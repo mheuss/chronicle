@@ -1,0 +1,12 @@
+[package]
+name = "chronicle-capture"
+version = "0.1.0"
+edition = "2024"
+description = "Screen capture engine — multi-display adaptive capture via ScreenCaptureKit"
+license = "MIT"
+
+[dependencies]
+objc2 = "0.6"
+objc2-screen-capture-kit = "0.3"
+core-graphics = "0.24"
+core-foundation = "0.10"

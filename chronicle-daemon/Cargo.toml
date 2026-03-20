@@ -1,0 +1,26 @@
+[workspace]
+members = [
+    ".",
+    "crates/capture",
+    "crates/ocr",
+    "crates/audio",
+    "crates/transcription",
+    "crates/storage",
+    "crates/ipc",
+]
+resolver = "2"
+
+[package]
+name = "chronicle-daemon"
+version = "0.1.0"
+edition = "2024"
+description = "Background daemon for Chronicle — continuous screen and audio capture with full-text search"
+license = "MIT"
+
+[dependencies]
+chronicle-capture = { path = "crates/capture" }
+chronicle-ocr = { path = "crates/ocr" }
+chronicle-audio = { path = "crates/audio" }
+chronicle-transcription = { path = "crates/transcription" }
+chronicle-storage = { path = "crates/storage" }
+chronicle-ipc = { path = "crates/ipc" }
