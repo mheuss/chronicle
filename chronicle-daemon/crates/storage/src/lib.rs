@@ -4,5 +4,12 @@
 //! audio transcripts. Manages on-disk media files (screenshots, audio).
 
 pub mod error;
+pub mod models;
 
 pub use error::{StorageError, Result};
+pub use models::{
+    StorageConfig, ScreenshotMetadata, Screenshot,
+    AudioSegmentMetadata, AudioSegment,
+    SearchFilter, SearchResult, SearchSource,
+    CleanupStats, StorageStatus,
+};
