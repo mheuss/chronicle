@@ -200,9 +200,17 @@ impl Storage {
                     Ok(val)
                 },
             ) {
-                Ok(val) => val.parse::<i64>().map_err(|e| {
-                    StorageError::Other(format!("invalid retention_days value: {e}"))
-                })?,
+                Ok(val) => {
+                    let days = val.parse::<i64>().map_err(|e| {
+                        StorageError::Other(format!("invalid retention_days value: {e}"))
+                    })?;
+                    if days < 0 {
+                        return Err(StorageError::Other(
+                            "retention_days must be non-negative".into(),
+                        ));
+                    }
+                    days
+                }
                 Err(rusqlite::Error::QueryReturnedNoRows) => 30,
                 Err(e) => return Err(e.into()),
             };
