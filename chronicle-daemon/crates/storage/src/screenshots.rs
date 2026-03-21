@@ -80,10 +80,16 @@ pub(crate) fn get_timeline(
 }
 
 pub(crate) fn update_ocr_text(conn: &Connection, id: i64, ocr_text: &str) -> Result<()> {
-    conn.execute(
+    let rows_affected = conn.execute(
         "UPDATE screenshots SET ocr_text = ?1 WHERE id = ?2",
         params![ocr_text, id],
     )?;
+    if rows_affected == 0 {
+        return Err(crate::error::StorageError::Other(format!(
+            "not found: id {}",
+            id
+        )));
+    }
     Ok(())
 }
 
@@ -195,6 +201,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn get_nonexistent_id_returns_error() {
+        let conn = setup_db();
+        let result = get(&conn, 9999);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn update_ocr_text_nonexistent_id_returns_error() {
+        let conn = setup_db();
+        let result = update_ocr_text(&conn, 9999, "some text");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("not found: id 9999"));
     }
 
     #[test]

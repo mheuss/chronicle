@@ -1,8 +1,9 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use rusqlite::{params, Connection};
 
 use crate::error::Result;
+use crate::files;
 use crate::models::CleanupStats;
 
 const BATCH_SIZE: usize = 500;
@@ -17,29 +18,34 @@ pub(crate) fn run_cleanup(conn: &Connection, retention_days: i64) -> Result<Clea
 
     // Delete expired screenshots in batches
     loop {
-        let paths: Vec<String> = {
-            let mut stmt = conn.prepare(
-                "SELECT image_path FROM screenshots WHERE timestamp < ?1 LIMIT ?2",
+        let tx = conn.unchecked_transaction()?;
+
+        let batch: Vec<(i64, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT id, image_path FROM screenshots WHERE timestamp < ?1 LIMIT ?2",
             )?;
             let rows = stmt.query_map(params![cutoff, BATCH_SIZE as i64], |row| {
-                row.get::<_, String>(0)
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
 
-        if paths.is_empty() {
+        if batch.is_empty() {
+            tx.commit()?;
             break;
         }
 
-        let count = paths.len();
-        conn.execute(
-            "DELETE FROM screenshots WHERE id IN (
-                SELECT id FROM screenshots WHERE timestamp < ?1 LIMIT ?2
-            )",
-            params![cutoff, BATCH_SIZE as i64],
-        )?;
+        let count = batch.len();
+        let ids: Vec<i64> = batch.iter().map(|(id, _)| *id).collect();
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("DELETE FROM screenshots WHERE id IN ({})", placeholders);
+        let id_params: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        tx.execute(&sql, id_params.as_slice())?;
 
-        for path in &paths {
+        tx.commit()?;
+
+        for (_, path) in &batch {
             let bytes = delete_file_if_exists(Path::new(path));
             stats.bytes_freed += bytes;
         }
@@ -53,29 +59,37 @@ pub(crate) fn run_cleanup(conn: &Connection, retention_days: i64) -> Result<Clea
 
     // Delete expired audio segments in batches
     loop {
-        let paths: Vec<String> = {
-            let mut stmt = conn.prepare(
-                "SELECT audio_path FROM audio_segments WHERE start_timestamp < ?1 LIMIT ?2",
+        let tx = conn.unchecked_transaction()?;
+
+        let batch: Vec<(i64, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT id, audio_path FROM audio_segments WHERE start_timestamp < ?1 LIMIT ?2",
             )?;
             let rows = stmt.query_map(params![cutoff, BATCH_SIZE as i64], |row| {
-                row.get::<_, String>(0)
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
 
-        if paths.is_empty() {
+        if batch.is_empty() {
+            tx.commit()?;
             break;
         }
 
-        let count = paths.len();
-        conn.execute(
-            "DELETE FROM audio_segments WHERE id IN (
-                SELECT id FROM audio_segments WHERE start_timestamp < ?1 LIMIT ?2
-            )",
-            params![cutoff, BATCH_SIZE as i64],
-        )?;
+        let count = batch.len();
+        let ids: Vec<i64> = batch.iter().map(|(id, _)| *id).collect();
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "DELETE FROM audio_segments WHERE id IN ({})",
+            placeholders
+        );
+        let id_params: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        tx.execute(&sql, id_params.as_slice())?;
 
-        for path in &paths {
+        tx.commit()?;
+
+        for (_, path) in &batch {
             let bytes = delete_file_if_exists(Path::new(path));
             stats.bytes_freed += bytes;
         }
@@ -96,63 +110,59 @@ pub(crate) fn sweep_orphans(conn: &Connection, base_dir: &Path) -> Result<u64> {
 
     let screenshots_dir = base_dir.join("screenshots");
     if screenshots_dir.exists() {
-        bytes_freed += sweep_directory(conn, &screenshots_dir, "screenshots", "image_path")?;
+        bytes_freed += sweep_screenshots(conn, &screenshots_dir)?;
     }
 
     let audio_dir = base_dir.join("audio");
     if audio_dir.exists() {
-        bytes_freed += sweep_directory(conn, &audio_dir, "audio_segments", "audio_path")?;
+        bytes_freed += sweep_audio(conn, &audio_dir)?;
     }
 
     Ok(bytes_freed)
 }
 
-fn sweep_directory(
-    conn: &Connection,
-    dir: &Path,
-    table: &str,
-    path_column: &str,
-) -> Result<u64> {
+/// Sweep the screenshots directory for orphan files not tracked in the DB.
+fn sweep_screenshots(conn: &Connection, dir: &Path) -> Result<u64> {
     let mut bytes_freed: u64 = 0;
-    let files = walkdir(dir);
+    let file_list = files::walk_files(dir)?;
 
-    for file_path in files {
-        let path_str = file_path.to_string_lossy().to_string();
-        let query = format!("SELECT COUNT(*) FROM {} WHERE {} = ?1", table, path_column);
-        let count: i64 = conn.query_row(&query, params![path_str], |row| row.get(0))?;
+    for file_path in file_list {
+        let canonical = std::fs::canonicalize(&file_path).unwrap_or(file_path);
+        let path_str = canonical.to_string_lossy().to_string();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM screenshots WHERE image_path = ?1",
+            params![path_str],
+            |row| row.get(0),
+        )?;
 
         if count == 0 {
-            bytes_freed += delete_file_if_exists(&file_path);
+            bytes_freed += delete_file_if_exists(&canonical);
         }
     }
 
     Ok(bytes_freed)
 }
 
-fn walkdir(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    walk_recursive(dir, &mut files);
-    files
-}
+/// Sweep the audio directory for orphan files not tracked in the DB.
+fn sweep_audio(conn: &Connection, dir: &Path) -> Result<u64> {
+    let mut bytes_freed: u64 = 0;
+    let file_list = files::walk_files(dir)?;
 
-fn walk_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
+    for file_path in file_list {
+        let canonical = std::fs::canonicalize(&file_path).unwrap_or(file_path);
+        let path_str = canonical.to_string_lossy().to_string();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM audio_segments WHERE audio_path = ?1",
+            params![path_str],
+            |row| row.get(0),
+        )?;
 
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        if path.is_dir() {
-            walk_recursive(&path, files);
-        } else {
-            files.push(path);
+        if count == 0 {
+            bytes_freed += delete_file_if_exists(&canonical);
         }
     }
+
+    Ok(bytes_freed)
 }
 
 fn delete_file_if_exists(path: &Path) -> u64 {
@@ -189,7 +199,7 @@ mod tests {
         let conn = setup_db();
         let now = now_millis();
         let old_ts = now - 31 * 86_400 * 1000; // 31 days ago
-        let new_ts = now - 1 * 86_400 * 1000; // 1 day ago
+        let new_ts = now - 86_400 * 1000; // 1 day ago
 
         let old_meta = ScreenshotMetadata {
             timestamp: old_ts,
@@ -236,7 +246,7 @@ mod tests {
         let conn = setup_db();
         let now = now_millis();
         let old_ts = now - 31 * 86_400 * 1000;
-        let new_ts = now - 1 * 86_400 * 1000;
+        let new_ts = now - 86_400 * 1000;
 
         let old_meta = AudioSegmentMetadata {
             start_timestamp: old_ts,

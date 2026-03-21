@@ -57,9 +57,14 @@ impl Storage {
     // --- Screenshot operations ---
 
     pub async fn allocate_screenshot_path(&self, timestamp: i64, display_id: &str) -> Result<PathBuf> {
-        let path = files::screenshot_path(&self.base_dir, timestamp, display_id);
-        files::ensure_parent_dir(&path)?;
-        Ok(path)
+        let base_dir = self.base_dir.clone();
+        let display_id = display_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let path = files::screenshot_path(&base_dir, timestamp, &display_id);
+            files::ensure_parent_dir(&path)?;
+            Ok(path)
+        })
+        .await?
     }
 
     pub async fn insert_screenshot(&self, meta: ScreenshotMetadata) -> Result<i64> {
@@ -106,9 +111,14 @@ impl Storage {
     // --- Audio operations ---
 
     pub async fn allocate_audio_path(&self, timestamp: i64, source: &str) -> Result<PathBuf> {
-        let path = files::audio_path(&self.base_dir, timestamp, source);
-        files::ensure_parent_dir(&path)?;
-        Ok(path)
+        let base_dir = self.base_dir.clone();
+        let source = source.to_string();
+        tokio::task::spawn_blocking(move || {
+            let path = files::audio_path(&base_dir, timestamp, &source);
+            files::ensure_parent_dir(&path)?;
+            Ok(path)
+        })
+        .await?
     }
 
     pub async fn insert_audio_segment(&self, meta: AudioSegmentMetadata) -> Result<i64> {
@@ -197,12 +207,16 @@ impl Storage {
         .await?
     }
 
-    pub async fn sweep_orphans(&self) -> Result<u64> {
+    pub async fn sweep_orphans(&self) -> Result<CleanupStats> {
         let pool = self.pool.clone();
         let base_dir = self.base_dir.clone();
         tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
-            retention::sweep_orphans(&conn, &base_dir)
+            let bytes_freed = retention::sweep_orphans(&conn, &base_dir)?;
+            Ok(CleanupStats {
+                bytes_freed,
+                ..CleanupStats::default()
+            })
         })
         .await?
     }
@@ -254,8 +268,8 @@ impl Storage {
                 .unwrap_or(0);
 
             // Total disk usage from screenshots/ and audio/ directories
-            let screenshots_size = dir_size(&base_dir.join("screenshots"));
-            let audio_size = dir_size(&base_dir.join("audio"));
+            let screenshots_size = files::dir_size(&base_dir.join("screenshots"));
+            let audio_size = files::dir_size(&base_dir.join("audio"));
             let total_disk_usage_bytes = db_size_bytes + screenshots_size + audio_size;
 
             Ok(StorageStatus {
@@ -286,38 +300,15 @@ impl Storage {
     }
 }
 
-fn dir_size(path: &std::path::Path) -> u64 {
-    if !path.exists() {
-        return 0;
-    }
-    let mut total: u64 = 0;
-    dir_size_recursive(path, &mut total);
-    total
-}
-
-fn dir_size_recursive(path: &std::path::Path, total: &mut u64) {
-    let entries = match std::fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        if path.is_dir() {
-            dir_size_recursive(&path, total);
-        } else if let Ok(meta) = std::fs::metadata(&path) {
-            *total += meta.len();
-        }
-    }
-}
-
 #[derive(Debug)]
 struct ConnectionCustomizer;
 
 impl r2d2::CustomizeConnection<rusqlite::Connection, rusqlite::Error> for ConnectionCustomizer {
+    // `on_acquire` runs once per connection creation (not per checkout from the
+    // pool). This is fine because SQLite PRAGMAs like journal_mode, synchronous,
+    // foreign_keys, and busy_timeout are connection-persistent — they stick for
+    // the lifetime of the connection and don't need to be re-applied on each
+    // checkout.
     fn on_acquire(&self, conn: &mut rusqlite::Connection) -> std::result::Result<(), rusqlite::Error> {
         schema::setup_connection(conn).map_err(|e| match e {
             StorageError::Database(e) => e,

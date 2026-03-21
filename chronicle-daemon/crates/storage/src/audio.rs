@@ -45,10 +45,16 @@ pub(crate) fn get(conn: &Connection, id: i64) -> Result<AudioSegment> {
 }
 
 pub(crate) fn update_transcript(conn: &Connection, id: i64, transcript: &str) -> Result<()> {
-    conn.execute(
+    let rows_affected = conn.execute(
         "UPDATE audio_segments SET transcript = ?1 WHERE id = ?2",
         params![transcript, id],
     )?;
+    if rows_affected == 0 {
+        return Err(crate::error::StorageError::Other(format!(
+            "not found: id {}",
+            id
+        )));
+    }
     Ok(())
 }
 
@@ -115,6 +121,22 @@ mod tests {
 
         let segment = get(&conn, id).unwrap();
         assert_eq!(segment.transcript.as_deref(), Some("Updated transcript content"));
+    }
+
+    #[test]
+    fn get_nonexistent_id_returns_error() {
+        let conn = setup_db();
+        let result = get(&conn, 9999);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn update_transcript_nonexistent_id_returns_error() {
+        let conn = setup_db();
+        let result = update_transcript(&conn, 9999, "some text");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("not found: id 9999"));
     }
 
     #[test]

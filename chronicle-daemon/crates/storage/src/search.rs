@@ -14,6 +14,8 @@ pub(crate) fn search(
 ) -> Result<Vec<SearchResult>> {
     let mut results: Vec<SearchResult> = Vec::new();
 
+    let sub_limit = (limit + offset) as i64;
+
     if *filter == SearchFilter::All || *filter == SearchFilter::ScreenOnly {
         let mut stmt = conn.prepare(
             "SELECT s.id, s.timestamp, s.display_id, s.app_name, s.app_bundle_id,
@@ -24,10 +26,11 @@ pub(crate) fn search(
              FROM screenshots_fts
              JOIN screenshots s ON s.id = screenshots_fts.rowid
              WHERE screenshots_fts MATCH ?1
-             ORDER BY rank",
+             ORDER BY rank
+             LIMIT ?2",
         )?;
 
-        let rows = stmt.query_map(params![query], |row| {
+        let rows = stmt.query_map(params![query, sub_limit], |row| {
             let screenshot = Screenshot {
                 id: row.get(0)?,
                 timestamp: row.get(1)?,
@@ -64,10 +67,11 @@ pub(crate) fn search(
              FROM audio_fts
              JOIN audio_segments a ON a.id = audio_fts.rowid
              WHERE audio_fts MATCH ?1
-             ORDER BY rank",
+             ORDER BY rank
+             LIMIT ?2",
         )?;
 
-        let rows = stmt.query_map(params![query], |row| {
+        let rows = stmt.query_map(params![query, sub_limit], |row| {
             let segment = AudioSegment {
                 id: row.get(0)?,
                 start_timestamp: row.get(1)?,

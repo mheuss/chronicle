@@ -9,6 +9,9 @@ pub struct StorageConfig {
 
 impl Default for StorageConfig {
     fn default() -> Self {
+        // Using HOME is intentional. Chronicle is macOS-only and HOME is always
+        // set by the system. This avoids pulling in a `dirs` crate dependency
+        // just for one path lookup.
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
         let base_dir = PathBuf::from(home).join("Library/Application Support/Chronicle");
         Self {
@@ -20,6 +23,7 @@ impl Default for StorageConfig {
 
 // --- Screenshot types ---
 
+#[derive(Debug)]
 pub struct ScreenshotMetadata {
     pub timestamp: i64,
     pub display_id: String,
@@ -49,6 +53,7 @@ pub struct Screenshot {
 
 // --- Audio types ---
 
+#[derive(Debug)]
 pub struct AudioSegmentMetadata {
     pub start_timestamp: i64,
     pub end_timestamp: i64,

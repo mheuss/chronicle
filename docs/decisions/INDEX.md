@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-Decisions that shape how Rewind works and why. Written for developers and
+Decisions that shape how Chronicle works and why. Written for developers and
 potential contributors.
 
 | # | Title | Status | Date |
