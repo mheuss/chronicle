@@ -12,6 +12,7 @@ pub mod error;
 pub mod models;
 pub(crate) mod schema;
 pub(crate) mod files;
+pub(crate) mod screenshots;
 
 pub use error::{StorageError, Result};
 pub use models::{
@@ -48,6 +49,55 @@ impl Storage {
         .await??;
 
         Ok(Self { pool, base_dir })
+    }
+
+    // --- Screenshot operations ---
+
+    pub async fn allocate_screenshot_path(&self, timestamp: i64, display_id: &str) -> Result<PathBuf> {
+        let path = files::screenshot_path(&self.base_dir, timestamp, display_id);
+        files::ensure_parent_dir(&path)?;
+        Ok(path)
+    }
+
+    pub async fn insert_screenshot(&self, meta: ScreenshotMetadata) -> Result<i64> {
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            screenshots::insert(&conn, &meta)
+        })
+        .await?
+    }
+
+    pub async fn get_screenshot(&self, id: i64) -> Result<Screenshot> {
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            screenshots::get(&conn, id)
+        })
+        .await?
+    }
+
+    pub async fn get_timeline(
+        &self,
+        start: i64,
+        end: i64,
+        display_id: Option<String>,
+    ) -> Result<Vec<Screenshot>> {
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            screenshots::get_timeline(&conn, start, end, display_id.as_deref())
+        })
+        .await?
+    }
+
+    pub async fn update_ocr_text(&self, id: i64, ocr_text: String) -> Result<()> {
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            screenshots::update_ocr_text(&conn, id, &ocr_text)
+        })
+        .await?
     }
 }
 
