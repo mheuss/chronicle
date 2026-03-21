@@ -6,6 +6,7 @@
 pub mod error;
 pub mod models;
 pub(crate) mod schema;
+pub(crate) mod files;
 
 pub use error::{StorageError, Result};
 pub use models::{
