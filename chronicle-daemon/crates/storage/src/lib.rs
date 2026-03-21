@@ -13,6 +13,7 @@ pub mod models;
 pub(crate) mod schema;
 pub(crate) mod files;
 pub(crate) mod screenshots;
+pub(crate) mod audio;
 
 pub use error::{StorageError, Result};
 pub use models::{
@@ -96,6 +97,41 @@ impl Storage {
         tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             screenshots::update_ocr_text(&conn, id, &ocr_text)
+        })
+        .await?
+    }
+
+    // --- Audio operations ---
+
+    pub async fn allocate_audio_path(&self, timestamp: i64, source: &str) -> Result<PathBuf> {
+        let path = files::audio_path(&self.base_dir, timestamp, source);
+        files::ensure_parent_dir(&path)?;
+        Ok(path)
+    }
+
+    pub async fn insert_audio_segment(&self, meta: AudioSegmentMetadata) -> Result<i64> {
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            audio::insert(&conn, &meta)
+        })
+        .await?
+    }
+
+    pub async fn get_audio_segment(&self, id: i64) -> Result<AudioSegment> {
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            audio::get(&conn, id)
+        })
+        .await?
+    }
+
+    pub async fn update_transcript(&self, id: i64, transcript: String) -> Result<()> {
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            audio::update_transcript(&conn, id, &transcript)
         })
         .await?
     }
