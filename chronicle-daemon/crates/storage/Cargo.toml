@@ -1,0 +1,9 @@
+[package]
+name = "chronicle-storage"
+version = "0.1.0"
+edition = "2024"
+description = "Storage engine — SQLite schema, FTS5 indexes, and file management"
+license = "MIT"
+
+[dependencies]
+rusqlite = { version = "0.35", features = ["bundled"] }

@@ -1,0 +1,10 @@
+[package]
+name = "chronicle-ocr"
+version = "0.1.0"
+edition = "2024"
+description = "OCR pipeline — text extraction from screenshots via Apple Vision framework"
+license = "MIT"
+
+[dependencies]
+objc2 = "0.6"
+objc2-vision = "0.3"
