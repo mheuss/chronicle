@@ -135,6 +135,42 @@ impl Storage {
         })
         .await?
     }
+
+    // --- Config operations ---
+
+    pub async fn get_config(&self, key: &str) -> Result<Option<String>> {
+        let pool = self.pool.clone();
+        let key = key.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            match conn.query_row(
+                "SELECT value FROM config WHERE key = ?1",
+                rusqlite::params![key],
+                |row| row.get::<_, String>(0),
+            ) {
+                Ok(value) => Ok(Some(value)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        })
+        .await?
+    }
+
+    pub async fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        let pool = self.pool.clone();
+        let key = key.to_string();
+        let value = value.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            conn.execute(
+                "INSERT INTO config (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![key, value],
+            )?;
+            Ok(())
+        })
+        .await?
+    }
 }
 
 #[derive(Debug)]
@@ -196,5 +232,45 @@ mod tests {
             .pragma_query_value(None, "journal_mode", |row| row.get(0))
             .unwrap();
         assert_eq!(mode.to_lowercase(), "wal");
+    }
+
+    #[tokio::test]
+    async fn get_config_returns_default_value() {
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Storage::open(config).await.unwrap();
+
+        let value = storage.get_config("retention_days").await.unwrap();
+        assert_eq!(value, Some("30".to_string()));
+    }
+
+    #[tokio::test]
+    async fn set_config_updates_value() {
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Storage::open(config).await.unwrap();
+
+        storage.set_config("retention_days", "60").await.unwrap();
+        let value = storage.get_config("retention_days").await.unwrap();
+        assert_eq!(value, Some("60".to_string()));
+    }
+
+    #[tokio::test]
+    async fn get_config_returns_none_for_missing_key() {
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Storage::open(config).await.unwrap();
+
+        let value = storage.get_config("nonexistent_key").await.unwrap();
+        assert_eq!(value, None);
     }
 }
