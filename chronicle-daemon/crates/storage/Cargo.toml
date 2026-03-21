@@ -6,4 +6,13 @@ description = "Storage engine — SQLite schema, FTS5 indexes, and file manageme
 license = "MIT"
 
 [dependencies]
-rusqlite = { version = "0.35", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled-full"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.33"
+tokio = { version = "1", features = ["rt"] }
+thiserror = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+tempfile = "3"
