@@ -1,7 +1,7 @@
 # Storage Engine — Design Document
 
 **Date:** 2026-03-21
-**Status:** Approved
+**Status:** Complete
 **Issue:** HEU-236
 **Branch:** mrheuss/heu-236-storage-engine-sqlite-schema-fts5-indexes-and-file
 **Base Branch:** main
