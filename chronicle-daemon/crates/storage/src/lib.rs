@@ -15,6 +15,7 @@ pub(crate) mod files;
 pub(crate) mod screenshots;
 pub(crate) mod audio;
 pub(crate) mod search;
+pub(crate) mod retention;
 
 pub use error::{StorageError, Result};
 pub use models::{
@@ -171,6 +172,37 @@ impl Storage {
         tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             search::search(&conn, &query, &filter, limit, offset)
+        })
+        .await?
+    }
+
+    // --- Retention operations ---
+
+    pub async fn run_cleanup(&self) -> Result<CleanupStats> {
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let retention_days: i64 = conn
+                .query_row(
+                    "SELECT value FROM config WHERE key = 'retention_days'",
+                    [],
+                    |row| {
+                        let val: String = row.get(0)?;
+                        Ok(val.parse::<i64>().unwrap_or(30))
+                    },
+                )
+                .unwrap_or(30);
+            retention::run_cleanup(&conn, retention_days)
+        })
+        .await?
+    }
+
+    pub async fn sweep_orphans(&self) -> Result<u64> {
+        let pool = self.pool.clone();
+        let base_dir = self.base_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            retention::sweep_orphans(&conn, &base_dir)
         })
         .await?
     }
