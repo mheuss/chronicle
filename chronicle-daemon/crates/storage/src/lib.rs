@@ -207,6 +207,68 @@ impl Storage {
         .await?
     }
 
+    // --- Status operations ---
+
+    pub async fn status(&self) -> Result<StorageStatus> {
+        let pool = self.pool.clone();
+        let base_dir = self.base_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+
+            let screenshot_count: u64 = conn
+                .query_row("SELECT COUNT(*) FROM screenshots", [], |row| {
+                    row.get::<_, i64>(0).map(|v| v as u64)
+                })?;
+
+            let audio_segment_count: u64 = conn
+                .query_row("SELECT COUNT(*) FROM audio_segments", [], |row| {
+                    row.get::<_, i64>(0).map(|v| v as u64)
+                })?;
+
+            // Find oldest entry across both tables
+            let oldest_screenshot: Option<i64> = conn
+                .query_row(
+                    "SELECT MIN(timestamp) FROM screenshots",
+                    [],
+                    |row| row.get(0),
+                )?;
+
+            let oldest_audio: Option<i64> = conn
+                .query_row(
+                    "SELECT MIN(start_timestamp) FROM audio_segments",
+                    [],
+                    |row| row.get(0),
+                )?;
+
+            let oldest_entry = match (oldest_screenshot, oldest_audio) {
+                (Some(s), Some(a)) => Some(s.min(a)),
+                (Some(s), None) => Some(s),
+                (None, Some(a)) => Some(a),
+                (None, None) => None,
+            };
+
+            // DB file size
+            let db_path = base_dir.join("chronicle.db");
+            let db_size_bytes = std::fs::metadata(&db_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+
+            // Total disk usage from screenshots/ and audio/ directories
+            let screenshots_size = dir_size(&base_dir.join("screenshots"));
+            let audio_size = dir_size(&base_dir.join("audio"));
+            let total_disk_usage_bytes = db_size_bytes + screenshots_size + audio_size;
+
+            Ok(StorageStatus {
+                db_size_bytes,
+                screenshot_count,
+                audio_segment_count,
+                total_disk_usage_bytes,
+                oldest_entry,
+            })
+        })
+        .await?
+    }
+
     pub async fn set_config(&self, key: &str, value: &str) -> Result<()> {
         let pool = self.pool.clone();
         let key = key.to_string();
@@ -221,6 +283,34 @@ impl Storage {
             Ok(())
         })
         .await?
+    }
+}
+
+fn dir_size(path: &std::path::Path) -> u64 {
+    if !path.exists() {
+        return 0;
+    }
+    let mut total: u64 = 0;
+    dir_size_recursive(path, &mut total);
+    total
+}
+
+fn dir_size_recursive(path: &std::path::Path, total: &mut u64) {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if path.is_dir() {
+            dir_size_recursive(&path, total);
+        } else if let Ok(meta) = std::fs::metadata(&path) {
+            *total += meta.len();
+        }
     }
 }
 
@@ -323,5 +413,61 @@ mod tests {
 
         let value = storage.get_config("nonexistent_key").await.unwrap();
         assert_eq!(value, None);
+    }
+
+    #[tokio::test]
+    async fn status_returns_correct_counts() {
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Storage::open(config).await.unwrap();
+
+        let screenshot_meta = ScreenshotMetadata {
+            timestamp: 1_700_000_000_000,
+            display_id: "display1".into(),
+            app_name: None,
+            app_bundle_id: None,
+            window_title: None,
+            image_path: "/data/shot.heif".into(),
+            ocr_text: None,
+            phash: None,
+            resolution: None,
+        };
+        storage.insert_screenshot(screenshot_meta).await.unwrap();
+
+        let audio_meta = AudioSegmentMetadata {
+            start_timestamp: 1_700_000_010_000,
+            end_timestamp: 1_700_000_040_000,
+            source: "mic".into(),
+            audio_path: "/data/audio.opus".into(),
+            transcript: None,
+            whisper_model: None,
+            language: None,
+        };
+        storage.insert_audio_segment(audio_meta).await.unwrap();
+
+        let status = storage.status().await.unwrap();
+        assert_eq!(status.screenshot_count, 1);
+        assert_eq!(status.audio_segment_count, 1);
+        assert!(status.db_size_bytes > 0);
+        // oldest_entry should be the screenshot's timestamp (earlier)
+        assert_eq!(status.oldest_entry, Some(1_700_000_000_000));
+    }
+
+    #[tokio::test]
+    async fn status_on_empty_db() {
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Storage::open(config).await.unwrap();
+
+        let status = storage.status().await.unwrap();
+        assert_eq!(status.screenshot_count, 0);
+        assert_eq!(status.audio_segment_count, 0);
+        assert_eq!(status.oldest_entry, None);
     }
 }
