@@ -1,6 +1,6 @@
 use rusqlite::{params, Connection};
 
-use crate::error::Result;
+use crate::error::{Result, StorageError};
 use crate::models::{
     AudioSegment, Screenshot, SearchFilter, SearchResult, SearchSource,
 };
@@ -14,6 +14,10 @@ pub(crate) fn search(
 ) -> Result<Vec<SearchResult>> {
     let mut results: Vec<SearchResult> = Vec::new();
 
+    // When filter is All, we fetch up to (limit + offset) rows from each source,
+    // merge and sort in memory, then apply limit/offset. A UNION ALL query would
+    // let SQLite handle this, but complicates the row-mapping logic. For typical
+    // usage (small limit, small offset), memory overhead is negligible.
     let sub_limit = (limit + offset) as i64;
 
     if *filter == SearchFilter::All || *filter == SearchFilter::ScreenOnly {
@@ -51,7 +55,8 @@ pub(crate) fn search(
                 snippet,
                 rank,
             })
-        })?;
+        })
+        .map_err(|e| map_fts5_error(e, query))?;
 
         for row in rows {
             results.push(row?);
@@ -90,7 +95,8 @@ pub(crate) fn search(
                 snippet,
                 rank,
             })
-        })?;
+        })
+        .map_err(|e| map_fts5_error(e, query))?;
 
         for row in rows {
             results.push(row?);
@@ -104,6 +110,16 @@ pub(crate) fn search(
     let results = results.into_iter().skip(offset).take(limit).collect();
 
     Ok(results)
+}
+
+/// Map FTS5 syntax errors to a more descriptive `StorageError`.
+fn map_fts5_error(err: rusqlite::Error, query: &str) -> StorageError {
+    let msg = err.to_string();
+    if msg.contains("fts5: syntax error") {
+        StorageError::Other(format!("invalid search query: {}", query))
+    } else {
+        StorageError::Database(err)
+    }
 }
 
 #[cfg(test)]

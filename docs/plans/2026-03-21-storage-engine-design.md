@@ -400,7 +400,7 @@ concerns.
 
 ```toml
 [dependencies]
-rusqlite = { version = "0.35", features = ["bundled-full"] }
+rusqlite = { version = "0.39", features = ["bundled-full"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.25"
 tokio = { version = "1", features = ["rt"] }

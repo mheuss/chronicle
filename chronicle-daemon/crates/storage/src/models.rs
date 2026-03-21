@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 // --- Configuration ---
 
+#[derive(Debug)]
 pub struct StorageConfig {
     pub base_dir: PathBuf,
     pub pool_size: usize,

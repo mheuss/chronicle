@@ -33,14 +33,17 @@ pub struct Storage {
 impl Storage {
     pub async fn open(config: StorageConfig) -> Result<Self> {
         let base_dir = config.base_dir.clone();
-        std::fs::create_dir_all(&base_dir)?;
+        let pool_size = u32::try_from(config.pool_size)
+            .map_err(|_| StorageError::Other("pool_size too large".into()))?;
 
         let db_path = base_dir.join("chronicle.db");
         let manager = SqliteConnectionManager::file(&db_path);
 
         let pool = tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&base_dir)?;
+
             let pool = Pool::builder()
-                .max_size(config.pool_size as u32)
+                .max_size(pool_size)
                 .connection_customizer(Box::new(ConnectionCustomizer))
                 .build(manager)?;
 
@@ -51,6 +54,7 @@ impl Storage {
         })
         .await??;
 
+        let base_dir = config.base_dir;
         Ok(Self { pool, base_dir })
     }
 
@@ -60,9 +64,7 @@ impl Storage {
         let base_dir = self.base_dir.clone();
         let display_id = display_id.to_string();
         tokio::task::spawn_blocking(move || {
-            let path = files::screenshot_path(&base_dir, timestamp, &display_id);
-            files::ensure_parent_dir(&path)?;
-            Ok(path)
+            files::allocate_path(&base_dir, timestamp, &display_id, "screenshots", "heif")
         })
         .await?
     }
@@ -114,9 +116,7 @@ impl Storage {
         let base_dir = self.base_dir.clone();
         let source = source.to_string();
         tokio::task::spawn_blocking(move || {
-            let path = files::audio_path(&base_dir, timestamp, &source);
-            files::ensure_parent_dir(&path)?;
-            Ok(path)
+            files::allocate_path(&base_dir, timestamp, &source, "audio", "opus")
         })
         .await?
     }

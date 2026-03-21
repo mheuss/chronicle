@@ -11,7 +11,34 @@ fn sanitize_id(input: &str) -> String {
         .replace(['/', '\\', '\0'], "_")
 }
 
-pub(crate) fn screenshot_path(base_dir: &Path, timestamp: i64, display_id: &str) -> PathBuf {
+/// Allocate a canonical file path under `base_dir/subdir/YYYY/MM/DD/`.
+///
+/// Creates the parent directory, then canonicalizes it so the returned path
+/// matches what the filesystem reports. This is critical on macOS where
+/// tempdir paths like `/var/folders/...` resolve to `/private/var/folders/...`.
+/// Storing canonical paths in the DB means the orphan sweep can compare
+/// without its own canonicalization step.
+pub(crate) fn allocate_path(
+    base_dir: &Path,
+    timestamp: i64,
+    id: &str,
+    subdir: &str,
+    ext: &str,
+) -> Result<PathBuf> {
+    let id = sanitize_id(id);
+    let (year, month, day) = date_parts(timestamp);
+    let parent = base_dir
+        .join(subdir)
+        .join(format!("{}/{:02}/{:02}", year, month, day));
+    std::fs::create_dir_all(&parent)?;
+    let canonical_parent = std::fs::canonicalize(&parent)?;
+    Ok(canonical_parent.join(format!("{}_{}.{}", timestamp, id, ext)))
+}
+
+/// Build a non-canonical screenshot path. Only used in tests to verify
+/// the date-partitioned structure without hitting the filesystem.
+#[cfg(test)]
+fn screenshot_path(base_dir: &Path, timestamp: i64, display_id: &str) -> PathBuf {
     let safe_id = sanitize_id(display_id);
     let (year, month, day) = date_parts(timestamp);
     base_dir
@@ -20,20 +47,15 @@ pub(crate) fn screenshot_path(base_dir: &Path, timestamp: i64, display_id: &str)
         .join(format!("{}_{}.heif", timestamp, safe_id))
 }
 
-pub(crate) fn audio_path(base_dir: &Path, timestamp: i64, source: &str) -> PathBuf {
+/// Build a non-canonical audio path. Only used in tests.
+#[cfg(test)]
+fn audio_path(base_dir: &Path, timestamp: i64, source: &str) -> PathBuf {
     let safe_source = sanitize_id(source);
     let (year, month, day) = date_parts(timestamp);
     base_dir
         .join("audio")
         .join(format!("{}/{:02}/{:02}", year, month, day))
         .join(format!("{}_{}.opus", timestamp, safe_source))
-}
-
-pub(crate) fn ensure_parent_dir(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    Ok(())
 }
 
 /// Recursively collect all file paths under `dir`.
@@ -47,10 +69,15 @@ fn walk_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     let entries = std::fs::read_dir(dir)?;
     for entry in entries {
         let entry = entry?;
+        let ft = entry.file_type()?;
+        // Skip symlinks to avoid following links outside the data directory.
+        if ft.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
+        if ft.is_dir() {
             walk_files_recursive(&path, files)?;
-        } else {
+        } else if ft.is_file() {
             files.push(path);
         }
     }
@@ -123,11 +150,13 @@ mod tests {
     }
 
     #[test]
-    fn ensure_parent_dir_creates_nested_directories() {
+    fn allocate_path_creates_nested_directories() {
         let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("a/b/c/file.txt");
-        ensure_parent_dir(&file_path).unwrap();
-        assert!(file_path.parent().unwrap().is_dir());
+        let ts: i64 = 1774094400000;
+        let path = allocate_path(dir.path(), ts, "test_id", "screenshots", "heif").unwrap();
+        assert!(path.parent().unwrap().is_dir());
+        // Path should be canonical (no symlinks or relative components)
+        assert!(path.is_absolute());
     }
 
     #[test]

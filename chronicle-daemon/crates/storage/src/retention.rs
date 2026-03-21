@@ -6,11 +6,17 @@ use crate::error::Result;
 use crate::files;
 use crate::models::CleanupStats;
 
-const BATCH_SIZE: usize = 500;
+// Must stay below SQLite's SQLITE_MAX_VARIABLE_NUMBER (default 999).
+const CLEANUP_BATCH_SIZE: usize = 500;
 
 /// Delete expired screenshots and audio segments in batches.
 /// Deletes DB rows first, then removes associated files.
 pub(crate) fn run_cleanup(conn: &Connection, retention_days: i64) -> Result<CleanupStats> {
+    // A retention of 0 days would delete everything — treat it as a no-op.
+    if retention_days == 0 {
+        return Ok(CleanupStats::default());
+    }
+
     let now_millis = chrono::Utc::now().timestamp_millis();
     let cutoff = now_millis - retention_days * 86_400 * 1000;
 
@@ -24,7 +30,7 @@ pub(crate) fn run_cleanup(conn: &Connection, retention_days: i64) -> Result<Clea
             let mut stmt = tx.prepare(
                 "SELECT id, image_path FROM screenshots WHERE timestamp < ?1 LIMIT ?2",
             )?;
-            let rows = stmt.query_map(params![cutoff, BATCH_SIZE as i64], |row| {
+            let rows = stmt.query_map(params![cutoff, CLEANUP_BATCH_SIZE as i64], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
@@ -52,7 +58,7 @@ pub(crate) fn run_cleanup(conn: &Connection, retention_days: i64) -> Result<Clea
 
         stats.screenshots_deleted += count;
 
-        if count < BATCH_SIZE {
+        if count < CLEANUP_BATCH_SIZE {
             break;
         }
     }
@@ -65,7 +71,7 @@ pub(crate) fn run_cleanup(conn: &Connection, retention_days: i64) -> Result<Clea
             let mut stmt = tx.prepare(
                 "SELECT id, audio_path FROM audio_segments WHERE start_timestamp < ?1 LIMIT ?2",
             )?;
-            let rows = stmt.query_map(params![cutoff, BATCH_SIZE as i64], |row| {
+            let rows = stmt.query_map(params![cutoff, CLEANUP_BATCH_SIZE as i64], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
@@ -96,7 +102,7 @@ pub(crate) fn run_cleanup(conn: &Connection, retention_days: i64) -> Result<Clea
 
         stats.audio_segments_deleted += count;
 
-        if count < BATCH_SIZE {
+        if count < CLEANUP_BATCH_SIZE {
             break;
         }
     }
@@ -127,8 +133,7 @@ fn sweep_screenshots(conn: &Connection, dir: &Path) -> Result<u64> {
     let file_list = files::walk_files(dir)?;
 
     for file_path in file_list {
-        let canonical = std::fs::canonicalize(&file_path).unwrap_or(file_path);
-        let path_str = canonical.to_string_lossy().to_string();
+        let path_str = file_path.to_string_lossy().to_string();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM screenshots WHERE image_path = ?1",
             params![path_str],
@@ -136,7 +141,7 @@ fn sweep_screenshots(conn: &Connection, dir: &Path) -> Result<u64> {
         )?;
 
         if count == 0 {
-            bytes_freed += delete_file_if_exists(&canonical);
+            bytes_freed += delete_file_if_exists(&file_path);
         }
     }
 
@@ -149,8 +154,7 @@ fn sweep_audio(conn: &Connection, dir: &Path) -> Result<u64> {
     let file_list = files::walk_files(dir)?;
 
     for file_path in file_list {
-        let canonical = std::fs::canonicalize(&file_path).unwrap_or(file_path);
-        let path_str = canonical.to_string_lossy().to_string();
+        let path_str = file_path.to_string_lossy().to_string();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM audio_segments WHERE audio_path = ?1",
             params![path_str],
@@ -158,7 +162,7 @@ fn sweep_audio(conn: &Connection, dir: &Path) -> Result<u64> {
         )?;
 
         if count == 0 {
-            bytes_freed += delete_file_if_exists(&canonical);
+            bytes_freed += delete_file_if_exists(&file_path);
         }
     }
 
