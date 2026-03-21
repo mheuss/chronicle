@@ -26,12 +26,18 @@ pub(crate) fn allocate_path(
     ext: &str,
 ) -> Result<PathBuf> {
     let id = sanitize_id(id);
+    let canonical_base = std::fs::canonicalize(base_dir)?;
     let (year, month, day) = date_parts(timestamp);
     let parent = base_dir
         .join(subdir)
         .join(format!("{}/{:02}/{:02}", year, month, day));
     std::fs::create_dir_all(&parent)?;
     let canonical_parent = std::fs::canonicalize(&parent)?;
+    if !canonical_parent.starts_with(&canonical_base) {
+        return Err(crate::error::StorageError::Other(
+            "path escaped storage root".into(),
+        ));
+    }
     Ok(canonical_parent.join(format!("{}_{}.{}", timestamp, id, ext)))
 }
 
@@ -60,6 +66,11 @@ fn audio_path(base_dir: &Path, timestamp: i64, source: &str) -> PathBuf {
 
 /// Recursively collect all file paths under `dir`.
 pub(crate) fn walk_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    if dir.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        return Err(crate::error::StorageError::Other(
+            format!("refusing to walk symlinked directory: {}", dir.display()),
+        ));
+    }
     let mut files = Vec::new();
     walk_files_recursive(dir, &mut files)?;
     Ok(files)
@@ -104,10 +115,18 @@ fn dir_size_recursive(path: &Path, total: &mut u64) {
             Ok(e) => e,
             Err(_) => continue,
         };
-        let p = entry.path();
-        if p.is_dir() {
-            dir_size_recursive(&p, total);
-        } else if let Ok(meta) = std::fs::metadata(&p) {
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
+            dir_size_recursive(&entry.path(), total);
+        } else if ft.is_file()
+            && let Ok(meta) = std::fs::symlink_metadata(entry.path())
+        {
             *total += meta.len();
         }
     }

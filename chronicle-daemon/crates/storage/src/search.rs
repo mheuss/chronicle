@@ -25,7 +25,7 @@ pub(crate) fn search(
             "SELECT s.id, s.timestamp, s.display_id, s.app_name, s.app_bundle_id,
                     s.window_title, s.image_path, s.ocr_text, s.phash, s.resolution,
                     s.created_at,
-                    snippet(screenshots_fts, 0, '<b>', '</b>', '...', 32) AS snip,
+                    snippet(screenshots_fts, -1, '<b>', '</b>', '...', 32) AS snip,
                     rank
              FROM screenshots_fts
              JOIN screenshots s ON s.id = screenshots_fts.rowid
@@ -67,7 +67,7 @@ pub(crate) fn search(
         let mut stmt = conn.prepare(
             "SELECT a.id, a.start_timestamp, a.end_timestamp, a.source, a.audio_path,
                     a.transcript, a.whisper_model, a.language, a.created_at,
-                    snippet(audio_fts, 0, '<b>', '</b>', '...', 32) AS snip,
+                    snippet(audio_fts, -1, '<b>', '</b>', '...', 32) AS snip,
                     rank
              FROM audio_fts
              JOIN audio_segments a ON a.id = audio_fts.rowid

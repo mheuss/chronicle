@@ -2,6 +2,7 @@ use chronicle_storage::{
     AudioSegmentMetadata, CleanupStats, ScreenshotMetadata, SearchFilter, SearchSource,
     Storage, StorageConfig,
 };
+use chrono::{Datelike, Utc};
 use tempfile::tempdir;
 
 /// Full workflow integration test exercising the complete async API end-to-end.
@@ -16,8 +17,10 @@ async fn full_workflow() {
     let storage = Storage::open(config).await.unwrap();
 
     // 2. Allocate screenshot and audio paths; verify parent dirs and date structure
-    // 1774094400000 ms = 2026-03-21 12:00:00 UTC
-    let ts: i64 = 1_774_094_400_000;
+    let now = Utc::now();
+    let ts: i64 = now.timestamp_millis();
+    let expected_date = format!("{}/{:02}/{:02}", now.year(), now.month(), now.day());
+
     let screenshot_path = storage
         .allocate_screenshot_path(ts, "display1")
         .await
@@ -28,7 +31,7 @@ async fn full_workflow() {
     );
     let screenshot_path_str = screenshot_path.to_string_lossy();
     assert!(
-        screenshot_path_str.contains("2026/03/21"),
+        screenshot_path_str.contains(&expected_date),
         "screenshot path should contain date structure, got: {screenshot_path_str}"
     );
 
@@ -42,7 +45,7 @@ async fn full_workflow() {
     );
     let audio_path_str = audio_path.to_string_lossy();
     assert!(
-        audio_path_str.contains("2026/03/21"),
+        audio_path_str.contains(&expected_date),
         "audio path should contain date structure, got: {audio_path_str}"
     );
 

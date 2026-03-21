@@ -12,8 +12,8 @@ const CLEANUP_BATCH_SIZE: usize = 500;
 /// Delete expired screenshots and audio segments in batches.
 /// Deletes DB rows first, then removes associated files.
 pub(crate) fn run_cleanup(conn: &Connection, retention_days: i64) -> Result<CleanupStats> {
-    // A retention of 0 days would delete everything — treat it as a no-op.
-    if retention_days == 0 {
+    // A retention of 0 or negative days is invalid — treat it as a no-op.
+    if retention_days <= 0 {
         return Ok(CleanupStats::default());
     }
 
@@ -133,7 +133,8 @@ fn sweep_screenshots(conn: &Connection, dir: &Path) -> Result<u64> {
     let file_list = files::walk_files(dir)?;
 
     for file_path in file_list {
-        let path_str = file_path.to_string_lossy().to_string();
+        let canonical = std::fs::canonicalize(&file_path).unwrap_or_else(|_| file_path.clone());
+        let path_str = canonical.to_string_lossy().to_string();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM screenshots WHERE image_path = ?1",
             params![path_str],
@@ -154,7 +155,8 @@ fn sweep_audio(conn: &Connection, dir: &Path) -> Result<u64> {
     let file_list = files::walk_files(dir)?;
 
     for file_path in file_list {
-        let path_str = file_path.to_string_lossy().to_string();
+        let canonical = std::fs::canonicalize(&file_path).unwrap_or_else(|_| file_path.clone());
+        let path_str = canonical.to_string_lossy().to_string();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM audio_segments WHERE audio_path = ?1",
             params![path_str],

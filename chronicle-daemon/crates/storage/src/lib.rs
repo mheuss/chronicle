@@ -192,16 +192,20 @@ impl Storage {
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
-            let retention_days: i64 = conn
-                .query_row(
-                    "SELECT value FROM config WHERE key = 'retention_days'",
-                    [],
-                    |row| {
-                        let val: String = row.get(0)?;
-                        Ok(val.parse::<i64>().unwrap_or(30))
-                    },
-                )
-                .unwrap_or(30);
+            let retention_days: i64 = match conn.query_row(
+                "SELECT value FROM config WHERE key = 'retention_days'",
+                [],
+                |row| {
+                    let val: String = row.get(0)?;
+                    Ok(val)
+                },
+            ) {
+                Ok(val) => val.parse::<i64>().map_err(|e| {
+                    StorageError::Other(format!("invalid retention_days value: {e}"))
+                })?,
+                Err(rusqlite::Error::QueryReturnedNoRows) => 30,
+                Err(e) => return Err(e.into()),
+            };
             retention::run_cleanup(&conn, retention_days)
         })
         .await?
@@ -261,11 +265,18 @@ impl Storage {
                 (None, None) => None,
             };
 
-            // DB file size
+            // DB file size (include WAL and SHM sidecars)
             let db_path = base_dir.join("chronicle.db");
             let db_size_bytes = std::fs::metadata(&db_path)
                 .map(|m| m.len())
                 .unwrap_or(0);
+            let wal_size = std::fs::metadata(db_path.with_extension("db-wal"))
+                .map(|m| m.len())
+                .unwrap_or(0);
+            let shm_size = std::fs::metadata(db_path.with_extension("db-shm"))
+                .map(|m| m.len())
+                .unwrap_or(0);
+            let db_size_bytes = db_size_bytes + wal_size + shm_size;
 
             // Total disk usage from screenshots/ and audio/ directories
             let screenshots_size = files::dir_size(&base_dir.join("screenshots"));

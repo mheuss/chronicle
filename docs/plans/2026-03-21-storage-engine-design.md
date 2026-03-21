@@ -412,8 +412,8 @@ thiserror = "2"
 
 ### 6.2 Module Layout
 
-```
-crates/storage/src/
+```text
+chronicle-daemon/crates/storage/src/
 ├── lib.rs              -- pub Storage struct, re-exports
 ├── error.rs            -- StorageError enum (thiserror)
 ├── schema.rs           -- migrations, PRAGMA setup
