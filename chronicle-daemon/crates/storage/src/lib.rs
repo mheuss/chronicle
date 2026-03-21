@@ -14,6 +14,7 @@ pub(crate) mod schema;
 pub(crate) mod files;
 pub(crate) mod screenshots;
 pub(crate) mod audio;
+pub(crate) mod search;
 
 pub use error::{StorageError, Result};
 pub use models::{
@@ -152,6 +153,24 @@ impl Storage {
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
                 Err(e) => Err(e.into()),
             }
+        })
+        .await?
+    }
+
+    // --- Search operations ---
+
+    pub async fn search(
+        &self,
+        query: &str,
+        filter: SearchFilter,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let pool = self.pool.clone();
+        let query = query.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            search::search(&conn, &query, &filter, limit, offset)
         })
         .await?
     }
