@@ -65,13 +65,16 @@ DYLD_LIBRARY_PATH="/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx"
 The `DYLD_LIBRARY_PATH` is needed because the `screencapturekit` crate links
 against Swift concurrency libraries that aren't on the default search path.
 
-Regular unit tests (no permission needed) run without the `--ignored` flag:
+Regular unit tests (no permission needed, no `DYLD_LIBRARY_PATH` required):
 
 ```bash
 cd chronicle-daemon
-DYLD_LIBRARY_PATH="/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx" \
-  cargo test -p chronicle-capture
+cargo test -p chronicle-capture
 ```
+
+Note: The `swift-5.5` path may vary depending on your Command Line Tools
+version. If the library isn't found, check what's available under
+`/Library/Developer/CommandLineTools/usr/lib/`.
 
 ## Channel backpressure
 
