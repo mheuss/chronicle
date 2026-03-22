@@ -1,23 +1,30 @@
 use thiserror::Error;
 
+/// Errors that can occur during storage operations.
 #[derive(Debug, Error)]
 pub enum StorageError {
+    /// SQLite query or schema error.
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
 
+    /// Connection pool exhausted or initialization failure.
     #[error("connection pool error: {0}")]
     Pool(#[from] r2d2::Error),
 
+    /// Filesystem read/write error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// A spawned blocking task panicked or was cancelled.
     #[error("task join error: {0}")]
     Join(#[from] tokio::task::JoinError),
 
+    /// Catch-all for errors that don't fit another variant.
     #[error("{0}")]
     Other(String),
 }
 
+/// Convenience alias for results that carry a [`StorageError`].
 pub type Result<T> = std::result::Result<T, StorageError>;
 
 #[cfg(test)]

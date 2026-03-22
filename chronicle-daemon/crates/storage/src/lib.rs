@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 
+/// Error types for storage operations.
 pub mod error;
+/// Data models, configuration, and query types.
 pub mod models;
 pub(crate) mod schema;
 pub(crate) mod files;
@@ -25,12 +27,17 @@ pub use models::{
     CleanupStats, StorageStatus,
 };
 
+/// SQLite-backed storage engine for screenshots, audio, and full-text search.
 pub struct Storage {
     pub(crate) pool: Pool<SqliteConnectionManager>,
     pub(crate) base_dir: PathBuf,
 }
 
 impl Storage {
+    /// Open or create a storage database at the configured path.
+    ///
+    /// Creates the base directory, builds the connection pool, and runs
+    /// pending schema migrations.
     pub async fn open(config: StorageConfig) -> Result<Self> {
         let base_dir = config.base_dir.clone();
         let pool_size = u32::try_from(config.pool_size)
@@ -60,6 +67,7 @@ impl Storage {
 
     // --- Screenshot operations ---
 
+    /// Reserve a unique file path for a new screenshot image.
     pub async fn allocate_screenshot_path(&self, timestamp: i64, display_id: &str) -> Result<PathBuf> {
         let base_dir = self.base_dir.clone();
         let display_id = display_id.to_string();
@@ -69,6 +77,7 @@ impl Storage {
         .await?
     }
 
+    /// Insert a screenshot record and return the assigned row ID.
     pub async fn insert_screenshot(&self, meta: ScreenshotMetadata) -> Result<i64> {
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {
@@ -78,6 +87,7 @@ impl Storage {
         .await?
     }
 
+    /// Fetch a single screenshot by row ID.
     pub async fn get_screenshot(&self, id: i64) -> Result<Screenshot> {
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {
@@ -87,6 +97,7 @@ impl Storage {
         .await?
     }
 
+    /// Return screenshots within a time range, optionally filtered by display.
     pub async fn get_timeline(
         &self,
         start: i64,
@@ -101,6 +112,7 @@ impl Storage {
         .await?
     }
 
+    /// Attach or replace the OCR text for a screenshot.
     pub async fn update_ocr_text(&self, id: i64, ocr_text: String) -> Result<()> {
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {
@@ -112,6 +124,7 @@ impl Storage {
 
     // --- Audio operations ---
 
+    /// Reserve a unique file path for a new audio segment.
     pub async fn allocate_audio_path(&self, timestamp: i64, source: &str) -> Result<PathBuf> {
         let base_dir = self.base_dir.clone();
         let source = source.to_string();
@@ -121,6 +134,7 @@ impl Storage {
         .await?
     }
 
+    /// Insert an audio segment record and return the assigned row ID.
     pub async fn insert_audio_segment(&self, meta: AudioSegmentMetadata) -> Result<i64> {
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {
@@ -130,6 +144,7 @@ impl Storage {
         .await?
     }
 
+    /// Fetch a single audio segment by row ID.
     pub async fn get_audio_segment(&self, id: i64) -> Result<AudioSegment> {
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {
@@ -139,6 +154,7 @@ impl Storage {
         .await?
     }
 
+    /// Attach or replace the transcript for an audio segment.
     pub async fn update_transcript(&self, id: i64, transcript: String) -> Result<()> {
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {
@@ -150,6 +166,7 @@ impl Storage {
 
     // --- Config operations ---
 
+    /// Read a configuration value by key. Returns `None` if the key doesn't exist.
     pub async fn get_config(&self, key: &str) -> Result<Option<String>> {
         let pool = self.pool.clone();
         let key = key.to_string();
@@ -170,6 +187,7 @@ impl Storage {
 
     // --- Search operations ---
 
+    /// Run a full-text search across screenshots and audio transcripts.
     pub async fn search(
         &self,
         query: &str,
@@ -188,6 +206,7 @@ impl Storage {
 
     // --- Retention operations ---
 
+    /// Delete records and media files older than the configured retention period.
     pub async fn run_cleanup(&self) -> Result<CleanupStats> {
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {
@@ -219,6 +238,7 @@ impl Storage {
         .await?
     }
 
+    /// Remove media files on disk that have no matching database record.
     pub async fn sweep_orphans(&self) -> Result<CleanupStats> {
         let pool = self.pool.clone();
         let base_dir = self.base_dir.clone();
@@ -235,6 +255,7 @@ impl Storage {
 
     // --- Status operations ---
 
+    /// Gather aggregate statistics about the database and on-disk storage.
     pub async fn status(&self) -> Result<StorageStatus> {
         let pool = self.pool.clone();
         let base_dir = self.base_dir.clone();
@@ -302,6 +323,7 @@ impl Storage {
         .await?
     }
 
+    /// Write a configuration value, creating or replacing the key.
     pub async fn set_config(&self, key: &str, value: &str) -> Result<()> {
         let pool = self.pool.clone();
         let key = key.to_string();
