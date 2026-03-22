@@ -8,9 +8,13 @@ use screencapturekit::cm::CMSampleBuffer;
 /// Error types for capture operations.
 pub mod error;
 
+/// Capture engine managing per-display SCStreams.
+pub mod engine;
+
 /// Frame handler bridging SCK callbacks to an mpsc channel.
 pub(crate) mod handler;
 
+pub use engine::CaptureEngine;
 pub use error::{CaptureError, Result};
 
 /// Configuration for the capture engine.
