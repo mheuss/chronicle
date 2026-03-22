@@ -6,7 +6,10 @@ description = "Screen capture engine — multi-display adaptive capture via Scre
 license = "MIT"
 
 [dependencies]
-objc2 = "0.6"
-objc2-screen-capture-kit = "0.3"
-core-graphics = "0.24"
-core-foundation = "0.10"
+screencapturekit = { version = "1.5", features = ["macos_14_0"] }
+tokio = { version = "1", features = ["sync"] }
+thiserror = "2"
+log = "0.4"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync", "rt", "macros"] }
