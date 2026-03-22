@@ -11,3 +11,4 @@ For the project overview, see the [README](../../README.md).
 | Guide | Crate | What it covers |
 |-------|-------|----------------|
 | [Storage Engine](storage-engine.md) | `chronicle-storage` | SQLite schema, FTS5 search, file management, retention |
+| [Screen Capture](screen-capture.md) | `chronicle-capture` | Display enumeration, SCStream setup, frame delivery |
