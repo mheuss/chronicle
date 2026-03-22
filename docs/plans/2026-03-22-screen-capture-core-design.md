@@ -1,7 +1,7 @@
 # Core Frame Capture — Design Document
 
 **Date:** 2026-03-22
-**Status:** Approved
+**Status:** Complete
 **Issue:** HEU-249
 **Branch:** mrheuss/heu-237-screen-capture-engine-multi-display-adaptive-capture-via
 **Base Branch:** main

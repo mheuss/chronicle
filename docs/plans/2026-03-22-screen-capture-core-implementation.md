@@ -1,7 +1,7 @@
 # Core Frame Capture Implementation Plan
 
 **Date:** 2026-03-22
-**Status:** Approved
+**Status:** Complete
 **Original Design Doc:** docs/plans/2026-03-22-screen-capture-core-design.md
 **Issue:** HEU-249
 **Branch:** mrheuss/heu-237-screen-capture-engine-multi-display-adaptive-capture-via
