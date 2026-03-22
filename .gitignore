@@ -32,3 +32,5 @@ xcuserdata/
 # Environment
 .env
 .env.*
+
+.claude/sop.md
