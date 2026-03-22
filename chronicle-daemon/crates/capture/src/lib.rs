@@ -36,6 +36,9 @@ impl Default for CaptureConfig {
 }
 
 /// A captured frame delivered over the channel.
+///
+/// Does not derive `Debug` because `CMSampleBuffer` from screencapturekit
+/// does not implement `Debug`. Use the metadata fields for logging.
 pub struct CapturedFrame {
     /// Raw sample buffer from ScreenCaptureKit.
     pub image_buffer: CMSampleBuffer,

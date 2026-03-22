@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 screencapturekit = { version = "1.5", features = ["macos_14_0"] }
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "rt"] }
 thiserror = "2"
 log = "0.4"
 

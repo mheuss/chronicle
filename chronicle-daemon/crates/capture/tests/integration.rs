@@ -40,6 +40,12 @@ async fn capture_engine_delivers_frames() {
     assert!(status.total_frames_captured >= 1);
 
     engine.stop().expect("Failed to stop capture");
+
+    // Drop engine to close all senders
+    drop(engine);
+    // Channel should now be closed
+    let result = receiver.recv().await;
+    assert!(result.is_none(), "Channel should close after engine is dropped");
 }
 
 #[ignore]

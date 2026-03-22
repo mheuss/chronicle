@@ -73,6 +73,8 @@ impl SCStreamOutputTrait for FrameHandler {
             .map(|buf| (buf.width() as u32, buf.height() as u32))
             .unwrap_or((self.width, self.height));
 
+        // i64 to match chronicle-storage's timestamp convention (SQLite INTEGER).
+        // Safe: won't overflow until year 292 billion.
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()

@@ -37,6 +37,17 @@ impl CaptureEngine {
     /// * `CaptureError::NoDisplays` -- no displays found
     /// * `CaptureError::ScreenCaptureKit` -- SCK returned an error
     pub fn start(config: CaptureConfig) -> Result<(Self, mpsc::Receiver<CapturedFrame>)> {
+        if config.frame_interval_secs <= 0.0 {
+            return Err(CaptureError::ScreenCaptureKit(
+                "frame_interval_secs must be positive".into(),
+            ));
+        }
+        if config.channel_buffer_size == 0 {
+            return Err(CaptureError::ScreenCaptureKit(
+                "channel_buffer_size must be at least 1".into(),
+            ));
+        }
+
         let (sender, receiver) = mpsc::channel(config.channel_buffer_size);
 
         let content = SCShareableContent::get().map_err(|e| {
@@ -52,24 +63,25 @@ impl CaptureEngine {
         let frames_dropped = Arc::new(AtomicU64::new(0));
 
         // Build a CMTime for the minimum frame interval.
-        // For 2.0 s interval we use value=2, timescale=1.
-        // For fractional intervals we scale up to millisecond precision.
+        // Uses millisecond precision: e.g. 2.0 s → value=2000, timescale=1000.
         let frame_interval = seconds_to_cmtime(config.frame_interval_secs);
 
-        let mut streams = Vec::with_capacity(displays.len());
+        let mut streams: Vec<SCStream> = Vec::with_capacity(displays.len());
 
         for display in &displays {
             let display_id = display.display_id();
             let width = display.width();
             let height = display.height();
 
+            // Build the content filter once per display and reuse it for both
+            // the scale-factor detection and the stream itself.
+            let filter = SCContentFilter::create()
+                .with_display(display)
+                .with_excluding_windows(&[])
+                .build();
+
             // Detect retina scale via SCShareableContentInfo (macOS 14.0+).
             let scale_factor = {
-                let filter = SCContentFilter::create()
-                    .with_display(display)
-                    .with_excluding_windows(&[])
-                    .build();
-
                 let info =
                     screencapturekit::shareable_content::SCShareableContentInfo::for_filter(&filter);
                 match info {
@@ -92,11 +104,6 @@ impl CaptureEngine {
                 .with_shows_cursor(true)
                 .with_minimum_frame_interval(&frame_interval);
 
-            let filter = SCContentFilter::create()
-                .with_display(display)
-                .with_excluding_windows(&[])
-                .build();
-
             let handler = FrameHandler::new(
                 sender.clone(),
                 display_id,
@@ -109,11 +116,15 @@ impl CaptureEngine {
 
             let mut stream = SCStream::new(&filter, &stream_config);
             stream.add_output_handler(handler, SCStreamOutputType::Screen);
-            stream.start_capture().map_err(|e| {
-                CaptureError::ScreenCaptureKit(format!(
+            if let Err(e) = stream.start_capture() {
+                // Stop all previously-started streams before propagating.
+                for started in &streams {
+                    let _ = started.stop_capture();
+                }
+                return Err(CaptureError::ScreenCaptureKit(format!(
                     "failed to start capture on display {display_id}: {e}"
-                ))
-            })?;
+                )));
+            }
 
             log::info!(
                 "Started capture on display {display_id} ({width}x{height}, scale {scale_factor})"
@@ -154,6 +165,17 @@ impl CaptureEngine {
     }
 }
 
+impl Drop for CaptureEngine {
+    fn drop(&mut self) {
+        for stream in &self.streams {
+            if let Err(e) = stream.stop_capture() {
+                log::warn!("Failed to stop stream on drop: {e}");
+            }
+        }
+        self.streams.clear();
+    }
+}
+
 /// Convert a fractional-seconds interval into a `CMTime`.
 ///
 /// Uses millisecond precision (timescale = 1000) so values like 0.5 s or 2.0 s
@@ -161,4 +183,24 @@ impl CaptureEngine {
 fn seconds_to_cmtime(secs: f64) -> CMTime {
     let millis = (secs * 1000.0).round() as i64;
     CMTime::new(millis, 1000)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seconds_to_cmtime_converts_correctly() {
+        let time = seconds_to_cmtime(2.0);
+        // 2.0 seconds = 2000 value with timescale 1000
+        assert_eq!(time.value, 2000);
+        assert_eq!(time.timescale, 1000);
+    }
+
+    #[test]
+    fn seconds_to_cmtime_fractional() {
+        let time = seconds_to_cmtime(0.5);
+        assert_eq!(time.value, 500);
+        assert_eq!(time.timescale, 1000);
+    }
 }

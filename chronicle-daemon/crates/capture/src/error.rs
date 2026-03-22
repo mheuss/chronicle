@@ -12,6 +12,9 @@ pub enum CaptureError {
     NoDisplays,
 
     /// The frame channel was closed unexpectedly.
+    ///
+    /// Reserved for future use by adaptive-rate and recovery features.
+    #[allow(dead_code)]
     #[error("channel send failed")]
     ChannelClosed,
 }
