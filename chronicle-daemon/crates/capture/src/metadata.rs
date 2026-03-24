@@ -55,41 +55,23 @@ fn get_frontmost_app_info() -> (Option<String>, Option<String>, Option<i32>) {
 /// Returns None if the app has no windows or window titles aren't
 /// accessible (Screen Recording permission required for window names).
 fn get_window_title_for_pid(target_pid: i32) -> Option<String> {
-    use core_foundation::array::CFArray;
     use core_foundation::base::TCFType;
-    use core_foundation::dictionary::CFDictionary;
     use core_foundation::number::CFNumber;
     use core_foundation::string::CFString;
-    use core_graphics::display::{
-        kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly,
+    use core_graphics::window::{
+        copy_window_info, kCGNullWindowID, kCGWindowListExcludeDesktopElements,
+        kCGWindowListOptionOnScreenOnly,
     };
-
-    // CGWindowListCopyWindowInfo FFI — core_graphics::display may not expose
-    // a safe wrapper that returns the right type. Use the raw function.
-    #[link(name = "CoreGraphics", kind = "framework")]
-    unsafe extern "C" {
-        fn CGWindowListCopyWindowInfo(
-            option: u32,
-            relativeToWindow: u32,
-        ) -> *const c_void;
-    }
     use std::ffi::c_void;
 
     let options = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
-
-    let window_list = unsafe { CGWindowListCopyWindowInfo(options, 0) };
-    if window_list.is_null() {
-        return None;
-    }
-
-    let cf_array: CFArray = unsafe { TCFType::wrap_under_create_rule(window_list as *const _) };
+    let cf_array = copy_window_info(options, kCGNullWindowID)?;
 
     let key_owner_pid = CFString::new("kCGWindowOwnerPID");
     let key_layer = CFString::new("kCGWindowLayer");
     let key_name = CFString::new("kCGWindowName");
 
     for i in 0..cf_array.len() {
-        // Each element is a CFDictionary; get it as a raw pointer.
         let dict_ptr = unsafe {
             core_foundation::array::CFArrayGetValueAtIndex(
                 cf_array.as_concrete_TypeRef(),
@@ -99,7 +81,7 @@ fn get_window_title_for_pid(target_pid: i32) -> Option<String> {
         if dict_ptr.is_null() {
             continue;
         }
-        let dict: CFDictionary =
+        let dict: core_foundation::dictionary::CFDictionary =
             unsafe { TCFType::wrap_under_get_rule(dict_ptr as *const _) };
 
         // Check PID matches.
@@ -142,6 +124,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore] // Requires active GUI session; may fail in headless CI
     fn get_frontmost_app_returns_metadata() {
         let meta = get_frontmost_app();
         assert!(
