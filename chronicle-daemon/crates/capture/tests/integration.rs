@@ -7,7 +7,7 @@
 //!
 //! Run manually: cargo test -p chronicle-capture --test integration -- --ignored
 
-use chronicle_capture::{CaptureConfig, CaptureEngine};
+use chronicle_capture::{CaptureConfig, CaptureEngine, encode_heif};
 
 #[ignore]
 #[tokio::test]
@@ -59,4 +59,32 @@ async fn capture_engine_finds_displays() {
     assert!(status.active_displays >= 1, "Should find at least one display");
 
     engine.stop().expect("Failed to stop");
+}
+
+#[ignore]
+#[tokio::test]
+async fn encode_captured_frame_as_heif() {
+    let config = CaptureConfig::default();
+    let (engine, mut receiver) = CaptureEngine::start(config)
+        .expect("failed to start capture engine");
+
+    let frame = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        receiver.recv(),
+    )
+    .await
+    .expect("timed out waiting for frame")
+    .expect("channel closed without delivering a frame");
+
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let path = dir.path().join("captured.heif");
+
+    encode_heif(&frame.image_buffer, &path, 0.65)
+        .expect("HEIF encoding failed");
+
+    assert!(path.exists(), "HEIF file was not created");
+    let metadata = std::fs::metadata(&path).unwrap();
+    assert!(metadata.len() > 1000, "HEIF file suspiciously small: {} bytes", metadata.len());
+
+    drop(engine);
 }
