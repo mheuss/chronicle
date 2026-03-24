@@ -1,0 +1,281 @@
+//! HEIF encoding via macOS ImageIO framework.
+//!
+//! Converts `CMSampleBuffer` frames from ScreenCaptureKit into HEIF files
+//! on disk. Uses hardware-accelerated HEVC encoding on Apple Silicon.
+
+use std::ffi::c_void;
+use std::path::Path;
+use std::ptr;
+
+use core_foundation::base::TCFType;
+use core_foundation::dictionary::CFDictionary;
+use core_foundation::number::CFNumber;
+use core_foundation::string::CFString;
+use core_foundation::url::CFURL;
+use core_graphics::color_space::CGColorSpace;
+use core_graphics::data_provider::CGDataProvider;
+use core_graphics::image::CGImage;
+use foreign_types::ForeignType;
+
+use screencapturekit::cm::CMSampleBuffer;
+
+use crate::error::{CaptureError, Result};
+
+// ---------------------------------------------------------------------------
+// ImageIO FFI — these symbols live in the ImageIO framework and are not
+// wrapped by any maintained Rust crate.
+// ---------------------------------------------------------------------------
+
+#[link(name = "ImageIO", kind = "framework")]
+unsafe extern "C" {
+    fn CGImageDestinationCreateWithURL(
+        url: *const c_void,      // CFURLRef
+        uti: *const c_void,      // CFStringRef
+        count: usize,
+        options: *const c_void,  // CFDictionaryRef, nullable
+    ) -> *mut c_void;            // CGImageDestinationRef
+
+    fn CGImageDestinationAddImage(
+        dest: *mut c_void,       // CGImageDestinationRef
+        image: *const c_void,    // CGImageRef
+        properties: *const c_void, // CFDictionaryRef, nullable
+    );
+
+    fn CGImageDestinationFinalize(dest: *mut c_void) -> bool;
+
+    static kCGImageDestinationLossyCompressionQuality: *const c_void; // CFStringRef
+}
+
+// CoreFoundation release — needed for the CGImageDestination which is
+// returned as an untyped pointer.
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFRelease(cf: *const c_void);
+}
+
+/// Encode a `CMSampleBuffer` as HEIF and write to disk.
+///
+/// Extracts the `CVPixelBuffer` from the sample buffer, builds a `CGImage`
+/// from the raw BGRA pixel data, and writes it as HEIF via ImageIO.
+///
+/// # Arguments
+/// * `sample_buffer` — raw frame from ScreenCaptureKit
+/// * `output_path` — destination file path (parent directory must exist)
+/// * `quality` — compression quality 0.0–1.0 (recommended: 0.65)
+///
+/// # Errors
+/// Returns `CaptureError::Encoding` if any step fails.
+pub fn encode_heif(
+    sample_buffer: &CMSampleBuffer,
+    output_path: &Path,
+    quality: f64,
+) -> Result<()> {
+    // 1. Extract pixel buffer from sample buffer.
+    let pixel_buffer = sample_buffer
+        .image_buffer()
+        .ok_or_else(|| CaptureError::Encoding("failed to extract pixel buffer".into()))?;
+
+    // 2. Lock pixel buffer for read-only CPU access.
+    let guard = pixel_buffer
+        .lock(screencapturekit::cv::CVPixelBufferLockFlags::READ_ONLY)
+        .map_err(|e| CaptureError::Encoding(format!("failed to lock pixel buffer: {e}")))?;
+
+    let width = guard.width();
+    let height = guard.height();
+    let bytes_per_row = guard.bytes_per_row();
+    let raw_bytes = guard.as_slice();
+
+    // 3. Create CGImage from raw BGRA pixel data.
+    let cg_image = create_cgimage_from_bgra(raw_bytes, width, height, bytes_per_row)?;
+
+    // 4. Write as HEIF.
+    write_cgimage_as_heif(&cg_image, output_path, quality)
+}
+
+/// Create a `CGImage` from raw BGRA pixel data.
+///
+/// ScreenCaptureKit delivers frames in BGRA format (configured via
+/// `PixelFormat::BGRA` in the stream configuration).
+fn create_cgimage_from_bgra(
+    data: &[u8],
+    width: usize,
+    height: usize,
+    bytes_per_row: usize,
+) -> Result<CGImage> {
+    let color_space = CGColorSpace::create_device_rgb();
+    // SAFETY: data is borrowed from a locked CVPixelBuffer guard and remains
+    // valid for the lifetime of this function call.
+    let provider = unsafe { CGDataProvider::from_slice(data) };
+
+    // BGRA in memory = kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst
+    // Numeric: 0x2000 (byte order 32 little) | 0x2 (premultiplied first) = 0x2002
+    let bitmap_info: u32 = 0x2002;
+
+    // CGImage::new panics on null (asserts internally), which only happens
+    // if the parameters are fundamentally invalid (zero dimensions, etc.).
+    Ok(CGImage::new(
+        width,
+        height,
+        8,              // bits per component
+        32,             // bits per pixel
+        bytes_per_row,
+        &color_space,
+        bitmap_info,
+        &provider,
+        false,          // should_interpolate
+        0,              // rendering intent: default
+    ))
+}
+
+/// Write a `CGImage` as HEIF to the given path.
+///
+/// This is the core ImageIO interaction. Separated from `encode_heif` so it
+/// can be unit-tested with synthetic CGImages (no ScreenCaptureKit needed).
+fn write_cgimage_as_heif(image: &CGImage, path: &Path, quality: f64) -> Result<()> {
+    let url = CFURL::from_path(path, false)
+        .ok_or_else(|| CaptureError::Encoding("failed to create URL from path".into()))?;
+
+    // Apple uses "public.heic" (HEIC = High Efficiency Image Container)
+    // as the UTI for HEIF images. "public.heif" is not accepted by
+    // CGImageDestination.
+    let uti = CFString::new("public.heic");
+
+    // Create destination.
+    let dest = unsafe {
+        CGImageDestinationCreateWithURL(
+            url.as_concrete_TypeRef() as *const c_void,
+            uti.as_concrete_TypeRef() as *const c_void,
+            1,
+            ptr::null(),
+        )
+    };
+    if dest.is_null() {
+        return Err(CaptureError::Encoding(
+            "failed to create image destination".into(),
+        ));
+    }
+
+    // Build properties dictionary with compression quality.
+    let quality_value = CFNumber::from(quality as f32);
+    let properties = unsafe {
+        let key = kCGImageDestinationLossyCompressionQuality;
+        CFDictionary::from_CFType_pairs(&[(
+            CFString::wrap_under_get_rule(key as *const _),
+            quality_value.as_CFType(),
+        )])
+    };
+
+    // Add image and finalize.
+    unsafe {
+        CGImageDestinationAddImage(
+            dest,
+            image.as_ptr() as *const c_void,
+            properties.as_concrete_TypeRef() as *const c_void,
+        );
+
+        let ok = CGImageDestinationFinalize(dest);
+        CFRelease(dest as *const c_void);
+
+        if !ok {
+            return Err(CaptureError::Encoding("failed to finalize HEIF output".into()));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// Create a synthetic CGImage (solid red, 100x100) for testing.
+    fn make_test_cgimage() -> CGImage {
+        let width = 100;
+        let height = 100;
+        let bytes_per_row = width * 4;
+        // BGRA: Blue=0, Green=0, Red=255, Alpha=255 → solid red
+        let mut data = vec![0u8; height * bytes_per_row];
+        for pixel in data.chunks_exact_mut(4) {
+            pixel[0] = 0;   // B
+            pixel[1] = 0;   // G
+            pixel[2] = 255; // R
+            pixel[3] = 255; // A
+        }
+        create_cgimage_from_bgra(&data, width, height, bytes_per_row)
+            .expect("failed to create test CGImage")
+    }
+
+    #[test]
+    fn create_cgimage_from_bgra_valid_data() {
+        let width = 50;
+        let height = 50;
+        let bytes_per_row = width * 4;
+        let data = vec![128u8; height * bytes_per_row];
+        let image = create_cgimage_from_bgra(&data, width, height, bytes_per_row);
+        assert!(image.is_ok());
+        let img = image.unwrap();
+        assert_eq!(img.width(), width);
+        assert_eq!(img.height(), height);
+    }
+
+    #[test]
+    fn write_heif_creates_file() {
+        let image = make_test_cgimage();
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("test.heif");
+
+        let result = write_cgimage_as_heif(&image, &path, 0.65);
+        assert!(result.is_ok(), "write_cgimage_as_heif failed: {result:?}");
+        assert!(path.exists(), "HEIF file was not created");
+
+        let metadata = fs::metadata(&path).unwrap();
+        assert!(metadata.len() > 0, "HEIF file is empty");
+    }
+
+    #[test]
+    fn write_heif_has_valid_magic_bytes() {
+        let image = make_test_cgimage();
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("magic.heif");
+
+        write_cgimage_as_heif(&image, &path, 0.65).unwrap();
+
+        let data = fs::read(&path).unwrap();
+        // HEIF files contain "ftyp" in the first 12 bytes.
+        assert!(data.len() >= 12, "file too small for HEIF");
+        let ftyp_pos = data[..12]
+            .windows(4)
+            .position(|w| w == b"ftyp");
+        assert!(ftyp_pos.is_some(), "missing ftyp box in HEIF header");
+    }
+
+    #[test]
+    fn write_heif_quality_affects_size() {
+        let image = make_test_cgimage();
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+
+        let low_path = dir.path().join("low.heif");
+        let high_path = dir.path().join("high.heif");
+
+        write_cgimage_as_heif(&image, &low_path, 0.1).unwrap();
+        write_cgimage_as_heif(&image, &high_path, 1.0).unwrap();
+
+        let low_size = fs::metadata(&low_path).unwrap().len();
+        let high_size = fs::metadata(&high_path).unwrap().len();
+
+        // Higher quality should produce a larger (or equal) file.
+        assert!(
+            high_size >= low_size,
+            "expected high quality ({high_size}) >= low quality ({low_size})"
+        );
+    }
+
+    #[test]
+    fn write_heif_invalid_path_returns_error() {
+        let image = make_test_cgimage();
+        let path = Path::new("/nonexistent/directory/out.heif");
+        let result = write_cgimage_as_heif(&image, &path, 0.65);
+        assert!(result.is_err());
+    }
+}

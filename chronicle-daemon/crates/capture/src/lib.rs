@@ -14,7 +14,11 @@ pub mod engine;
 /// Frame handler bridging SCK callbacks to an mpsc channel.
 pub(crate) mod handler;
 
+/// HEIF encoding for captured frames.
+pub mod encoder;
+
 pub use engine::CaptureEngine;
+pub use encoder::encode_heif;
 pub use error::{CaptureError, Result};
 
 /// Configuration for the capture engine.

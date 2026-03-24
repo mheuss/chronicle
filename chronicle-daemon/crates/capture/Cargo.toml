@@ -12,6 +12,7 @@ thiserror = "2"
 log = "0.4"
 core-foundation = "0.10"
 core-graphics = "0.24"
+foreign-types = "0.5"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
