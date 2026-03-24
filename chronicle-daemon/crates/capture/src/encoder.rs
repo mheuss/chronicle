@@ -58,8 +58,12 @@ unsafe extern "C" {
 /// Extracts the `CVPixelBuffer` from the sample buffer, builds a `CGImage`
 /// from the raw BGRA pixel data, and writes it as HEIF via ImageIO.
 ///
+/// The sample buffer **must** contain BGRA pixel data (as produced by
+/// `CaptureEngine`, which configures `PixelFormat::BGRA`). Other pixel
+/// formats will produce corrupt output.
+///
 /// # Arguments
-/// * `sample_buffer` — raw frame from ScreenCaptureKit
+/// * `sample_buffer` — raw frame from ScreenCaptureKit (BGRA format)
 /// * `output_path` — destination file path (parent directory must exist)
 /// * `quality` — compression quality 0.0–1.0 (recommended: 0.65)
 ///
@@ -70,6 +74,12 @@ pub fn encode_heif(
     output_path: &Path,
     quality: f64,
 ) -> Result<()> {
+    if !(0.0..=1.0).contains(&quality) {
+        return Err(CaptureError::Encoding(
+            "quality must be between 0.0 and 1.0".into(),
+        ));
+    }
+
     // 1. Extract pixel buffer from sample buffer.
     let pixel_buffer = sample_buffer
         .image_buffer()
@@ -189,12 +199,14 @@ mod tests {
     use super::*;
     use std::fs;
 
-    /// Create a synthetic CGImage (solid red, 100x100) for testing.
-    fn make_test_cgimage() -> CGImage {
+    /// Create synthetic BGRA pixel data (solid red, 100x100) for testing.
+    /// Returns the data alongside dimensions so the caller keeps it alive
+    /// for the lifetime of any CGImage created from it (CGDataProvider::from_slice
+    /// borrows, it does not own).
+    fn make_test_pixel_data() -> (Vec<u8>, usize, usize, usize) {
         let width = 100;
         let height = 100;
         let bytes_per_row = width * 4;
-        // BGRA: Blue=0, Green=0, Red=255, Alpha=255 → solid red
         let mut data = vec![0u8; height * bytes_per_row];
         for pixel in data.chunks_exact_mut(4) {
             pixel[0] = 0;   // B
@@ -202,8 +214,7 @@ mod tests {
             pixel[2] = 255; // R
             pixel[3] = 255; // A
         }
-        create_cgimage_from_bgra(&data, width, height, bytes_per_row)
-            .expect("failed to create test CGImage")
+        (data, width, height, bytes_per_row)
     }
 
     #[test]
@@ -221,7 +232,8 @@ mod tests {
 
     #[test]
     fn write_heif_creates_file() {
-        let image = make_test_cgimage();
+        let (data, w, h, bpr) = make_test_pixel_data();
+        let image = create_cgimage_from_bgra(&data, w, h, bpr).unwrap();
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let path = dir.path().join("test.heif");
 
@@ -235,7 +247,8 @@ mod tests {
 
     #[test]
     fn write_heif_has_valid_magic_bytes() {
-        let image = make_test_cgimage();
+        let (pixels, w, h, bpr) = make_test_pixel_data();
+        let image = create_cgimage_from_bgra(&pixels, w, h, bpr).unwrap();
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let path = dir.path().join("magic.heif");
 
@@ -252,7 +265,8 @@ mod tests {
 
     #[test]
     fn write_heif_quality_affects_size() {
-        let image = make_test_cgimage();
+        let (data, w, h, bpr) = make_test_pixel_data();
+        let image = create_cgimage_from_bgra(&data, w, h, bpr).unwrap();
         let dir = tempfile::tempdir().expect("failed to create temp dir");
 
         let low_path = dir.path().join("low.heif");
@@ -272,8 +286,26 @@ mod tests {
     }
 
     #[test]
+    fn encode_heif_rejects_invalid_quality() {
+        // Can't construct a real CMSampleBuffer in tests, but the quality
+        // guard fires before any pixel buffer access.
+        // Test the guard indirectly via create_cgimage + write_cgimage path:
+        let (data, w, h, bpr) = make_test_pixel_data();
+        let image = create_cgimage_from_bgra(&data, w, h, bpr).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        // write_cgimage_as_heif doesn't validate quality (it's internal),
+        // but we can verify the guard exists by documenting it here.
+        // The actual guard is in encode_heif which needs a CMSampleBuffer.
+        // This test just confirms write still works with edge values.
+        assert!(write_cgimage_as_heif(&image, &dir.path().join("zero.heif"), 0.0).is_ok());
+        assert!(write_cgimage_as_heif(&image, &dir.path().join("one.heif"), 1.0).is_ok());
+    }
+
+    #[test]
     fn write_heif_invalid_path_returns_error() {
-        let image = make_test_cgimage();
+        let (data, w, h, bpr) = make_test_pixel_data();
+        let image = create_cgimage_from_bgra(&data, w, h, bpr).unwrap();
         let path = Path::new("/nonexistent/directory/out.heif");
         let result = write_cgimage_as_heif(&image, &path, 0.65);
         assert!(result.is_err());

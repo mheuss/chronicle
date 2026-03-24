@@ -64,7 +64,10 @@ async fn capture_engine_finds_displays() {
 #[ignore]
 #[tokio::test]
 async fn encode_captured_frame_as_heif() {
-    let config = CaptureConfig::default();
+    let config = CaptureConfig {
+        frame_interval_secs: 0.5,
+        channel_buffer_size: 16,
+    };
     let (engine, mut receiver) = CaptureEngine::start(config)
         .expect("failed to start capture engine");
 
