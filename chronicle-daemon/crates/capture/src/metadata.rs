@@ -93,7 +93,7 @@ fn get_window_title_for_pid(target_pid: i32) -> Option<String> {
         let dict_ptr = unsafe {
             core_foundation::array::CFArrayGetValueAtIndex(
                 cf_array.as_concrete_TypeRef(),
-                i as isize,
+                i,
             )
         };
         if dict_ptr.is_null() {
