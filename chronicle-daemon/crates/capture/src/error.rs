@@ -17,6 +17,10 @@ pub enum CaptureError {
     #[allow(dead_code)]
     #[error("channel send failed")]
     ChannelClosed,
+
+    /// HEIF encoding failed.
+    #[error("heif encoding failed: {0}")]
+    Encoding(String),
 }
 
 /// Convenience alias for capture operations.
@@ -36,5 +40,12 @@ mod tests {
     fn no_displays_error_displays() {
         let err = CaptureError::NoDisplays;
         assert_eq!(err.to_string(), "no displays found");
+    }
+
+    #[test]
+    fn encoding_error_displays() {
+        let err = CaptureError::Encoding("pixel buffer locked".into());
+        assert!(err.to_string().contains("pixel buffer locked"));
+        assert!(err.to_string().contains("heif encoding failed"));
     }
 }

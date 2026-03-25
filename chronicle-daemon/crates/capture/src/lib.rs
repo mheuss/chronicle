@@ -14,10 +14,14 @@ pub mod engine;
 /// Frame handler bridging SCK callbacks to an mpsc channel.
 pub(crate) mod handler;
 
+/// HEIF encoding for captured frames.
+pub mod encoder;
+
 /// App metadata extraction — foreground app and window title.
 pub mod metadata;
 
 pub use engine::CaptureEngine;
+pub use encoder::encode_heif;
 pub use error::{CaptureError, Result};
 pub use metadata::{AppMetadata, get_frontmost_app};
 
