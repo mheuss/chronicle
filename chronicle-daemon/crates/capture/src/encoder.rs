@@ -121,6 +121,15 @@ fn create_cgimage_from_bgra(
     height: usize,
     bytes_per_row: usize,
 ) -> Result<CGImage> {
+    let required_len = height.saturating_mul(bytes_per_row);
+    if data.len() < required_len {
+        return Err(CaptureError::Encoding(format!(
+            "data slice too small: {} < {}",
+            data.len(),
+            required_len
+        )));
+    }
+
     let color_space = CGColorSpace::create_device_rgb();
     // SAFETY: data is borrowed from a locked CVPixelBuffer guard and remains
     // valid for the lifetime of this function call.
