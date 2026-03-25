@@ -283,7 +283,21 @@ mod tests {
 
     #[test]
     fn write_heif_quality_affects_size() {
-        let (data, w, h, bpr) = make_test_pixel_data();
+        // Use high-entropy pixels so the encoder actually has to work harder
+        // at higher quality. Solid-color images compress identically at any
+        // quality level, which would let a non-strict assertion pass vacuously.
+        let w = 256;
+        let h = 256;
+        let bpr = w * 4;
+        let mut data = vec![0u8; h * bpr];
+        for (i, pixel) in data.chunks_exact_mut(4).enumerate() {
+            let x = (i % w) as u8;
+            let y = (i / w) as u8;
+            pixel[0] = x.wrapping_mul(31);
+            pixel[1] = y.wrapping_mul(17);
+            pixel[2] = x ^ y;
+            pixel[3] = 255;
+        }
         let image = create_cgimage_from_bgra(&data, w, h, bpr).unwrap();
         let dir = tempfile::tempdir().expect("failed to create temp dir");
 
@@ -296,26 +310,18 @@ mod tests {
         let low_size = fs::metadata(&low_path).unwrap().len();
         let high_size = fs::metadata(&high_path).unwrap().len();
 
-        // Higher quality should produce a larger (or equal) file.
         assert!(
-            high_size >= low_size,
-            "expected high quality ({high_size}) >= low quality ({low_size})"
+            high_size > low_size,
+            "expected high quality ({high_size}) > low quality ({low_size})"
         );
     }
 
     #[test]
-    fn encode_heif_rejects_invalid_quality() {
-        // Can't construct a real CMSampleBuffer in tests, but the quality
-        // guard fires before any pixel buffer access.
-        // Test the guard indirectly via create_cgimage + write_cgimage path:
+    fn write_heif_accepts_edge_quality_values() {
         let (data, w, h, bpr) = make_test_pixel_data();
         let image = create_cgimage_from_bgra(&data, w, h, bpr).unwrap();
         let dir = tempfile::tempdir().unwrap();
 
-        // write_cgimage_as_heif doesn't validate quality (it's internal),
-        // but we can verify the guard exists by documenting it here.
-        // The actual guard is in encode_heif which needs a CMSampleBuffer.
-        // This test just confirms write still works with edge values.
         assert!(write_cgimage_as_heif(&image, &dir.path().join("zero.heif"), 0.0).is_ok());
         assert!(write_cgimage_as_heif(&image, &dir.path().join("one.heif"), 1.0).is_ok());
     }
