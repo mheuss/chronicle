@@ -85,7 +85,16 @@ pub fn encode_heif(
         .image_buffer()
         .ok_or_else(|| CaptureError::Encoding("failed to extract pixel buffer".into()))?;
 
-    // 2. Lock pixel buffer for read-only CPU access.
+    // 2. Validate pixel format is BGRA.
+    const BGRA_FOURCC: u32 = u32::from_be_bytes(*b"BGRA");
+    let format = pixel_buffer.pixel_format();
+    if format != BGRA_FOURCC {
+        return Err(CaptureError::Encoding(format!(
+            "expected BGRA pixel format, got 0x{format:08X}"
+        )));
+    }
+
+    // 3. Lock pixel buffer for read-only CPU access.
     let guard = pixel_buffer
         .lock(screencapturekit::cv::CVPixelBufferLockFlags::READ_ONLY)
         .map_err(|e| CaptureError::Encoding(format!("failed to lock pixel buffer: {e}")))?;
