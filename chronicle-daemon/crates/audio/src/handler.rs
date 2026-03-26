@@ -91,7 +91,7 @@ unsafe fn extract_pcm_bytes(sample_buffer: &CMSampleBuffer) -> Option<Vec<u8>> {
 }
 
 /// Ivars for the `AudioOutputHandler` ObjC class.
-struct AudioOutputHandlerIvars {
+pub struct AudioOutputHandlerIvars {
     sender: SyncSender<AudioBuffer>,
 }
 
@@ -99,7 +99,7 @@ define_class!(
     // SAFETY: NSObject has no subclassing requirements. We don't implement Drop.
     #[unsafe(super(NSObject))]
     #[ivars = AudioOutputHandlerIvars]
-    struct AudioOutputHandler;
+    pub struct AudioOutputHandler;
 
     // SAFETY: NSObjectProtocol has no extra requirements.
     unsafe impl NSObjectProtocol for AudioOutputHandler {}

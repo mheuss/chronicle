@@ -6,9 +6,11 @@
 
 mod accumulator;
 mod encoder;
+mod engine;
 pub mod handler;
 
 pub use encoder::OggOpusEncoder;
+pub use engine::AudioEngine;
 
 use std::path::{Path, PathBuf};
 
