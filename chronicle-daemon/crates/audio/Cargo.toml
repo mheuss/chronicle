@@ -2,10 +2,24 @@
 name = "chronicle-audio"
 version = "0.1.0"
 edition = "2024"
-description = "Audio capture — microphone via AVFoundation, system audio via ScreenCaptureKit"
+description = "Audio capture — microphone and system audio via ScreenCaptureKit"
 license = "MIT"
 
 [dependencies]
 objc2 = "0.6"
-objc2-av-foundation = "0.3"
-objc2-screen-capture-kit = "0.3"
+objc2-screen-capture-kit = { version = "0.3", features = [
+    "SCStream",
+    "SCShareableContent",
+] }
+objc2-foundation = { version = "0.3", features = [
+    "NSArray",
+    "NSString",
+    "NSError",
+] }
+objc2-core-media = { version = "0.3", features = [
+    "CMSampleBuffer",
+] }
+dispatch2 = "0.3"
+opus = "0.3"
+ogg = "0.9"
+thiserror = "2"
