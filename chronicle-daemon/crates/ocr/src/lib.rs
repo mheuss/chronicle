@@ -48,7 +48,7 @@ pub fn extract_text(image_path: &Path) -> Result<String> {
 /// encapsulated here.
 unsafe fn extract_text_inner(path_str: &str) -> Result<String> {
     use objc2::runtime::AnyObject;
-    use objc2::AnyThread;
+    use objc2::AnyThread; // Required for VNImageRequestHandler::alloc() trait resolution
     use objc2_foundation::{NSArray, NSDictionary, NSString, NSURL};
     use objc2_vision::{VNImageRequestHandler, VNRecognizeTextRequest, VNRequestTextRecognitionLevel};
 
@@ -72,6 +72,7 @@ unsafe fn extract_text_inner(path_str: &str) -> Result<String> {
 
     // 4. Perform the request.
     //    Upcast VNRecognizeTextRequest -> VNImageBasedRequest -> VNRequest.
+    // Clone needed: into_super consumes the Retained, but we need request again for .results().
     let request_as_vn = objc2::rc::Retained::into_super(
         objc2::rc::Retained::into_super(request.clone()),
     );
