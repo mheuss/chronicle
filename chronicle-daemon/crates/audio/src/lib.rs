@@ -4,6 +4,7 @@
 //! Audio is encoded to Opus in 30-second Ogg segments and delivered
 //! over an mpsc channel for downstream storage and transcription.
 
+mod accumulator;
 mod encoder;
 
 pub use encoder::OggOpusEncoder;
