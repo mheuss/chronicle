@@ -28,7 +28,7 @@ pub type Result<T> = std::result::Result<T, OcrError>;
 /// Returns the concatenated recognized text, or an empty string if
 /// no text is found.
 pub fn extract_text(image_path: &Path) -> Result<String> {
-    if !image_path.exists() {
+    if !image_path.is_file() {
         return Err(OcrError::ImageNotFound(
             image_path.display().to_string(),
         ));
@@ -159,6 +159,7 @@ mod tests {
     #[test]
     fn extract_text_never_panics() {
         let path = fixtures_dir().join("sample-text.png");
+        assert!(path.exists(), "fixture missing: {}", path.display());
         // Call 50 times rapidly — must never panic from ObjC interop
         // or autorelease pool issues.
         for _ in 0..50 {
