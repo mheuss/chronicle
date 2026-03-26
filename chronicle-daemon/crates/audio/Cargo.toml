@@ -24,6 +24,7 @@ objc2-core-media = { version = "0.3", features = [
     "CMSampleBuffer",
     "CMBlockBuffer",
     "CMBase",
+    "CMTime",
 ] }
 objc2-core-foundation = "0.3"
 log = "0.4"

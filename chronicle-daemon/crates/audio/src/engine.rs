@@ -176,6 +176,7 @@ fn run_encoding_loop(
         config.sample_rate,
         config.segment_duration_secs,
         config.bitrate,
+        opus::Application::Voip, // Speech-optimized for mic
         &config.output_dir,
         segment_tx.clone(),
     );
@@ -185,6 +186,7 @@ fn run_encoding_loop(
         config.sample_rate,
         config.segment_duration_secs,
         config.bitrate,
+        opus::Application::Audio, // General audio for system output
         &config.output_dir,
         segment_tx,
     );

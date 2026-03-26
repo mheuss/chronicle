@@ -7,7 +7,7 @@
 mod accumulator;
 mod encoder;
 mod engine;
-pub mod handler;
+pub(crate) mod handler;
 
 pub use encoder::OggOpusEncoder;
 pub use engine::AudioEngine;
@@ -109,6 +109,7 @@ struct DateComponents {
 }
 
 fn time_components(unix_secs: i64) -> DateComponents {
+    debug_assert!(unix_secs >= 0, "negative timestamps not supported");
     let days = unix_secs / 86400;
     let mut y = 1970;
     let mut remaining = days;

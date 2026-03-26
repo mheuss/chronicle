@@ -29,11 +29,12 @@ impl SegmentAccumulator {
         sample_rate: u32,
         segment_duration_secs: u32,
         bitrate: u32,
+        application: opus::Application,
         output_dir: &Path,
         sender: mpsc::Sender<CompletedSegment>,
     ) -> Self {
         let samples_per_segment = sample_rate as usize * segment_duration_secs as usize;
-        let encoder = OggOpusEncoder::new(sample_rate, 1, bitrate);
+        let encoder = OggOpusEncoder::new(1, bitrate, application);
         Self {
             source,
             buffer: Vec::new(),
@@ -99,13 +100,18 @@ impl SegmentAccumulator {
 
         let segment = CompletedSegment {
             source: self.source,
-            path,
+            path: path.clone(),
             start_timestamp: start_ms,
             end_timestamp: end_ms,
         };
 
-        // Best-effort send — ignore channel errors (receiver may have dropped).
-        let _ = self.sender.send(segment);
+        // Best-effort send. Log if the receiver dropped — the file is now orphaned.
+        if self.sender.send(segment).is_err() {
+            log::warn!(
+                "segment channel closed — orphaned file at {}",
+                path.display()
+            );
+        }
 
         Ok(())
     }
@@ -130,6 +136,7 @@ mod tests {
             SAMPLE_RATE,
             SEGMENT_SECS,
             BITRATE,
+            opus::Application::Voip,
             dir,
             sender,
         )

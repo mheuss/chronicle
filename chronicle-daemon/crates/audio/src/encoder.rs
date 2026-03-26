@@ -20,19 +20,29 @@ const MAX_PACKET_SIZE: usize = 4000;
 const STREAM_SERIAL: u32 = 1;
 
 /// Encodes raw f32 PCM samples to Ogg/Opus files.
+///
+/// Always operates at 48kHz (Opus native rate). The sample rate
+/// parameter is not configurable — Opus internally resamples if
+/// the input differs, but we standardize on 48kHz throughout.
 pub struct OggOpusEncoder {
-    sample_rate: u32,
     channels: u8,
     bitrate: u32,
+    application: opus::Application,
 }
 
+/// Fixed sample rate: 48kHz is Opus's native rate.
+const SAMPLE_RATE: u32 = 48_000;
+
 impl OggOpusEncoder {
-    /// Create a new encoder with the given sample rate, channel count, and bitrate.
-    pub fn new(sample_rate: u32, channels: u8, bitrate: u32) -> Self {
+    /// Create a new encoder with the given channel count, bitrate, and application mode.
+    ///
+    /// Use `opus::Application::Voip` for speech (microphone) and
+    /// `opus::Application::Audio` for general audio (system audio).
+    pub fn new(channels: u8, bitrate: u32, application: opus::Application) -> Self {
         Self {
-            sample_rate,
             channels,
             bitrate,
+            application,
         }
     }
 
@@ -60,8 +70,14 @@ impl OggOpusEncoder {
             }
         };
 
-        let mut opus_enc = opus::Encoder::new(48_000, channels, opus::Application::Voip)
+        let mut opus_enc = opus::Encoder::new(SAMPLE_RATE, channels, self.application)
             .map_err(|e| AudioError::Encoding(format!("opus encoder create: {e}")))?;
+
+        // Query the encoder's lookahead for RFC 7845 pre-skip.
+        let pre_skip = opus_enc
+            .get_lookahead()
+            .map(|v| v as u16)
+            .unwrap_or(0);
 
         opus_enc
             .set_bitrate(opus::Bitrate::Bits(self.bitrate as i32))
@@ -70,7 +86,7 @@ impl OggOpusEncoder {
         let mut pw = PacketWriter::new(writer);
 
         // RFC 7845 Section 5.1: OpusHead identification header.
-        let opus_head = self.build_opus_head();
+        let opus_head = self.build_opus_head(pre_skip);
         pw.write_packet(
             opus_head,
             STREAM_SERIAL,
@@ -100,7 +116,8 @@ impl OggOpusEncoder {
         };
 
         let mut encoded_buf = vec![0u8; MAX_PACKET_SIZE];
-        let mut granule_pos: u64 = 0;
+        // RFC 7845 Section 4: initial granule position includes pre-skip.
+        let mut granule_pos: u64 = pre_skip as u64;
 
         for frame_idx in 0..total_frames {
             let is_last = frame_idx + 1 == total_frames;
@@ -141,13 +158,13 @@ impl OggOpusEncoder {
     }
 
     /// Build the OpusHead identification header per RFC 7845 Section 5.1.
-    fn build_opus_head(&self) -> Vec<u8> {
+    fn build_opus_head(&self, pre_skip: u16) -> Vec<u8> {
         let mut head = Vec::with_capacity(19);
         head.extend_from_slice(b"OpusHead"); // Magic signature
         head.push(1); // Version
         head.push(self.channels); // Channel count
-        head.extend_from_slice(&0u16.to_le_bytes()); // Pre-skip
-        head.extend_from_slice(&self.sample_rate.to_le_bytes()); // Input sample rate
+        head.extend_from_slice(&pre_skip.to_le_bytes()); // Pre-skip (encoder lookahead)
+        head.extend_from_slice(&SAMPLE_RATE.to_le_bytes()); // Input sample rate
         head.extend_from_slice(&0u16.to_le_bytes()); // Output gain
         head.push(0); // Channel mapping family
         head
@@ -186,7 +203,7 @@ mod tests {
     fn encode_silence_produces_valid_ogg_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("silence.opus");
-        let encoder = OggOpusEncoder::new(48_000, 1, 64_000);
+        let encoder = OggOpusEncoder::new(1, 64_000, opus::Application::Voip);
         let samples = make_silence(48_000); // 1 second
 
         encoder.encode_to_file(&samples, &path).unwrap();
@@ -205,7 +222,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let silence_path = dir.path().join("silence.opus");
         let tone_path = dir.path().join("tone.opus");
-        let encoder = OggOpusEncoder::new(48_000, 1, 64_000);
+        let encoder = OggOpusEncoder::new(1, 64_000, opus::Application::Voip);
 
         let silence = make_silence(48_000);
         let tone = make_tone(48_000, 440.0, 48_000.0);
@@ -226,7 +243,7 @@ mod tests {
     fn encode_decode_round_trip_preserves_sample_count() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("round_trip.opus");
-        let encoder = OggOpusEncoder::new(48_000, 1, 64_000);
+        let encoder = OggOpusEncoder::new(1, 64_000, opus::Application::Voip);
         let samples = make_silence(48_000); // 1 second = 50 frames of 960
 
         encoder.encode_to_file(&samples, &path).unwrap();
@@ -252,7 +269,7 @@ mod tests {
     fn encode_short_segment_works() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("short.opus");
-        let encoder = OggOpusEncoder::new(48_000, 1, 64_000);
+        let encoder = OggOpusEncoder::new(1, 64_000, opus::Application::Voip);
         let samples = make_silence(500); // less than one frame
 
         encoder.encode_to_file(&samples, &path).unwrap();
