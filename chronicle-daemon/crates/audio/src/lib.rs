@@ -6,11 +6,11 @@
 
 mod accumulator;
 mod encoder;
+pub mod handler;
 
 pub use encoder::OggOpusEncoder;
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
 
 /// Errors from audio capture.
 #[derive(Debug, thiserror::Error)]
