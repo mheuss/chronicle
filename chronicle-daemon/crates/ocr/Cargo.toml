@@ -7,4 +7,17 @@ license = "MIT"
 
 [dependencies]
 objc2 = "0.6"
-objc2-vision = "0.3"
+objc2-vision = { version = "0.3", features = [
+    "VNRecognizeTextRequest",
+    "VNRequest",
+    "VNRequestHandler",
+    "VNObservation",
+] }
+objc2-foundation = { version = "0.3", features = [
+    "NSURL",
+    "NSArray",
+    "NSString",
+    "NSDictionary",
+    "NSError",
+] }
+thiserror = "2"
