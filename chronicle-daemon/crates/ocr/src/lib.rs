@@ -36,3 +36,22 @@ pub fn extract_text(image_path: &Path) -> Result<String> {
 
     todo!("Vision framework integration — Task 5")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn extract_text_errors_on_missing_file() {
+        let path = PathBuf::from("/nonexistent/image.png");
+        let result = extract_text(&path);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            OcrError::ImageNotFound(p) => {
+                assert!(p.contains("nonexistent"));
+            }
+            other => panic!("expected ImageNotFound, got: {other}"),
+        }
+    }
+}
