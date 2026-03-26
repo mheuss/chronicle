@@ -139,4 +139,29 @@ mod tests {
             "expected recognized text to contain at least one of 'hello', 'chronicle', or 'ocr', got: '{text}'"
         );
     }
+
+    #[test]
+    fn extract_text_returns_empty_for_blank_image() {
+        let path = fixtures_dir().join("blank.png");
+        assert!(path.exists(), "fixture missing: {}", path.display());
+
+        let result = extract_text(&path);
+        assert!(result.is_ok(), "extract_text failed: {:?}", result.err());
+
+        let text = result.unwrap();
+        assert!(
+            text.trim().is_empty(),
+            "expected empty text for blank image, got: '{text}'"
+        );
+    }
+
+    #[test]
+    fn extract_text_never_panics() {
+        let path = fixtures_dir().join("sample-text.png");
+        // Call 50 times rapidly — must never panic from ObjC interop
+        // or autorelease pool issues.
+        for _ in 0..50 {
+            let _ = extract_text(&path);
+        }
+    }
 }
