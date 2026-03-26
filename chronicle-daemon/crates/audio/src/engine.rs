@@ -190,21 +190,13 @@ fn run_encoding_loop(
     );
 
     // Process buffers until the channel disconnects.
-    loop {
-        match buffer_rx.recv() {
-            Ok(buf) => {
-                let acc = match buf.source {
-                    AudioSource::Microphone => &mut mic_acc,
-                    AudioSource::System => &mut sys_acc,
-                };
-                if let Err(e) = acc.push(&buf.samples, buf.timestamp_ms) {
-                    log::error!("encoding error for {}: {e}", buf.source.as_str());
-                }
-            }
-            Err(_) => {
-                // Channel disconnected — time to shut down.
-                break;
-            }
+    while let Ok(buf) = buffer_rx.recv() {
+        let acc = match buf.source {
+            AudioSource::Microphone => &mut mic_acc,
+            AudioSource::System => &mut sys_acc,
+        };
+        if let Err(e) = acc.push(&buf.samples, buf.timestamp_ms) {
+            log::error!("encoding error for {}: {e}", buf.source.as_str());
         }
     }
 
@@ -235,7 +227,7 @@ fn enumerate_first_display() -> Result<Retained<SCDisplay>> {
 
         let content = unsafe { &*content };
         let displays = unsafe { content.displays() };
-        if displays.len() == 0 {
+        if displays.is_empty() {
             let _ = tx.send(Err("no displays found".into()));
             return;
         }
@@ -250,7 +242,7 @@ fn enumerate_first_display() -> Result<Retained<SCDisplay>> {
 
     rx.recv()
         .map_err(|_| AudioError::ScreenCaptureKit("display enumeration channel closed".into()))?
-        .map_err(|e| AudioError::ScreenCaptureKit(e))
+        .map_err(AudioError::ScreenCaptureKit)
 }
 
 /// Create and configure the SCStreamConfiguration for audio capture.
