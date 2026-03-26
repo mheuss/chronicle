@@ -4,6 +4,10 @@
 //! Audio is encoded to Opus in 30-second Ogg segments and delivered
 //! over an mpsc channel for downstream storage and transcription.
 
+mod encoder;
+
+pub use encoder::OggOpusEncoder;
+
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
