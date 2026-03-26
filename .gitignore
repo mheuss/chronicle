@@ -30,8 +30,14 @@ xcuserdata/
 *.sublime-workspace
 
 # Environment
-.env/
+.env
 .env.*
 
 .claude/sop.md
 .claude/active-plan/
+
+docs/plans/
+docs/development/
+docs/decisions/
+docs/use-cases/
+docs/standards/
