@@ -14,6 +14,7 @@ resolver = "2"
 name = "chronicle-daemon"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Background daemon for Chronicle — continuous screen and audio capture with full-text search"
 license = "MIT"
 
