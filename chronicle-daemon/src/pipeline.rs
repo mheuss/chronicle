@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chronicle_capture::{CapturedFrame, encode_heif, get_frontmost_app};
+use chronicle_ocr::extract_text;
 use chronicle_storage::{ScreenshotMetadata, Storage};
 use tokio::sync::mpsc;
 
@@ -76,4 +77,165 @@ async fn process_frame(
     );
 
     Ok(())
+}
+
+/// Run OCR on stored screenshots and index the extracted text.
+///
+/// Runs until the OCR channel closes (capture→store loop exited).
+pub async fn ocr_loop(
+    storage: Arc<Storage>,
+    mut ocr_rx: mpsc::UnboundedReceiver<(i64, PathBuf)>,
+) {
+    while let Some((row_id, image_path)) = ocr_rx.recv().await {
+        let path = image_path.clone();
+        let result = tokio::task::spawn_blocking(move || extract_text(&path)).await;
+
+        match result {
+            Ok(Ok(text)) => {
+                if !text.is_empty()
+                    && let Err(e) = storage.update_ocr_text(row_id, text).await
+                {
+                    log::error!("Failed to store OCR text for screenshot {row_id}: {e}");
+                }
+            }
+            Ok(Err(e)) => {
+                log::warn!("OCR failed for screenshot {row_id}: {e}");
+            }
+            Err(e) => {
+                log::error!("OCR task panicked for screenshot {row_id}: {e}");
+            }
+        }
+    }
+    log::info!("OCR loop exiting (channel closed)");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chronicle_storage::StorageConfig;
+    use tempfile::tempdir;
+
+    /// Helper: open a Storage backed by a temp directory.
+    async fn temp_storage() -> (Arc<Storage>, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Arc::new(Storage::open(config).await.unwrap());
+        (storage, dir)
+    }
+
+    /// Helper: insert a screenshot record so we have a valid row_id.
+    async fn insert_test_screenshot(storage: &Storage, image_path: &str) -> i64 {
+        storage
+            .insert_screenshot(ScreenshotMetadata {
+                timestamp: 1_700_000_000_000,
+                display_id: "display1".into(),
+                app_name: None,
+                app_bundle_id: None,
+                window_title: None,
+                image_path: image_path.into(),
+                ocr_text: None,
+                phash: None,
+                resolution: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    /// Path to the OCR test fixture with known text.
+    fn sample_text_image() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("crates/ocr/tests/fixtures/sample-text.png")
+    }
+
+    /// Path to the OCR test fixture with no text (blank).
+    fn blank_image() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("crates/ocr/tests/fixtures/blank.png")
+    }
+
+    #[tokio::test]
+    async fn ocr_loop_stores_extracted_text() {
+        let (storage, _dir) = temp_storage().await;
+        let image_path = sample_text_image();
+        let row_id = insert_test_screenshot(&storage, image_path.to_str().unwrap()).await;
+
+        let (ocr_tx, ocr_rx) = mpsc::unbounded_channel();
+        ocr_tx.send((row_id, image_path)).unwrap();
+        drop(ocr_tx); // close channel so loop exits after processing
+
+        ocr_loop(storage.clone(), ocr_rx).await;
+
+        let screenshot = storage.get_screenshot(row_id).await.unwrap();
+        assert!(
+            screenshot.ocr_text.is_some(),
+            "expected OCR text to be stored for screenshot with known text"
+        );
+        let text = screenshot.ocr_text.unwrap();
+        assert!(
+            !text.is_empty(),
+            "expected non-empty OCR text"
+        );
+    }
+
+    #[tokio::test]
+    async fn ocr_loop_skips_empty_text() {
+        let (storage, _dir) = temp_storage().await;
+        let image_path = blank_image();
+        let row_id = insert_test_screenshot(&storage, image_path.to_str().unwrap()).await;
+
+        let (ocr_tx, ocr_rx) = mpsc::unbounded_channel();
+        ocr_tx.send((row_id, image_path)).unwrap();
+        drop(ocr_tx);
+
+        ocr_loop(storage.clone(), ocr_rx).await;
+
+        let screenshot = storage.get_screenshot(row_id).await.unwrap();
+        assert!(
+            screenshot.ocr_text.is_none(),
+            "expected no OCR text stored for blank image, got: {:?}",
+            screenshot.ocr_text
+        );
+    }
+
+    #[tokio::test]
+    async fn ocr_loop_continues_on_missing_image() {
+        let (storage, _dir) = temp_storage().await;
+        let missing_path = PathBuf::from("/nonexistent/image.png");
+        let row_id_bad = insert_test_screenshot(&storage, "/nonexistent/image.png").await;
+
+        let image_path = sample_text_image();
+        let row_id_good = insert_test_screenshot(&storage, image_path.to_str().unwrap()).await;
+
+        let (ocr_tx, ocr_rx) = mpsc::unbounded_channel();
+        // Send bad path first, then good path
+        ocr_tx.send((row_id_bad, missing_path)).unwrap();
+        ocr_tx.send((row_id_good, image_path)).unwrap();
+        drop(ocr_tx);
+
+        ocr_loop(storage.clone(), ocr_rx).await;
+
+        // Bad one should have no OCR text
+        let bad = storage.get_screenshot(row_id_bad).await.unwrap();
+        assert!(bad.ocr_text.is_none(), "no OCR text for missing image");
+
+        // Good one should still be processed
+        let good = storage.get_screenshot(row_id_good).await.unwrap();
+        assert!(
+            good.ocr_text.is_some(),
+            "OCR text should be stored even after a previous failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn ocr_loop_exits_on_empty_channel() {
+        let (storage, _dir) = temp_storage().await;
+        let (_ocr_tx, ocr_rx) = mpsc::unbounded_channel();
+        drop(_ocr_tx); // close immediately
+
+        // Should return promptly without hanging
+        ocr_loop(storage, ocr_rx).await;
+    }
 }
