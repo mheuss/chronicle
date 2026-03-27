@@ -67,6 +67,9 @@ pub struct CompletedSegment {
     pub end_timestamp: i64,
 }
 
+/// Fixed sample rate: 48kHz is Opus's native rate and what SCK delivers.
+pub const SAMPLE_RATE: u32 = 48_000;
+
 /// Configuration for the audio engine.
 #[derive(Debug, Clone)]
 pub struct AudioConfig {
@@ -74,8 +77,6 @@ pub struct AudioConfig {
     pub segment_duration_secs: u32,
     /// Opus encoding bitrate in bits/sec. Default: 64000.
     pub bitrate: u32,
-    /// Sample rate in Hz. Default: 48000.
-    pub sample_rate: u32,
     /// Output directory for segment files.
     pub output_dir: PathBuf,
 }
@@ -85,7 +86,6 @@ impl Default for AudioConfig {
         Self {
             segment_duration_secs: 30,
             bitrate: 64_000,
-            sample_rate: 48_000,
             output_dir: PathBuf::from("audio"),
         }
     }
@@ -164,7 +164,7 @@ mod tests {
         let config = AudioConfig::default();
         assert_eq!(config.segment_duration_secs, 30);
         assert_eq!(config.bitrate, 64_000);
-        assert_eq!(config.sample_rate, 48_000);
+        assert_eq!(SAMPLE_RATE, 48_000);
     }
 
     #[test]

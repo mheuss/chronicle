@@ -173,7 +173,7 @@ fn run_encoding_loop(
 ) {
     let mut mic_acc = SegmentAccumulator::new(
         AudioSource::Microphone,
-        config.sample_rate,
+        crate::SAMPLE_RATE,
         config.segment_duration_secs,
         config.bitrate,
         opus::Application::Voip, // Speech-optimized for mic
@@ -183,7 +183,7 @@ fn run_encoding_loop(
 
     let mut sys_acc = SegmentAccumulator::new(
         AudioSource::System,
-        config.sample_rate,
+        crate::SAMPLE_RATE,
         config.segment_duration_secs,
         config.bitrate,
         opus::Application::Audio, // General audio for system output
@@ -377,7 +377,6 @@ mod tests {
         let config = AudioConfig {
             segment_duration_secs: 15,
             bitrate: 32_000,
-            sample_rate: 48_000,
             output_dir: PathBuf::from("/tmp/audio-test"),
         };
 
@@ -397,7 +396,6 @@ mod tests {
         let config = AudioConfig {
             segment_duration_secs: 1,
             bitrate: 64_000,
-            sample_rate: 48_000,
             output_dir: dir.path().to_path_buf(),
         };
 
@@ -468,7 +466,6 @@ mod tests {
         let config = AudioConfig {
             segment_duration_secs: 1,
             bitrate: 64_000,
-            sample_rate: 48_000,
             output_dir: dir.path().to_path_buf(),
         };
 
@@ -516,7 +513,6 @@ mod tests {
         let config = AudioConfig {
             segment_duration_secs: 1,
             bitrate: 64_000,
-            sample_rate: 48_000,
             output_dir: dir.path().to_path_buf(),
         };
 

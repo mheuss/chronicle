@@ -93,16 +93,10 @@ unsafe fn extract_pcm_bytes(sample_buffer: &CMSampleBuffer) -> Option<Vec<u8>> {
 /// Extract the presentation timestamp from a CMSampleBuffer and convert
 /// to milliseconds since Unix epoch. Returns None if the PTS is invalid.
 ///
-/// Note: CMSampleBuffer PTS is relative to the system's media clock, not
-/// wall-clock time. We convert by anchoring against the current wall clock,
-/// which gives us frame-accurate relative timing within a session even if
-/// the absolute epoch-ms drifts slightly at startup.
-/// Extract the presentation timestamp from a CMSampleBuffer and convert
-/// to milliseconds since Unix epoch. Returns None if the PTS is invalid.
-///
 /// SCK PTS values use the host time clock (mach_continuous_time based).
-/// We convert by computing the offset between wall clock and monotonic
-/// clock at the time of the call.
+/// We convert by computing the offset between wall clock and the host
+/// monotonic clock at the time of the call.
+#[cfg(target_arch = "aarch64")]
 fn pts_to_epoch_ms(sample_buffer: &objc2_core_media::CMSampleBuffer) -> Option<i64> {
     let pts = unsafe { sample_buffer.presentation_time_stamp() };
     // kCMTimeFlags_Valid = 1. CMTimeFlags is a newtype.
@@ -127,6 +121,13 @@ fn pts_to_epoch_ms(sample_buffer: &objc2_core_media::CMSampleBuffer) -> Option<i
     let boot_epoch_ms = now_ms - (host_secs * 1000.0) as i64;
 
     Some(boot_epoch_ms + (pts_secs * 1000.0) as i64)
+}
+
+/// On non-aarch64 (Intel), the mach_continuous_time tick rate varies.
+/// Fall back to wall-clock timestamps rather than compute incorrect PTS.
+#[cfg(not(target_arch = "aarch64"))]
+fn pts_to_epoch_ms(_sample_buffer: &objc2_core_media::CMSampleBuffer) -> Option<i64> {
+    None
 }
 
 /// Ivars for the `AudioOutputHandler` ObjC class.
