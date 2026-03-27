@@ -37,8 +37,11 @@ async fn main() -> Result<()> {
     tokio::signal::ctrl_c().await?;
     log::info!("Shutdown signal received");
 
-    // 7. Stop capture engine — closes frame channel — Task A drains and exits
+    // 7. Stop capture engine and drop it — the engine holds a Sender that
+    //    keeps the frame channel alive. Dropping it closes the channel so
+    //    Task A's recv() returns None and the loop exits.
     engine.stop()?;
+    drop(engine);
     log::info!("Capture engine stopped");
 
     // 8. Wait for both tasks to finish
