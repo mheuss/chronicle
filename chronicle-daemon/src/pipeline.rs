@@ -15,7 +15,7 @@ const HEIF_QUALITY: f64 = 0.65;
 pub async fn capture_store_loop(
     storage: Arc<Storage>,
     mut frame_rx: mpsc::Receiver<CapturedFrame>,
-    ocr_tx: mpsc::UnboundedSender<(i64, PathBuf)>,
+    ocr_tx: mpsc::Sender<(i64, PathBuf)>,
 ) {
     while let Some(frame) = frame_rx.recv().await {
         if let Err(e) = process_frame(&storage, &frame, &ocr_tx).await {
@@ -32,7 +32,7 @@ pub async fn capture_store_loop(
 async fn process_frame(
     storage: &Storage,
     frame: &CapturedFrame,
-    ocr_tx: &mpsc::UnboundedSender<(i64, PathBuf)>,
+    ocr_tx: &mpsc::Sender<(i64, PathBuf)>,
 ) -> anyhow::Result<()> {
     // 1. Grab app metadata (sync, fast)
     let metadata = get_frontmost_app();
@@ -53,8 +53,9 @@ async fn process_frame(
     // so briefly blocking the task is acceptable.
     encode_heif(&frame.image_buffer, &image_path, HEIF_QUALITY)?;
 
-    // 5. Insert DB record
-    let row_id = storage
+    // 5. Insert DB record — clean up the HEIF file if this fails so we
+    //    don't accumulate orphaned files on disk.
+    let row_id = match storage
         .insert_screenshot(ScreenshotMetadata {
             timestamp: frame.timestamp,
             display_id,
@@ -66,11 +67,24 @@ async fn process_frame(
             phash: None,
             resolution: Some(resolution),
         })
-        .await?;
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            let _ = std::fs::remove_file(&image_path);
+            return Err(e.into());
+        }
+    };
 
-    // 6. Forward to OCR task (best-effort)
-    if ocr_tx.send((row_id, image_path)).is_err() {
-        log::warn!("OCR channel closed — screenshot {row_id} will not be OCR'd");
+    // 6. Forward to OCR task (best-effort, non-blocking)
+    match ocr_tx.try_send((row_id, image_path)) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            log::warn!("OCR channel full — screenshot {row_id} will not be OCR'd");
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            log::warn!("OCR channel closed — screenshot {row_id} will not be OCR'd");
+        }
     }
 
     log::debug!(
@@ -86,7 +100,7 @@ async fn process_frame(
 /// Runs until the OCR channel closes (capture→store loop exited).
 pub async fn ocr_loop(
     storage: Arc<Storage>,
-    mut ocr_rx: mpsc::UnboundedReceiver<(i64, PathBuf)>,
+    mut ocr_rx: mpsc::Receiver<(i64, PathBuf)>,
 ) {
     while let Some((row_id, image_path)) = ocr_rx.recv().await {
         let path = image_path.clone();
@@ -164,8 +178,8 @@ mod tests {
         let image_path = sample_text_image();
         let row_id = insert_test_screenshot(&storage, image_path.to_str().unwrap(), 1_700_000_000_000).await;
 
-        let (ocr_tx, ocr_rx) = mpsc::unbounded_channel();
-        ocr_tx.send((row_id, image_path)).unwrap();
+        let (ocr_tx, ocr_rx) = mpsc::channel(32);
+        ocr_tx.try_send((row_id, image_path)).unwrap();
         drop(ocr_tx); // close channel so loop exits after processing
 
         ocr_loop(storage.clone(), ocr_rx).await;
@@ -188,8 +202,8 @@ mod tests {
         let image_path = blank_image();
         let row_id = insert_test_screenshot(&storage, image_path.to_str().unwrap(), 1_700_000_001_000).await;
 
-        let (ocr_tx, ocr_rx) = mpsc::unbounded_channel();
-        ocr_tx.send((row_id, image_path)).unwrap();
+        let (ocr_tx, ocr_rx) = mpsc::channel(32);
+        ocr_tx.try_send((row_id, image_path)).unwrap();
         drop(ocr_tx);
 
         ocr_loop(storage.clone(), ocr_rx).await;
@@ -211,10 +225,10 @@ mod tests {
         let image_path = sample_text_image();
         let row_id_good = insert_test_screenshot(&storage, image_path.to_str().unwrap(), 1_700_000_003_000).await;
 
-        let (ocr_tx, ocr_rx) = mpsc::unbounded_channel();
+        let (ocr_tx, ocr_rx) = mpsc::channel(32);
         // Send bad path first, then good path
-        ocr_tx.send((row_id_bad, missing_path)).unwrap();
-        ocr_tx.send((row_id_good, image_path)).unwrap();
+        ocr_tx.try_send((row_id_bad, missing_path)).unwrap();
+        ocr_tx.try_send((row_id_good, image_path)).unwrap();
         drop(ocr_tx);
 
         ocr_loop(storage.clone(), ocr_rx).await;
@@ -234,7 +248,7 @@ mod tests {
     #[tokio::test]
     async fn ocr_loop_exits_on_empty_channel() {
         let (storage, _dir) = temp_storage().await;
-        let (_ocr_tx, ocr_rx) = mpsc::unbounded_channel();
+        let (_ocr_tx, ocr_rx) = mpsc::channel(32);
         drop(_ocr_tx); // close immediately
 
         // Should return promptly without hanging

@@ -18,8 +18,9 @@ async fn main() -> Result<()> {
     let (mut engine, frame_rx) = CaptureEngine::start(CaptureConfig::default())?;
     log::info!("Capture engine started");
 
-    // 3. Create OCR channel (unbounded — OCR can fall behind)
-    let (ocr_tx, ocr_rx) = tokio::sync::mpsc::unbounded_channel();
+    // 3. Create OCR channel (bounded — generous buffer so storage never
+    //    blocks, but prevents unbounded memory growth if OCR falls behind)
+    let (ocr_tx, ocr_rx) = tokio::sync::mpsc::channel(1024);
 
     // 4. Spawn Task A (capture→store)
     let store_storage = Arc::clone(&storage);
