@@ -6,6 +6,8 @@ use chronicle_ocr::extract_text;
 use chronicle_storage::{ScreenshotMetadata, Storage};
 use tokio::sync::mpsc;
 
+const HEIF_QUALITY: f64 = 0.65;
+
 /// Receive captured frames, encode to HEIF, store metadata in the database,
 /// and forward (row_id, image_path) to the OCR task.
 ///
@@ -49,7 +51,7 @@ async fn process_frame(
     // encode_heif takes references that aren't Send, so we call it directly.
     // The capture loop is the only consumer and frames arrive at ~0.5 fps,
     // so briefly blocking the task is acceptable.
-    encode_heif(&frame.image_buffer, &image_path, 0.65)?;
+    encode_heif(&frame.image_buffer, &image_path, HEIF_QUALITY)?;
 
     // 5. Insert DB record
     let row_id = storage
@@ -127,10 +129,10 @@ mod tests {
     }
 
     /// Helper: insert a screenshot record so we have a valid row_id.
-    async fn insert_test_screenshot(storage: &Storage, image_path: &str) -> i64 {
+    async fn insert_test_screenshot(storage: &Storage, image_path: &str, timestamp: i64) -> i64 {
         storage
             .insert_screenshot(ScreenshotMetadata {
-                timestamp: 1_700_000_000_000,
+                timestamp,
                 display_id: "display1".into(),
                 app_name: None,
                 app_bundle_id: None,
@@ -160,7 +162,7 @@ mod tests {
     async fn ocr_loop_stores_extracted_text() {
         let (storage, _dir) = temp_storage().await;
         let image_path = sample_text_image();
-        let row_id = insert_test_screenshot(&storage, image_path.to_str().unwrap()).await;
+        let row_id = insert_test_screenshot(&storage, image_path.to_str().unwrap(), 1_700_000_000_000).await;
 
         let (ocr_tx, ocr_rx) = mpsc::unbounded_channel();
         ocr_tx.send((row_id, image_path)).unwrap();
@@ -184,7 +186,7 @@ mod tests {
     async fn ocr_loop_skips_empty_text() {
         let (storage, _dir) = temp_storage().await;
         let image_path = blank_image();
-        let row_id = insert_test_screenshot(&storage, image_path.to_str().unwrap()).await;
+        let row_id = insert_test_screenshot(&storage, image_path.to_str().unwrap(), 1_700_000_001_000).await;
 
         let (ocr_tx, ocr_rx) = mpsc::unbounded_channel();
         ocr_tx.send((row_id, image_path)).unwrap();
@@ -204,10 +206,10 @@ mod tests {
     async fn ocr_loop_continues_on_missing_image() {
         let (storage, _dir) = temp_storage().await;
         let missing_path = PathBuf::from("/nonexistent/image.png");
-        let row_id_bad = insert_test_screenshot(&storage, "/nonexistent/image.png").await;
+        let row_id_bad = insert_test_screenshot(&storage, "/nonexistent/image.png", 1_700_000_002_000).await;
 
         let image_path = sample_text_image();
-        let row_id_good = insert_test_screenshot(&storage, image_path.to_str().unwrap()).await;
+        let row_id_good = insert_test_screenshot(&storage, image_path.to_str().unwrap(), 1_700_000_003_000).await;
 
         let (ocr_tx, ocr_rx) = mpsc::unbounded_channel();
         // Send bad path first, then good path
