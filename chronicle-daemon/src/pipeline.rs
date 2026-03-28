@@ -4,7 +4,7 @@ use std::sync::Arc;
 use chronicle_audio::CompletedSegment;
 use chronicle_capture::{CapturedFrame, encode_heif, get_frontmost_app};
 use chronicle_ocr::extract_text;
-use chronicle_storage::{ScreenshotMetadata, Storage};
+use chronicle_storage::{AudioSegmentMetadata, ScreenshotMetadata, Storage};
 use tokio::sync::mpsc;
 
 const HEIF_QUALITY: f64 = 0.65;
@@ -152,6 +152,68 @@ pub fn bridge_audio_segments(
     log::info!("Audio bridge thread exiting (sync channel closed)");
 }
 
+/// Receive completed audio segments, move files from staging to permanent
+/// storage, and insert database records.
+///
+/// Runs until the audio channel closes (bridge thread exited).
+pub async fn audio_store_loop(
+    storage: Arc<Storage>,
+    mut segment_rx: mpsc::Receiver<CompletedSegment>,
+) {
+    while let Some(segment) = segment_rx.recv().await {
+        if let Err(e) = process_audio_segment(&storage, &segment).await {
+            log::error!(
+                "Failed to store audio segment (source={}, ts={}): {e}",
+                segment.source.as_str(),
+                segment.start_timestamp
+            );
+        }
+    }
+    log::info!("Audio store loop exiting (channel closed)");
+}
+
+async fn process_audio_segment(
+    storage: &Storage,
+    segment: &CompletedSegment,
+) -> anyhow::Result<()> {
+    // 1. Allocate permanent path via storage (sanitizes source identifier)
+    let dest_path = storage
+        .allocate_audio_path(segment.start_timestamp, segment.source.as_str())
+        .await?;
+
+    // 2. Move from staging to permanent location (atomic rename, same filesystem).
+    //    rename(2) on the same filesystem is a metadata-only operation (microseconds).
+    //    Both directories are under the Chronicle data dir, so no cross-mount copy.
+    std::fs::rename(&segment.path, &dest_path)?;
+
+    // 3. Insert DB record — clean up dest file if insert fails
+    match storage
+        .insert_audio_segment(AudioSegmentMetadata {
+            start_timestamp: segment.start_timestamp,
+            end_timestamp: segment.end_timestamp,
+            source: segment.source.as_str().to_string(),
+            audio_path: dest_path.to_string_lossy().into_owned(),
+            transcript: None,
+            whisper_model: None,
+            language: None,
+        })
+        .await
+    {
+        Ok(row_id) => {
+            log::debug!(
+                "Stored audio segment {row_id} (source={}, ts={})",
+                segment.source.as_str(),
+                segment.start_timestamp
+            );
+            Ok(())
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&dest_path);
+            Err(e.into())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +342,89 @@ mod tests {
 
         // Should return promptly without hanging
         ocr_loop(storage, ocr_rx).await;
+    }
+
+    #[tokio::test]
+    async fn audio_store_loop_stores_segment() {
+        use chronicle_audio::{AudioSource, CompletedSegment};
+
+        let (storage, dir) = temp_storage().await;
+
+        let staging_dir = dir.path().join("audio-staging");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        let staging_file = staging_dir.join("test_segment.opus");
+        std::fs::write(&staging_file, b"fake opus data").unwrap();
+
+        let segment = CompletedSegment {
+            source: AudioSource::Microphone,
+            path: staging_file.clone(),
+            start_timestamp: 1_700_000_000_000,
+            end_timestamp: 1_700_000_030_000,
+        };
+
+        let (tx, rx) = mpsc::channel(16);
+        tx.send(segment).await.unwrap();
+        drop(tx);
+
+        audio_store_loop(storage.clone(), rx).await;
+
+        assert!(!staging_file.exists(), "staging file should have been moved");
+
+        let audio = storage.get_audio_segment(1).await.unwrap();
+        assert_eq!(audio.start_timestamp, 1_700_000_000_000);
+        assert_eq!(audio.end_timestamp, 1_700_000_030_000);
+        assert_eq!(audio.source, "mic");
+        assert!(audio.transcript.is_none());
+
+        let perm_path = std::path::Path::new(&audio.audio_path);
+        assert!(perm_path.exists(), "permanent audio file should exist");
+        assert_eq!(std::fs::read(perm_path).unwrap(), b"fake opus data");
+    }
+
+    #[tokio::test]
+    async fn audio_store_loop_continues_on_missing_file() {
+        use chronicle_audio::{AudioSource, CompletedSegment};
+
+        let (storage, dir) = temp_storage().await;
+
+        let staging_dir = dir.path().join("audio-staging");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        let good_file = staging_dir.join("good.opus");
+        std::fs::write(&good_file, b"good data").unwrap();
+
+        let bad_segment = CompletedSegment {
+            source: AudioSource::System,
+            path: PathBuf::from("/nonexistent/bad.opus"),
+            start_timestamp: 1_700_000_000_000,
+            end_timestamp: 1_700_000_030_000,
+        };
+        let good_segment = CompletedSegment {
+            source: AudioSource::Microphone,
+            path: good_file,
+            start_timestamp: 1_700_000_060_000,
+            end_timestamp: 1_700_000_090_000,
+        };
+
+        let (tx, rx) = mpsc::channel(16);
+        tx.send(bad_segment).await.unwrap();
+        tx.send(good_segment).await.unwrap();
+        drop(tx);
+
+        audio_store_loop(storage.clone(), rx).await;
+
+        let audio = storage.get_audio_segment(1).await.unwrap();
+        assert_eq!(audio.source, "mic");
+        assert_eq!(audio.start_timestamp, 1_700_000_060_000);
+    }
+
+    #[tokio::test]
+    async fn audio_store_loop_exits_on_empty_channel() {
+        use chronicle_audio::CompletedSegment;
+
+        let (storage, _dir) = temp_storage().await;
+        let (_tx, rx) = mpsc::channel::<CompletedSegment>(16);
+        drop(_tx);
+        audio_store_loop(storage, rx).await;
     }
 
     #[tokio::test]
