@@ -3,7 +3,7 @@
 //! SQLite database with FTS5 full-text search indexes for OCR text and
 //! audio transcripts. Manages on-disk media files (screenshots, audio).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -63,6 +63,11 @@ impl Storage {
 
         let base_dir = config.base_dir;
         Ok(Self { pool, base_dir })
+    }
+
+    /// The root directory for the database file and media subdirectories.
+    pub fn base_dir(&self) -> &Path {
+        &self.base_dir
     }
 
     // --- Screenshot operations ---
@@ -486,6 +491,17 @@ mod tests {
         assert!(status.db_size_bytes > 0);
         // oldest_entry should be the screenshot's timestamp (earlier)
         assert_eq!(status.oldest_entry, Some(1_700_000_000_000));
+    }
+
+    #[tokio::test]
+    async fn base_dir_returns_configured_path() {
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Storage::open(config).await.unwrap();
+        assert_eq!(storage.base_dir(), dir.path());
     }
 
     #[tokio::test]
