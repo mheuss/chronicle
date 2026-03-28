@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use chronicle_audio::CompletedSegment;
 use chronicle_capture::{CapturedFrame, encode_heif, get_frontmost_app};
 use chronicle_ocr::extract_text;
 use chronicle_storage::{ScreenshotMetadata, Storage};
@@ -123,6 +124,32 @@ pub async fn ocr_loop(
         }
     }
     log::info!("OCR loop exiting (channel closed)");
+}
+
+/// Bridge std::sync::mpsc to tokio::mpsc for audio segments.
+///
+/// Runs on a dedicated OS thread. Reads from the sync receiver and
+/// forwards to the tokio sender via `blocking_send`. Uses blocking_send
+/// (not try_send) because audio segments are 30-second recordings —
+/// dropping one means a gap in recorded audio.
+///
+/// Exits when the sync channel closes (audio engine stopped).
+///
+/// # Panics
+///
+/// Must be called from a dedicated OS thread, not from within a tokio
+/// runtime. `blocking_send` panics if called inside an async context.
+pub fn bridge_audio_segments(
+    sync_rx: std::sync::mpsc::Receiver<CompletedSegment>,
+    async_tx: mpsc::Sender<CompletedSegment>,
+) {
+    while let Ok(segment) = sync_rx.recv() {
+        if async_tx.blocking_send(segment).is_err() {
+            log::info!("Audio bridge: tokio channel closed, stopping");
+            break;
+        }
+    }
+    log::info!("Audio bridge thread exiting (sync channel closed)");
 }
 
 #[cfg(test)]
@@ -253,5 +280,37 @@ mod tests {
 
         // Should return promptly without hanging
         ocr_loop(storage, ocr_rx).await;
+    }
+
+    #[tokio::test]
+    async fn bridge_audio_segments_forwards_to_tokio_channel() {
+        use chronicle_audio::AudioSource;
+
+        let (sync_tx, sync_rx) = std::sync::mpsc::channel::<CompletedSegment>();
+        let (async_tx, mut async_rx) = mpsc::channel::<CompletedSegment>(16);
+
+        let bridge = std::thread::Builder::new()
+            .name("test-bridge".into())
+            .spawn(move || bridge_audio_segments(sync_rx, async_tx))
+            .unwrap();
+
+        sync_tx
+            .send(CompletedSegment {
+                source: AudioSource::Microphone,
+                path: PathBuf::from("/tmp/test.opus"),
+                start_timestamp: 1_700_000_000_000,
+                end_timestamp: 1_700_000_030_000,
+            })
+            .unwrap();
+
+        let received = async_rx.recv().await.unwrap();
+        assert_eq!(received.source, AudioSource::Microphone);
+        assert_eq!(received.start_timestamp, 1_700_000_000_000);
+        assert_eq!(received.end_timestamp, 1_700_000_030_000);
+        assert_eq!(received.path, PathBuf::from("/tmp/test.opus"));
+
+        drop(sync_tx);
+        bridge.join().unwrap();
+        assert!(async_rx.recv().await.is_none());
     }
 }
