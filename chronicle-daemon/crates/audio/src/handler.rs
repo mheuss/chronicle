@@ -90,46 +90,6 @@ unsafe fn extract_pcm_bytes(sample_buffer: &CMSampleBuffer) -> Option<Vec<u8>> {
     Some(slice.to_vec())
 }
 
-/// Extract the presentation timestamp from a CMSampleBuffer and convert
-/// to milliseconds since Unix epoch. Returns None if the PTS is invalid.
-///
-/// SCK PTS values use the host time clock (mach_continuous_time based).
-/// We convert by computing the offset between wall clock and the host
-/// monotonic clock at the time of the call.
-#[cfg(target_arch = "aarch64")]
-fn pts_to_epoch_ms(sample_buffer: &objc2_core_media::CMSampleBuffer) -> Option<i64> {
-    let pts = unsafe { sample_buffer.presentation_time_stamp() };
-    // kCMTimeFlags_Valid = 1. CMTimeFlags is a newtype.
-    if pts.flags.0 & 1 == 0 || pts.timescale == 0 {
-        return None;
-    }
-    let pts_secs = pts.value as f64 / pts.timescale as f64;
-
-    // Anchor PTS (host-time seconds) to epoch-ms via wall clock offset.
-    // mach_continuous_time is the host clock SCK uses.
-    unsafe extern "C" {
-        fn mach_continuous_time() -> u64;
-    }
-    // mach_continuous_time returns ticks. On Apple Silicon, 1 tick = 1 ns.
-    // On Intel, the ratio comes from mach_timebase_info. For simplicity
-    // and correctness on Apple Silicon (our target), assume 1:1.
-    let host_secs = unsafe { mach_continuous_time() } as f64 / 1_000_000_000.0;
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-    let boot_epoch_ms = now_ms - (host_secs * 1000.0) as i64;
-
-    Some(boot_epoch_ms + (pts_secs * 1000.0) as i64)
-}
-
-/// On non-aarch64 (Intel), the mach_continuous_time tick rate varies.
-/// Fall back to wall-clock timestamps rather than compute incorrect PTS.
-#[cfg(not(target_arch = "aarch64"))]
-fn pts_to_epoch_ms(_sample_buffer: &objc2_core_media::CMSampleBuffer) -> Option<i64> {
-    None
-}
-
 /// Ivars for the `AudioOutputHandler` ObjC class.
 pub struct AudioOutputHandlerIvars {
     sender: SyncSender<AudioBuffer>,
@@ -172,15 +132,13 @@ define_class!(
                 return;
             }
 
-            // Prefer the CMSampleBuffer's presentation timestamp for
-            // frame-accurate timing. Fall back to wall clock if invalid.
-            let timestamp_ms = pts_to_epoch_ms(sample_buffer)
-                .unwrap_or_else(|| {
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as i64
-                });
+            // Wall-clock timestamp. PTS-to-epoch conversion is fragile
+            // (depends on undocumented clock behavior across macOS versions)
+            // and unnecessary for 30-second segment boundaries.
+            let timestamp_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
 
             let buffer = AudioBuffer {
                 samples,
