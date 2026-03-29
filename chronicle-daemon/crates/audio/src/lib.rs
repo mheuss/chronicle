@@ -91,62 +91,12 @@ impl Default for AudioConfig {
     }
 }
 
-/// Generate a segment file path: {output_dir}/YYYY/MM/DD/{timestamp}_{source}.opus
+/// Generate a flat segment file path: {output_dir}/{timestamp}_{source}.opus
+///
+/// Staging paths are flat — no date subdirectories. The permanent path
+/// (allocated by chronicle-storage) handles the YYYY/MM/DD hierarchy.
 pub fn segment_path(output_dir: &Path, timestamp_ms: i64, source: AudioSource) -> PathBuf {
-    let secs = timestamp_ms / 1000;
-    let dt = time_components(secs);
-    output_dir
-        .join(dt.year)
-        .join(dt.month)
-        .join(dt.day)
-        .join(format!("{}_{}.opus", timestamp_ms, source.as_str()))
-}
-
-struct DateComponents {
-    year: String,
-    month: String,
-    day: String,
-}
-
-fn time_components(unix_secs: i64) -> DateComponents {
-    debug_assert!(unix_secs >= 0, "negative timestamps not supported");
-    let days = unix_secs / 86400;
-    let mut y = 1970;
-    let mut remaining = days;
-
-    loop {
-        let days_in_year = if is_leap(y) { 366 } else { 365 };
-        if remaining < days_in_year {
-            break;
-        }
-        remaining -= days_in_year;
-        y += 1;
-    }
-
-    let leap = is_leap(y);
-    let month_days = [
-        31,
-        if leap { 29 } else { 28 },
-        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
-    ];
-    let mut m = 0;
-    for (i, &d) in month_days.iter().enumerate() {
-        if remaining < d {
-            m = i;
-            break;
-        }
-        remaining -= d;
-    }
-
-    DateComponents {
-        year: format!("{y}"),
-        month: format!("{:02}", m + 1),
-        day: format!("{:02}", remaining + 1),
-    }
-}
-
-fn is_leap(y: i64) -> bool {
-    y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
+    output_dir.join(format!("{}_{}.opus", timestamp_ms, source.as_str()))
 }
 
 #[cfg(test)]
@@ -168,21 +118,23 @@ mod tests {
     }
 
     #[test]
-    fn segment_path_has_correct_structure() {
-        let dir = PathBuf::from("/data/audio");
+    fn segment_path_is_flat() {
+        let dir = PathBuf::from("/data/staging");
         let ts = 1774526400_000_i64;
         let path = segment_path(&dir, ts, AudioSource::System);
-        let path_str = path.to_str().unwrap();
-        assert!(path_str.contains("2026"));
-        assert!(path_str.contains("03"));
-        assert!(path_str.contains("26"));
-        assert!(path_str.ends_with("_system.opus"));
+        assert_eq!(
+            path,
+            PathBuf::from("/data/staging/1774526400000_system.opus")
+        );
     }
 
     #[test]
     fn segment_path_mic_suffix() {
         let dir = PathBuf::from("/tmp");
         let path = segment_path(&dir, 1774526400_000, AudioSource::Microphone);
-        assert!(path.to_str().unwrap().ends_with("_mic.opus"));
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/1774526400000_mic.opus")
+        );
     }
 }

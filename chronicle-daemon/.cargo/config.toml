@@ -1,0 +1,9 @@
+# ScreenCaptureKit depends on libswift_Concurrency.dylib, which is referenced
+# via @rpath. Without an rpath the binary (and test binaries) crash at launch
+# with "no LC_RPATH's found". The library lives in the dyld shared cache at
+# /usr/lib/swift.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]

@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use chronicle_audio::CompletedSegment;
 use chronicle_capture::{CapturedFrame, encode_heif, get_frontmost_app};
 use chronicle_ocr::extract_text;
-use chronicle_storage::{ScreenshotMetadata, Storage};
+use chronicle_storage::{AudioSegmentMetadata, ScreenshotMetadata, Storage};
 use tokio::sync::mpsc;
 
 const HEIF_QUALITY: f64 = 0.65;
@@ -123,6 +124,94 @@ pub async fn ocr_loop(
         }
     }
     log::info!("OCR loop exiting (channel closed)");
+}
+
+/// Bridge std::sync::mpsc to tokio::mpsc for audio segments.
+///
+/// Runs on a dedicated OS thread. Reads from the sync receiver and
+/// forwards to the tokio sender via `blocking_send`. Uses blocking_send
+/// (not try_send) because audio segments are 30-second recordings —
+/// dropping one means a gap in recorded audio.
+///
+/// Exits when the sync channel closes (audio engine stopped).
+///
+/// # Panics
+///
+/// Must be called from a dedicated OS thread, not from within a tokio
+/// runtime. `blocking_send` panics if called inside an async context.
+pub fn bridge_audio_segments(
+    sync_rx: std::sync::mpsc::Receiver<CompletedSegment>,
+    async_tx: mpsc::Sender<CompletedSegment>,
+) {
+    while let Ok(segment) = sync_rx.recv() {
+        if async_tx.blocking_send(segment).is_err() {
+            log::info!("Audio bridge: tokio channel closed, stopping");
+            break;
+        }
+    }
+    log::info!("Audio bridge thread exiting (sync channel closed)");
+}
+
+/// Receive completed audio segments, move files from staging to permanent
+/// storage, and insert database records.
+///
+/// Runs until the audio channel closes (bridge thread exited).
+pub async fn audio_store_loop(
+    storage: Arc<Storage>,
+    mut segment_rx: mpsc::Receiver<CompletedSegment>,
+) {
+    while let Some(segment) = segment_rx.recv().await {
+        if let Err(e) = process_audio_segment(&storage, &segment).await {
+            log::error!(
+                "Failed to store audio segment (source={}, ts={}): {e}",
+                segment.source.as_str(),
+                segment.start_timestamp
+            );
+        }
+    }
+    log::info!("Audio store loop exiting (channel closed)");
+}
+
+async fn process_audio_segment(
+    storage: &Storage,
+    segment: &CompletedSegment,
+) -> anyhow::Result<()> {
+    // 1. Allocate permanent path via storage (sanitizes source identifier)
+    let dest_path = storage
+        .allocate_audio_path(segment.start_timestamp, segment.source.as_str())
+        .await?;
+
+    // 2. Move from staging to permanent location (atomic rename, same filesystem).
+    //    rename(2) on the same filesystem is a metadata-only operation (microseconds).
+    //    Both directories are under the Chronicle data dir, so no cross-mount copy.
+    std::fs::rename(&segment.path, &dest_path)?;
+
+    // 3. Insert DB record — clean up dest file if insert fails
+    match storage
+        .insert_audio_segment(AudioSegmentMetadata {
+            start_timestamp: segment.start_timestamp,
+            end_timestamp: segment.end_timestamp,
+            source: segment.source.as_str().to_string(),
+            audio_path: dest_path.to_string_lossy().into_owned(),
+            transcript: None,
+            whisper_model: None,
+            language: None,
+        })
+        .await
+    {
+        Ok(row_id) => {
+            log::debug!(
+                "Stored audio segment {row_id} (source={}, ts={})",
+                segment.source.as_str(),
+                segment.start_timestamp
+            );
+            Ok(())
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&dest_path);
+            Err(e.into())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -253,5 +342,120 @@ mod tests {
 
         // Should return promptly without hanging
         ocr_loop(storage, ocr_rx).await;
+    }
+
+    #[tokio::test]
+    async fn audio_store_loop_stores_segment() {
+        use chronicle_audio::{AudioSource, CompletedSegment};
+
+        let (storage, dir) = temp_storage().await;
+
+        let staging_dir = dir.path().join("audio-staging");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        let staging_file = staging_dir.join("test_segment.opus");
+        std::fs::write(&staging_file, b"fake opus data").unwrap();
+
+        let segment = CompletedSegment {
+            source: AudioSource::Microphone,
+            path: staging_file.clone(),
+            start_timestamp: 1_700_000_000_000,
+            end_timestamp: 1_700_000_030_000,
+        };
+
+        let (tx, rx) = mpsc::channel(16);
+        tx.send(segment).await.unwrap();
+        drop(tx);
+
+        audio_store_loop(storage.clone(), rx).await;
+
+        assert!(!staging_file.exists(), "staging file should have been moved");
+
+        let audio = storage.get_audio_segment(1).await.unwrap();
+        assert_eq!(audio.start_timestamp, 1_700_000_000_000);
+        assert_eq!(audio.end_timestamp, 1_700_000_030_000);
+        assert_eq!(audio.source, "mic");
+        assert!(audio.transcript.is_none());
+
+        let perm_path = std::path::Path::new(&audio.audio_path);
+        assert!(perm_path.exists(), "permanent audio file should exist");
+        assert_eq!(std::fs::read(perm_path).unwrap(), b"fake opus data");
+    }
+
+    #[tokio::test]
+    async fn audio_store_loop_continues_on_missing_file() {
+        use chronicle_audio::{AudioSource, CompletedSegment};
+
+        let (storage, dir) = temp_storage().await;
+
+        let staging_dir = dir.path().join("audio-staging");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        let good_file = staging_dir.join("good.opus");
+        std::fs::write(&good_file, b"good data").unwrap();
+
+        let bad_segment = CompletedSegment {
+            source: AudioSource::System,
+            path: PathBuf::from("/nonexistent/bad.opus"),
+            start_timestamp: 1_700_000_000_000,
+            end_timestamp: 1_700_000_030_000,
+        };
+        let good_segment = CompletedSegment {
+            source: AudioSource::Microphone,
+            path: good_file,
+            start_timestamp: 1_700_000_060_000,
+            end_timestamp: 1_700_000_090_000,
+        };
+
+        let (tx, rx) = mpsc::channel(16);
+        tx.send(bad_segment).await.unwrap();
+        tx.send(good_segment).await.unwrap();
+        drop(tx);
+
+        audio_store_loop(storage.clone(), rx).await;
+
+        let audio = storage.get_audio_segment(1).await.unwrap();
+        assert_eq!(audio.source, "mic");
+        assert_eq!(audio.start_timestamp, 1_700_000_060_000);
+    }
+
+    #[tokio::test]
+    async fn audio_store_loop_exits_on_empty_channel() {
+        use chronicle_audio::CompletedSegment;
+
+        let (storage, _dir) = temp_storage().await;
+        let (_tx, rx) = mpsc::channel::<CompletedSegment>(16);
+        drop(_tx);
+        audio_store_loop(storage, rx).await;
+    }
+
+    #[tokio::test]
+    async fn bridge_audio_segments_forwards_to_tokio_channel() {
+        use chronicle_audio::AudioSource;
+
+        let (sync_tx, sync_rx) = std::sync::mpsc::channel::<CompletedSegment>();
+        let (async_tx, mut async_rx) = mpsc::channel::<CompletedSegment>(16);
+
+        let bridge = std::thread::Builder::new()
+            .name("test-bridge".into())
+            .spawn(move || bridge_audio_segments(sync_rx, async_tx))
+            .unwrap();
+
+        sync_tx
+            .send(CompletedSegment {
+                source: AudioSource::Microphone,
+                path: PathBuf::from("/tmp/test.opus"),
+                start_timestamp: 1_700_000_000_000,
+                end_timestamp: 1_700_000_030_000,
+            })
+            .unwrap();
+
+        let received = async_rx.recv().await.unwrap();
+        assert_eq!(received.source, AudioSource::Microphone);
+        assert_eq!(received.start_timestamp, 1_700_000_000_000);
+        assert_eq!(received.end_timestamp, 1_700_000_030_000);
+        assert_eq!(received.path, PathBuf::from("/tmp/test.opus"));
+
+        drop(sync_tx);
+        bridge.join().unwrap();
+        assert!(async_rx.recv().await.is_none());
     }
 }
