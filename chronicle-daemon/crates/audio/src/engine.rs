@@ -261,9 +261,11 @@ fn create_stream_config() -> Retained<SCStreamConfiguration> {
         config.setChannelCount(1);
 
         // Minimize video overhead — we only need audio.
+        // 2x2 is the minimum; 1x1 causes kCGErrorInvalidContext on some macOS versions.
         config.setShowsCursor(false);
-        config.setWidth(1);
-        config.setHeight(1);
+        config.setMinimumFrameInterval(objc2_core_media::CMTime::new(1, 1));
+        config.setWidth(2);
+        config.setHeight(2);
     }
     config
 }
