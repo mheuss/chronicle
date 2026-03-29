@@ -28,7 +28,7 @@ The Chronicle daemon now records audio from the microphone and system output as 
 2. Watch the startup log
 
 **Expected result:** Log shows:
-```
+```text
 INFO  chronicle-daemon starting
 INFO  Started capture on display ...
 INFO  Capture engine started
@@ -43,7 +43,7 @@ Both engines start without errors. If you see `database is locked` errors, a pre
 3. Watch the log for audio segment entries
 
 **Expected result:** Log shows lines like:
-```
+```text
 DEBUG Stored audio segment 1 (source=mic, ts=...)
 DEBUG Stored audio segment 2 (source=system, ts=...)
 ```
@@ -66,7 +66,7 @@ Segment IDs increment. Both `mic` and `system` sources appear.
 #### Scenario 5: Database records match files on disk
 
 1. Run:
-   ```
+   ```bash
    sqlite3 ~/Library/Application\ Support/Chronicle/chronicle.db "SELECT id, source, start_timestamp, end_timestamp, audio_path FROM audio_segments ORDER BY id DESC LIMIT 5;"
    ```
 2. Pick an `audio_path` from the results and verify the file exists: `ls -la <audio_path>`
@@ -76,7 +76,7 @@ Segment IDs increment. Both `mic` and `system` sources appear.
 #### Scenario 6: Transcript fields are NULL
 
 1. Run:
-   ```
+   ```bash
    sqlite3 ~/Library/Application\ Support/Chronicle/chronicle.db \
      "SELECT id, transcript, whisper_model, language FROM audio_segments LIMIT 3;"
    ```
@@ -91,7 +91,7 @@ Segment IDs increment. Both `mic` and `system` sources appear.
 2. Watch the log output
 
 **Expected result:** Log shows this sequence:
-```
+```text
 INFO  Shutdown signal received
 INFO  Capture engine stopped
 INFO  Audio engine stopped
