@@ -1,5 +1,8 @@
 # Chronicle
 
+This is wicked alpha - more a concept than a working product. I'm still playing with 
+the ideas, and having fun with it. 
+
 An open-source macOS app that continuously captures your screen and audio, then
 lets you search across everything you've seen and heard. Inspired by the
 original Rewind app.
@@ -8,15 +11,15 @@ original Rewind app.
 
 Chronicle uses a two-process design:
 
-- **chronicle-daemon** (Rust) — Background service that handles screen capture,
+- **chronicle-daemon** (Rust): Background service that handles screen capture,
   OCR, audio capture, transcription, storage, and search. Runs as a `launchd`
   agent and listens on a Unix domain socket.
 
-- **chronicle-ui** (Swift/SwiftUI) — Menu bar app that connects to the daemon
+- **chronicle-ui** (Swift/SwiftUI): Menu bar app that connects to the daemon
   over IPC. Sends search queries and displays results.
 
 The two-process split gives us crash isolation (a UI crash doesn't stop
-capture), clean separation of concerns, and independent testability.
+capture), clean separation of concerns and independent testability.
 
 ## Project Structure
 
