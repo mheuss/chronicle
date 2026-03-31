@@ -61,7 +61,7 @@ flowchart TD
 
 ### Channel Topology
 
-```
+```text
 CaptureEngine → [frame_rx: mpsc] → Task A (capture_store_loop)
                                         ↓ encode HEIF, insert DB
                                         ↓ try_send (lossy, best-effort)
