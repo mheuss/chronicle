@@ -12,3 +12,4 @@ For the project overview, see the [README](../../README.md).
 |-------|-------|----------------|
 | [Storage Engine](storage-engine.md) | `chronicle-storage` | SQLite schema, FTS5 search, file management, retention |
 | [Screen Capture](screen-capture.md) | `chronicle-capture` | Display enumeration, SCStream setup, frame delivery |
+| [Chronicle Daemon](chronicle-daemon.md) | `chronicle-daemon` | Startup, pipelines, permissions, shutdown, workspace overview |
