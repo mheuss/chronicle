@@ -79,10 +79,10 @@ fn check_microphone() -> MicrophoneStatus {
         ]
     };
     match status {
-        0 => MicrophoneStatus::NotDetermined,
-        1 => MicrophoneStatus::Restricted,
-        2 => MicrophoneStatus::Denied,
-        3 => MicrophoneStatus::Authorized,
+        0 => MicrophoneStatus::NotDetermined, // AVAuthorizationStatusNotDetermined
+        1 => MicrophoneStatus::Restricted,    // AVAuthorizationStatusRestricted
+        2 => MicrophoneStatus::Denied,        // AVAuthorizationStatusDenied
+        3 => MicrophoneStatus::Authorized,    // AVAuthorizationStatusAuthorized
         _ => MicrophoneStatus::Denied,
     }
 }
@@ -100,12 +100,14 @@ pub fn preflight() -> Result<MicrophoneStatus, PermissionError> {
     let screen = check_screen_recording();
     let mic = check_microphone();
 
-    log::info!("Screen recording permission: {screen:?}");
     log::info!("Microphone permission: {mic:?}");
 
     if screen == ScreenRecordingStatus::Denied {
+        log::error!("Screen recording permission: {screen:?}");
         return Err(PermissionError::ScreenRecordingDenied);
     }
+
+    log::info!("Screen recording permission: {screen:?}");
 
     Ok(mic)
 }
