@@ -13,6 +13,9 @@ async fn main() -> Result<()> {
     env_logger::init();
     log::info!("chronicle-daemon starting");
 
+    // --- Permission preflight ---
+    let _mic_status = permissions::preflight()?;
+
     // --- Storage ---
     let storage = Arc::new(Storage::open(StorageConfig::default()).await?);
 
