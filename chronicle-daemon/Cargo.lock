@@ -224,10 +224,7 @@ dependencies = [
  "chronicle-transcription",
  "env_logger",
  "log",
- "objc2",
- "objc2-foundation",
  "tempfile",
- "thiserror",
  "tokio",
 ]
 
