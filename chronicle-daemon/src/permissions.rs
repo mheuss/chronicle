@@ -83,7 +83,10 @@ fn check_microphone() -> MicrophoneStatus {
         1 => MicrophoneStatus::Restricted,    // AVAuthorizationStatusRestricted
         2 => MicrophoneStatus::Denied,        // AVAuthorizationStatusDenied
         3 => MicrophoneStatus::Authorized,    // AVAuthorizationStatusAuthorized
-        _ => MicrophoneStatus::Denied,
+        _ => {
+            log::warn!("Unknown AVAuthorizationStatus value: {status}");
+            MicrophoneStatus::Denied
+        }
     }
 }
 
