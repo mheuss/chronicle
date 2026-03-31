@@ -1,4 +1,5 @@
 mod pipeline;
+mod permissions;
 
 use std::sync::Arc;
 
