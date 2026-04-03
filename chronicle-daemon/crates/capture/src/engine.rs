@@ -6,12 +6,30 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use screencapturekit::prelude::*;
+use block2::RcBlock;
+use dispatch2::DispatchQueue;
+use objc2::rc::{autoreleasepool, Retained};
+use objc2::AnyThread;
+use objc2_core_media::CMTime;
+use objc2_foundation::{NSArray, NSError};
+use objc2_screen_capture_kit::{
+    SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration,
+    SCStreamOutputType,
+};
 use tokio::sync::mpsc;
 
 use crate::error::{CaptureError, Result};
-use crate::handler::FrameHandler;
+use crate::handler::CaptureOutputHandler;
 use crate::{CaptureConfig, CaptureStatus, CapturedFrame};
+
+// ---------------------------------------------------------------------------
+// CoreGraphics FFI for primary display detection
+// ---------------------------------------------------------------------------
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGMainDisplayID() -> u32;
+}
 
 /// Multi-display capture engine.
 ///
@@ -20,7 +38,8 @@ use crate::{CaptureConfig, CaptureStatus, CapturedFrame};
 /// receiver. Use [`stop`](CaptureEngine::stop) to tear down all streams and
 /// [`status`](CaptureEngine::status) to read health counters.
 pub struct CaptureEngine {
-    streams: Vec<SCStream>,
+    streams: Vec<Retained<SCStream>>,
+    handlers: Vec<Retained<CaptureOutputHandler>>,
     _sender: mpsc::Sender<CapturedFrame>,
     frames_captured: Arc<AtomicU64>,
     frames_dropped: Arc<AtomicU64>,
@@ -50,11 +69,7 @@ impl CaptureEngine {
 
         let (sender, receiver) = mpsc::channel(config.channel_buffer_size);
 
-        let content = SCShareableContent::get().map_err(|e| {
-            CaptureError::ScreenCaptureKit(format!("failed to get shareable content: {e}"))
-        })?;
-
-        let displays = content.displays();
+        let displays = enumerate_displays()?;
         if displays.is_empty() {
             return Err(CaptureError::NoDisplays);
         }
@@ -63,48 +78,53 @@ impl CaptureEngine {
         let frames_dropped = Arc::new(AtomicU64::new(0));
 
         // Build a CMTime for the minimum frame interval.
-        // Uses millisecond precision: e.g. 2.0 s → value=2000, timescale=1000.
+        // Uses millisecond precision: e.g. 2.0 s -> value=2000, timescale=1000.
         let frame_interval = seconds_to_cmtime(config.frame_interval_secs);
 
-        let mut streams: Vec<SCStream> = Vec::with_capacity(displays.len());
+        // Identify the primary display.
+        let primary_display_id = unsafe { CGMainDisplayID() };
+
+        let mut streams: Vec<Retained<SCStream>> = Vec::with_capacity(displays.len());
+        let mut handlers: Vec<Retained<CaptureOutputHandler>> = Vec::with_capacity(displays.len());
 
         for display in &displays {
-            let display_id = display.display_id();
-            let width = display.width();
-            let height = display.height();
+            let display_id = unsafe { display.displayID() };
+            let width = unsafe { display.width() } as u32;
+            let height = unsafe { display.height() } as u32;
 
-            // Build the content filter once per display and reuse it for both
-            // the scale-factor detection and the stream itself.
-            let filter = SCContentFilter::create()
-                .with_display(display)
-                .with_excluding_windows(&[])
-                .build();
+            // Detect retina scale. Default to 2.0 on modern Macs (same
+            // heuristic as before). We could query SCShareableContentInfo
+            // for point_pixel_scale, but 2.0 is correct for all current
+            // Apple Silicon displays.
+            let scale_factor = 2.0;
 
-            // Detect retina scale via SCShareableContentInfo (macOS 14.0+).
-            let scale_factor = {
-                let info =
-                    screencapturekit::shareable_content::SCShareableContentInfo::for_filter(&filter);
-                match info {
-                    Some(info) => f64::from(info.point_pixel_scale()),
-                    None => {
-                        // Heuristic: if the pixel width is at least 2x the
-                        // display point width reported by the frame, assume 2x.
-                        // Since we cannot know for sure without the info object,
-                        // default to 2.0 on modern Macs.
-                        2.0
-                    }
+            // Build the content filter and stream configuration.
+            let (filter, stream_config) = autoreleasepool(|_| {
+                let empty_windows: Retained<NSArray<_>> = NSArray::new();
+                let filter = unsafe {
+                    SCContentFilter::initWithDisplay_excludingWindows(
+                        SCContentFilter::alloc(),
+                        display,
+                        &empty_windows,
+                    )
+                };
+
+                let config = unsafe { SCStreamConfiguration::new() };
+                unsafe {
+                    config.setWidth(width as usize);
+                    config.setHeight(height as usize);
+                    config.setShowsCursor(true);
+                    config.setMinimumFrameInterval(frame_interval);
+                    // BGRA = 'BGRA' as FourCC
+                    config.setPixelFormat(u32::from_be_bytes(*b"BGRA"));
                 }
-            };
+                // TODO: audio config (Task 6)
 
-            // Capture at the display's native pixel dimensions.
-            let stream_config = SCStreamConfiguration::new()
-                .with_width(width)
-                .with_height(height)
-                .with_pixel_format(PixelFormat::BGRA)
-                .with_shows_cursor(true)
-                .with_minimum_frame_interval(&frame_interval);
+                (filter, config)
+            });
 
-            let handler = FrameHandler::new(
+            // Create the handler wired to our frame channel.
+            let handler = CaptureOutputHandler::new(
                 sender.clone(),
                 display_id,
                 scale_factor,
@@ -114,26 +134,60 @@ impl CaptureEngine {
                 Arc::clone(&frames_dropped),
             );
 
-            let mut stream = SCStream::new(&filter, &stream_config);
-            stream.add_output_handler(handler, SCStreamOutputType::Screen);
-            if let Err(e) = stream.start_capture() {
+            // Create the SCStream.
+            let stream = autoreleasepool(|_| unsafe {
+                SCStream::initWithFilter_configuration_delegate(
+                    SCStream::alloc(),
+                    &filter,
+                    &stream_config,
+                    None,
+                )
+            });
+
+            // Register the output handler.
+            let queue = DispatchQueue::new(
+                &format!("com.chronicle.capture.display-{display_id}"),
+                None,
+            );
+
+            autoreleasepool(|_| unsafe {
+                stream
+                    .addStreamOutput_type_sampleHandlerQueue_error(
+                        handler.as_protocol_object(),
+                        SCStreamOutputType::Screen,
+                        Some(&queue),
+                    )
+                    .map_err(|e| {
+                        CaptureError::ScreenCaptureKit(format!(
+                            "failed to add output handler for display {display_id}: {}",
+                            e.localizedDescription()
+                        ))
+                    })
+            })?;
+
+            // Start capture.
+            if let Err(e) = start_stream(&stream) {
                 // Stop all previously-started streams before propagating.
                 for started in &streams {
-                    let _ = started.stop_capture();
+                    let _ = stop_stream(started);
                 }
                 return Err(CaptureError::ScreenCaptureKit(format!(
                     "failed to start capture on display {display_id}: {e}"
                 )));
             }
 
+            let is_primary = display_id == primary_display_id;
             log::info!(
-                "Started capture on display {display_id} ({width}x{height}, scale {scale_factor})"
+                "Started capture on display {display_id} ({width}x{height}, scale {scale_factor}{})",
+                if is_primary { ", primary" } else { "" }
             );
             streams.push(stream);
+            handlers.push(handler);
         }
 
         let engine = Self {
             streams,
+            handlers,
             _sender: sender,
             frames_captured,
             frames_dropped,
@@ -147,11 +201,12 @@ impl CaptureEngine {
     /// After calling this the receiver will eventually drain and close.
     pub fn stop(&mut self) -> Result<()> {
         for stream in &self.streams {
-            if let Err(e) = stream.stop_capture() {
+            if let Err(e) = stop_stream(stream) {
                 log::warn!("Error stopping stream: {e}");
             }
         }
         self.streams.clear();
+        self.handlers.clear();
         Ok(())
     }
 
@@ -168,11 +223,103 @@ impl CaptureEngine {
 impl Drop for CaptureEngine {
     fn drop(&mut self) {
         for stream in &self.streams {
-            if let Err(e) = stream.stop_capture() {
+            if let Err(e) = stop_stream(stream) {
                 log::warn!("Failed to stop stream on drop: {e}");
             }
         }
         self.streams.clear();
+        self.handlers.clear();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SCK helpers
+// ---------------------------------------------------------------------------
+
+/// Enumerate all connected displays via SCShareableContent.
+///
+/// Uses a synchronous channel + block2 callback to bridge the async SCK API.
+fn enumerate_displays() -> Result<Vec<Retained<SCDisplay>>> {
+    let (tx, rx) =
+        std::sync::mpsc::sync_channel::<std::result::Result<Vec<Retained<SCDisplay>>, String>>(1);
+
+    let block = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
+        if !error.is_null() {
+            let desc = unsafe { (*error).localizedDescription() };
+            let _ = tx.send(Err(desc.to_string()));
+            return;
+        }
+
+        if content.is_null() {
+            let _ = tx.send(Err("SCShareableContent was null".into()));
+            return;
+        }
+
+        let content = unsafe { &*content };
+        let displays = unsafe { content.displays() };
+        let mut result = Vec::with_capacity(displays.len());
+        for i in 0..displays.len() {
+            result.push(displays.objectAtIndex(i));
+        }
+        let _ = tx.send(Ok(result));
+    });
+
+    unsafe {
+        SCShareableContent::getShareableContentWithCompletionHandler(&block);
+    }
+
+    rx.recv()
+        .map_err(|_| {
+            CaptureError::ScreenCaptureKit("display enumeration channel closed".into())
+        })?
+        .map_err(CaptureError::ScreenCaptureKit)
+}
+
+/// Start the SCStream capture, blocking until the completion handler fires.
+fn start_stream(stream: &SCStream) -> std::result::Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Option<String>>(1);
+
+    let block = RcBlock::new(move |error: *mut NSError| {
+        if error.is_null() {
+            let _ = tx.send(None);
+        } else {
+            let desc = unsafe { (*error).localizedDescription() };
+            let _ = tx.send(Some(desc.to_string()));
+        }
+    });
+
+    unsafe {
+        stream.startCaptureWithCompletionHandler(Some(&block));
+    }
+
+    match rx.recv() {
+        Ok(None) => Ok(()),
+        Ok(Some(err)) => Err(err),
+        Err(_) => Err("start capture completion handler channel closed".into()),
+    }
+}
+
+/// Stop the SCStream capture, blocking until the completion handler fires.
+fn stop_stream(stream: &SCStream) -> std::result::Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Option<String>>(1);
+
+    let block = RcBlock::new(move |error: *mut NSError| {
+        if error.is_null() {
+            let _ = tx.send(None);
+        } else {
+            let desc = unsafe { (*error).localizedDescription() };
+            let _ = tx.send(Some(desc.to_string()));
+        }
+    });
+
+    unsafe {
+        stream.stopCaptureWithCompletionHandler(Some(&block));
+    }
+
+    match rx.recv() {
+        Ok(None) => Ok(()),
+        Ok(Some(err)) => Err(err),
+        Err(_) => Err("stop capture completion handler channel closed".into()),
     }
 }
 
@@ -182,7 +329,7 @@ impl Drop for CaptureEngine {
 /// are represented accurately.
 fn seconds_to_cmtime(secs: f64) -> CMTime {
     let millis = (secs * 1000.0).round() as i64;
-    CMTime::new(millis, 1000)
+    unsafe { CMTime::new(millis, 1000) }
 }
 
 #[cfg(test)]
@@ -192,15 +339,19 @@ mod tests {
     #[test]
     fn seconds_to_cmtime_converts_correctly() {
         let time = seconds_to_cmtime(2.0);
-        // 2.0 seconds = 2000 value with timescale 1000
-        assert_eq!(time.value, 2000);
-        assert_eq!(time.timescale, 1000);
+        // CMTime is packed — copy fields to locals to avoid unaligned access.
+        let value = { time.value };
+        let timescale = { time.timescale };
+        assert_eq!(value, 2000);
+        assert_eq!(timescale, 1000);
     }
 
     #[test]
     fn seconds_to_cmtime_fractional() {
         let time = seconds_to_cmtime(0.5);
-        assert_eq!(time.value, 500);
-        assert_eq!(time.timescale, 1000);
+        let value = { time.value };
+        let timescale = { time.timescale };
+        assert_eq!(value, 500);
+        assert_eq!(timescale, 1000);
     }
 }

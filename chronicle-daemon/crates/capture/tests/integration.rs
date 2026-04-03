@@ -82,7 +82,7 @@ async fn encode_captured_frame_as_heif() {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
     let path = dir.path().join("captured.heif");
 
-    encode_heif(&frame.image_buffer, &path, 0.65)
+    encode_heif(frame.sample_buffer.as_ref(), &path, 0.65)
         .expect("HEIF encoding failed");
 
     assert!(path.exists(), "HEIF file was not created");

@@ -3,7 +3,8 @@
 //! Uses ScreenCaptureKit to capture all connected displays with adaptive
 //! frame rates based on screen activity and input events.
 
-use screencapturekit::cm::CMSampleBuffer;
+use objc2::rc::Retained;
+use objc2_core_media::CMSampleBuffer;
 
 /// Error types for capture operations.
 pub mod error;
@@ -20,10 +21,36 @@ pub mod encoder;
 /// App metadata extraction — foreground app and window title.
 pub mod metadata;
 
+/// CoreVideo pixel buffer FFI.
+pub(crate) mod pixel_buffer;
+
 pub use engine::CaptureEngine;
 pub use encoder::encode_heif;
 pub use error::{CaptureError, Result};
 pub use metadata::{AppMetadata, get_frontmost_app};
+
+/// Thread-safe wrapper around `Retained<CMSampleBuffer>`.
+///
+/// Apple documents CMSampleBuffer as immutable and thread-safe once created.
+/// The objc2 crate doesn't mark it `Send` because it can't verify this
+/// generically, but for our use case (passing captured frames from the SCK
+/// callback thread to a tokio task) this is safe.
+pub struct SendableSampleBuffer(pub Retained<CMSampleBuffer>);
+
+// SAFETY: CMSampleBuffer is immutable after creation and documented as
+// thread-safe by Apple. We only read from it (HEIF encoding, pixel access).
+unsafe impl Send for SendableSampleBuffer {}
+
+// SAFETY: Same rationale — CMSampleBuffer is immutable. Shared references
+// (&SendableSampleBuffer) across await points in tokio::spawn are safe.
+unsafe impl Sync for SendableSampleBuffer {}
+
+impl SendableSampleBuffer {
+    /// Borrow the inner CMSampleBuffer.
+    pub fn as_ref(&self) -> &CMSampleBuffer {
+        &self.0
+    }
+}
 
 /// Configuration for the capture engine.
 #[derive(Debug, Clone)]
@@ -45,11 +72,11 @@ impl Default for CaptureConfig {
 
 /// A captured frame delivered over the channel.
 ///
-/// Does not derive `Debug` because `CMSampleBuffer` from screencapturekit
-/// does not implement `Debug`. Use the metadata fields for logging.
+/// Does not derive `Debug` because `CMSampleBuffer` does not implement `Debug`.
+/// Use the metadata fields for logging.
 pub struct CapturedFrame {
     /// Raw sample buffer from ScreenCaptureKit.
-    pub image_buffer: CMSampleBuffer,
+    pub sample_buffer: SendableSampleBuffer,
     /// macOS display identifier (CGDirectDisplayID).
     pub display_id: u32,
     /// Unix timestamp in milliseconds.
