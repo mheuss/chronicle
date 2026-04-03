@@ -15,6 +15,7 @@ async fn capture_engine_delivers_frames() {
     let config = CaptureConfig {
         frame_interval_secs: 0.5,
         channel_buffer_size: 16,
+        audio: None,
     };
 
     let (mut engine, mut receiver) = CaptureEngine::start(config)
@@ -67,6 +68,7 @@ async fn encode_captured_frame_as_heif() {
     let config = CaptureConfig {
         frame_interval_secs: 0.5,
         channel_buffer_size: 16,
+        audio: None,
     };
     let (engine, mut receiver) = CaptureEngine::start(config)
         .expect("failed to start capture engine");
@@ -82,7 +84,7 @@ async fn encode_captured_frame_as_heif() {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
     let path = dir.path().join("captured.heif");
 
-    encode_heif(&frame.image_buffer, &path, 0.65)
+    encode_heif(frame.sample_buffer.inner(), &path, 0.65)
         .expect("HEIF encoding failed");
 
     assert!(path.exists(), "HEIF file was not created");

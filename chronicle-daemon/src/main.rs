@@ -3,8 +3,8 @@ mod pipeline;
 use std::sync::Arc;
 
 use anyhow::Result;
-use chronicle_audio::{AudioConfig, AudioEngine};
-use chronicle_capture::{CaptureConfig, CaptureEngine};
+use chronicle_audio::{AudioConfig, AudioPipeline};
+use chronicle_capture::{AudioOutputConfig, CaptureConfig, CaptureEngine};
 use chronicle_storage::{Storage, StorageConfig};
 
 #[tokio::main]
@@ -15,9 +15,32 @@ async fn main() -> Result<()> {
     // --- Storage ---
     let storage = Arc::new(Storage::open(StorageConfig::default()).await?);
 
-    // --- Screen capture pipeline ---
-    let (mut engine, frame_rx) = CaptureEngine::start(CaptureConfig::default())?;
-    log::info!("Capture engine started");
+    // --- Audio pipeline (create first — capture engine needs the handler) ---
+    let audio_staging_dir = storage.base_dir().join("audio-staging");
+    std::fs::create_dir_all(&audio_staging_dir)?;
+
+    let audio_config = AudioConfig {
+        output_dir: audio_staging_dir,
+        ..AudioConfig::default()
+    };
+    let (mut audio_pipeline, audio_segment_rx) = AudioPipeline::create(audio_config)?;
+    log::info!("Audio pipeline created");
+
+    // --- Screen capture pipeline (with audio on primary display) ---
+    let capture_config = CaptureConfig {
+        audio: Some(AudioOutputConfig {
+            handler: audio_pipeline
+                .handler()
+                .ok_or_else(|| anyhow::anyhow!("audio handler unavailable"))?,
+            queue: audio_pipeline.queue(),
+            sample_rate: 48_000,
+            channel_count: 1,
+            capture_microphone: false, // HEU-329: mic off by default
+        }),
+        ..Default::default()
+    };
+    let (mut engine, frame_rx) = CaptureEngine::start(capture_config)?;
+    log::info!("Capture engine started (audio on primary display)");
 
     let (ocr_tx, ocr_rx) = tokio::sync::mpsc::channel(1024);
 
@@ -31,26 +54,13 @@ async fn main() -> Result<()> {
     let ocr_storage = Arc::clone(&storage);
     let ocr_handle = tokio::spawn(pipeline::ocr_loop(ocr_storage, ocr_rx));
 
-    // --- Audio pipeline ---
-    let audio_staging_dir = storage.base_dir().join("audio-staging");
-    std::fs::create_dir_all(&audio_staging_dir)?;
-
-    let audio_config = AudioConfig {
-        output_dir: audio_staging_dir,
-        ..AudioConfig::default()
-    };
-    let mut audio_engine = AudioEngine::new(audio_config)?;
-    let audio_segment_rx = audio_engine.start()?;
-    log::info!("Audio engine started");
-
     // Bounded channel (64) with blocking_send — backpressure over data loss
     let (audio_tx, audio_rx) = tokio::sync::mpsc::channel(64);
 
     // Bridge thread: std::sync::mpsc → tokio::mpsc
     let bridge_handle = std::thread::Builder::new()
         .name("audio-bridge".into())
-        .spawn(move || pipeline::bridge_audio_segments(audio_segment_rx, audio_tx))
-        ?;
+        .spawn(move || pipeline::bridge_audio_segments(audio_segment_rx, audio_tx))?;
 
     let audio_storage = Arc::clone(&storage);
     let audio_store_handle = tokio::spawn(pipeline::audio_store_loop(audio_storage, audio_rx));
@@ -59,19 +69,20 @@ async fn main() -> Result<()> {
     tokio::signal::ctrl_c().await?;
     log::info!("Shutdown signal received");
 
-    // Stop capture engine — closes frame channel so Task A drains and exits
+    // Stop capture engine FIRST — stops SCStream, no more audio callbacks.
+    // Must drop before audio_pipeline.stop() so the handler Retained ref
+    // is released and the buffer channel can close.
     if let Err(e) = engine.stop() {
         log::error!("Capture engine stop failed: {e}");
     }
     drop(engine);
     log::info!("Capture engine stopped");
 
-    // Stop audio engine — stops SCStream, flushes remaining segments, closes
-    // sync channel. Bridge thread sees close, forwards remaining, exits.
-    if let Err(e) = audio_engine.stop() {
-        log::error!("Audio engine stop failed: {e}");
+    // Stop audio pipeline — encoding thread sees EOF, flushes segments.
+    if let Err(e) = audio_pipeline.stop() {
+        log::error!("Audio pipeline stop failed: {e}");
     }
-    log::info!("Audio engine stopped");
+    log::info!("Audio pipeline stopped");
 
     // Wait for bridge thread to finish
     bridge_handle

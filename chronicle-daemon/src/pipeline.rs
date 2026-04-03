@@ -52,7 +52,7 @@ async fn process_frame(
     // encode_heif takes references that aren't Send, so we call it directly.
     // The capture loop is the only consumer and frames arrive at ~0.5 fps,
     // so briefly blocking the task is acceptable.
-    encode_heif(&frame.image_buffer, &image_path, HEIF_QUALITY)?;
+    encode_heif(frame.sample_buffer.inner(), &image_path, HEIF_QUALITY)?;
 
     // 5. Insert DB record — clean up the HEIF file if this fails so we
     //    don't accumulate orphaned files on disk.

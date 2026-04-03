@@ -6,16 +6,30 @@ description = "Screen capture engine — multi-display adaptive capture via Scre
 license = "MIT"
 
 [dependencies]
-screencapturekit = { version = "1.5", features = ["macos_14_0"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSError"] }
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication"] }
+objc2-screen-capture-kit = { version = "0.3", features = [
+    "SCStream",
+    "SCShareableContent",
+    "objc2-core-media",
+    "dispatch2",
+    "block2",
+] }
+objc2-core-media = { version = "0.3", features = [
+    "CMSampleBuffer",
+    "CMTime",
+    "CMBase",
+] }
+objc2-core-foundation = "0.3"
+block2 = "0.6"
+dispatch2 = "0.3"
 tokio = { version = "1", features = ["sync", "rt"] }
 thiserror = "2"
 log = "0.4"
 core-foundation = "0.10"
 core-graphics = "0.24"
 foreign-types = "0.5"
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication"] }
-objc2-foundation = { version = "0.3", features = ["NSString"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }

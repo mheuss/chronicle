@@ -1,144 +1,95 @@
-//! AudioEngine — manages SCStream lifecycle for audio capture.
+//! AudioPipeline — encoding pipeline for audio capture.
 //!
-//! Creates and manages an SCStream configured for mic + system audio,
-//! spawns an encoding thread, and delivers completed Opus segments
-//! over an mpsc channel.
+//! Creates an ObjC handler and dispatch queue for ScreenCaptureKit audio
+//! callbacks, spawns an encoding thread, and delivers completed Opus
+//! segments over an mpsc channel. Does not manage SCStream lifecycle --
+//! the caller registers the handler on an externally managed stream.
 
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
-use block2::RcBlock;
 use dispatch2::DispatchQueue;
-use objc2::rc::{autoreleasepool, Retained};
-use objc2::AnyThread;
-use objc2_foundation::{NSArray, NSError};
-use objc2_screen_capture_kit::{
-    SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration,
-    SCStreamOutputType,
-};
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_screen_capture_kit::SCStreamOutput;
 
 use crate::accumulator::SegmentAccumulator;
 use crate::handler::{AudioBuffer, AudioOutputHandler};
 use crate::{AudioConfig, AudioError, AudioSource, CompletedSegment, Result};
 
-/// Audio capture engine backed by ScreenCaptureKit.
+/// Audio encoding pipeline.
 ///
-/// Manages the full lifecycle: enumerate displays, configure SCStream,
-/// register audio output handlers, and run an encoding thread that
-/// converts raw PCM into Opus segments.
-pub struct AudioEngine {
-    config: AudioConfig,
-    stream: Option<Retained<SCStream>>,
+/// Owns the ObjC handler, dispatch queue, and encoding thread. The handler
+/// and queue are exposed for external registration on an SCStream. The
+/// encoding thread converts raw PCM into Opus segments and sends them
+/// over a channel.
+///
+/// The handler is the sole owner of the buffer sender channel. Calling
+/// `stop()` drops the handler, which closes the channel and lets the
+/// encoding thread flush and exit. If the caller holds a `Retained`
+/// clone from `handler()`, they must drop it before `stop()` for the
+/// encoding thread to exit.
+pub struct AudioPipeline {
     handler: Option<Retained<AudioOutputHandler>>,
+    queue: Retained<DispatchQueue>,
     encoding_thread: Option<JoinHandle<()>>,
-    buffer_sender: Option<mpsc::SyncSender<AudioBuffer>>,
 }
 
-impl AudioEngine {
-    /// Create a new AudioEngine with the given configuration.
+impl AudioPipeline {
+    /// Create a new audio pipeline.
     ///
-    /// No ScreenCaptureKit calls are made until `start()`.
-    pub fn new(config: AudioConfig) -> Result<Self> {
-        Ok(Self {
-            config,
-            stream: None,
-            handler: None,
-            encoding_thread: None,
-            buffer_sender: None,
-        })
-    }
-
-    /// Start audio capture and return a receiver for completed segments.
-    ///
-    /// This will:
-    /// 1. Enumerate displays via SCShareableContent
-    /// 2. Configure an SCStream for audio capture
-    /// 3. Spawn an encoding thread
-    /// 4. Start the stream
-    pub fn start(&mut self) -> Result<mpsc::Receiver<CompletedSegment>> {
-        // Channel for completed segments (encoding thread -> caller).
+    /// Spawns the encoding thread immediately. Returns the pipeline and
+    /// a receiver for completed Opus segments. The caller should retrieve
+    /// the handler and queue via `handler()` and `queue()`, then register
+    /// them on an SCStream.
+    pub fn create(config: AudioConfig) -> Result<(Self, mpsc::Receiver<CompletedSegment>)> {
         let (segment_tx, segment_rx) = mpsc::channel::<CompletedSegment>();
-
-        // Channel for raw audio buffers (SCK callback -> encoding thread).
         let (buffer_tx, buffer_rx) = mpsc::sync_channel::<AudioBuffer>(64);
 
-        // Spawn the encoding thread. It owns the accumulators and reads
-        // from buffer_rx until the channel disconnects.
-        let encoding_thread = spawn_encoding_thread(
-            buffer_rx,
-            segment_tx,
-            self.config.clone(),
-        );
+        let encoding_thread = spawn_encoding_thread(buffer_rx, segment_tx, config);
 
-        // Enumerate displays.
-        let display = enumerate_first_display()?;
+        let handler = AudioOutputHandler::new(buffer_tx);
+        // DispatchQueue::new returns dispatch2::Queue, .into() converts to
+        // Retained<DispatchQueue> for objc2 interop.
+        let queue: Retained<DispatchQueue> =
+            DispatchQueue::new("com.chronicle.audio.samples", None).into();
 
-        // Create SCStream configuration.
-        let stream_config = autoreleasepool(|_| create_stream_config());
+        let pipeline = Self {
+            handler: Some(handler),
+            queue,
+            encoding_thread: Some(encoding_thread),
+        };
 
-        // Create content filter with the display.
-        let filter = autoreleasepool(|_| {
-            let empty_windows: Retained<NSArray<_>> = NSArray::new();
-            unsafe {
-                SCContentFilter::initWithDisplay_excludingWindows(
-                    SCContentFilter::alloc(),
-                    &display,
-                    &empty_windows,
-                )
-            }
-        });
-
-        // Create the SCStream.
-        let stream = autoreleasepool(|_| unsafe {
-            SCStream::initWithFilter_configuration_delegate(
-                SCStream::alloc(),
-                &filter,
-                &stream_config,
-                None, // no delegate
-            )
-        });
-
-        // Create the audio output handler wired to the buffer channel.
-        let handler = AudioOutputHandler::new(buffer_tx.clone());
-
-        // Create a dispatch queue for sample delivery.
-        let queue = DispatchQueue::new("com.chronicle.audio.samples", None);
-
-        // Register the handler for both system audio and microphone.
-        autoreleasepool(|_| {
-            register_stream_outputs(&stream, &handler, &queue)?;
-            Ok::<(), AudioError>(())
-        })?;
-
-        // Start capture.
-        start_capture(&stream)?;
-
-        self.stream = Some(stream);
-        self.handler = Some(handler);
-        self.encoding_thread = Some(encoding_thread);
-        self.buffer_sender = Some(buffer_tx);
-
-        Ok(segment_rx)
+        Ok((pipeline, segment_rx))
     }
 
-    /// Stop audio capture, flush remaining segments, and clean up.
-    pub fn stop(&mut self) -> Result<()> {
-        // Stop the SCStream.
-        if let Some(ref stream) = self.stream {
-            stop_capture(stream)?;
-        }
+    /// Protocol-erased handler for registering on an SCStream.
+    ///
+    /// Returns `None` after `stop()` has been called.
+    pub fn handler(&self) -> Option<Retained<ProtocolObject<dyn SCStreamOutput>>> {
+        self.handler
+            .as_ref()
+            .map(|h| ProtocolObject::from_retained(h.clone()))
+    }
 
-        // Drop the stream and handler. This disconnects the buffer sender
-        // held by the SCK handler, so the encoding thread's recv() will
-        // eventually return Err.
-        self.stream = None;
+    /// Dispatch queue for audio sample delivery.
+    pub fn queue(&self) -> Retained<DispatchQueue> {
+        self.queue.clone()
+    }
+
+    /// Stop the encoding pipeline.
+    ///
+    /// Drops the handler (and its buffer sender) so the encoding thread's
+    /// `recv()` returns `Err`, which triggers a flush of any remaining
+    /// samples. Blocks until the encoding thread exits.
+    ///
+    /// The caller must drop any `Retained` references from `handler()`
+    /// before calling this, otherwise the handler stays alive and the
+    /// encoding thread won't exit.
+    pub fn stop(&mut self) -> Result<()> {
+        // Drop the handler to close the buffer sender channel.
         self.handler = None;
 
-        // Drop our copy of the sender too.
-        self.buffer_sender = None;
-
-        // Wait for the encoding thread to finish. It will flush
-        // accumulators before exiting.
         if let Some(thread) = self.encoding_thread.take() {
             thread
                 .join()
@@ -146,6 +97,17 @@ impl AudioEngine {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for AudioPipeline {
+    fn drop(&mut self) {
+        if self.handler.is_some() || self.encoding_thread.is_some() {
+            log::warn!("AudioPipeline dropped without calling stop() — stopping now");
+            if let Err(e) = self.stop() {
+                log::error!("AudioPipeline::stop() failed in drop: {e}");
+            }
+        }
     }
 }
 
@@ -211,185 +173,22 @@ fn run_encoding_loop(
     }
 }
 
-/// Enumerate displays and return the first one.
-fn enumerate_first_display() -> Result<Retained<SCDisplay>> {
-    let (tx, rx) = mpsc::sync_channel::<std::result::Result<Retained<SCDisplay>, String>>(1);
-
-    let block = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
-        if !error.is_null() {
-            let desc = unsafe { (*error).localizedDescription() };
-            let _ = tx.send(Err(desc.to_string()));
-            return;
-        }
-
-        if content.is_null() {
-            let _ = tx.send(Err("SCShareableContent was null".into()));
-            return;
-        }
-
-        let content = unsafe { &*content };
-        let displays = unsafe { content.displays() };
-        if displays.is_empty() {
-            let _ = tx.send(Err("no displays found".into()));
-            return;
-        }
-
-        let display = displays.objectAtIndex(0);
-        let _ = tx.send(Ok(display));
-    });
-
-    unsafe {
-        SCShareableContent::getShareableContentWithCompletionHandler(&block);
-    }
-
-    rx.recv()
-        .map_err(|_| AudioError::ScreenCaptureKit("display enumeration channel closed".into()))?
-        .map_err(AudioError::ScreenCaptureKit)
-}
-
-/// Create and configure the SCStreamConfiguration for audio capture.
-fn create_stream_config() -> Retained<SCStreamConfiguration> {
-    let config = unsafe { SCStreamConfiguration::new() };
-    unsafe {
-        // Enable audio capture.
-        config.setCapturesAudio(true);
-        config.setCaptureMicrophone(true);
-        config.setExcludesCurrentProcessAudio(true);
-
-        // Audio format: 48kHz mono.
-        config.setSampleRate(48_000);
-        config.setChannelCount(1);
-
-        // Minimize video overhead — we only need audio.
-        // 2x2 is the minimum; 1x1 causes kCGErrorInvalidContext on some macOS versions.
-        config.setShowsCursor(false);
-        config.setMinimumFrameInterval(objc2_core_media::CMTime::new(1, 1));
-        config.setWidth(2);
-        config.setHeight(2);
-    }
-    config
-}
-
-/// Register the audio output handler for system audio and microphone streams.
-fn register_stream_outputs(
-    stream: &SCStream,
-    handler: &AudioOutputHandler,
-    queue: &DispatchQueue,
-) -> Result<()> {
-    let protocol_obj = handler.as_protocol_object();
-
-    unsafe {
-        stream
-            .addStreamOutput_type_sampleHandlerQueue_error(
-                protocol_obj,
-                SCStreamOutputType::Audio,
-                Some(queue),
-            )
-            .map_err(|e| {
-                AudioError::ScreenCaptureKit(format!(
-                    "failed to add system audio output: {}",
-                    e.localizedDescription()
-                ))
-            })?;
-    }
-
-    // Microphone output may fail if mic permission is denied.
-    // Log a warning but don't fail start().
-    let mic_result = unsafe {
-        stream.addStreamOutput_type_sampleHandlerQueue_error(
-            protocol_obj,
-            SCStreamOutputType::Microphone,
-            Some(queue),
-        )
-    };
-
-    if let Err(e) = mic_result {
-        log::warn!(
-            "failed to add microphone output (permission denied?): {}",
-            e.localizedDescription()
-        );
-    }
-
-    Ok(())
-}
-
-/// Start the SCStream capture, blocking until the completion handler fires.
-fn start_capture(stream: &SCStream) -> Result<()> {
-    let (tx, rx) = mpsc::sync_channel::<Option<String>>(1);
-
-    let block = RcBlock::new(move |error: *mut NSError| {
-        if error.is_null() {
-            let _ = tx.send(None);
-        } else {
-            let desc = unsafe { (*error).localizedDescription() };
-            let _ = tx.send(Some(desc.to_string()));
-        }
-    });
-
-    unsafe {
-        stream.startCaptureWithCompletionHandler(Some(&block));
-    }
-
-    match rx.recv() {
-        Ok(None) => Ok(()),
-        Ok(Some(err)) => Err(AudioError::ScreenCaptureKit(format!(
-            "start capture failed: {err}"
-        ))),
-        Err(_) => Err(AudioError::ScreenCaptureKit(
-            "start capture completion handler channel closed".into(),
-        )),
-    }
-}
-
-/// Stop the SCStream capture, blocking until the completion handler fires.
-fn stop_capture(stream: &SCStream) -> Result<()> {
-    let (tx, rx) = mpsc::sync_channel::<Option<String>>(1);
-
-    let block = RcBlock::new(move |error: *mut NSError| {
-        if error.is_null() {
-            let _ = tx.send(None);
-        } else {
-            let desc = unsafe { (*error).localizedDescription() };
-            let _ = tx.send(Some(desc.to_string()));
-        }
-    });
-
-    unsafe {
-        stream.stopCaptureWithCompletionHandler(Some(&block));
-    }
-
-    match rx.recv() {
-        Ok(None) => Ok(()),
-        Ok(Some(err)) => Err(AudioError::ScreenCaptureKit(format!(
-            "stop capture failed: {err}"
-        ))),
-        Err(_) => Err(AudioError::ScreenCaptureKit(
-            "stop capture completion handler channel closed".into(),
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
-    fn new_stores_config_without_sck_calls() {
+    fn create_returns_pipeline_and_segment_receiver() {
+        let dir = tempfile::tempdir().unwrap();
         let config = AudioConfig {
-            segment_duration_secs: 15,
-            bitrate: 32_000,
-            output_dir: PathBuf::from("/tmp/audio-test"),
+            segment_duration_secs: 30,
+            bitrate: 64_000,
+            output_dir: dir.path().to_path_buf(),
         };
-
-        let engine = AudioEngine::new(config.clone()).unwrap();
-
-        assert_eq!(engine.config.segment_duration_secs, 15);
-        assert_eq!(engine.config.bitrate, 32_000);
-        assert!(engine.stream.is_none());
-        assert!(engine.handler.is_none());
-        assert!(engine.encoding_thread.is_none());
-        assert!(engine.buffer_sender.is_none());
+        let (pipeline, _segment_rx) = AudioPipeline::create(config).unwrap();
+        // Handler and queue should be available
+        let _handler = pipeline.handler().expect("handler should be Some before stop");
+        let _queue = pipeline.queue();
     }
 
     #[test]
@@ -538,12 +337,32 @@ mod tests {
     }
 
     #[test]
-    fn stop_without_start_is_noop() {
-        let config = AudioConfig::default();
-        let mut engine = AudioEngine::new(config).unwrap();
+    fn stop_shuts_down_encoding_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = AudioConfig {
+            segment_duration_secs: 30,
+            bitrate: 64_000,
+            output_dir: dir.path().to_path_buf(),
+        };
+        let (mut pipeline, _segment_rx) = AudioPipeline::create(config).unwrap();
 
-        // Stopping before starting should not panic or error.
-        let result = engine.stop();
+        // Stopping should cleanly shut down the encoding thread.
+        let result = pipeline.stop();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn handler_returns_none_after_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = AudioConfig {
+            segment_duration_secs: 30,
+            bitrate: 64_000,
+            output_dir: dir.path().to_path_buf(),
+        };
+        let (mut pipeline, _segment_rx) = AudioPipeline::create(config).unwrap();
+
+        assert!(pipeline.handler().is_some(), "handler should exist before stop");
+        pipeline.stop().unwrap();
+        assert!(pipeline.handler().is_none(), "handler should be None after stop");
     }
 }

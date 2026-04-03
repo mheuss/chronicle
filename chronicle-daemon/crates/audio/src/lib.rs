@@ -1,16 +1,17 @@
-//! Audio capture for Chronicle.
+//! Audio encoding pipeline for Chronicle.
 //!
-//! Captures microphone input and system audio via ScreenCaptureKit.
-//! Audio is encoded to Opus in 30-second Ogg segments and delivered
-//! over an mpsc channel for downstream storage and transcription.
+//! Provides an Opus encoding pipeline for microphone and system audio.
+//! Exposes an ObjC handler and dispatch queue for external SCStream
+//! registration. Completed Opus segments are delivered over an mpsc
+//! channel for downstream storage and transcription.
 
 mod accumulator;
 mod encoder;
 mod engine;
-pub(crate) mod handler;
+pub mod handler;
 
 pub use encoder::OggOpusEncoder;
-pub use engine::AudioEngine;
+pub use engine::AudioPipeline;
 
 use std::path::{Path, PathBuf};
 

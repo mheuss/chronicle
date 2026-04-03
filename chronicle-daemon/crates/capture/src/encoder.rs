@@ -17,9 +17,10 @@ use core_graphics::data_provider::CGDataProvider;
 use core_graphics::image::CGImage;
 use foreign_types::ForeignType;
 
-use screencapturekit::cm::CMSampleBuffer;
+use objc2_core_media::CMSampleBuffer;
 
 use crate::error::{CaptureError, Result};
+use crate::pixel_buffer;
 
 // ---------------------------------------------------------------------------
 // ImageIO FFI — these symbols live in the ImageIO framework and are not
@@ -59,13 +60,13 @@ unsafe extern "C" {
 /// from the raw BGRA pixel data, and writes it as HEIF via ImageIO.
 ///
 /// The sample buffer **must** contain BGRA pixel data (as produced by
-/// `CaptureEngine`, which configures `PixelFormat::BGRA`). Other pixel
+/// `CaptureEngine`, which configures BGRA pixel format). Other pixel
 /// formats will produce corrupt output.
 ///
 /// # Arguments
-/// * `sample_buffer` — raw frame from ScreenCaptureKit (BGRA format)
-/// * `output_path` — destination file path (parent directory must exist)
-/// * `quality` — compression quality 0.0–1.0 (recommended: 0.65)
+/// * `sample_buffer` -- raw frame from ScreenCaptureKit (BGRA format)
+/// * `output_path` -- destination file path (parent directory must exist)
+/// * `quality` -- compression quality 0.0-1.0 (recommended: 0.65)
 ///
 /// # Errors
 /// Returns `CaptureError::Encoding` if any step fails.
@@ -81,13 +82,12 @@ pub fn encode_heif(
     }
 
     // 1. Extract pixel buffer from sample buffer.
-    let pixel_buffer = sample_buffer
-        .image_buffer()
+    let px_buf = pixel_buffer::get_image_buffer(sample_buffer)
         .ok_or_else(|| CaptureError::Encoding("failed to extract pixel buffer".into()))?;
 
     // 2. Validate pixel format is BGRA.
     const BGRA_FOURCC: u32 = u32::from_be_bytes(*b"BGRA");
-    let format = pixel_buffer.pixel_format();
+    let format = pixel_buffer::pixel_format(px_buf);
     if format != BGRA_FOURCC {
         return Err(CaptureError::Encoding(format!(
             "expected BGRA pixel format, got 0x{format:08X}"
@@ -95,26 +95,24 @@ pub fn encode_heif(
     }
 
     // 3. Lock pixel buffer for read-only CPU access.
-    let guard = pixel_buffer
-        .lock(screencapturekit::cv::CVPixelBufferLockFlags::READ_ONLY)
-        .map_err(|e| CaptureError::Encoding(format!("failed to lock pixel buffer: {e}")))?;
+    let guard = pixel_buffer::PixelBufferGuard::new(px_buf)?;
 
     let width = guard.width();
     let height = guard.height();
     let bytes_per_row = guard.bytes_per_row();
     let raw_bytes = guard.as_slice();
 
-    // 3. Create CGImage from raw BGRA pixel data.
+    // 4. Create CGImage from raw BGRA pixel data.
     let cg_image = create_cgimage_from_bgra(raw_bytes, width, height, bytes_per_row)?;
 
-    // 4. Write as HEIF.
+    // 5. Write as HEIF.
     write_cgimage_as_heif(&cg_image, output_path, quality)
 }
 
 /// Create a `CGImage` from raw BGRA pixel data.
 ///
 /// ScreenCaptureKit delivers frames in BGRA format (configured via
-/// `PixelFormat::BGRA` in the stream configuration).
+/// BGRA pixel format in the stream configuration).
 fn create_cgimage_from_bgra(
     data: &[u8],
     width: usize,

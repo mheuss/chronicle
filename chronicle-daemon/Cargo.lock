@@ -180,13 +180,11 @@ dependencies = [
 name = "chronicle-audio"
 version = "0.1.0"
 dependencies = [
- "block2",
  "dispatch2",
  "log",
  "objc2",
  "objc2-core-foundation",
  "objc2-core-media",
- "objc2-foundation",
  "objc2-screen-capture-kit",
  "ogg",
  "opus",
@@ -198,14 +196,18 @@ dependencies = [
 name = "chronicle-capture"
 version = "0.1.0"
 dependencies = [
+ "block2",
  "core-foundation",
  "core-graphics",
+ "dispatch2",
  "foreign-types",
  "log",
  "objc2",
  "objc2-app-kit",
+ "objc2-core-foundation",
+ "objc2-core-media",
  "objc2-foundation",
- "screencapturekit",
+ "objc2-screen-capture-kit",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1452,12 +1454,6 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
-
-[[package]]
-name = "screencapturekit"
-version = "1.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99b732b2db50b25cfbcb171e1b7abda06e77873aeef493e635eb209482fdd149"
 
 [[package]]
 name = "semver"
