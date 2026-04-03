@@ -97,6 +97,7 @@ impl CaptureEngine {
             // for point_pixel_scale, but 2.0 is correct for all current
             // Apple Silicon displays.
             let scale_factor = 2.0;
+            let is_primary = display_id == primary_display_id;
 
             // Build the content filter and stream configuration.
             let (filter, stream_config) = autoreleasepool(|_| {
@@ -109,18 +110,32 @@ impl CaptureEngine {
                     )
                 };
 
-                let config = unsafe { SCStreamConfiguration::new() };
+                let sc_config = unsafe { SCStreamConfiguration::new() };
                 unsafe {
-                    config.setWidth(width as usize);
-                    config.setHeight(height as usize);
-                    config.setShowsCursor(true);
-                    config.setMinimumFrameInterval(frame_interval);
+                    sc_config.setWidth(width as usize);
+                    sc_config.setHeight(height as usize);
+                    sc_config.setShowsCursor(true);
+                    sc_config.setMinimumFrameInterval(frame_interval);
                     // BGRA = 'BGRA' as FourCC
-                    config.setPixelFormat(u32::from_be_bytes(*b"BGRA"));
+                    sc_config.setPixelFormat(u32::from_be_bytes(*b"BGRA"));
                 }
-                // TODO: audio config (Task 6)
 
-                (filter, config)
+                // Configure audio capture on the primary display.
+                if is_primary {
+                    if let Some(ref audio) = config.audio {
+                        unsafe {
+                            sc_config.setCapturesAudio(true);
+                            sc_config.setSampleRate(audio.sample_rate as isize);
+                            sc_config.setChannelCount(audio.channel_count as isize);
+                            sc_config.setExcludesCurrentProcessAudio(true);
+                            if audio.capture_microphone {
+                                sc_config.setCaptureMicrophone(true);
+                            }
+                        }
+                    }
+                }
+
+                (filter, sc_config)
             });
 
             // Create the handler wired to our frame channel.
@@ -165,6 +180,47 @@ impl CaptureEngine {
                     })
             })?;
 
+            // Register audio handler on the primary display's stream.
+            if is_primary {
+                if let Some(ref audio) = config.audio {
+                    // System audio — hard error. Core functionality.
+                    autoreleasepool(|_| unsafe {
+                        stream
+                            .addStreamOutput_type_sampleHandlerQueue_error(
+                                &*audio.handler,
+                                SCStreamOutputType::Audio,
+                                Some(&audio.queue),
+                            )
+                            .map_err(|e| {
+                                CaptureError::ScreenCaptureKit(format!(
+                                    "failed to register audio handler on primary display: {}",
+                                    e.localizedDescription()
+                                ))
+                            })
+                    })?;
+
+                    // Microphone — soft error. Permission may be denied or
+                    // hardware may be absent. Log and continue.
+                    if audio.capture_microphone {
+                        let mic_result = autoreleasepool(|_| unsafe {
+                            stream.addStreamOutput_type_sampleHandlerQueue_error(
+                                &*audio.handler,
+                                SCStreamOutputType::Microphone,
+                                Some(&audio.queue),
+                            )
+                        });
+                        if let Err(e) = mic_result {
+                            log::warn!(
+                                "Microphone registration failed (permission denied?): {}",
+                                e.localizedDescription()
+                            );
+                        }
+                    }
+
+                    log::info!("Registered audio handler on primary display {display_id}");
+                }
+            }
+
             // Start capture.
             if let Err(e) = start_stream(&stream) {
                 // Stop all previously-started streams before propagating.
@@ -176,7 +232,6 @@ impl CaptureEngine {
                 )));
             }
 
-            let is_primary = display_id == primary_display_id;
             log::info!(
                 "Started capture on display {display_id} ({width}x{height}, scale {scale_factor}{})",
                 if is_primary { ", primary" } else { "" }
