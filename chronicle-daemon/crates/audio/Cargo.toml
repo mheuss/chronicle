@@ -6,25 +6,16 @@ description = "Audio capture — microphone and system audio via ScreenCaptureKi
 license = "MIT"
 
 [dependencies]
-block2 = "0.6"
 objc2 = "0.6"
 objc2-screen-capture-kit = { version = "0.3", features = [
     "SCStream",
-    "SCShareableContent",
     "objc2-core-media",
     "dispatch2",
-    "block2",
-] }
-objc2-foundation = { version = "0.3", features = [
-    "NSArray",
-    "NSString",
-    "NSError",
 ] }
 objc2-core-media = { version = "0.3", features = [
     "CMSampleBuffer",
     "CMBlockBuffer",
     "CMBase",
-    "CMTime",
 ] }
 objc2-core-foundation = "0.3"
 log = "0.4"

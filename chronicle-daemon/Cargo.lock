@@ -180,13 +180,11 @@ dependencies = [
 name = "chronicle-audio"
 version = "0.1.0"
 dependencies = [
- "block2",
  "dispatch2",
  "log",
  "objc2",
  "objc2-core-foundation",
  "objc2-core-media",
- "objc2-foundation",
  "objc2-screen-capture-kit",
  "ogg",
  "opus",
