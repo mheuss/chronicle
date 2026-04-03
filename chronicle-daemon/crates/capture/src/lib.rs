@@ -52,7 +52,7 @@ unsafe impl Sync for SendableSampleBuffer {}
 
 impl SendableSampleBuffer {
     /// Borrow the inner CMSampleBuffer.
-    pub fn as_ref(&self) -> &CMSampleBuffer {
+    pub fn inner(&self) -> &CMSampleBuffer {
         &self.0
     }
 }

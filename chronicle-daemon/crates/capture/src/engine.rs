@@ -92,10 +92,12 @@ impl CaptureEngine {
             let width = unsafe { display.width() } as u32;
             let height = unsafe { display.height() } as u32;
 
-            // Detect retina scale. Default to 2.0 on modern Macs (same
-            // heuristic as before). We could query SCShareableContentInfo
-            // for point_pixel_scale, but 2.0 is correct for all current
-            // Apple Silicon displays.
+            // TODO: Detect actual retina scale factor per display. External
+            // non-retina monitors (common with Mac mini/Studio/Pro) use 1.0x.
+            // The screencapturekit wrapper used SCShareableContentInfo::for_filter
+            // for this. We need an objc2 equivalent or a CoreGraphics query
+            // (CGDisplayScreenSize + pixel dimensions). For now, default to 2.0
+            // which is correct for built-in Apple Silicon displays.
             let scale_factor = 2.0;
             let is_primary = display_id == primary_display_id;
 
@@ -121,16 +123,14 @@ impl CaptureEngine {
                 }
 
                 // Configure audio capture on the primary display.
-                if is_primary {
-                    if let Some(ref audio) = config.audio {
-                        unsafe {
-                            sc_config.setCapturesAudio(true);
-                            sc_config.setSampleRate(audio.sample_rate as isize);
-                            sc_config.setChannelCount(audio.channel_count as isize);
-                            sc_config.setExcludesCurrentProcessAudio(true);
-                            if audio.capture_microphone {
-                                sc_config.setCaptureMicrophone(true);
-                            }
+                if is_primary && let Some(ref audio) = config.audio {
+                    unsafe {
+                        sc_config.setCapturesAudio(true);
+                        sc_config.setSampleRate(audio.sample_rate as isize);
+                        sc_config.setChannelCount(audio.channel_count as isize);
+                        sc_config.setExcludesCurrentProcessAudio(true);
+                        if audio.capture_microphone {
+                            sc_config.setCaptureMicrophone(true);
                         }
                     }
                 }
@@ -181,44 +181,42 @@ impl CaptureEngine {
             })?;
 
             // Register audio handler on the primary display's stream.
-            if is_primary {
-                if let Some(ref audio) = config.audio {
-                    // System audio — hard error. Core functionality.
-                    autoreleasepool(|_| unsafe {
-                        stream
-                            .addStreamOutput_type_sampleHandlerQueue_error(
-                                &*audio.handler,
-                                SCStreamOutputType::Audio,
-                                Some(&audio.queue),
-                            )
-                            .map_err(|e| {
-                                CaptureError::ScreenCaptureKit(format!(
-                                    "failed to register audio handler on primary display: {}",
-                                    e.localizedDescription()
-                                ))
-                            })
-                    })?;
-
-                    // Microphone — soft error. Permission may be denied or
-                    // hardware may be absent. Log and continue.
-                    if audio.capture_microphone {
-                        let mic_result = autoreleasepool(|_| unsafe {
-                            stream.addStreamOutput_type_sampleHandlerQueue_error(
-                                &*audio.handler,
-                                SCStreamOutputType::Microphone,
-                                Some(&audio.queue),
-                            )
-                        });
-                        if let Err(e) = mic_result {
-                            log::warn!(
-                                "Microphone registration failed (permission denied?): {}",
+            if is_primary && let Some(ref audio) = config.audio {
+                // System audio — hard error. Core functionality.
+                autoreleasepool(|_| unsafe {
+                    stream
+                        .addStreamOutput_type_sampleHandlerQueue_error(
+                            &audio.handler,
+                            SCStreamOutputType::Audio,
+                            Some(&audio.queue),
+                        )
+                        .map_err(|e| {
+                            CaptureError::ScreenCaptureKit(format!(
+                                "failed to register audio handler on primary display: {}",
                                 e.localizedDescription()
-                            );
-                        }
-                    }
+                            ))
+                        })
+                })?;
 
-                    log::info!("Registered audio handler on primary display {display_id}");
+                // Microphone — soft error. Permission may be denied or
+                // hardware may be absent. Log and continue.
+                if audio.capture_microphone {
+                    let mic_result = autoreleasepool(|_| unsafe {
+                        stream.addStreamOutput_type_sampleHandlerQueue_error(
+                            &audio.handler,
+                            SCStreamOutputType::Microphone,
+                            Some(&audio.queue),
+                        )
+                    });
+                    if let Err(e) = mic_result {
+                        log::warn!(
+                            "Microphone registration failed (permission denied?): {}",
+                            e.localizedDescription()
+                        );
+                    }
                 }
+
+                log::info!("Registered audio handler on primary display {display_id}");
             }
 
             // Start capture.

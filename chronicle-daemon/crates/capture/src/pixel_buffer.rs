@@ -138,20 +138,14 @@ impl Drop for PixelBufferGuard {
 }
 
 // SAFETY: CVPixelBuffer data is thread-safe when locked read-only.
-// The guard holds a read lock and only provides immutable access.
+// The guard holds a read lock and only provides immutable access via as_slice().
+// Only Send is needed (not Sync) because the guard is used within a single
+// async task — it's never shared across threads, only moved.
 unsafe impl Send for PixelBufferGuard {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn get_image_buffer_returns_none_for_null() {
-        // We can't easily construct a CMSampleBuffer in tests without SCK,
-        // but we can verify the pixel_format FFI linkage doesn't panic.
-        // The actual get_image_buffer test requires a real sample buffer
-        // from ScreenCaptureKit.
-    }
 
     #[test]
     fn read_only_lock_flag_is_correct() {

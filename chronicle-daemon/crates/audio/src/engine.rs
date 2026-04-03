@@ -49,6 +49,8 @@ impl AudioPipeline {
         let encoding_thread = spawn_encoding_thread(buffer_rx, segment_tx, config);
 
         let handler = AudioOutputHandler::new(buffer_tx);
+        // DispatchQueue::new returns dispatch2::Queue, .into() converts to
+        // Retained<DispatchQueue> for objc2 interop.
         let queue: Retained<DispatchQueue> =
             DispatchQueue::new("com.chronicle.audio.samples", None).into();
 
