@@ -81,8 +81,23 @@ impl CaptureEngine {
         // Uses millisecond precision: e.g. 2.0 s -> value=2000, timescale=1000.
         let frame_interval = seconds_to_cmtime(config.frame_interval_secs);
 
-        // Identify the primary display.
-        let primary_display_id = unsafe { CGMainDisplayID() };
+        // Identify the primary display for audio output registration.
+        // Fall back to the first display if CGMainDisplayID returns an ID
+        // not in the enumerated list (e.g., during display hot-plug).
+        let cg_primary = unsafe { CGMainDisplayID() };
+        let first_display_id = unsafe { displays[0].displayID() };
+        let primary_has_match = displays
+            .iter()
+            .any(|d| unsafe { d.displayID() } == cg_primary);
+        let primary_display_id = if primary_has_match {
+            cg_primary
+        } else {
+            log::warn!(
+                "Primary display {cg_primary} not found in enumerated displays, \
+                 using first display {first_display_id} for audio"
+            );
+            first_display_id
+        };
 
         let mut streams: Vec<Retained<SCStream>> = Vec::with_capacity(displays.len());
         let mut handlers: Vec<Retained<CaptureOutputHandler>> = Vec::with_capacity(displays.len());
