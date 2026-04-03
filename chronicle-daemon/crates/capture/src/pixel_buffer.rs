@@ -53,6 +53,16 @@ pub fn pixel_format(pixel_buffer: *mut c_void) -> u32 {
     unsafe { CVPixelBufferGetPixelFormatType(pixel_buffer) }
 }
 
+/// Query the width of a CVPixelBuffer in pixels (no lock required).
+pub fn width(pixel_buffer: *mut c_void) -> usize {
+    unsafe { CVPixelBufferGetWidth(pixel_buffer) }
+}
+
+/// Query the height of a CVPixelBuffer in pixels (no lock required).
+pub fn height(pixel_buffer: *mut c_void) -> usize {
+    unsafe { CVPixelBufferGetHeight(pixel_buffer) }
+}
+
 /// RAII guard that locks a CVPixelBuffer on creation and unlocks on drop.
 ///
 /// Provides safe read-only access to the pixel data while the lock is held.

@@ -336,14 +336,21 @@ fn enumerate_displays() -> Result<Vec<Retained<SCDisplay>>> {
         SCShareableContent::getShareableContentWithCompletionHandler(&block);
     }
 
-    rx.recv()
-        .map_err(|_| {
-            CaptureError::ScreenCaptureKit("display enumeration channel closed".into())
-        })?
-        .map_err(CaptureError::ScreenCaptureKit)
+    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(result) => result.map_err(CaptureError::ScreenCaptureKit),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(
+            CaptureError::ScreenCaptureKit("display enumeration timed out".into()),
+        ),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(
+            CaptureError::ScreenCaptureKit("display enumeration channel closed".into()),
+        ),
+    }
 }
 
 /// Start the SCStream capture, blocking until the completion handler fires.
+///
+/// Times out after 10 seconds to avoid hanging indefinitely if SCK
+/// never invokes the completion handler.
 fn start_stream(stream: &SCStream) -> std::result::Result<(), String> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<Option<String>>(1);
 
@@ -360,14 +367,22 @@ fn start_stream(stream: &SCStream) -> std::result::Result<(), String> {
         stream.startCaptureWithCompletionHandler(Some(&block));
     }
 
-    match rx.recv() {
+    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
         Ok(None) => Ok(()),
         Ok(Some(err)) => Err(err),
-        Err(_) => Err("start capture completion handler channel closed".into()),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err("start capture timed out".into())
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("start capture completion handler channel closed".into())
+        }
     }
 }
 
 /// Stop the SCStream capture, blocking until the completion handler fires.
+///
+/// Times out after 5 seconds. This is shorter than start because stop runs
+/// in the Drop path — a hung stop would make the daemon unkillable.
 fn stop_stream(stream: &SCStream) -> std::result::Result<(), String> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<Option<String>>(1);
 
@@ -384,10 +399,15 @@ fn stop_stream(stream: &SCStream) -> std::result::Result<(), String> {
         stream.stopCaptureWithCompletionHandler(Some(&block));
     }
 
-    match rx.recv() {
+    match rx.recv_timeout(std::time::Duration::from_secs(5)) {
         Ok(None) => Ok(()),
         Ok(Some(err)) => Err(err),
-        Err(_) => Err("stop capture completion handler channel closed".into()),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err("stop capture timed out".into())
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("stop capture completion handler channel closed".into())
+        }
     }
 }
 

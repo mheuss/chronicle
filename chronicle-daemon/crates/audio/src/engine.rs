@@ -100,6 +100,17 @@ impl AudioPipeline {
     }
 }
 
+impl Drop for AudioPipeline {
+    fn drop(&mut self) {
+        if self.handler.is_some() || self.encoding_thread.is_some() {
+            log::warn!("AudioPipeline dropped without calling stop() — stopping now");
+            if let Err(e) = self.stop() {
+                log::error!("AudioPipeline::stop() failed in drop: {e}");
+            }
+        }
+    }
+}
+
 /// Spawn the encoding thread that reads AudioBuffers and dispatches
 /// them to the appropriate SegmentAccumulator.
 fn spawn_encoding_thread(

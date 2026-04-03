@@ -57,16 +57,10 @@ define_class!(
 
             let ivars = self.ivars();
 
-            // Try to extract actual dimensions from the pixel buffer.
+            // Extract dimensions from the pixel buffer metadata (no lock needed).
             // Fall back to the values stored at construction time.
             let (width, height) = pixel_buffer::get_image_buffer(sample_buffer)
-                .map(|px_buf| {
-                    let guard = pixel_buffer::PixelBufferGuard::new(px_buf);
-                    match guard {
-                        Ok(g) => (g.width() as u32, g.height() as u32),
-                        Err(_) => (ivars.width, ivars.height),
-                    }
-                })
+                .map(|px_buf| (pixel_buffer::width(px_buf) as u32, pixel_buffer::height(px_buf) as u32))
                 .unwrap_or((ivars.width, ivars.height));
 
             // Retain the sample buffer so it lives beyond this callback.
