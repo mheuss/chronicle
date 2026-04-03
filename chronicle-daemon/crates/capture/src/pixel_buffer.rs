@@ -104,7 +104,21 @@ impl PixelBufferGuard {
         let width = unsafe { CVPixelBufferGetWidth(pixel_buffer) };
         let height = unsafe { CVPixelBufferGetHeight(pixel_buffer) };
         let bytes_per_row = unsafe { CVPixelBufferGetBytesPerRow(pixel_buffer) };
-        let data_len = height * bytes_per_row;
+        let data_len = height
+            .checked_mul(bytes_per_row)
+            .filter(|len| *len <= isize::MAX as usize)
+            .ok_or_else(|| {
+                // Unlock before returning.
+                unsafe {
+                    CVPixelBufferUnlockBaseAddress(
+                        pixel_buffer,
+                        K_CV_PIXEL_BUFFER_LOCK_READ_ONLY,
+                    );
+                }
+                CaptureError::Encoding(
+                    "pixel buffer size overflow while computing data_len".into(),
+                )
+            })?;
 
         Ok(Self {
             pixel_buffer,
