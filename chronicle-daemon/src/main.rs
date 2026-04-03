@@ -3,7 +3,7 @@ mod pipeline;
 use std::sync::Arc;
 
 use anyhow::Result;
-use chronicle_audio::{AudioConfig, AudioPipeline};
+use chronicle_audio::{AudioConfig, AudioPipeline, CHANNEL_COUNT, SAMPLE_RATE};
 use chronicle_capture::{AudioOutputConfig, CaptureConfig, CaptureEngine};
 use chronicle_storage::{Storage, StorageConfig};
 
@@ -33,8 +33,8 @@ async fn main() -> Result<()> {
                 .handler()
                 .ok_or_else(|| anyhow::anyhow!("audio handler unavailable"))?,
             queue: audio_pipeline.queue(),
-            sample_rate: 48_000,
-            channel_count: 1,
+            sample_rate: SAMPLE_RATE,
+            channel_count: CHANNEL_COUNT,
             capture_microphone: false, // HEU-329: mic off by default
         }),
         ..Default::default()

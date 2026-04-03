@@ -71,6 +71,9 @@ pub struct CompletedSegment {
 /// Fixed sample rate: 48kHz is Opus's native rate and what SCK delivers.
 pub const SAMPLE_RATE: u32 = 48_000;
 
+/// Fixed channel count: mono capture.
+pub const CHANNEL_COUNT: u32 = 1;
+
 /// Configuration for the audio engine.
 #[derive(Debug, Clone)]
 pub struct AudioConfig {
@@ -116,6 +119,7 @@ mod tests {
         assert_eq!(config.segment_duration_secs, 30);
         assert_eq!(config.bitrate, 64_000);
         assert_eq!(SAMPLE_RATE, 48_000);
+        assert_eq!(CHANNEL_COUNT, 1);
     }
 
     #[test]
