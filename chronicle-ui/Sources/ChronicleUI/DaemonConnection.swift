@@ -146,8 +146,9 @@ final class DaemonConnection {
                 }
 
                 guard result == 0 else {
+                    let connectErrno = errno
                     Darwin.close(fd)
-                    cont.resume(throwing: IPCError.connectionFailed(errno: errno))
+                    cont.resume(throwing: IPCError.connectionFailed(errno: connectErrno))
                     return
                 }
 
@@ -181,7 +182,7 @@ final class DaemonConnection {
                             rawBuffer.baseAddress! + offset,
                             rawBuffer.count - offset
                         )
-                        if written < 0 {
+                        if written <= 0 {
                             cont.resume(throwing: IPCError.writeFailed(errno: errno))
                             return
                         }
