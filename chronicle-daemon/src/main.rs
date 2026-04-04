@@ -7,6 +7,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use chronicle_audio::{AudioConfig, AudioPipeline, CHANNEL_COUNT, SAMPLE_RATE};
 use chronicle_capture::{AudioOutputConfig, CaptureConfig, CaptureEngine};
+use chronicle_ipc::{CancellationToken, IpcServer};
 use chronicle_storage::{Storage, StorageConfig};
 
 #[tokio::main]
@@ -19,6 +20,13 @@ async fn main() -> Result<()> {
 
     // --- Storage ---
     let storage = Arc::new(Storage::open(StorageConfig::default()).await?);
+
+    // --- IPC server ---
+    let cancel = CancellationToken::new();
+    let socket_path = storage.base_dir().join("chronicle.sock");
+    let handler = ipc_handler::DaemonHandler::new();
+    let _ipc_server = IpcServer::start(&socket_path, handler, cancel.clone()).await?;
+    log::info!("IPC server started");
 
     // --- Audio pipeline (create first — capture engine needs the handler) ---
     let audio_staging_dir = storage.base_dir().join("audio-staging");
@@ -73,6 +81,7 @@ async fn main() -> Result<()> {
     // --- Shutdown ---
     tokio::signal::ctrl_c().await?;
     log::info!("Shutdown signal received");
+    cancel.cancel();
 
     // Stop capture engine FIRST — stops SCStream, no more audio callbacks.
     // Must drop before audio_pipeline.stop() so the handler Retained ref
