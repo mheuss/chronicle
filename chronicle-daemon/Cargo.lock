@@ -234,6 +234,7 @@ dependencies = [
  "log",
  "objc2",
  "objc2-foundation",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
