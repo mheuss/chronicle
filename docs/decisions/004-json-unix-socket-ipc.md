@@ -11,7 +11,7 @@ results, screenshots, audio, and status information to the UI.
 ## Decision
 
 Newline-delimited JSON over a Unix domain socket at
-`~/Library/Application Support/Rewind/rewind.sock`.
+`~/Library/Application Support/Chronicle/chronicle.sock`.
 
 We considered gRPC with protobuf but decided against it.
 

@@ -45,7 +45,7 @@ pub trait RequestHandler: Send + Sync + 'static {
 
 mod server;
 
-pub use server::IpcServer;
+pub use server::{IpcServer, ServerError};
 pub use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]

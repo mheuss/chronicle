@@ -151,10 +151,13 @@ impl IpcServer {
 
                             let response = match serde_json::from_str::<Request>(line) {
                                 Ok(req) => handler.handle(req),
-                                Err(e) => Response::Error {
-                                    ok: false,
-                                    message: format!("invalid request: {e}"),
-                                },
+                                Err(e) => {
+                                    log::warn!("Invalid IPC request: {e}");
+                                    Response::Error {
+                                        ok: false,
+                                        message: "invalid request".to_string(),
+                                    }
+                                }
                             };
 
                             let mut resp_json = match serde_json::to_string(&response) {
