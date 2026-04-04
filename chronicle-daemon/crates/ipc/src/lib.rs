@@ -17,7 +17,7 @@ pub enum Request {
 }
 
 /// A response from the daemon to the UI.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
     Status { ok: bool, data: StatusData },
@@ -25,7 +25,7 @@ pub enum Response {
 }
 
 /// Payload for a successful status response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusData {
     pub uptime_secs: u64,
     pub version: String,
