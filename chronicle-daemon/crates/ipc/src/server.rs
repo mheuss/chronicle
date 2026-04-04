@@ -1,11 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::{Request, RequestHandler, Response};
+
+/// Maximum line length for incoming requests (64 KB).
+const MAX_REQUEST_LINE: u64 = 64 * 1024;
 
 /// Errors from the IPC server.
 #[derive(Debug, thiserror::Error)]
@@ -15,8 +18,6 @@ pub enum ServerError {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
 }
 
 /// Unix domain socket server for IPC with the Chronicle UI.
@@ -120,18 +121,35 @@ impl IpcServer {
         cancel: CancellationToken,
     ) {
         let (reader, mut writer) = tokio::io::split(stream);
-        let mut buf_reader = BufReader::new(reader);
-        let mut line = String::new();
+        // Limit reader to MAX_REQUEST_LINE to prevent unbounded allocation
+        let mut buf_reader = BufReader::new(reader.take(MAX_REQUEST_LINE));
+        let mut buf = Vec::new();
 
         loop {
-            line.clear();
+            buf.clear();
+            // read_until is cancellation-safe (unlike read_line): partial
+            // reads are appended to `buf` and resumed correctly.
             tokio::select! {
                 _ = cancel.cancelled() => break,
-                result = buf_reader.read_line(&mut line) => {
+                result = buf_reader.read_until(b'\n', &mut buf) => {
                     match result {
                         Ok(0) => break, // EOF — client disconnected
                         Ok(_) => {
-                            let response = match serde_json::from_str::<Request>(line.trim()) {
+                            let line = match std::str::from_utf8(&buf) {
+                                Ok(s) => s.trim(),
+                                Err(_) => {
+                                    let resp = Response::Error {
+                                        ok: false,
+                                        message: "invalid UTF-8".to_string(),
+                                    };
+                                    let mut json = serde_json::to_string(&resp).unwrap();
+                                    json.push('\n');
+                                    let _ = writer.write_all(json.as_bytes()).await;
+                                    continue;
+                                }
+                            };
+
+                            let response = match serde_json::from_str::<Request>(line) {
                                 Ok(req) => handler.handle(req),
                                 Err(e) => Response::Error {
                                     ok: false,
@@ -151,6 +169,9 @@ impl IpcServer {
                             if writer.write_all(resp_json.as_bytes()).await.is_err() {
                                 break; // Write failed — client disconnected
                             }
+
+                            // Reset the take limit for the next request
+                            buf_reader.get_mut().set_limit(MAX_REQUEST_LINE);
                         }
                         Err(e) => {
                             log::error!("IPC read error: {e}");
