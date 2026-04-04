@@ -43,6 +43,11 @@ pub trait RequestHandler: Send + Sync + 'static {
     fn handle(&self, req: Request) -> Response;
 }
 
+mod server;
+
+pub use server::IpcServer;
+pub use tokio_util::sync::CancellationToken;
+
 #[cfg(test)]
 mod tests {
     use super::*;
