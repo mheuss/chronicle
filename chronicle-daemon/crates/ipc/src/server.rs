@@ -135,6 +135,23 @@ impl IpcServer {
                     match result {
                         Ok(0) => break, // EOF — client disconnected
                         Ok(_) => {
+                            // Detect oversized request (hit the Take limit
+                            // without finding a newline delimiter)
+                            let hit_limit = buf.len() as u64 == MAX_REQUEST_LINE
+                                && !buf.ends_with(b"\n");
+                            if hit_limit {
+                                log::warn!("IPC request exceeded max line length");
+                                let resp = Response::Error {
+                                    ok: false,
+                                    message: "request too large".to_string(),
+                                };
+                                if let Ok(mut json) = serde_json::to_string(&resp) {
+                                    json.push('\n');
+                                    let _ = writer.write_all(json.as_bytes()).await;
+                                }
+                                break; // close connection — framing is desynced
+                            }
+
                             let line = match std::str::from_utf8(&buf) {
                                 Ok(s) => s.trim(),
                                 Err(_) => {
@@ -145,6 +162,8 @@ impl IpcServer {
                                     let mut json = serde_json::to_string(&resp).unwrap();
                                     json.push('\n');
                                     let _ = writer.write_all(json.as_bytes()).await;
+                                    // Reset the take limit before continuing
+                                    buf_reader.get_mut().set_limit(MAX_REQUEST_LINE);
                                     continue;
                                 }
                             };

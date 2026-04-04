@@ -11,10 +11,16 @@ struct ChronicleApp: App {
                     .font(.headline)
                 HStack {
                     Circle()
-                        .fill(connection.state == .connected ? .green : .red)
+                        .fill(
+                            connection.state == .connected ? .green :
+                            connection.state == .connecting ? .yellow : .red
+                        )
                         .frame(width: 8, height: 8)
-                    Text(connection.state == .connected ? "Daemon connected" : "Daemon disconnected")
-                        .font(.caption)
+                    Text(
+                        connection.state == .connected ? "Daemon connected" :
+                        connection.state == .connecting ? "Connecting…" : "Daemon disconnected"
+                    )
+                    .font(.caption)
                 }
                 Divider()
                 Button("Quit") {

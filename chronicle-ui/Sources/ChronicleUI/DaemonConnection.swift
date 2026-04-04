@@ -59,6 +59,7 @@ final class DaemonConnection {
                 state = .connecting
                 do {
                     try await establishConnection()
+                    try Task.checkCancellation()
                     state = .connected
                     delay = .seconds(1)
                     try await monitorConnection()
