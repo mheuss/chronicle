@@ -224,6 +224,7 @@ impl Storage {
     /// Delete records and media files older than the configured retention period.
     pub async fn run_cleanup(&self) -> Result<CleanupStats> {
         let pool = self.pool.clone();
+        let base_dir = self.base_dir.clone();
         tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             let retention_days: i64 = match conn.query_row(
@@ -248,7 +249,8 @@ impl Storage {
                 Err(rusqlite::Error::QueryReturnedNoRows) => 30,
                 Err(e) => return Err(e.into()),
             };
-            retention::run_cleanup(&conn, retention_days)
+            let media_mgr = MediaManager::new(base_dir);
+            retention::run_cleanup(&conn, &media_mgr, retention_days)
         })
         .await?
     }
@@ -259,7 +261,8 @@ impl Storage {
         let base_dir = self.base_dir.clone();
         tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
-            let bytes_freed = retention::sweep_orphans(&conn, &base_dir)?;
+            let media_mgr = MediaManager::new(base_dir);
+            let bytes_freed = retention::sweep_orphans(&conn, &media_mgr)?;
             Ok(CleanupStats {
                 bytes_freed,
                 ..CleanupStats::default()
