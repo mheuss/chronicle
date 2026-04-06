@@ -1,9 +1,26 @@
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+
+use chrono::{DateTime, Datelike, Utc};
 
 use crate::error::Result;
 
 const FILE_MODE: u32 = 0o600;
+const DIR_MODE: u32 = 0o700;
+
+/// Sanitize a user-supplied identifier so it cannot escape the intended
+/// directory. Replaces `/`, `\`, `..`, and null bytes with `_`.
+fn sanitize_id(input: &str) -> String {
+    input
+        .replace("..", "_")
+        .replace(['/', '\\', '\0'], "_")
+}
+
+fn date_parts(timestamp_millis: i64) -> (i32, u32, u32) {
+    let dt = DateTime::<Utc>::from_timestamp_millis(timestamp_millis)
+        .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).unwrap());
+    (dt.year(), dt.month(), dt.day())
+}
 
 /// Owns the base directory and all file lifecycle operations.
 /// Permission policy is enforced here: files get 0o600, directories get 0o700.
@@ -55,6 +72,36 @@ impl MediaManager {
     pub(crate) fn harden_file(&self, path: &Path) -> Result<()> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(FILE_MODE))?;
         Ok(())
+    }
+
+    /// Allocate a canonical file path under base_dir/subdir/YYYY/MM/DD/.
+    /// Creates parent directories with mode 0o700.
+    pub(crate) fn allocate_path(
+        &self,
+        subdir: &str,
+        timestamp: i64,
+        id: &str,
+        ext: &str,
+    ) -> Result<PathBuf> {
+        let id = sanitize_id(id);
+        let canonical_base = std::fs::canonicalize(&self.base_dir)?;
+        let (year, month, day) = date_parts(timestamp);
+        let parent = self.base_dir
+            .join(subdir)
+            .join(format!("{}/{:02}/{:02}", year, month, day));
+
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(DIR_MODE)
+            .create(&parent)?;
+
+        let canonical_parent = std::fs::canonicalize(&parent)?;
+        if !canonical_parent.starts_with(&canonical_base) {
+            return Err(crate::error::StorageError::Other(
+                "path escaped storage root".into(),
+            ));
+        }
+        Ok(canonical_parent.join(format!("{}_{}.{}", timestamp, id, ext)))
     }
 }
 
@@ -122,5 +169,44 @@ mod tests {
         mgr.harden_file(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn allocate_path_creates_dirs_with_0o700() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let ts: i64 = 1774094400000;
+
+        let path = mgr.allocate_path("screenshots", ts, "display1", "heif").unwrap();
+        assert!(path.is_absolute());
+
+        let parent = path.parent().unwrap();
+        assert!(parent.is_dir());
+        let mode = std::fs::metadata(parent).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "parent dir should be 0o700, got {:#o}", mode);
+    }
+
+    #[test]
+    fn allocate_path_sanitizes_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let ts: i64 = 1774094400000;
+
+        let path = mgr.allocate_path("screenshots", ts, "../evil", "heif").unwrap();
+        let filename = path.file_name().unwrap().to_string_lossy();
+        assert!(!filename.contains(".."), "path traversal should be sanitized");
+    }
+
+    #[test]
+    fn allocate_path_rejects_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let ts: i64 = 1774094400000;
+
+        let result = mgr.allocate_path("screenshots", ts, "../../etc/passwd", "heif");
+        assert!(result.is_ok());
+        let path = result.unwrap();
+        let canonical_base = std::fs::canonicalize(dir.path()).unwrap();
+        assert!(path.starts_with(&canonical_base));
     }
 }
