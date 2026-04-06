@@ -557,4 +557,46 @@ mod tests {
         assert_eq!(status.audio_segment_count, 0);
         assert_eq!(status.oldest_entry, None);
     }
+
+    #[tokio::test]
+    async fn sweep_orphans_removes_untracked_files_on_startup() {
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Storage::open(config).await.unwrap();
+
+        // Simulate a crash: create an orphan file in the screenshots directory
+        let orphan_dir = dir.path().join("screenshots/2026/03/21");
+        std::fs::create_dir_all(&orphan_dir).unwrap();
+        let orphan_file = orphan_dir.join("999_orphan.heif");
+        std::fs::write(&orphan_file, b"orphan data").unwrap();
+        assert!(orphan_file.exists());
+
+        // Run sweep (what startup would do)
+        let stats = storage.sweep_orphans().await.unwrap();
+        assert!(stats.bytes_freed > 0, "should have freed orphan bytes");
+        assert!(!orphan_file.exists(), "orphan file should be deleted");
+    }
+
+    #[tokio::test]
+    async fn status_handles_metadata_errors_gracefully() {
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Storage::open(config).await.unwrap();
+
+        // Delete the database file and its sidecars to simulate metadata read failure
+        let db_path = dir.path().join("chronicle.db");
+        std::fs::remove_file(&db_path).unwrap();
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+
+        // status() should still succeed (returning 0 for unreadable fields)
+        let status = storage.status().await.unwrap();
+        assert_eq!(status.db_size_bytes, 0, "should report 0 for missing db file");
+    }
 }
