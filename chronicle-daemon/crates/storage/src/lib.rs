@@ -74,7 +74,7 @@ impl Storage {
         .await??;
 
         let base_dir = config.base_dir;
-        let media_mgr = MediaManager::new(base_dir.clone());
+        let media_mgr = MediaManager::new(base_dir.clone())?;
         Ok(Self {
             pool,
             base_dir,
