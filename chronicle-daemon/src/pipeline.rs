@@ -54,6 +54,9 @@ async fn process_frame(
     // so briefly blocking the task is acceptable.
     encode_heif(frame.sample_buffer.inner(), &image_path, HEIF_QUALITY)?;
 
+    // Harden file permissions (encode_heif writes directly, bypassing MediaManager)
+    storage.media_manager().harden_file(&image_path)?;
+
     // 5. Insert DB record — clean up the HEIF file if this fails so we
     //    don't accumulate orphaned files on disk.
     let row_id = match storage
@@ -72,7 +75,7 @@ async fn process_frame(
     {
         Ok(id) => id,
         Err(e) => {
-            let _ = std::fs::remove_file(&image_path);
+            let _ = storage.media_manager().delete_file(&image_path);
             return Err(e.into());
         }
     };
@@ -184,7 +187,7 @@ async fn process_audio_segment(
     // 2. Move from staging to permanent location (atomic rename, same filesystem).
     //    rename(2) on the same filesystem is a metadata-only operation (microseconds).
     //    Both directories are under the Chronicle data dir, so no cross-mount copy.
-    std::fs::rename(&segment.path, &dest_path)?;
+    storage.media_manager().move_file(&segment.path, &dest_path)?;
 
     // 3. Insert DB record — clean up dest file if insert fails
     match storage
@@ -208,7 +211,7 @@ async fn process_audio_segment(
             Ok(())
         }
         Err(e) => {
-            let _ = std::fs::remove_file(&dest_path);
+            let _ = storage.media_manager().delete_file(&dest_path);
             Err(e.into())
         }
     }
@@ -425,6 +428,41 @@ mod tests {
         let (_tx, rx) = mpsc::channel::<CompletedSegment>(16);
         drop(_tx);
         audio_store_loop(storage, rx).await;
+    }
+
+    #[tokio::test]
+    async fn audio_store_loop_hardens_file_permissions() {
+        use chronicle_audio::{AudioSource, CompletedSegment};
+        use std::os::unix::fs::PermissionsExt;
+
+        let (storage, dir) = temp_storage().await;
+
+        let staging_dir = dir.path().join("audio-staging");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        let staging_file = staging_dir.join("perm_test.opus");
+        // Write with permissive mode so we can verify the move tightens it
+        std::fs::write(&staging_file, b"perm test data").unwrap();
+        std::fs::set_permissions(&staging_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let segment = CompletedSegment {
+            source: AudioSource::Microphone,
+            path: staging_file.clone(),
+            start_timestamp: 1_700_000_100_000,
+            end_timestamp: 1_700_000_130_000,
+        };
+
+        let (tx, rx) = mpsc::channel(16);
+        tx.send(segment).await.unwrap();
+        drop(tx);
+
+        audio_store_loop(storage.clone(), rx).await;
+
+        let audio = storage.get_audio_segment(1).await.unwrap();
+        let perm_path = std::path::Path::new(&audio.audio_path);
+        assert!(perm_path.exists(), "permanent audio file should exist");
+
+        let mode = std::fs::metadata(perm_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "audio file should be owner-only (0o600), got {:#o}", mode);
     }
 
     #[tokio::test]

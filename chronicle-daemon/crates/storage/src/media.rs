@@ -45,14 +45,14 @@ impl MediaManager {
     }
 
     /// Move (rename) a file from one path to another, then set 0o600.
-    pub(crate) fn move_file(&self, from: &Path, to: &Path) -> Result<()> {
+    pub fn move_file(&self, from: &Path, to: &Path) -> Result<()> {
         std::fs::rename(from, to)?;
         std::fs::set_permissions(to, std::fs::Permissions::from_mode(FILE_MODE))?;
         Ok(())
     }
 
     /// Delete a file, returning bytes freed. Returns Ok(0) if the file is already gone.
-    pub(crate) fn delete_file(&self, path: &Path) -> Result<u64> {
+    pub fn delete_file(&self, path: &Path) -> Result<u64> {
         let size = match std::fs::metadata(path) {
             Ok(meta) => meta.len(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -69,7 +69,7 @@ impl MediaManager {
     /// write_file(). However, encode_heif is an external function from the
     /// capture crate that writes directly to a path and cannot be wrapped.
     /// harden_file closes the permission window immediately after the write.
-    pub(crate) fn harden_file(&self, path: &Path) -> Result<()> {
+    pub fn harden_file(&self, path: &Path) -> Result<()> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(FILE_MODE))?;
         Ok(())
     }
