@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
-use chrono::{DateTime, Datelike, Utc};
+
 use crate::error::Result;
 
 /// Sanitize a user-supplied identifier (display_id, source) so it cannot
 /// escape the intended directory. Replaces `/`, `\`, `..`, and null bytes
 /// with `_`.
+#[cfg(test)]
 fn sanitize_id(input: &str) -> String {
     input
         .replace("..", "_")
@@ -18,6 +19,9 @@ fn sanitize_id(input: &str) -> String {
 /// tempdir paths like `/var/folders/...` resolve to `/private/var/folders/...`.
 /// Storing canonical paths in the DB means the orphan sweep can compare
 /// without its own canonicalization step.
+///
+/// Delegates to `MediaManager::allocate_path` which creates directories
+/// with mode 0o700.
 pub(crate) fn allocate_path(
     base_dir: &Path,
     timestamp: i64,
@@ -25,20 +29,8 @@ pub(crate) fn allocate_path(
     subdir: &str,
     ext: &str,
 ) -> Result<PathBuf> {
-    let id = sanitize_id(id);
-    let canonical_base = std::fs::canonicalize(base_dir)?;
-    let (year, month, day) = date_parts(timestamp);
-    let parent = base_dir
-        .join(subdir)
-        .join(format!("{}/{:02}/{:02}", year, month, day));
-    std::fs::create_dir_all(&parent)?;
-    let canonical_parent = std::fs::canonicalize(&parent)?;
-    if !canonical_parent.starts_with(&canonical_base) {
-        return Err(crate::error::StorageError::Other(
-            "path escaped storage root".into(),
-        ));
-    }
-    Ok(canonical_parent.join(format!("{}_{}.{}", timestamp, id, ext)))
+    let mgr = crate::media::MediaManager::new(base_dir.to_path_buf());
+    mgr.allocate_path(subdir, timestamp, id, ext)
 }
 
 /// Build a non-canonical screenshot path. Only used in tests to verify
@@ -132,7 +124,9 @@ fn dir_size_recursive(path: &Path, total: &mut u64) {
     }
 }
 
+#[cfg(test)]
 fn date_parts(timestamp_millis: i64) -> (i32, u32, u32) {
+    use chrono::{DateTime, Datelike, Utc};
     let dt = DateTime::<Utc>::from_timestamp_millis(timestamp_millis)
         .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).unwrap());
     (dt.year(), dt.month(), dt.day())
