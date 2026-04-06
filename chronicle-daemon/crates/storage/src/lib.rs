@@ -18,6 +18,7 @@ pub(crate) mod screenshots;
 pub(crate) mod audio;
 pub(crate) mod search;
 pub(crate) mod retention;
+pub(crate) mod media;
 
 pub use error::{StorageError, Result};
 pub use models::{
