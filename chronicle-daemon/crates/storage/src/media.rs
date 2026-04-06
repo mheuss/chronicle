@@ -24,7 +24,7 @@ fn date_parts(timestamp_millis: i64) -> (i32, u32, u32) {
 
 /// Owns the base directory and all file lifecycle operations.
 /// Permission policy is enforced here: files get 0o600, directories get 0o700.
-pub(crate) struct MediaManager {
+pub struct MediaManager {
     base_dir: PathBuf,
 }
 

@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 
+use crate::media::MediaManager;
+
 /// Error types for storage operations.
 pub mod error;
 /// Data models, configuration, and query types.
@@ -32,6 +34,7 @@ pub use models::{
 pub struct Storage {
     pub(crate) pool: Pool<SqliteConnectionManager>,
     pub(crate) base_dir: PathBuf,
+    media_mgr: MediaManager,
 }
 
 impl Storage {
@@ -63,7 +66,8 @@ impl Storage {
         .await??;
 
         let base_dir = config.base_dir;
-        Ok(Self { pool, base_dir })
+        let media_mgr = MediaManager::new(base_dir.clone());
+        Ok(Self { pool, base_dir, media_mgr })
     }
 
     /// The root directory for the database file and media subdirectories.
@@ -71,14 +75,19 @@ impl Storage {
         &self.base_dir
     }
 
+    /// The media file manager for this storage instance.
+    pub fn media_manager(&self) -> &MediaManager {
+        &self.media_mgr
+    }
+
     // --- Screenshot operations ---
 
     /// Reserve a unique file path for a new screenshot image.
     pub async fn allocate_screenshot_path(&self, timestamp: i64, display_id: &str) -> Result<PathBuf> {
-        let base_dir = self.base_dir.clone();
+        let mgr = MediaManager::new(self.base_dir.clone());
         let display_id = display_id.to_string();
         tokio::task::spawn_blocking(move || {
-            files::allocate_path(&base_dir, timestamp, &display_id, "screenshots", "heif")
+            mgr.allocate_path("screenshots", timestamp, &display_id, "heif")
         })
         .await?
     }
@@ -132,10 +141,10 @@ impl Storage {
 
     /// Reserve a unique file path for a new audio segment.
     pub async fn allocate_audio_path(&self, timestamp: i64, source: &str) -> Result<PathBuf> {
-        let base_dir = self.base_dir.clone();
+        let mgr = MediaManager::new(self.base_dir.clone());
         let source = source.to_string();
         tokio::task::spawn_blocking(move || {
-            files::allocate_path(&base_dir, timestamp, &source, "audio", "opus")
+            mgr.allocate_path("audio", timestamp, &source, "opus")
         })
         .await?
     }
@@ -302,20 +311,35 @@ impl Storage {
 
             // DB file size (include WAL and SHM sidecars)
             let db_path = base_dir.join("chronicle.db");
-            let db_size_bytes = std::fs::metadata(&db_path)
-                .map(|m| m.len())
-                .unwrap_or(0);
-            let wal_size = std::fs::metadata(db_path.with_extension("db-wal"))
-                .map(|m| m.len())
-                .unwrap_or(0);
-            let shm_size = std::fs::metadata(db_path.with_extension("db-shm"))
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let db_size_bytes = match std::fs::metadata(&db_path) {
+                Ok(m) => m.len(),
+                Err(e) => {
+                    log::warn!("failed to read db metadata at {}: {}", db_path.display(), e);
+                    0
+                }
+            };
+            let wal_size = match std::fs::metadata(db_path.with_extension("db-wal")) {
+                Ok(m) => m.len(),
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    log::warn!("failed to read WAL metadata: {}", e);
+                    0
+                }
+                Err(_) => 0, // WAL file not existing is normal
+            };
+            let shm_size = match std::fs::metadata(db_path.with_extension("db-shm")) {
+                Ok(m) => m.len(),
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    log::warn!("failed to read SHM metadata: {}", e);
+                    0
+                }
+                Err(_) => 0,
+            };
             let db_size_bytes = db_size_bytes + wal_size + shm_size;
 
             // Total disk usage from screenshots/ and audio/ directories
-            let screenshots_size = files::dir_size(&base_dir.join("screenshots"));
-            let audio_size = files::dir_size(&base_dir.join("audio"));
+            let mgr = crate::media::MediaManager::new(base_dir);
+            let screenshots_size = mgr.dir_size("screenshots");
+            let audio_size = mgr.dir_size("audio");
             let total_disk_usage_bytes = db_size_bytes + screenshots_size + audio_size;
 
             Ok(StorageStatus {
@@ -503,6 +527,17 @@ mod tests {
         };
         let storage = Storage::open(config).await.unwrap();
         assert_eq!(storage.base_dir(), dir.path());
+    }
+
+    #[tokio::test]
+    async fn media_manager_returns_base_dir() {
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Storage::open(config).await.unwrap();
+        assert_eq!(storage.media_manager().base_dir(), dir.path());
     }
 
     #[tokio::test]
