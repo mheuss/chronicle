@@ -380,4 +380,42 @@ mod tests {
         assert!(bytes_freed > 0);
         assert!(!orphan_file.exists());
     }
+
+    #[test]
+    fn cleanup_unified_handles_both_tables() {
+        let conn = setup_db();
+        let now = now_millis();
+        let old_ts = now - 31 * 86_400 * 1000;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        let shot_path = dir.path().join("old_shot.heif");
+        std::fs::write(&shot_path, b"image").unwrap();
+        let audio_path = dir.path().join("old_audio.opus");
+        std::fs::write(&audio_path, b"audio").unwrap();
+
+        screenshots::insert(&conn, &ScreenshotMetadata {
+            timestamp: old_ts,
+            display_id: "d1".into(),
+            app_name: None, app_bundle_id: None, window_title: None,
+            image_path: shot_path.to_string_lossy().into_owned(),
+            ocr_text: None, phash: None, resolution: None,
+        }).unwrap();
+
+        audio::insert(&conn, &AudioSegmentMetadata {
+            start_timestamp: old_ts,
+            end_timestamp: old_ts + 30_000,
+            source: "mic".into(),
+            audio_path: audio_path.to_string_lossy().into_owned(),
+            transcript: None, whisper_model: None, language: None,
+        }).unwrap();
+
+        let media_mgr = crate::media::MediaManager::new(dir.path().to_path_buf());
+        let stats = run_cleanup(&conn, &media_mgr, 30).unwrap();
+
+        assert_eq!(stats.screenshots_deleted, 1, "should delete expired screenshot");
+        assert_eq!(stats.audio_segments_deleted, 1, "should delete expired audio");
+        assert!(!shot_path.exists(), "screenshot file should be deleted");
+        assert!(!audio_path.exists(), "audio file should be deleted");
+    }
 }
