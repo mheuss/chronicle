@@ -74,6 +74,35 @@ impl MediaManager {
         Ok(())
     }
 
+    /// Recursively collect all file paths under base_dir/subdir.
+    /// Returns an empty vec if the directory doesn't exist or is unreadable.
+    /// Skips symlinks to avoid following links outside the data directory.
+    /// Logs and skips unreadable entries (best-effort walk).
+    pub(crate) fn walk_files(&self, subdir: &str) -> Vec<PathBuf> {
+        let dir = self.base_dir.join(subdir);
+        if !dir.exists() {
+            return Vec::new();
+        }
+        if dir.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            log::warn!("refusing to walk symlinked directory: {}", dir.display());
+            return Vec::new();
+        }
+        let mut files = Vec::new();
+        walk_files_recursive(&dir, &mut files);
+        files
+    }
+
+    /// Sum the size (in bytes) of all files under base_dir/subdir.
+    pub(crate) fn dir_size(&self, subdir: &str) -> u64 {
+        let dir = self.base_dir.join(subdir);
+        if !dir.exists() {
+            return 0;
+        }
+        let mut total: u64 = 0;
+        dir_size_recursive(&dir, &mut total);
+        total
+    }
+
     /// Allocate a canonical file path under base_dir/subdir/YYYY/MM/DD/.
     /// Creates parent directories with mode 0o700.
     pub(crate) fn allocate_path(
@@ -102,6 +131,71 @@ impl MediaManager {
             ));
         }
         Ok(canonical_parent.join(format!("{}_{}.{}", timestamp, id, ext)))
+    }
+}
+
+pub(crate) fn walk_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            log::warn!("skipping unreadable directory {}: {}", dir.display(), e);
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                log::warn!("skipping unreadable entry in {}: {}", dir.display(), e);
+                continue;
+            }
+        };
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if ft.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if ft.is_dir() {
+            walk_files_recursive(&path, files);
+        } else if ft.is_file() {
+            files.push(path);
+        }
+    }
+}
+
+fn dir_size_recursive(path: &Path, total: &mut u64) {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(e) => {
+            log::warn!("skipping unreadable directory {}: {}", path.display(), e);
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                log::warn!("skipping unreadable entry in {}: {}", path.display(), e);
+                continue;
+            }
+        };
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
+            dir_size_recursive(&entry.path(), total);
+        } else if ft.is_file()
+            && let Ok(meta) = std::fs::symlink_metadata(entry.path())
+        {
+            *total += meta.len();
+        }
     }
 }
 
@@ -208,5 +302,45 @@ mod tests {
         let path = result.unwrap();
         let canonical_base = std::fs::canonicalize(dir.path()).unwrap();
         assert!(path.starts_with(&canonical_base));
+    }
+
+    #[test]
+    fn walk_files_collects_recursively() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let sub = dir.path().join("screenshots/2026/03/21");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("a.heif"), b"x").unwrap();
+        std::fs::write(sub.join("b.heif"), b"y").unwrap();
+
+        let files = mgr.walk_files("screenshots");
+        assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn walk_files_returns_empty_for_missing_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let files = mgr.walk_files("nonexistent");
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn dir_size_sums_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let sub = dir.path().join("audio");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("a.opus"), &[0u8; 100]).unwrap();
+        std::fs::write(sub.join("b.opus"), &[0u8; 200]).unwrap();
+
+        assert_eq!(mgr.dir_size("audio"), 300);
+    }
+
+    #[test]
+    fn dir_size_returns_zero_for_missing_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = MediaManager::new(dir.path().to_path_buf());
+        assert_eq!(mgr.dir_size("nonexistent"), 0);
     }
 }
