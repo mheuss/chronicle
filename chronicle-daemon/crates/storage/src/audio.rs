@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, Row};
+use rusqlite::{Connection, Row, params};
 
 use crate::error::Result;
 use crate::models::{AudioSegment, AudioSegmentMetadata};
@@ -120,7 +120,10 @@ mod tests {
         update_transcript(&conn, id, "Updated transcript content").unwrap();
 
         let segment = get(&conn, id).unwrap();
-        assert_eq!(segment.transcript.as_deref(), Some("Updated transcript content"));
+        assert_eq!(
+            segment.transcript.as_deref(),
+            Some("Updated transcript content")
+        );
     }
 
     #[test]

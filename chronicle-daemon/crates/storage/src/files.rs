@@ -3,9 +3,7 @@
 /// with `_`.
 #[cfg(test)]
 fn sanitize_id(input: &str) -> String {
-    input
-        .replace("..", "_")
-        .replace(['/', '\\', '\0'], "_")
+    input.replace("..", "_").replace(['/', '\\', '\0'], "_")
 }
 
 #[cfg(test)]
@@ -19,7 +17,11 @@ fn date_parts(timestamp_millis: i64) -> (i32, u32, u32) {
 /// Build a non-canonical screenshot path. Only used in tests to verify
 /// the date-partitioned structure without hitting the filesystem.
 #[cfg(test)]
-fn screenshot_path(base_dir: &std::path::Path, timestamp: i64, display_id: &str) -> std::path::PathBuf {
+fn screenshot_path(
+    base_dir: &std::path::Path,
+    timestamp: i64,
+    display_id: &str,
+) -> std::path::PathBuf {
     let safe_id = sanitize_id(display_id);
     let (year, month, day) = date_parts(timestamp);
     base_dir

@@ -1,6 +1,6 @@
 use chronicle_storage::{
-    AudioSegmentMetadata, CleanupStats, ScreenshotMetadata, SearchFilter, SearchSource,
-    Storage, StorageConfig,
+    AudioSegmentMetadata, CleanupStats, ScreenshotMetadata, SearchFilter, SearchSource, Storage,
+    StorageConfig,
 };
 use chrono::{Datelike, Utc};
 use tempfile::tempdir;
@@ -35,10 +35,7 @@ async fn full_workflow() {
         "screenshot path should contain date structure, got: {screenshot_path_str}"
     );
 
-    let audio_path = storage
-        .allocate_audio_path(ts, "mic")
-        .await
-        .unwrap();
+    let audio_path = storage.allocate_audio_path(ts, "mic").await.unwrap();
     assert!(
         audio_path.parent().unwrap().exists(),
         "audio parent dir should be created"
@@ -90,7 +87,11 @@ async fn full_workflow() {
         .search("kubernetes", SearchFilter::All, 10, 0)
         .await
         .unwrap();
-    assert_eq!(results.len(), 2, "All filter should find 2 results for 'kubernetes'");
+    assert_eq!(
+        results.len(),
+        2,
+        "All filter should find 2 results for 'kubernetes'"
+    );
 
     // 7. Search with ScreenOnly filter -- expect 1 result
     let results = storage
@@ -121,7 +122,11 @@ async fn full_workflow() {
         .search("grafana", SearchFilter::ScreenOnly, 10, 0)
         .await
         .unwrap();
-    assert_eq!(results.len(), 1, "'grafana' should match in ScreenOnly after OCR update");
+    assert_eq!(
+        results.len(),
+        1,
+        "'grafana' should match in ScreenOnly after OCR update"
+    );
 
     // 10. Update transcript
     storage
@@ -164,24 +169,41 @@ async fn full_workflow() {
 
     // 13. Get and set config (verify default retention_days = "30", set to "7", verify)
     let retention = storage.get_config("retention_days").await.unwrap();
-    assert_eq!(retention, Some("30".to_string()), "default retention_days should be 30");
+    assert_eq!(
+        retention,
+        Some("30".to_string()),
+        "default retention_days should be 30"
+    );
 
     storage.set_config("retention_days", "7").await.unwrap();
     let retention = storage.get_config("retention_days").await.unwrap();
-    assert_eq!(retention, Some("7".to_string()), "retention_days should be updated to 7");
+    assert_eq!(
+        retention,
+        Some("7".to_string()),
+        "retention_days should be updated to 7"
+    );
 
     // 14. Get status (verify counts, db_size > 0)
     let status = storage.status().await.unwrap();
     assert_eq!(status.screenshot_count, 1);
     assert_eq!(status.audio_segment_count, 1);
     assert!(status.db_size_bytes > 0, "db_size_bytes should be > 0");
-    assert!(status.total_disk_usage_bytes > 0, "total_disk_usage_bytes should be > 0");
+    assert!(
+        status.total_disk_usage_bytes > 0,
+        "total_disk_usage_bytes should be > 0"
+    );
     assert_eq!(status.oldest_entry, Some(ts));
 
     // 15. Run cleanup (nothing expired with fresh data and 7-day retention)
     let cleanup: CleanupStats = storage.run_cleanup().await.unwrap();
-    assert_eq!(cleanup.screenshots_deleted, 0, "no screenshots should be deleted");
-    assert_eq!(cleanup.audio_segments_deleted, 0, "no audio segments should be deleted");
+    assert_eq!(
+        cleanup.screenshots_deleted, 0,
+        "no screenshots should be deleted"
+    );
+    assert_eq!(
+        cleanup.audio_segments_deleted, 0,
+        "no audio segments should be deleted"
+    );
 
     // Verify data is still intact after cleanup
     let status_after = storage.status().await.unwrap();

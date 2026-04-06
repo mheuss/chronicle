@@ -16,8 +16,7 @@ impl Default for StorageConfig {
         // Using HOME is intentional. Chronicle is macOS-only and HOME is always
         // set by the system. This avoids pulling in a `dirs` crate dependency
         // just for one path lookup.
-        let home = std::env::var("HOME")
-            .expect("HOME environment variable must be set");
+        let home = std::env::var("HOME").expect("HOME environment variable must be set");
         let base_dir = PathBuf::from(home).join("Library/Application Support/Chronicle");
         Self {
             base_dir,

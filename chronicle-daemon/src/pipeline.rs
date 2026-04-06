@@ -102,10 +102,7 @@ async fn process_frame(
 /// Run OCR on stored screenshots and index the extracted text.
 ///
 /// Runs until the OCR channel closes (capture→store loop exited).
-pub async fn ocr_loop(
-    storage: Arc<Storage>,
-    mut ocr_rx: mpsc::Receiver<(i64, PathBuf)>,
-) {
+pub async fn ocr_loop(storage: Arc<Storage>, mut ocr_rx: mpsc::Receiver<(i64, PathBuf)>) {
     while let Some((row_id, image_path)) = ocr_rx.recv().await {
         let path = image_path.clone();
         let result = tokio::task::spawn_blocking(move || extract_text(&path)).await;
@@ -187,7 +184,9 @@ async fn process_audio_segment(
     // 2. Move from staging to permanent location (atomic rename, same filesystem).
     //    rename(2) on the same filesystem is a metadata-only operation (microseconds).
     //    Both directories are under the Chronicle data dir, so no cross-mount copy.
-    storage.media_manager().move_file(&segment.path, &dest_path)?;
+    storage
+        .media_manager()
+        .move_file(&segment.path, &dest_path)?;
 
     // 3. Insert DB record — clean up dest file if insert fails
     match storage
@@ -254,21 +253,20 @@ mod tests {
 
     /// Path to the OCR test fixture with known text.
     fn sample_text_image() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("crates/ocr/tests/fixtures/sample-text.png")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("crates/ocr/tests/fixtures/sample-text.png")
     }
 
     /// Path to the OCR test fixture with no text (blank).
     fn blank_image() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("crates/ocr/tests/fixtures/blank.png")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("crates/ocr/tests/fixtures/blank.png")
     }
 
     #[tokio::test]
     async fn ocr_loop_stores_extracted_text() {
         let (storage, _dir) = temp_storage().await;
         let image_path = sample_text_image();
-        let row_id = insert_test_screenshot(&storage, image_path.to_str().unwrap(), 1_700_000_000_000).await;
+        let row_id =
+            insert_test_screenshot(&storage, image_path.to_str().unwrap(), 1_700_000_000_000).await;
 
         let (ocr_tx, ocr_rx) = mpsc::channel(32);
         ocr_tx.try_send((row_id, image_path)).unwrap();
@@ -282,17 +280,15 @@ mod tests {
             "expected OCR text to be stored for screenshot with known text"
         );
         let text = screenshot.ocr_text.unwrap();
-        assert!(
-            !text.is_empty(),
-            "expected non-empty OCR text"
-        );
+        assert!(!text.is_empty(), "expected non-empty OCR text");
     }
 
     #[tokio::test]
     async fn ocr_loop_skips_empty_text() {
         let (storage, _dir) = temp_storage().await;
         let image_path = blank_image();
-        let row_id = insert_test_screenshot(&storage, image_path.to_str().unwrap(), 1_700_000_001_000).await;
+        let row_id =
+            insert_test_screenshot(&storage, image_path.to_str().unwrap(), 1_700_000_001_000).await;
 
         let (ocr_tx, ocr_rx) = mpsc::channel(32);
         ocr_tx.try_send((row_id, image_path)).unwrap();
@@ -312,10 +308,12 @@ mod tests {
     async fn ocr_loop_continues_on_missing_image() {
         let (storage, _dir) = temp_storage().await;
         let missing_path = PathBuf::from("/nonexistent/image.png");
-        let row_id_bad = insert_test_screenshot(&storage, "/nonexistent/image.png", 1_700_000_002_000).await;
+        let row_id_bad =
+            insert_test_screenshot(&storage, "/nonexistent/image.png", 1_700_000_002_000).await;
 
         let image_path = sample_text_image();
-        let row_id_good = insert_test_screenshot(&storage, image_path.to_str().unwrap(), 1_700_000_003_000).await;
+        let row_id_good =
+            insert_test_screenshot(&storage, image_path.to_str().unwrap(), 1_700_000_003_000).await;
 
         let (ocr_tx, ocr_rx) = mpsc::channel(32);
         // Send bad path first, then good path
@@ -371,7 +369,10 @@ mod tests {
 
         audio_store_loop(storage.clone(), rx).await;
 
-        assert!(!staging_file.exists(), "staging file should have been moved");
+        assert!(
+            !staging_file.exists(),
+            "staging file should have been moved"
+        );
 
         let audio = storage.get_audio_segment(1).await.unwrap();
         assert_eq!(audio.start_timestamp, 1_700_000_000_000);
@@ -462,7 +463,11 @@ mod tests {
         assert!(perm_path.exists(), "permanent audio file should exist");
 
         let mode = std::fs::metadata(perm_path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "audio file should be owner-only (0o600), got {:#o}", mode);
+        assert_eq!(
+            mode, 0o600,
+            "audio file should be owner-only (0o600), got {:#o}",
+            mode
+        );
     }
 
     #[tokio::test]
