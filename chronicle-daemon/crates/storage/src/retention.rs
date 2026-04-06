@@ -58,6 +58,12 @@ pub(crate) fn run_cleanup(
 }
 
 /// Generic cleanup for one media table. Returns (rows_deleted, bytes_freed).
+///
+/// **Single-caller assumption:** This function is not safe for concurrent
+/// execution. The SELECT runs outside the transaction, so a concurrent call
+/// could select the same batch. The daemon calls `run_cleanup` from a single
+/// async task — if that changes, wrap SELECT + file deletion + DB DELETE in
+/// a broader transaction or add row-level locking.
 fn cleanup_media(
     conn: &Connection,
     media: &MediaTable,
