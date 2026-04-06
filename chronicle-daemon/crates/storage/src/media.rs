@@ -207,6 +207,7 @@ impl MediaManager {
         id: &str,
         ext: &str,
     ) -> Result<PathBuf> {
+        Self::validate_subdir(subdir)?;
         let id = sanitize_id(id);
         let (year, month, day) = date_parts(timestamp);
         let parent = self
