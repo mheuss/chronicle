@@ -1,7 +1,3 @@
-use std::path::{Path, PathBuf};
-
-use crate::error::Result;
-
 /// Sanitize a user-supplied identifier (display_id, source) so it cannot
 /// escape the intended directory. Replaces `/`, `\`, `..`, and null bytes
 /// with `_`.
@@ -12,31 +8,18 @@ fn sanitize_id(input: &str) -> String {
         .replace(['/', '\\', '\0'], "_")
 }
 
-/// Allocate a canonical file path under `base_dir/subdir/YYYY/MM/DD/`.
-///
-/// Creates the parent directory, then canonicalizes it so the returned path
-/// matches what the filesystem reports. This is critical on macOS where
-/// tempdir paths like `/var/folders/...` resolve to `/private/var/folders/...`.
-/// Storing canonical paths in the DB means the orphan sweep can compare
-/// without its own canonicalization step.
-///
-/// Delegates to `MediaManager::allocate_path` which creates directories
-/// with mode 0o700.
-pub(crate) fn allocate_path(
-    base_dir: &Path,
-    timestamp: i64,
-    id: &str,
-    subdir: &str,
-    ext: &str,
-) -> Result<PathBuf> {
-    let mgr = crate::media::MediaManager::new(base_dir.to_path_buf());
-    mgr.allocate_path(subdir, timestamp, id, ext)
+#[cfg(test)]
+fn date_parts(timestamp_millis: i64) -> (i32, u32, u32) {
+    use chrono::{DateTime, Datelike, Utc};
+    let dt = DateTime::<Utc>::from_timestamp_millis(timestamp_millis)
+        .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).unwrap());
+    (dt.year(), dt.month(), dt.day())
 }
 
 /// Build a non-canonical screenshot path. Only used in tests to verify
 /// the date-partitioned structure without hitting the filesystem.
 #[cfg(test)]
-fn screenshot_path(base_dir: &Path, timestamp: i64, display_id: &str) -> PathBuf {
+fn screenshot_path(base_dir: &std::path::Path, timestamp: i64, display_id: &str) -> std::path::PathBuf {
     let safe_id = sanitize_id(display_id);
     let (year, month, day) = date_parts(timestamp);
     base_dir
@@ -47,73 +30,13 @@ fn screenshot_path(base_dir: &Path, timestamp: i64, display_id: &str) -> PathBuf
 
 /// Build a non-canonical audio path. Only used in tests.
 #[cfg(test)]
-fn audio_path(base_dir: &Path, timestamp: i64, source: &str) -> PathBuf {
+fn audio_path(base_dir: &std::path::Path, timestamp: i64, source: &str) -> std::path::PathBuf {
     let safe_source = sanitize_id(source);
     let (year, month, day) = date_parts(timestamp);
     base_dir
         .join("audio")
         .join(format!("{}/{:02}/{:02}", year, month, day))
         .join(format!("{}_{}.opus", timestamp, safe_source))
-}
-
-/// Recursively collect all file paths under `dir`.
-///
-/// Delegates to the log-and-skip walker in `media.rs`, wrapping in `Ok` for
-/// backward compatibility. The only hard error is a symlinked root directory.
-pub(crate) fn walk_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    if dir.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
-        return Err(crate::error::StorageError::Other(
-            format!("refusing to walk symlinked directory: {}", dir.display()),
-        ));
-    }
-    let mut files = Vec::new();
-    crate::media::walk_files_recursive(dir, &mut files);
-    Ok(files)
-}
-
-/// Sum the size (in bytes) of all files under `path`, recursively.
-pub(crate) fn dir_size(path: &Path) -> u64 {
-    if !path.exists() {
-        return 0;
-    }
-    let mut total: u64 = 0;
-    dir_size_recursive(path, &mut total);
-    total
-}
-
-fn dir_size_recursive(path: &Path, total: &mut u64) {
-    let entries = match std::fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let ft = match entry.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
-        };
-        if ft.is_symlink() {
-            continue;
-        }
-        if ft.is_dir() {
-            dir_size_recursive(&entry.path(), total);
-        } else if ft.is_file()
-            && let Ok(meta) = std::fs::symlink_metadata(entry.path())
-        {
-            *total += meta.len();
-        }
-    }
-}
-
-#[cfg(test)]
-fn date_parts(timestamp_millis: i64) -> (i32, u32, u32) {
-    use chrono::{DateTime, Datelike, Utc};
-    let dt = DateTime::<Utc>::from_timestamp_millis(timestamp_millis)
-        .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).unwrap());
-    (dt.year(), dt.month(), dt.day())
 }
 
 #[cfg(test)]
@@ -147,16 +70,6 @@ mod tests {
     }
 
     #[test]
-    fn allocate_path_creates_nested_directories() {
-        let dir = tempfile::tempdir().unwrap();
-        let ts: i64 = 1774094400000;
-        let path = allocate_path(dir.path(), ts, "test_id", "screenshots", "heif").unwrap();
-        assert!(path.parent().unwrap().is_dir());
-        // Path should be canonical (no symlinks or relative components)
-        assert!(path.is_absolute());
-    }
-
-    #[test]
     fn sanitize_id_replaces_path_separators() {
         assert_eq!(sanitize_id("../etc/passwd"), "__etc_passwd");
         assert_eq!(sanitize_id("display/1"), "display_1");
@@ -171,27 +84,5 @@ mod tests {
         let path = screenshot_path(&base, ts, "../evil");
         // Should not escape the screenshots directory
         assert!(!path.to_string_lossy().contains(".."));
-    }
-
-    #[test]
-    fn walk_files_collects_recursively() {
-        let dir = tempfile::tempdir().unwrap();
-        let sub = dir.path().join("a/b");
-        std::fs::create_dir_all(&sub).unwrap();
-        std::fs::write(dir.path().join("top.txt"), b"x").unwrap();
-        std::fs::write(sub.join("nested.txt"), b"y").unwrap();
-
-        let files = walk_files(dir.path()).unwrap();
-        assert_eq!(files.len(), 2);
-    }
-
-    #[test]
-    fn dir_size_sums_file_sizes() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.bin"), &[0u8; 100]).unwrap();
-        std::fs::write(dir.path().join("b.bin"), &[0u8; 200]).unwrap();
-
-        let size = dir_size(dir.path());
-        assert_eq!(size, 300);
     }
 }
