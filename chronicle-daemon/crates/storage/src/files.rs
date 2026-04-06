@@ -57,6 +57,9 @@ fn audio_path(base_dir: &Path, timestamp: i64, source: &str) -> PathBuf {
 }
 
 /// Recursively collect all file paths under `dir`.
+///
+/// Delegates to the log-and-skip walker in `media.rs`, wrapping in `Ok` for
+/// backward compatibility. The only hard error is a symlinked root directory.
 pub(crate) fn walk_files(dir: &Path) -> Result<Vec<PathBuf>> {
     if dir.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
         return Err(crate::error::StorageError::Other(
@@ -64,27 +67,8 @@ pub(crate) fn walk_files(dir: &Path) -> Result<Vec<PathBuf>> {
         ));
     }
     let mut files = Vec::new();
-    walk_files_recursive(dir, &mut files)?;
+    crate::media::walk_files_recursive(dir, &mut files);
     Ok(files)
-}
-
-fn walk_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    let entries = std::fs::read_dir(dir)?;
-    for entry in entries {
-        let entry = entry?;
-        let ft = entry.file_type()?;
-        // Skip symlinks to avoid following links outside the data directory.
-        if ft.is_symlink() {
-            continue;
-        }
-        let path = entry.path();
-        if ft.is_dir() {
-            walk_files_recursive(&path, files)?;
-        } else if ft.is_file() {
-            files.push(path);
-        }
-    }
-    Ok(())
 }
 
 /// Sum the size (in bytes) of all files under `path`, recursively.
