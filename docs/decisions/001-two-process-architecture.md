@@ -1,5 +1,9 @@
 # ADR-001: Two-Process Architecture
 
+> Historical naming note:
+> this ADR captures the original Rewind-era naming and rationale.
+> The current implementation uses `chronicle-daemon` and `chronicle-ui`.
+
 **Status:** Accepted
 **Date:** 2026-03-20
 

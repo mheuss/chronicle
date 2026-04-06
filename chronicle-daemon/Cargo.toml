@@ -22,7 +22,6 @@ license = "MIT"
 chronicle-capture = { path = "crates/capture" }
 chronicle-ocr = { path = "crates/ocr" }
 chronicle-audio = { path = "crates/audio" }
-chronicle-transcription = { path = "crates/transcription" }
 chronicle-storage = { path = "crates/storage" }
 chronicle-ipc = { path = "crates/ipc" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync"] }

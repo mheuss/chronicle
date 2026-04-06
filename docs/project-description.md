@@ -1,5 +1,9 @@
 # Rewind — Project Description
 
+> Historical design note from the Rewind-era concept phase.
+> It does not describe the current Chronicle implementation.
+> For current behavior, start with `README.md` and `docs/guides/`.
+
 An open-source macOS app that continuously captures your screen and audio, then
 lets you search across everything you've seen and heard. Inspired by the
 original Rewind app (discontinued after Meta acquisition).
