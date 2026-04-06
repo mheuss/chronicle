@@ -98,18 +98,21 @@ impl MediaManager {
         }
         self.validate_path(to)?;
         std::fs::rename(from, to)?;
-        std::fs::set_permissions(to, std::fs::Permissions::from_mode(FILE_MODE))?;
+        if let Err(e) = std::fs::set_permissions(to, std::fs::Permissions::from_mode(FILE_MODE)) {
+            let _ = std::fs::remove_file(to);
+            return Err(e.into());
+        }
         Ok(())
     }
 
     /// Delete a file, returning bytes freed. Returns Ok(0) if the file is already gone.
     pub fn delete_file(&self, path: &Path) -> Result<u64> {
-        self.validate_path(path)?;
         let size = match std::fs::metadata(path) {
             Ok(meta) => meta.len(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
             Err(e) => return Err(e.into()),
         };
+        self.validate_path(path)?;
         match std::fs::remove_file(path) {
             Ok(()) => Ok(size),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
@@ -130,11 +133,31 @@ impl MediaManager {
         Ok(())
     }
 
+    /// Validate that a subdir name is a simple relative component (no `/`, `\`,
+    /// `..`, null bytes, or absolute paths).
+    fn validate_subdir(subdir: &str) -> Result<()> {
+        if subdir.is_empty()
+            || subdir.contains('/')
+            || subdir.contains('\\')
+            || subdir.contains('\0')
+            || subdir.contains("..")
+            || Path::new(subdir).is_absolute()
+        {
+            return Err(crate::error::StorageError::Other(format!(
+                "invalid subdir: {subdir}"
+            )));
+        }
+        Ok(())
+    }
+
     /// Recursively collect all file paths under base_dir/subdir.
     /// Returns an empty vec if the directory doesn't exist or is unreadable.
     /// Skips symlinks to avoid following links outside the data directory.
     /// Logs and skips unreadable entries (best-effort walk).
     pub fn walk_files(&self, subdir: &str) -> Vec<PathBuf> {
+        if Self::validate_subdir(subdir).is_err() {
+            return Vec::new();
+        }
         let dir = self.base_dir.join(subdir);
         if !dir.exists() {
             return Vec::new();
@@ -155,6 +178,9 @@ impl MediaManager {
     /// Sum the size (in bytes) of all files under base_dir/subdir.
     /// Refuses to follow a symlinked root directory (mirrors walk_files).
     pub fn dir_size(&self, subdir: &str) -> u64 {
+        if Self::validate_subdir(subdir).is_err() {
+            return 0;
+        }
         let dir = self.base_dir.join(subdir);
         if !dir.exists() {
             return 0;

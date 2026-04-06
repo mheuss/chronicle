@@ -14,7 +14,7 @@ pub(crate) mod audio;
 /// Error types for storage operations.
 pub mod error;
 pub(crate) mod files;
-pub(crate) mod media;
+pub mod media;
 /// Data models, configuration, and query types.
 pub mod models;
 pub(crate) mod retention;
