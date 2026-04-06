@@ -22,12 +22,14 @@ async fn main() -> Result<()> {
     let storage = Arc::new(Storage::open(StorageConfig::default()).await?);
 
     // --- Startup orphan sweep ---
-    let sweep_stats = storage.sweep_orphans().await?;
-    if sweep_stats.bytes_freed > 0 {
-        log::info!(
-            "Startup orphan sweep freed {} bytes",
-            sweep_stats.bytes_freed
-        );
+    match storage.sweep_orphans().await {
+        Ok(stats) if stats.bytes_freed > 0 => {
+            log::info!("Startup orphan sweep freed {} bytes", stats.bytes_freed);
+        }
+        Ok(_) => {}
+        Err(e) => {
+            log::error!("Startup orphan sweep failed: {e}");
+        }
     }
 
     // --- IPC server ---

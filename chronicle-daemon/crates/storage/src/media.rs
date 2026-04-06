@@ -22,28 +22,69 @@ fn date_parts(timestamp_millis: i64) -> (i32, u32, u32) {
 
 /// Owns the base directory and all file lifecycle operations.
 /// Permission policy is enforced here: files get 0o600, directories get 0o700.
+#[derive(Clone)]
 pub struct MediaManager {
     base_dir: PathBuf,
 }
 
 impl MediaManager {
-    pub(crate) fn new(base_dir: PathBuf) -> Self {
+    pub fn new(base_dir: PathBuf) -> Self {
         Self { base_dir }
     }
 
-    pub(crate) fn base_dir(&self) -> &Path {
+    pub fn base_dir(&self) -> &Path {
         &self.base_dir
     }
 
+    /// Best-effort check that a path is under `base_dir`.
+    /// Canonical validation happens in `allocate_path`; this catches misuse
+    /// of the file-op methods with arbitrary paths.
+    ///
+    /// Checks both the raw path and canonical forms because on macOS
+    /// /var is a symlink to /private/var, so allocate_path returns
+    /// canonical paths while base_dir may not be canonical.
+    fn validate_path(&self, path: &Path) -> Result<()> {
+        // Fast path: non-canonical prefix match.
+        if path.starts_with(&self.base_dir) {
+            return Ok(());
+        }
+        // Slow path: try canonical comparison (handles /var vs /private/var).
+        if let (Ok(canonical_path), Ok(canonical_base)) = (
+            std::fs::canonicalize(path),
+            std::fs::canonicalize(&self.base_dir),
+        ) && canonical_path.starts_with(&canonical_base)
+        {
+            return Ok(());
+        }
+        // For paths that don't exist yet, canonicalize the parent.
+        if let Some(parent) = path.parent()
+            && let (Ok(canonical_parent), Ok(canonical_base)) = (
+                std::fs::canonicalize(parent),
+                std::fs::canonicalize(&self.base_dir),
+            )
+            && canonical_parent.starts_with(&canonical_base)
+        {
+            return Ok(());
+        }
+        Err(crate::error::StorageError::Other(format!(
+            "path outside storage root: {}",
+            path.display()
+        )))
+    }
+
     /// Write bytes to path, then set file permissions to owner-only (0o600).
-    pub(crate) fn write_file(&self, path: &Path, data: &[u8]) -> Result<()> {
+    pub fn write_file(&self, path: &Path, data: &[u8]) -> Result<()> {
+        self.validate_path(path)?;
         std::fs::write(path, data)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(FILE_MODE))?;
         Ok(())
     }
 
     /// Move (rename) a file from one path to another, then set 0o600.
+    /// The `from` path is not validated because it may be in a staging
+    /// directory outside base_dir. The `to` path must be under base_dir.
     pub fn move_file(&self, from: &Path, to: &Path) -> Result<()> {
+        self.validate_path(to)?;
         std::fs::rename(from, to)?;
         std::fs::set_permissions(to, std::fs::Permissions::from_mode(FILE_MODE))?;
         Ok(())
@@ -51,13 +92,17 @@ impl MediaManager {
 
     /// Delete a file, returning bytes freed. Returns Ok(0) if the file is already gone.
     pub fn delete_file(&self, path: &Path) -> Result<u64> {
+        self.validate_path(path)?;
         let size = match std::fs::metadata(path) {
             Ok(meta) => meta.len(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
             Err(e) => return Err(e.into()),
         };
-        std::fs::remove_file(path)?;
-        Ok(size)
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(size),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Set owner-only permissions (0o600) on an existing file.
@@ -68,6 +113,7 @@ impl MediaManager {
     /// capture crate that writes directly to a path and cannot be wrapped.
     /// harden_file closes the permission window immediately after the write.
     pub fn harden_file(&self, path: &Path) -> Result<()> {
+        self.validate_path(path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(FILE_MODE))?;
         Ok(())
     }
@@ -76,7 +122,7 @@ impl MediaManager {
     /// Returns an empty vec if the directory doesn't exist or is unreadable.
     /// Skips symlinks to avoid following links outside the data directory.
     /// Logs and skips unreadable entries (best-effort walk).
-    pub(crate) fn walk_files(&self, subdir: &str) -> Vec<PathBuf> {
+    pub fn walk_files(&self, subdir: &str) -> Vec<PathBuf> {
         let dir = self.base_dir.join(subdir);
         if !dir.exists() {
             return Vec::new();
@@ -95,7 +141,7 @@ impl MediaManager {
     }
 
     /// Sum the size (in bytes) of all files under base_dir/subdir.
-    pub(crate) fn dir_size(&self, subdir: &str) -> u64 {
+    pub fn dir_size(&self, subdir: &str) -> u64 {
         let dir = self.base_dir.join(subdir);
         if !dir.exists() {
             return 0;
@@ -107,7 +153,7 @@ impl MediaManager {
 
     /// Allocate a canonical file path under base_dir/subdir/YYYY/MM/DD/.
     /// Creates parent directories with mode 0o700.
-    pub(crate) fn allocate_path(
+    pub fn allocate_path(
         &self,
         subdir: &str,
         timestamp: i64,
@@ -137,7 +183,7 @@ impl MediaManager {
     }
 }
 
-pub(crate) fn walk_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
+fn walk_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) => {
@@ -356,5 +402,51 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mgr = MediaManager::new(dir.path().to_path_buf());
         assert_eq!(mgr.dir_size("nonexistent"), 0);
+    }
+
+    #[test]
+    fn write_file_rejects_path_outside_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = MediaManager::new(dir.path().join("storage"));
+        std::fs::create_dir_all(dir.path().join("storage")).unwrap();
+        let outside = dir.path().join("outside.dat");
+        let result = mgr.write_file(&outside, b"data");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn delete_file_rejects_path_outside_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = MediaManager::new(dir.path().join("storage"));
+        std::fs::create_dir_all(dir.path().join("storage")).unwrap();
+        let outside = dir.path().join("outside.dat");
+        std::fs::write(&outside, b"data").unwrap();
+        let result = mgr.delete_file(&outside);
+        assert!(result.is_err());
+        assert!(outside.exists(), "file outside base should not be deleted");
+    }
+
+    #[test]
+    fn harden_file_rejects_path_outside_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = MediaManager::new(dir.path().join("storage"));
+        std::fs::create_dir_all(dir.path().join("storage")).unwrap();
+        let outside = dir.path().join("outside.dat");
+        std::fs::write(&outside, b"data").unwrap();
+        let result = mgr.harden_file(&outside);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn move_file_rejects_destination_outside_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = MediaManager::new(dir.path().join("storage"));
+        std::fs::create_dir_all(dir.path().join("storage")).unwrap();
+        let src = dir.path().join("storage/src.dat");
+        std::fs::write(&src, b"data").unwrap();
+        let outside_dest = dir.path().join("outside.dat");
+        let result = mgr.move_file(&src, &outside_dest);
+        assert!(result.is_err());
+        assert!(src.exists(), "source should not be moved to outside path");
     }
 }
