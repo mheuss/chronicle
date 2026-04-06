@@ -25,47 +25,43 @@ fn date_parts(timestamp_millis: i64) -> (i32, u32, u32) {
 #[derive(Clone)]
 pub struct MediaManager {
     base_dir: PathBuf,
+    canonical_base: PathBuf,
 }
 
 impl MediaManager {
     pub fn new(base_dir: PathBuf) -> Self {
-        Self { base_dir }
+        let canonical_base =
+            std::fs::canonicalize(&base_dir).unwrap_or_else(|_| base_dir.clone());
+        Self {
+            base_dir,
+            canonical_base,
+        }
     }
 
     pub fn base_dir(&self) -> &Path {
         &self.base_dir
     }
 
-    /// Best-effort check that a path is under `base_dir`.
-    /// Canonical validation happens in `allocate_path`; this catches misuse
-    /// of the file-op methods with arbitrary paths.
+    /// Verify that a path resolves to a location under the storage root.
     ///
-    /// Checks both the raw path and canonical forms because on macOS
-    /// /var is a symlink to /private/var, so allocate_path returns
-    /// canonical paths while base_dir may not be canonical.
+    /// Always uses canonical (resolved) paths so that symlinks and `..`
+    /// segments cannot bypass the check.
     fn validate_path(&self, path: &Path) -> Result<()> {
-        // Fast path: non-canonical prefix match.
-        if path.starts_with(&self.base_dir) {
-            return Ok(());
-        }
-        // Slow path: try canonical comparison (handles /var vs /private/var).
-        if let (Ok(canonical_path), Ok(canonical_base)) = (
-            std::fs::canonicalize(path),
-            std::fs::canonicalize(&self.base_dir),
-        ) && canonical_path.starts_with(&canonical_base)
+        // Try to canonicalize the full path first.
+        if let Ok(canonical_path) = std::fs::canonicalize(path)
+            && canonical_path.starts_with(&self.canonical_base)
         {
             return Ok(());
         }
+
         // For paths that don't exist yet, canonicalize the parent.
         if let Some(parent) = path.parent()
-            && let (Ok(canonical_parent), Ok(canonical_base)) = (
-                std::fs::canonicalize(parent),
-                std::fs::canonicalize(&self.base_dir),
-            )
-            && canonical_parent.starts_with(&canonical_base)
+            && let Ok(canonical_parent) = std::fs::canonicalize(parent)
+            && canonical_parent.starts_with(&self.canonical_base)
         {
             return Ok(());
         }
+
         Err(crate::error::StorageError::Other(format!(
             "path outside storage root: {}",
             path.display()
@@ -161,7 +157,6 @@ impl MediaManager {
         ext: &str,
     ) -> Result<PathBuf> {
         let id = sanitize_id(id);
-        let canonical_base = std::fs::canonicalize(&self.base_dir)?;
         let (year, month, day) = date_parts(timestamp);
         let parent = self
             .base_dir
@@ -174,7 +169,7 @@ impl MediaManager {
             .create(&parent)?;
 
         let canonical_parent = std::fs::canonicalize(&parent)?;
-        if !canonical_parent.starts_with(&canonical_base) {
+        if !canonical_parent.starts_with(&self.canonical_base) {
             return Err(crate::error::StorageError::Other(
                 "path escaped storage root".into(),
             ));
@@ -352,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn allocate_path_rejects_escape() {
+    fn allocate_path_sanitizes_traversal_attempts() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = MediaManager::new(dir.path().to_path_buf());
         let ts: i64 = 1774094400000;

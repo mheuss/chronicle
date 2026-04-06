@@ -51,6 +51,10 @@ impl Storage {
         let pool = tokio::task::spawn_blocking(move || {
             std::fs::create_dir_all(&base_dir)?;
 
+            // Harden base directory permissions.
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&base_dir, std::fs::Permissions::from_mode(0o700))?;
+
             let pool = Pool::builder()
                 .max_size(pool_size)
                 .connection_customizer(Box::new(ConnectionCustomizer))
@@ -58,6 +62,12 @@ impl Storage {
 
             let conn = pool.get()?;
             schema::migrate(&conn)?;
+
+            // Harden DB file permissions.
+            let db_file = base_dir.join("chronicle.db");
+            if db_file.exists() {
+                std::fs::set_permissions(&db_file, std::fs::Permissions::from_mode(0o600))?;
+            }
 
             Ok::<_, StorageError>(pool)
         })
