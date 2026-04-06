@@ -11,9 +11,7 @@ const DIR_MODE: u32 = 0o700;
 /// Sanitize a user-supplied identifier so it cannot escape the intended
 /// directory. Replaces `/`, `\`, `..`, and null bytes with `_`.
 fn sanitize_id(input: &str) -> String {
-    input
-        .replace("..", "_")
-        .replace(['/', '\\', '\0'], "_")
+    input.replace("..", "_").replace(['/', '\\', '\0'], "_")
 }
 
 fn date_parts(timestamp_millis: i64) -> (i32, u32, u32) {
@@ -83,7 +81,11 @@ impl MediaManager {
         if !dir.exists() {
             return Vec::new();
         }
-        if dir.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        if dir
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
             log::warn!("refusing to walk symlinked directory: {}", dir.display());
             return Vec::new();
         }
@@ -115,7 +117,8 @@ impl MediaManager {
         let id = sanitize_id(id);
         let canonical_base = std::fs::canonicalize(&self.base_dir)?;
         let (year, month, day) = date_parts(timestamp);
-        let parent = self.base_dir
+        let parent = self
+            .base_dir
             .join(subdir)
             .join(format!("{}/{:02}/{:02}", year, month, day));
 
@@ -212,7 +215,11 @@ mod tests {
         mgr.write_file(&path, b"secret data").unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "file should be owner-only (0o600), got {:#o}", mode);
+        assert_eq!(
+            mode, 0o600,
+            "file should be owner-only (0o600), got {:#o}",
+            mode
+        );
         assert_eq!(std::fs::read(&path).unwrap(), b"secret data");
     }
 
@@ -271,7 +278,9 @@ mod tests {
         let mgr = MediaManager::new(dir.path().to_path_buf());
         let ts: i64 = 1774094400000;
 
-        let path = mgr.allocate_path("screenshots", ts, "display1", "heif").unwrap();
+        let path = mgr
+            .allocate_path("screenshots", ts, "display1", "heif")
+            .unwrap();
         assert!(path.is_absolute());
 
         let parent = path.parent().unwrap();
@@ -286,9 +295,14 @@ mod tests {
         let mgr = MediaManager::new(dir.path().to_path_buf());
         let ts: i64 = 1774094400000;
 
-        let path = mgr.allocate_path("screenshots", ts, "../evil", "heif").unwrap();
+        let path = mgr
+            .allocate_path("screenshots", ts, "../evil", "heif")
+            .unwrap();
         let filename = path.file_name().unwrap().to_string_lossy();
-        assert!(!filename.contains(".."), "path traversal should be sanitized");
+        assert!(
+            !filename.contains(".."),
+            "path traversal should be sanitized"
+        );
     }
 
     #[test]

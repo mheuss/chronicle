@@ -10,24 +10,22 @@ use r2d2_sqlite::SqliteConnectionManager;
 
 use crate::media::MediaManager;
 
+pub(crate) mod audio;
 /// Error types for storage operations.
 pub mod error;
+pub(crate) mod files;
+pub(crate) mod media;
 /// Data models, configuration, and query types.
 pub mod models;
-pub(crate) mod schema;
-pub(crate) mod files;
-pub(crate) mod screenshots;
-pub(crate) mod audio;
-pub(crate) mod search;
 pub(crate) mod retention;
-pub(crate) mod media;
+pub(crate) mod schema;
+pub(crate) mod screenshots;
+pub(crate) mod search;
 
-pub use error::{StorageError, Result};
+pub use error::{Result, StorageError};
 pub use models::{
-    StorageConfig, ScreenshotMetadata, Screenshot,
-    AudioSegmentMetadata, AudioSegment,
-    SearchFilter, SearchResult, SearchSource,
-    CleanupStats, StorageStatus,
+    AudioSegment, AudioSegmentMetadata, CleanupStats, Screenshot, ScreenshotMetadata, SearchFilter,
+    SearchResult, SearchSource, StorageConfig, StorageStatus,
 };
 
 /// SQLite-backed storage engine for screenshots, audio, and full-text search.
@@ -67,7 +65,11 @@ impl Storage {
 
         let base_dir = config.base_dir;
         let media_mgr = MediaManager::new(base_dir.clone());
-        Ok(Self { pool, base_dir, media_mgr })
+        Ok(Self {
+            pool,
+            base_dir,
+            media_mgr,
+        })
     }
 
     /// The root directory for the database file and media subdirectories.
@@ -83,7 +85,11 @@ impl Storage {
     // --- Screenshot operations ---
 
     /// Reserve a unique file path for a new screenshot image.
-    pub async fn allocate_screenshot_path(&self, timestamp: i64, display_id: &str) -> Result<PathBuf> {
+    pub async fn allocate_screenshot_path(
+        &self,
+        timestamp: i64,
+        display_id: &str,
+    ) -> Result<PathBuf> {
         let mgr = MediaManager::new(self.base_dir.clone());
         let display_id = display_id.to_string();
         tokio::task::spawn_blocking(move || {
@@ -143,10 +149,8 @@ impl Storage {
     pub async fn allocate_audio_path(&self, timestamp: i64, source: &str) -> Result<PathBuf> {
         let mgr = MediaManager::new(self.base_dir.clone());
         let source = source.to_string();
-        tokio::task::spawn_blocking(move || {
-            mgr.allocate_path("audio", timestamp, &source, "opus")
-        })
-        .await?
+        tokio::task::spawn_blocking(move || mgr.allocate_path("audio", timestamp, &source, "opus"))
+            .await?
     }
 
     /// Insert an audio segment record and return the assigned row ID.
@@ -280,30 +284,27 @@ impl Storage {
         tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
 
-            let screenshot_count: u64 = conn
-                .query_row("SELECT COUNT(*) FROM screenshots", [], |row| {
+            let screenshot_count: u64 =
+                conn.query_row("SELECT COUNT(*) FROM screenshots", [], |row| {
                     row.get::<_, i64>(0).map(|v| v as u64)
                 })?;
 
-            let audio_segment_count: u64 = conn
-                .query_row("SELECT COUNT(*) FROM audio_segments", [], |row| {
+            let audio_segment_count: u64 =
+                conn.query_row("SELECT COUNT(*) FROM audio_segments", [], |row| {
                     row.get::<_, i64>(0).map(|v| v as u64)
                 })?;
 
             // Find oldest entry across both tables
-            let oldest_screenshot: Option<i64> = conn
-                .query_row(
-                    "SELECT MIN(timestamp) FROM screenshots",
-                    [],
-                    |row| row.get(0),
-                )?;
+            let oldest_screenshot: Option<i64> =
+                conn.query_row("SELECT MIN(timestamp) FROM screenshots", [], |row| {
+                    row.get(0)
+                })?;
 
-            let oldest_audio: Option<i64> = conn
-                .query_row(
-                    "SELECT MIN(start_timestamp) FROM audio_segments",
-                    [],
-                    |row| row.get(0),
-                )?;
+            let oldest_audio: Option<i64> = conn.query_row(
+                "SELECT MIN(start_timestamp) FROM audio_segments",
+                [],
+                |row| row.get(0),
+            )?;
 
             let oldest_entry = match (oldest_screenshot, oldest_audio) {
                 (Some(s), Some(a)) => Some(s.min(a)),
@@ -383,7 +384,10 @@ impl r2d2::CustomizeConnection<rusqlite::Connection, rusqlite::Error> for Connec
     // foreign_keys, and busy_timeout are connection-persistent — they stick for
     // the lifetime of the connection and don't need to be re-applied on each
     // checkout.
-    fn on_acquire(&self, conn: &mut rusqlite::Connection) -> std::result::Result<(), rusqlite::Error> {
+    fn on_acquire(
+        &self,
+        conn: &mut rusqlite::Connection,
+    ) -> std::result::Result<(), rusqlite::Error> {
         schema::setup_connection(conn).map_err(|e| match e {
             StorageError::Database(e) => e,
             other => rusqlite::Error::ModuleError(other.to_string()),
@@ -597,6 +601,9 @@ mod tests {
 
         // status() should still succeed (returning 0 for unreadable fields)
         let status = storage.status().await.unwrap();
-        assert_eq!(status.db_size_bytes, 0, "should report 0 for missing db file");
+        assert_eq!(
+            status.db_size_bytes, 0,
+            "should report 0 for missing db file"
+        );
     }
 }

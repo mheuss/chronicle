@@ -1,9 +1,7 @@
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::error::{Result, StorageError};
-use crate::models::{
-    AudioSegment, Screenshot, SearchFilter, SearchResult, SearchSource,
-};
+use crate::models::{AudioSegment, Screenshot, SearchFilter, SearchResult, SearchSource};
 
 pub(crate) fn search(
     conn: &Connection,
@@ -34,29 +32,30 @@ pub(crate) fn search(
              LIMIT ?2",
         )?;
 
-        let rows = stmt.query_map(params![query, sub_limit], |row| {
-            let screenshot = Screenshot {
-                id: row.get(0)?,
-                timestamp: row.get(1)?,
-                display_id: row.get(2)?,
-                app_name: row.get(3)?,
-                app_bundle_id: row.get(4)?,
-                window_title: row.get(5)?,
-                image_path: row.get(6)?,
-                ocr_text: row.get(7)?,
-                phash: row.get(8)?,
-                resolution: row.get(9)?,
-                created_at: row.get(10)?,
-            };
-            let snippet: String = row.get(11)?;
-            let rank: f64 = row.get(12)?;
-            Ok(SearchResult {
-                source: SearchSource::Screen(screenshot),
-                snippet,
-                rank,
+        let rows = stmt
+            .query_map(params![query, sub_limit], |row| {
+                let screenshot = Screenshot {
+                    id: row.get(0)?,
+                    timestamp: row.get(1)?,
+                    display_id: row.get(2)?,
+                    app_name: row.get(3)?,
+                    app_bundle_id: row.get(4)?,
+                    window_title: row.get(5)?,
+                    image_path: row.get(6)?,
+                    ocr_text: row.get(7)?,
+                    phash: row.get(8)?,
+                    resolution: row.get(9)?,
+                    created_at: row.get(10)?,
+                };
+                let snippet: String = row.get(11)?;
+                let rank: f64 = row.get(12)?;
+                Ok(SearchResult {
+                    source: SearchSource::Screen(screenshot),
+                    snippet,
+                    rank,
+                })
             })
-        })
-        .map_err(|e| map_fts5_error(e, query))?;
+            .map_err(|e| map_fts5_error(e, query))?;
 
         for row in rows {
             results.push(row?);
@@ -76,27 +75,28 @@ pub(crate) fn search(
              LIMIT ?2",
         )?;
 
-        let rows = stmt.query_map(params![query, sub_limit], |row| {
-            let segment = AudioSegment {
-                id: row.get(0)?,
-                start_timestamp: row.get(1)?,
-                end_timestamp: row.get(2)?,
-                source: row.get(3)?,
-                audio_path: row.get(4)?,
-                transcript: row.get(5)?,
-                whisper_model: row.get(6)?,
-                language: row.get(7)?,
-                created_at: row.get(8)?,
-            };
-            let snippet: String = row.get(9)?;
-            let rank: f64 = row.get(10)?;
-            Ok(SearchResult {
-                source: SearchSource::Audio(segment),
-                snippet,
-                rank,
+        let rows = stmt
+            .query_map(params![query, sub_limit], |row| {
+                let segment = AudioSegment {
+                    id: row.get(0)?,
+                    start_timestamp: row.get(1)?,
+                    end_timestamp: row.get(2)?,
+                    source: row.get(3)?,
+                    audio_path: row.get(4)?,
+                    transcript: row.get(5)?,
+                    whisper_model: row.get(6)?,
+                    language: row.get(7)?,
+                    created_at: row.get(8)?,
+                };
+                let snippet: String = row.get(9)?;
+                let rank: f64 = row.get(10)?;
+                Ok(SearchResult {
+                    source: SearchSource::Audio(segment),
+                    snippet,
+                    rank,
+                })
             })
-        })
-        .map_err(|e| map_fts5_error(e, query))?;
+            .map_err(|e| map_fts5_error(e, query))?;
 
         for row in rows {
             results.push(row?);
@@ -104,7 +104,11 @@ pub(crate) fn search(
     }
 
     // Sort combined results by rank (lower is better in FTS5)
-    results.sort_by(|a, b| a.rank.partial_cmp(&b.rank).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        a.rank
+            .partial_cmp(&b.rank)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Apply limit and offset on the combined sorted results
     let results = results.into_iter().skip(offset).take(limit).collect();
@@ -193,8 +197,12 @@ mod tests {
         let results = search(&conn, "kubernetes", &SearchFilter::All, 10, 0).unwrap();
         assert_eq!(results.len(), 2);
 
-        let has_screen = results.iter().any(|r| matches!(r.source, SearchSource::Screen(_)));
-        let has_audio = results.iter().any(|r| matches!(r.source, SearchSource::Audio(_)));
+        let has_screen = results
+            .iter()
+            .any(|r| matches!(r.source, SearchSource::Screen(_)));
+        let has_audio = results
+            .iter()
+            .any(|r| matches!(r.source, SearchSource::Audio(_)));
         assert!(has_screen);
         assert!(has_audio);
     }

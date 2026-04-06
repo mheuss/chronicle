@@ -2,9 +2,7 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 
-const MIGRATIONS: &[&str] = &[
-    include_str!("migrations/001_initial_schema.sql"),
-];
+const MIGRATIONS: &[&str] = &[include_str!("migrations/001_initial_schema.sql")];
 
 /// Configure connection-level PRAGMAs. Call on every new connection.
 pub(crate) fn setup_connection(conn: &Connection) -> Result<()> {
@@ -17,8 +15,7 @@ pub(crate) fn setup_connection(conn: &Connection) -> Result<()> {
 
 /// Run pending migrations. Uses PRAGMA user_version to track progress.
 pub(crate) fn migrate(conn: &Connection) -> Result<()> {
-    let current_version: u32 =
-        conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let current_version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
 
     for (i, migration) in MIGRATIONS.iter().enumerate() {
         let version = (i + 1) as u32;

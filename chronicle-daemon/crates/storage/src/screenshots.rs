@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, Row};
+use rusqlite::{Connection, Row, params};
 
 use crate::error::Result;
 use crate::models::{Screenshot, ScreenshotMetadata};
