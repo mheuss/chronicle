@@ -1,6 +1,6 @@
 # Developer Guide — Chronicle Daemon
 
-**Last updated:** 2026-03-31
+**Last updated:** 2026-04-06
 **Component path:** chronicle-daemon/
 
 ## Overview
@@ -8,7 +8,7 @@
 The daemon is Chronicle's background process. It captures screens, records
 audio, runs OCR, and stores everything in SQLite with full-text search. It runs
 headless via launchd, independent of the UI. The UI communicates with it over a
-Unix socket (ADR-004).
+Unix socket (ADR-004). The current IPC surface is status-only.
 
 The daemon is a Cargo workspace with six crates, each owning one concern. The
 root binary (`chronicle-daemon`) orchestrates startup, wires crates into
@@ -20,14 +20,15 @@ pipelines, and handles shutdown.
 flowchart TD
     subgraph Startup
         P[Permission Preflight] --> S[Storage]
-        S --> CE[CaptureEngine]
-        CE --> AE[AudioEngine]
+        S --> IPC[IpcServer]
+        IPC --> AP[AudioPipeline]
+        AP --> CE[CaptureEngine]
     end
 
     subgraph Pipelines
         CE -->|frame_rx| CSL[capture_store_loop]
         CSL -->|ocr_tx| OCR[ocr_loop]
-        AE -->|segment_rx| BT[Bridge Thread]
+        AP -->|segment_rx| BT[Bridge Thread]
         BT -->|audio_tx| ASL[audio_store_loop]
     end
 
@@ -51,13 +52,15 @@ flowchart TD
    Microphone (informational). Exits with an actionable error if Screen
    Recording is denied.
 3. `Storage::open()` — opens/migrates SQLite database
-4. `CaptureEngine::start()` — enumerates displays, starts one SCStream per
-   display, returns a frame receiver channel
-5. Spawn `capture_store_loop` (Task A) and `ocr_loop` (Task B)
-6. `AudioEngine::new()` + `start()` — starts audio SCStream, spawns encoding
-   thread, returns a segment receiver
-7. Spawn bridge thread and `audio_store_loop` (Task C)
-8. `ctrl_c().await` — blocks until shutdown signal
+4. `IpcServer::start()` — starts the Unix-socket status server
+5. `AudioPipeline::create()` — prepares the audio handler, dispatch queue, and
+   encoding thread used by ScreenCaptureKit audio callbacks
+6. `CaptureEngine::start()` — enumerates displays, starts one SCStream per
+   display, registers the audio handler on the primary display, and returns a
+   frame receiver channel
+7. Spawn `capture_store_loop` (Task A) and `ocr_loop` (Task B)
+8. Spawn bridge thread and `audio_store_loop` (Task C)
+9. `ctrl_c().await` — blocks until shutdown signal
 
 ### Channel Topology
 
@@ -69,10 +72,10 @@ CaptureEngine → [frame_rx: mpsc] → Task A (capture_store_loop)
                                                                       ↓ Vision OCR
                                                                       ↓ update DB
 
-AudioEngine → [segment_rx: std::sync::mpsc] → Bridge Thread
-                                                    ↓ blocking_send (lossless)
-                                              [audio_tx: tokio::mpsc(64)] → Task C (audio_store_loop)
-                                                                                ↓ move file, insert DB
+AudioPipeline → [segment_rx: std::sync::mpsc] → Bridge Thread
+                                                     ↓ blocking_send (lossless)
+                                               [audio_tx: tokio::mpsc(64)] → Task C (audio_store_loop)
+                                                                                 ↓ move file, insert DB
 ```
 
 Capture-to-OCR is lossy (`try_send`) because OCR is slow and screenshots are
@@ -84,7 +87,7 @@ segment means data loss.
 Triggered by `ctrl_c`. Cascades through the system:
 
 1. `engine.stop()` + `drop(engine)` — stops SCStreams, closes `frame_rx`
-2. `audio_engine.stop()` — stops audio SCStream, flushes encoding thread
+2. `audio_pipeline.stop()` — drops the audio handler and flushes the encoding thread
 3. `bridge_handle.join()` — bridge thread drains and exits, closing `audio_tx`
 4. `await` all async tasks — they exit when their input channels close
 
@@ -96,9 +99,9 @@ No forced cancellation. Everything drains naturally.
 processes. If the UI crashes, capture continues. The daemon starts via launchd
 at login.
 
-**Async transcription (ADR-005):** Capture and storage are the critical path.
-OCR and transcription run behind, catching up during idle time. The pipeline
-never blocks on slow processing.
+**Async OCR (and future transcription) (ADR-005):** Capture and storage are the
+critical path. OCR already runs behind the main ingestion loop, and any future
+transcription work should follow the same pattern.
 
 **Permission preflight:** Screen Recording is required for all ScreenCaptureKit
 functionality (both screen capture and audio). Microphone is optional — mic
@@ -135,8 +138,8 @@ capture is off by default and toggled from the UI.
 | `chronicle-audio` | Audio capture + Opus encoding | `objc2-screen-capture-kit`, `opus`, `ogg` |
 | `chronicle-storage` | SQLite + FTS5 storage engine | `rusqlite` (bundled), `r2d2` |
 | `chronicle-ocr` | Text extraction via Vision framework | `objc2-vision` |
-| `chronicle-transcription` | Speech-to-text (not yet integrated) | `whisper-rs` |
-| `chronicle-ipc` | JSON over Unix socket (not yet integrated) | `serde`, `serde_json` |
+| `chronicle-transcription` | Placeholder for future speech-to-text work | none today |
+| `chronicle-ipc` | JSON over Unix socket status server | `serde`, `serde_json` |
 
 All crates are independent of each other. The daemon binary is the only thing
 that depends on all of them.

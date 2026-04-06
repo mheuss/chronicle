@@ -1,4 +1,6 @@
 //! Transcription pipeline for Chronicle.
 //!
-//! Runs local speech-to-text on captured audio segments using whisper.cpp.
-//! Transcription runs asynchronously and never blocks audio capture.
+//! Placeholder crate for future speech-to-text integration.
+//!
+//! The workspace keeps this crate so planned transcription work has a stable
+//! home, but there is no runtime implementation here yet.

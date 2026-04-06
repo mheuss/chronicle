@@ -4,19 +4,19 @@ This is wicked alpha - more a concept than a working product. I'm still playing 
 the ideas, and having fun with it. 
 
 An open-source macOS app that continuously captures your screen and audio, then
-lets you search across everything you've seen and heard. Inspired by the
-original Rewind app.
+stores metadata locally for future search and playback features. Inspired by
+the original Rewind app.
 
 ## Architecture
 
 Chronicle uses a two-process design:
 
 - **chronicle-daemon** (Rust): Background service that handles screen capture,
-  OCR, audio capture, transcription, storage, and search. Runs as a `launchd`
-  agent and listens on a Unix domain socket.
+  OCR, audio capture, storage, and IPC. Runs as a `launchd` agent and listens
+  on a Unix domain socket.
 
 - **chronicle-ui** (Swift/SwiftUI): Menu bar app that connects to the daemon
-  over IPC. Sends search queries and displays results.
+  over IPC. Today it reports daemon connection and status only.
 
 The two-process split gives us crash isolation (a UI crash doesn't stop
 capture), clean separation of concerns and independent testability.
@@ -30,7 +30,7 @@ chronicle-daemon/          Rust workspace
     ├── capture/           Screen capture via ScreenCaptureKit
     ├── ocr/               Text extraction via Apple Vision
     ├── audio/             Mic + system audio capture
-    ├── transcription/     Speech-to-text via whisper.cpp
+    ├── transcription/     Placeholder crate for future speech-to-text work
     ├── storage/           SQLite + FTS5 search indexes
     └── ipc/               Unix socket JSON protocol
 
