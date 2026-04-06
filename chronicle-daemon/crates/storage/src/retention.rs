@@ -185,7 +185,9 @@ mod tests {
     }
 
     fn dummy_media_mgr() -> crate::media::MediaManager {
-        crate::media::MediaManager::new(std::path::PathBuf::from("/tmp/chronicle-test-dummy"))
+        let path = std::path::PathBuf::from("/tmp/chronicle-test-dummy");
+        std::fs::create_dir_all(&path).unwrap();
+        crate::media::MediaManager::new(path).unwrap()
     }
 
     #[test]
@@ -302,7 +304,7 @@ mod tests {
         };
         screenshots::insert(&conn, &meta).unwrap();
 
-        let media_mgr = crate::media::MediaManager::new(dir.path().to_path_buf());
+        let media_mgr = crate::media::MediaManager::new(dir.path().to_path_buf()).unwrap();
         let stats = run_cleanup(&conn, &media_mgr, 30).unwrap();
         assert_eq!(stats.screenshots_deleted, 1);
         assert!(stats.bytes_freed > 0);
@@ -358,7 +360,7 @@ mod tests {
         };
         screenshots::insert(&conn, &meta).unwrap();
 
-        let media_mgr = crate::media::MediaManager::new(dir.path().to_path_buf());
+        let media_mgr = crate::media::MediaManager::new(dir.path().to_path_buf()).unwrap();
         let stats = run_cleanup(&conn, &media_mgr, 30).unwrap();
 
         assert_eq!(stats.screenshots_deleted, 1);
@@ -381,7 +383,7 @@ mod tests {
         std::fs::write(&orphan_file, b"orphan data").unwrap();
         assert!(orphan_file.exists());
 
-        let media_mgr = crate::media::MediaManager::new(dir.path().to_path_buf());
+        let media_mgr = crate::media::MediaManager::new(dir.path().to_path_buf()).unwrap();
         let bytes_freed = sweep_orphans(&conn, &media_mgr).unwrap();
         assert!(bytes_freed > 0);
         assert!(!orphan_file.exists());
@@ -430,7 +432,7 @@ mod tests {
         )
         .unwrap();
 
-        let media_mgr = crate::media::MediaManager::new(dir.path().to_path_buf());
+        let media_mgr = crate::media::MediaManager::new(dir.path().to_path_buf()).unwrap();
         let stats = run_cleanup(&conn, &media_mgr, 30).unwrap();
 
         assert_eq!(

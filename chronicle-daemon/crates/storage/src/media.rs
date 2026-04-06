@@ -30,13 +30,18 @@ pub struct MediaManager {
 }
 
 impl MediaManager {
-    pub fn new(base_dir: PathBuf) -> Self {
-        let canonical_base =
-            std::fs::canonicalize(&base_dir).unwrap_or_else(|_| base_dir.clone());
-        Self {
+    pub fn new(base_dir: PathBuf) -> Result<Self> {
+        let canonical_base = std::fs::canonicalize(&base_dir).map_err(|e| {
+            crate::error::StorageError::Other(format!(
+                "cannot canonicalize storage root {}: {}",
+                base_dir.display(),
+                e
+            ))
+        })?;
+        Ok(Self {
             base_dir,
             canonical_base,
-        }
+        })
     }
 
     pub fn base_dir(&self) -> &Path {
@@ -80,6 +85,8 @@ impl MediaManager {
             .mode(FILE_MODE)
             .open(path)?;
         file.write_all(data)?;
+        // Enforce permissions even if the file already existed.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(FILE_MODE))?;
         Ok(())
     }
 
@@ -107,12 +114,25 @@ impl MediaManager {
 
     /// Delete a file, returning bytes freed. Returns Ok(0) if the file is already gone.
     pub fn delete_file(&self, path: &Path) -> Result<u64> {
+        // Validate before any I/O to avoid leaking metadata for paths outside
+        // the storage root. If validation fails because the file (and its
+        // parent) are already gone, that's a benign NotFound — return Ok(0).
+        if let Err(e) = self.validate_path(path) {
+            if !path.exists()
+                && path
+                    .parent()
+                    .map(|p| !p.exists())
+                    .unwrap_or(false)
+            {
+                return Ok(0);
+            }
+            return Err(e);
+        }
         let size = match std::fs::metadata(path) {
             Ok(meta) => meta.len(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
             Err(e) => return Err(e.into()),
         };
-        self.validate_path(path)?;
         match std::fs::remove_file(path) {
             Ok(()) => Ok(size),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
@@ -303,7 +323,7 @@ mod tests {
     #[test]
     fn write_file_sets_owner_only_permissions() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let mgr = MediaManager::new(dir.path().to_path_buf()).unwrap();
         let path = dir.path().join("test.dat");
         mgr.write_file(&path, b"secret data").unwrap();
 
@@ -319,7 +339,7 @@ mod tests {
     #[test]
     fn move_file_sets_owner_only_permissions() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let mgr = MediaManager::new(dir.path().to_path_buf()).unwrap();
 
         let src = dir.path().join("src.dat");
         std::fs::write(&src, b"audio data").unwrap();
@@ -336,7 +356,7 @@ mod tests {
     #[test]
     fn delete_file_returns_bytes_freed() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let mgr = MediaManager::new(dir.path().to_path_buf()).unwrap();
         let path = dir.path().join("deleteme.dat");
         std::fs::write(&path, &[0u8; 256]).unwrap();
 
@@ -348,7 +368,7 @@ mod tests {
     #[test]
     fn delete_file_returns_zero_for_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let mgr = MediaManager::new(dir.path().to_path_buf()).unwrap();
         let freed = mgr.delete_file(&dir.path().join("nope.dat")).unwrap();
         assert_eq!(freed, 0);
     }
@@ -356,7 +376,7 @@ mod tests {
     #[test]
     fn harden_file_sets_permissions_on_existing_file() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let mgr = MediaManager::new(dir.path().to_path_buf()).unwrap();
         let path = dir.path().join("existing.dat");
         std::fs::write(&path, b"content").unwrap();
 
@@ -368,7 +388,7 @@ mod tests {
     #[test]
     fn allocate_path_creates_dirs_with_0o700() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let mgr = MediaManager::new(dir.path().to_path_buf()).unwrap();
         let ts: i64 = 1774094400000;
 
         let path = mgr
@@ -385,7 +405,7 @@ mod tests {
     #[test]
     fn allocate_path_sanitizes_id() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let mgr = MediaManager::new(dir.path().to_path_buf()).unwrap();
         let ts: i64 = 1774094400000;
 
         let path = mgr
@@ -401,7 +421,7 @@ mod tests {
     #[test]
     fn allocate_path_sanitizes_traversal_attempts() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let mgr = MediaManager::new(dir.path().to_path_buf()).unwrap();
         let ts: i64 = 1774094400000;
 
         let result = mgr.allocate_path("screenshots", ts, "../../etc/passwd", "heif");
@@ -414,7 +434,7 @@ mod tests {
     #[test]
     fn walk_files_collects_recursively() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let mgr = MediaManager::new(dir.path().to_path_buf()).unwrap();
         let sub = dir.path().join("screenshots/2026/03/21");
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(sub.join("a.heif"), b"x").unwrap();
@@ -427,7 +447,7 @@ mod tests {
     #[test]
     fn walk_files_returns_empty_for_missing_subdir() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let mgr = MediaManager::new(dir.path().to_path_buf()).unwrap();
         let files = mgr.walk_files("nonexistent");
         assert!(files.is_empty());
     }
@@ -435,7 +455,7 @@ mod tests {
     #[test]
     fn dir_size_sums_files() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let mgr = MediaManager::new(dir.path().to_path_buf()).unwrap();
         let sub = dir.path().join("audio");
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(sub.join("a.opus"), &[0u8; 100]).unwrap();
@@ -447,15 +467,15 @@ mod tests {
     #[test]
     fn dir_size_returns_zero_for_missing_subdir() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let mgr = MediaManager::new(dir.path().to_path_buf()).unwrap();
         assert_eq!(mgr.dir_size("nonexistent"), 0);
     }
 
     #[test]
     fn write_file_rejects_path_outside_base() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = MediaManager::new(dir.path().join("storage"));
         std::fs::create_dir_all(dir.path().join("storage")).unwrap();
+        let mgr = MediaManager::new(dir.path().join("storage")).unwrap();
         let outside = dir.path().join("outside.dat");
         let result = mgr.write_file(&outside, b"data");
         assert!(result.is_err());
@@ -464,8 +484,8 @@ mod tests {
     #[test]
     fn delete_file_rejects_path_outside_base() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = MediaManager::new(dir.path().join("storage"));
         std::fs::create_dir_all(dir.path().join("storage")).unwrap();
+        let mgr = MediaManager::new(dir.path().join("storage")).unwrap();
         let outside = dir.path().join("outside.dat");
         std::fs::write(&outside, b"data").unwrap();
         let result = mgr.delete_file(&outside);
@@ -476,8 +496,8 @@ mod tests {
     #[test]
     fn harden_file_rejects_path_outside_base() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = MediaManager::new(dir.path().join("storage"));
         std::fs::create_dir_all(dir.path().join("storage")).unwrap();
+        let mgr = MediaManager::new(dir.path().join("storage")).unwrap();
         let outside = dir.path().join("outside.dat");
         std::fs::write(&outside, b"data").unwrap();
         let result = mgr.harden_file(&outside);
@@ -487,8 +507,8 @@ mod tests {
     #[test]
     fn move_file_rejects_destination_outside_base() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = MediaManager::new(dir.path().join("storage"));
         std::fs::create_dir_all(dir.path().join("storage")).unwrap();
+        let mgr = MediaManager::new(dir.path().join("storage")).unwrap();
         let src = dir.path().join("storage/src.dat");
         std::fs::write(&src, b"data").unwrap();
         let outside_dest = dir.path().join("outside.dat");
@@ -500,7 +520,7 @@ mod tests {
     #[test]
     fn move_file_rejects_symlink_source() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let mgr = MediaManager::new(dir.path().to_path_buf()).unwrap();
 
         let real_file = dir.path().join("real.dat");
         std::fs::write(&real_file, b"target data").unwrap();
@@ -516,7 +536,7 @@ mod tests {
     #[test]
     fn write_file_creates_with_restricted_permissions() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let mgr = MediaManager::new(dir.path().to_path_buf()).unwrap();
         let path = dir.path().join("atomic.dat");
         mgr.write_file(&path, b"secret").unwrap();
 
@@ -531,7 +551,7 @@ mod tests {
     #[test]
     fn dir_size_refuses_symlinked_subdir() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let mgr = MediaManager::new(dir.path().to_path_buf()).unwrap();
 
         // Create a real directory with files outside the expected subdir
         let real_dir = dir.path().join("real_audio");
