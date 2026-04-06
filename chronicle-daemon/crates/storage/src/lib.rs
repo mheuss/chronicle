@@ -90,10 +90,10 @@ impl Storage {
         timestamp: i64,
         display_id: &str,
     ) -> Result<PathBuf> {
-        let mgr = MediaManager::new(self.base_dir.clone());
+        let media_mgr = self.media_mgr.clone();
         let display_id = display_id.to_string();
         tokio::task::spawn_blocking(move || {
-            mgr.allocate_path("screenshots", timestamp, &display_id, "heif")
+            media_mgr.allocate_path("screenshots", timestamp, &display_id, "heif")
         })
         .await?
     }
@@ -147,10 +147,12 @@ impl Storage {
 
     /// Reserve a unique file path for a new audio segment.
     pub async fn allocate_audio_path(&self, timestamp: i64, source: &str) -> Result<PathBuf> {
-        let mgr = MediaManager::new(self.base_dir.clone());
+        let media_mgr = self.media_mgr.clone();
         let source = source.to_string();
-        tokio::task::spawn_blocking(move || mgr.allocate_path("audio", timestamp, &source, "opus"))
-            .await?
+        tokio::task::spawn_blocking(move || {
+            media_mgr.allocate_path("audio", timestamp, &source, "opus")
+        })
+        .await?
     }
 
     /// Insert an audio segment record and return the assigned row ID.
@@ -228,7 +230,7 @@ impl Storage {
     /// Delete records and media files older than the configured retention period.
     pub async fn run_cleanup(&self) -> Result<CleanupStats> {
         let pool = self.pool.clone();
-        let base_dir = self.base_dir.clone();
+        let media_mgr = self.media_mgr.clone();
         tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             let retention_days: i64 = match conn.query_row(
@@ -253,7 +255,6 @@ impl Storage {
                 Err(rusqlite::Error::QueryReturnedNoRows) => 30,
                 Err(e) => return Err(e.into()),
             };
-            let media_mgr = MediaManager::new(base_dir);
             retention::run_cleanup(&conn, &media_mgr, retention_days)
         })
         .await?
@@ -262,10 +263,9 @@ impl Storage {
     /// Remove media files on disk that have no matching database record.
     pub async fn sweep_orphans(&self) -> Result<CleanupStats> {
         let pool = self.pool.clone();
-        let base_dir = self.base_dir.clone();
+        let media_mgr = self.media_mgr.clone();
         tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
-            let media_mgr = MediaManager::new(base_dir);
             let bytes_freed = retention::sweep_orphans(&conn, &media_mgr)?;
             Ok(CleanupStats {
                 bytes_freed,
@@ -280,7 +280,7 @@ impl Storage {
     /// Gather aggregate statistics about the database and on-disk storage.
     pub async fn status(&self) -> Result<StorageStatus> {
         let pool = self.pool.clone();
-        let base_dir = self.base_dir.clone();
+        let media_mgr = self.media_mgr.clone();
         tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
 
@@ -314,7 +314,7 @@ impl Storage {
             };
 
             // DB file size (include WAL and SHM sidecars)
-            let db_path = base_dir.join("chronicle.db");
+            let db_path = media_mgr.base_dir().join("chronicle.db");
             let db_size_bytes = match std::fs::metadata(&db_path) {
                 Ok(m) => m.len(),
                 Err(e) => {
@@ -341,9 +341,8 @@ impl Storage {
             let db_size_bytes = db_size_bytes + wal_size + shm_size;
 
             // Total disk usage from screenshots/ and audio/ directories
-            let mgr = crate::media::MediaManager::new(base_dir);
-            let screenshots_size = mgr.dir_size("screenshots");
-            let audio_size = mgr.dir_size("audio");
+            let screenshots_size = media_mgr.dir_size("screenshots");
+            let audio_size = media_mgr.dir_size("audio");
             let total_disk_usage_bytes = db_size_bytes + screenshots_size + audio_size;
 
             Ok(StorageStatus {
