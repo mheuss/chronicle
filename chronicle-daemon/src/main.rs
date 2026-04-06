@@ -21,6 +21,15 @@ async fn main() -> Result<()> {
     // --- Storage ---
     let storage = Arc::new(Storage::open(StorageConfig::default()).await?);
 
+    // --- Startup orphan sweep ---
+    let sweep_stats = storage.sweep_orphans().await?;
+    if sweep_stats.bytes_freed > 0 {
+        log::info!(
+            "Startup orphan sweep freed {} bytes",
+            sweep_stats.bytes_freed
+        );
+    }
+
     // --- IPC server ---
     let cancel = CancellationToken::new();
     let socket_path = storage.base_dir().join("chronicle.sock");
