@@ -1,4 +1,5 @@
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, Utc};
@@ -68,18 +69,33 @@ impl MediaManager {
         )))
     }
 
-    /// Write bytes to path, then set file permissions to owner-only (0o600).
+    /// Write bytes to path with owner-only permissions (0o600) set at creation
+    /// time to avoid a window where the file is more permissive.
     pub fn write_file(&self, path: &Path, data: &[u8]) -> Result<()> {
         self.validate_path(path)?;
-        std::fs::write(path, data)?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(FILE_MODE))?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(FILE_MODE)
+            .open(path)?;
+        file.write_all(data)?;
         Ok(())
     }
 
     /// Move (rename) a file from one path to another, then set 0o600.
     /// The `from` path is not validated because it may be in a staging
     /// directory outside base_dir. The `to` path must be under base_dir.
+    /// Rejects non-regular files (symlinks, directories, devices) to prevent
+    /// set_permissions from following a symlink to an unintended target.
     pub fn move_file(&self, from: &Path, to: &Path) -> Result<()> {
+        let from_meta = std::fs::symlink_metadata(from)?;
+        if !from_meta.file_type().is_file() {
+            return Err(crate::error::StorageError::Other(format!(
+                "refusing to move non-regular file: {}",
+                from.display()
+            )));
+        }
         self.validate_path(to)?;
         std::fs::rename(from, to)?;
         std::fs::set_permissions(to, std::fs::Permissions::from_mode(FILE_MODE))?;
@@ -137,9 +153,18 @@ impl MediaManager {
     }
 
     /// Sum the size (in bytes) of all files under base_dir/subdir.
+    /// Refuses to follow a symlinked root directory (mirrors walk_files).
     pub fn dir_size(&self, subdir: &str) -> u64 {
         let dir = self.base_dir.join(subdir);
         if !dir.exists() {
+            return 0;
+        }
+        if dir
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            log::warn!("refusing to size symlinked directory: {}", dir.display());
             return 0;
         }
         let mut total: u64 = 0;
@@ -443,5 +468,57 @@ mod tests {
         let result = mgr.move_file(&src, &outside_dest);
         assert!(result.is_err());
         assert!(src.exists(), "source should not be moved to outside path");
+    }
+
+    #[test]
+    fn move_file_rejects_symlink_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = MediaManager::new(dir.path().to_path_buf());
+
+        let real_file = dir.path().join("real.dat");
+        std::fs::write(&real_file, b"target data").unwrap();
+        let symlink = dir.path().join("link.dat");
+        std::os::unix::fs::symlink(&real_file, &symlink).unwrap();
+
+        let dest = dir.path().join("dest.dat");
+        let result = mgr.move_file(&symlink, &dest);
+        assert!(result.is_err(), "should reject symlink source");
+        assert!(symlink.exists(), "symlink should not be moved");
+    }
+
+    #[test]
+    fn write_file_creates_with_restricted_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = MediaManager::new(dir.path().to_path_buf());
+        let path = dir.path().join("atomic.dat");
+        mgr.write_file(&path, b"secret").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "file should be created with 0o600, got {:#o}",
+            mode
+        );
+    }
+
+    #[test]
+    fn dir_size_refuses_symlinked_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = MediaManager::new(dir.path().to_path_buf());
+
+        // Create a real directory with files outside the expected subdir
+        let real_dir = dir.path().join("real_audio");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::fs::write(real_dir.join("a.opus"), &[0u8; 500]).unwrap();
+
+        // Symlink the subdir to the real directory
+        let symlink_dir = dir.path().join("audio");
+        std::os::unix::fs::symlink(&real_dir, &symlink_dir).unwrap();
+
+        assert_eq!(
+            mgr.dir_size("audio"),
+            0,
+            "should refuse to size a symlinked subdir"
+        );
     }
 }
