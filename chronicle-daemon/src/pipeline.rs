@@ -55,7 +55,15 @@ async fn process_frame(
     encode_heif(frame.sample_buffer.inner(), &image_path, HEIF_QUALITY)?;
 
     // Harden file permissions (encode_heif writes directly, bypassing MediaManager)
-    storage.media_manager().harden_file(&image_path)?;
+    if let Err(e) = storage.media_manager().harden_file(&image_path) {
+        if let Err(del_err) = storage.media_manager().delete_file(&image_path) {
+            log::error!(
+                "failed to harden {} and cleanup also failed: {del_err}",
+                image_path.display()
+            );
+        }
+        return Err(e.into());
+    }
 
     // 5. Insert DB record — clean up the HEIF file if this fails so we
     //    don't accumulate orphaned files on disk.
