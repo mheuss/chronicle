@@ -12,6 +12,7 @@ r2d2_sqlite = "0.33"
 tokio = { version = "1", features = ["rt"] }
 thiserror = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+log = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
