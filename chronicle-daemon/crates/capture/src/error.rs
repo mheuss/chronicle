@@ -11,13 +11,6 @@ pub enum CaptureError {
     #[error("no displays found")]
     NoDisplays,
 
-    /// The frame channel was closed unexpectedly.
-    ///
-    /// Reserved for future use by adaptive-rate and recovery features.
-    #[allow(dead_code)]
-    #[error("channel send failed")]
-    ChannelClosed,
-
     /// HEIF encoding failed.
     #[error("heif encoding failed: {0}")]
     Encoding(String),
