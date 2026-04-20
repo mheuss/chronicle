@@ -3,13 +3,13 @@
 //! `CaptureEngine` enumerates all connected displays, creates one `SCStream`
 //! per display, and delivers frames over a bounded mpsc channel.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
-use objc2::rc::{autoreleasepool, Retained};
 use objc2::AnyThread;
+use objc2::rc::{Retained, autoreleasepool};
 use objc2_core_media::CMTime;
 use objc2_foundation::{NSArray, NSError};
 use objc2_screen_capture_kit::{
@@ -51,7 +51,7 @@ pub enum EngineState {
 /// per display, and begin delivering `CapturedFrame`s over the returned
 /// receiver. Use [`stop`](CaptureEngine::stop) to tear down all streams and
 /// [`status`](CaptureEngine::status) to read health counters.
-pub struct CaptureEngine {
+pub struct CaptureEngine<'a> {
     streams: Vec<Retained<SCStream>>,
     handlers: Vec<Retained<CaptureOutputHandler>>,
     display_ids: Vec<u32>,
@@ -60,9 +60,14 @@ pub struct CaptureEngine {
     frames_dropped: Arc<AtomicU64>,
     state: EngineState,
     deps: EngineDeps,
+    /// Borrows the `AudioPipeline` for as long as the engine lives. Lets
+    /// the borrow checker enforce that callers keep the pipeline alive
+    /// until the engine is dropped. Not read in the body — the field's
+    /// only job is to keep the borrow alive.
+    _audio_token: Option<chronicle_audio::AudioHandlerToken<'a>>,
 }
 
-impl CaptureEngine {
+impl<'a> CaptureEngine<'a> {
     /// Enumerate displays and start one capture stream per display.
     ///
     /// Returns the engine and a receiver that delivers `CapturedFrame`s.
@@ -72,7 +77,7 @@ impl CaptureEngine {
     ///
     /// * `CaptureError::NoDisplays` -- no displays found
     /// * `CaptureError::ScreenCaptureKit` -- SCK returned an error
-    pub fn start(config: CaptureConfig) -> Result<(Self, mpsc::Receiver<CapturedFrame>)> {
+    pub fn start(config: CaptureConfig<'a>) -> Result<(Self, mpsc::Receiver<CapturedFrame>)> {
         Self::start_with_deps(config, EngineDeps::default())
     }
 
@@ -82,7 +87,7 @@ impl CaptureEngine {
     /// `EngineDeps::default()`. Unit tests substitute alternate implementations
     /// to exercise rollback and failure paths without a real SCK runtime.
     pub(crate) fn start_with_deps(
-        config: CaptureConfig,
+        config: CaptureConfig<'a>,
         deps: EngineDeps,
     ) -> Result<(Self, mpsc::Receiver<CapturedFrame>)> {
         if config.frame_interval_secs <= 0.0 {
@@ -205,10 +210,8 @@ impl CaptureEngine {
             });
 
             // Register the output handler.
-            let queue = DispatchQueue::new(
-                &format!("com.chronicle.capture.display-{display_id}"),
-                None,
-            );
+            let queue =
+                DispatchQueue::new(&format!("com.chronicle.capture.display-{display_id}"), None);
 
             autoreleasepool(|_| unsafe {
                 stream
@@ -228,12 +231,13 @@ impl CaptureEngine {
             // Register audio handler on the primary display's stream.
             if is_primary && let Some(ref audio) = config.audio {
                 // System audio — hard error. Core functionality.
+                let system_handler = audio.handler_clone();
                 autoreleasepool(|_| unsafe {
                     stream
                         .addStreamOutput_type_sampleHandlerQueue_error(
-                            &audio.handler,
+                            &system_handler,
                             SCStreamOutputType::Audio,
-                            Some(&audio.queue),
+                            Some(audio.queue()),
                         )
                         .map_err(|e| {
                             CaptureError::ScreenCaptureKit(format!(
@@ -246,11 +250,12 @@ impl CaptureEngine {
                 // Microphone — soft error. Permission may be denied or
                 // hardware may be absent. Log and continue.
                 if audio.capture_microphone {
+                    let mic_handler = audio.handler_clone();
                     let mic_result = autoreleasepool(|_| unsafe {
                         stream.addStreamOutput_type_sampleHandlerQueue_error(
-                            &audio.handler,
+                            &mic_handler,
                             SCStreamOutputType::Microphone,
-                            Some(&audio.queue),
+                            Some(audio.queue()),
                         )
                     });
                     if let Err(e) = mic_result {
@@ -309,6 +314,7 @@ impl CaptureEngine {
             frames_dropped,
             state: EngineState::Running,
             deps,
+            _audio_token: config.audio,
         };
 
         Ok((engine, receiver))
@@ -348,9 +354,7 @@ impl CaptureEngine {
             Err(CaptureError::PartialTeardown {
                 survivors,
                 stop_errors: errors,
-                original: Box::new(CaptureError::ScreenCaptureKit(
-                    "engine stop failed".into(),
-                )),
+                original: Box::new(CaptureError::ScreenCaptureKit("engine stop failed".into())),
             })
         }
     }
@@ -370,7 +374,7 @@ impl CaptureEngine {
     }
 }
 
-impl Drop for CaptureEngine {
+impl Drop for CaptureEngine<'_> {
     fn drop(&mut self) {
         for stream in &self.streams {
             if let Err(e) = (self.deps.stop_stream)(stream) {
@@ -394,26 +398,28 @@ pub(crate) fn enumerate_displays() -> Result<Vec<Retained<SCDisplay>>> {
     let (tx, rx) =
         std::sync::mpsc::sync_channel::<std::result::Result<Vec<Retained<SCDisplay>>, String>>(1);
 
-    let block = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
-        if !error.is_null() {
-            let desc = unsafe { (*error).localizedDescription() };
-            let _ = tx.send(Err(desc.to_string()));
-            return;
-        }
+    let block = RcBlock::new(
+        move |content: *mut SCShareableContent, error: *mut NSError| {
+            if !error.is_null() {
+                let desc = unsafe { (*error).localizedDescription() };
+                let _ = tx.send(Err(desc.to_string()));
+                return;
+            }
 
-        if content.is_null() {
-            let _ = tx.send(Err("SCShareableContent was null".into()));
-            return;
-        }
+            if content.is_null() {
+                let _ = tx.send(Err("SCShareableContent was null".into()));
+                return;
+            }
 
-        let content = unsafe { &*content };
-        let displays = unsafe { content.displays() };
-        let mut result = Vec::with_capacity(displays.len());
-        for i in 0..displays.len() {
-            result.push(displays.objectAtIndex(i));
-        }
-        let _ = tx.send(Ok(result));
-    });
+            let content = unsafe { &*content };
+            let displays = unsafe { content.displays() };
+            let mut result = Vec::with_capacity(displays.len());
+            for i in 0..displays.len() {
+                result.push(displays.objectAtIndex(i));
+            }
+            let _ = tx.send(Ok(result));
+        },
+    );
 
     unsafe {
         SCShareableContent::getShareableContentWithCompletionHandler(&block);
@@ -421,9 +427,9 @@ pub(crate) fn enumerate_displays() -> Result<Vec<Retained<SCDisplay>>> {
 
     match rx.recv_timeout(std::time::Duration::from_secs(10)) {
         Ok(result) => result.map_err(CaptureError::ScreenCaptureKit),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(
-            CaptureError::ScreenCaptureKit("display enumeration timed out".into()),
-        ),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(CaptureError::ScreenCaptureKit(
+            "display enumeration timed out".into(),
+        )),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(
             CaptureError::ScreenCaptureKit("display enumeration channel closed".into()),
         ),
@@ -453,9 +459,7 @@ pub(crate) fn start_stream(stream: &SCStream) -> std::result::Result<(), String>
     match rx.recv_timeout(std::time::Duration::from_secs(10)) {
         Ok(None) => Ok(()),
         Ok(Some(err)) => Err(err),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            Err("start capture timed out".into())
-        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err("start capture timed out".into()),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             Err("start capture completion handler channel closed".into())
         }
@@ -485,9 +489,7 @@ pub(crate) fn stop_stream(stream: &SCStream) -> std::result::Result<(), String> 
     match rx.recv_timeout(std::time::Duration::from_secs(5)) {
         Ok(None) => Ok(()),
         Ok(Some(err)) => Err(err),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            Err("stop capture timed out".into())
-        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err("stop capture timed out".into()),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             Err("stop capture completion handler channel closed".into())
         }
@@ -575,11 +577,19 @@ mod tests {
 
         fn fail_on_third_start(_: &SCStream) -> std::result::Result<(), String> {
             let n = START_CALLS.fetch_add(1, Ordering::SeqCst);
-            if n == 2 { Err("injected failure on 3rd stream".into()) } else { Ok(()) }
+            if n == 2 {
+                Err("injected failure on 3rd stream".into())
+            } else {
+                Ok(())
+            }
         }
         fn fail_on_first_stop(_: &SCStream) -> std::result::Result<(), String> {
             let n = STOP_CALLS.fetch_add(1, Ordering::SeqCst);
-            if n == 0 { Err("injected stop failure".into()) } else { Ok(()) }
+            if n == 0 {
+                Err("injected stop failure".into())
+            } else {
+                Ok(())
+            }
         }
 
         let deps = crate::deps::EngineDeps {
@@ -591,7 +601,11 @@ mod tests {
             .err()
             .expect("rollback should fail");
         match err {
-            CaptureError::PartialTeardown { survivors, stop_errors, .. } => {
+            CaptureError::PartialTeardown {
+                survivors,
+                stop_errors,
+                ..
+            } => {
                 assert_eq!(survivors.len(), 1, "expected one survivor");
                 assert_eq!(stop_errors.len(), 1, "expected one stop error");
             }
@@ -611,7 +625,11 @@ mod tests {
 
         fn fail_on_second_start(_: &SCStream) -> std::result::Result<(), String> {
             let n = START_CALLS.fetch_add(1, Ordering::SeqCst);
-            if n == 1 { Err("injected failure on 2nd stream".into()) } else { Ok(()) }
+            if n == 1 {
+                Err("injected failure on 2nd stream".into())
+            } else {
+                Ok(())
+            }
         }
         fn always_stop_ok(_: &SCStream) -> std::result::Result<(), String> {
             Ok(())
@@ -631,7 +649,7 @@ mod tests {
         );
     }
 
-    fn test_engine_with_state(state: EngineState) -> CaptureEngine {
+    fn test_engine_with_state(state: EngineState) -> CaptureEngine<'static> {
         let (sender, _rx) = mpsc::channel(1);
         CaptureEngine {
             streams: Vec::new(),
@@ -642,6 +660,7 @@ mod tests {
             frames_dropped: Arc::new(AtomicU64::new(0)),
             state,
             deps: EngineDeps::default(),
+            _audio_token: None,
         }
     }
 
@@ -657,7 +676,9 @@ mod tests {
     fn stop_success_transitions_to_idle() {
         // Empty streams vec → no deps.stop_stream calls → clean transition.
         let mut engine = test_engine_with_state(EngineState::Running);
-        engine.stop().expect("stop on Running with no streams must succeed");
+        engine
+            .stop()
+            .expect("stop on Running with no streams must succeed");
         assert_eq!(engine.state, EngineState::Idle);
     }
 
@@ -681,7 +702,9 @@ mod tests {
             ..EngineDeps::default()
         };
 
-        let err = engine.stop().expect_err("stop must fail when deps.stop_stream fails");
+        let err = engine
+            .stop()
+            .expect_err("stop must fail when deps.stop_stream fails");
         assert!(matches!(err, CaptureError::PartialTeardown { .. }));
         assert_eq!(engine.state, EngineState::Poisoned);
     }

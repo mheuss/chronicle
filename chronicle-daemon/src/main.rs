@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chronicle_audio::{AudioConfig, AudioPipeline, CHANNEL_COUNT, SAMPLE_RATE};
-use chronicle_capture::{AudioOutputConfig, CaptureConfig, CaptureEngine, CaptureError};
+use chronicle_capture::{CaptureConfig, CaptureEngine, CaptureError};
 use chronicle_ipc::{CancellationToken, IpcServer};
 use chronicle_storage::{Storage, StorageConfig};
 
@@ -51,21 +51,16 @@ async fn main() -> Result<()> {
     log::info!("Audio pipeline created");
 
     // --- Screen capture pipeline (with audio on primary display) ---
+    // Hold the token locally; CaptureEngine::start consumes it and the
+    // borrow ends when `start` returns. After this block, `audio_pipeline`
+    // is borrow-free and can be stopped at shutdown.
     let capture_config = CaptureConfig {
-        audio: Some(AudioOutputConfig {
-            handler: audio_pipeline
-                .handler()
-                .ok_or_else(|| anyhow::anyhow!("audio handler unavailable"))?,
-            queue: audio_pipeline.queue(),
-            sample_rate: SAMPLE_RATE,
-            channel_count: CHANNEL_COUNT,
-            capture_microphone: false, // HEU-329: mic off by default
-        }),
+        audio: audio_pipeline.token(SAMPLE_RATE, CHANNEL_COUNT, false),
         ..Default::default()
     };
     let (mut engine, frame_rx) = match CaptureEngine::start(capture_config) {
         Ok(pair) => pair,
-        Err(chronicle_capture::CaptureError::PartialTeardown {
+        Err(CaptureError::PartialTeardown {
             survivors,
             stop_errors,
             original,
@@ -115,7 +110,11 @@ async fn main() -> Result<()> {
     let mut poisoned = false;
     match &stop_result {
         Ok(()) => log::info!("Capture engine stopped cleanly"),
-        Err(CaptureError::PartialTeardown { survivors, stop_errors, .. }) => {
+        Err(CaptureError::PartialTeardown {
+            survivors,
+            stop_errors,
+            ..
+        }) => {
             poisoned = true;
             log::error!(
                 "engine stop failed; entering Poisoned. survivors={survivors:?} \

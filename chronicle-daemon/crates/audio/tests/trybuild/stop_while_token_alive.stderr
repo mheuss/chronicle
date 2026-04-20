@@ -1,0 +1,10 @@
+error[E0502]: cannot borrow `pipeline` as mutable because it is also borrowed as immutable
+ --> tests/trybuild/stop_while_token_alive.rs:6:5
+  |
+5 |     let token = pipeline.token(48_000, 1, false).unwrap();
+  |                 -------- immutable borrow occurs here
+6 |     pipeline.stop().unwrap(); //~ ERROR cannot borrow `pipeline` as mutable
+  |     ^^^^^^^^^^^^^^^ mutable borrow occurs here
+7 |     // Keep `token` borrow live past `stop()` so NLL doesn't release it early.
+8 |     let _ = token.sample_rate;
+  |             ----------------- immutable borrow later used here

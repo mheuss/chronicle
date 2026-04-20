@@ -5,11 +5,8 @@
 
 use std::fmt;
 
-use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
 use objc2_core_media::CMSampleBuffer;
-use objc2_screen_capture_kit::SCStreamOutput;
 
 /// Error types for capture operations.
 pub mod error;
@@ -31,8 +28,8 @@ pub mod metadata;
 /// CoreVideo pixel buffer FFI.
 pub(crate) mod pixel_buffer;
 
-pub use engine::{CaptureEngine, EngineState};
 pub use encoder::encode_heif;
+pub use engine::{CaptureEngine, EngineState};
 pub use error::{CaptureError, Result};
 pub use metadata::{AppMetadata, get_frontmost_app};
 
@@ -59,34 +56,21 @@ impl SendableSampleBuffer {
     }
 }
 
-/// Audio output configuration for piggybacking audio on a capture stream.
-///
-/// The capture engine attaches this to the primary display's SCStream so
-/// audio and screen capture share a single ScreenCaptureKit session.
-pub struct AudioOutputConfig {
-    /// Protocol-erased SCStreamOutput handler from the audio crate.
-    pub handler: Retained<ProtocolObject<dyn SCStreamOutput>>,
-    /// Dispatch queue for audio sample delivery.
-    pub queue: Retained<DispatchQueue>,
-    /// Audio sample rate in Hz (48000 for Opus native).
-    pub sample_rate: u32,
-    /// Number of audio channels (1 = mono).
-    pub channel_count: u32,
-    /// Whether to also capture microphone input. Default: false.
-    pub capture_microphone: bool,
-}
-
 /// Configuration for the capture engine.
-pub struct CaptureConfig {
+pub struct CaptureConfig<'a> {
     /// Minimum time between frames in seconds. Default: 2.0
     pub frame_interval_secs: f64,
     /// Backpressure buffer size for the frame channel. Default: 32
     pub channel_buffer_size: usize,
-    /// Optional audio handler to register on the primary display's stream.
-    pub audio: Option<AudioOutputConfig>,
+    /// Optional audio token borrowed from an active `AudioPipeline`.
+    ///
+    /// While the token is held inside this config, the originating
+    /// `AudioPipeline` cannot be mutably borrowed. The borrow ends when
+    /// `CaptureEngine::start` returns.
+    pub audio: Option<chronicle_audio::AudioHandlerToken<'a>>,
 }
 
-impl Default for CaptureConfig {
+impl<'a> Default for CaptureConfig<'a> {
     fn default() -> Self {
         Self {
             frame_interval_secs: 2.0,
@@ -96,12 +80,12 @@ impl Default for CaptureConfig {
     }
 }
 
-impl fmt::Debug for CaptureConfig {
+impl fmt::Debug for CaptureConfig<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CaptureConfig")
             .field("frame_interval_secs", &self.frame_interval_secs)
             .field("channel_buffer_size", &self.channel_buffer_size)
-            .field("audio", &self.audio.as_ref().map(|_| "Some(...)"))
+            .field("audio", &self.audio.as_ref().map(|_| "Some(token)"))
             .finish()
     }
 }
@@ -151,5 +135,12 @@ mod tests {
     fn capture_config_defaults_no_audio() {
         let config = CaptureConfig::default();
         assert!(config.audio.is_none());
+    }
+
+    #[test]
+    fn capture_config_accepts_lifetime_parameter() {
+        fn _takes_config<'a>(_: CaptureConfig<'a>) {}
+        let cfg: CaptureConfig<'_> = CaptureConfig::default();
+        _takes_config(cfg);
     }
 }

@@ -19,29 +19,57 @@ use crate::{AudioConfig, AudioError, AudioSource, CompletedSegment, Result};
 
 /// Audio encoding pipeline.
 ///
-/// Owns the ObjC handler, dispatch queue, and encoding thread. The handler
-/// and queue are exposed for external registration on an SCStream. The
+/// Owns the ObjC handler, dispatch queue, and encoding thread. External
+/// callers register the handler on an `SCStream` via a borrowed
+/// [`AudioHandlerToken`] obtained from [`token()`](Self::token). The
 /// encoding thread converts raw PCM into Opus segments and sends them
 /// over a channel.
 ///
 /// The handler is the sole owner of the buffer sender channel. Calling
 /// `stop()` drops the handler, which closes the channel and lets the
-/// encoding thread flush and exit. If the caller holds a `Retained`
-/// clone from `handler()`, they must drop it before `stop()` for the
-/// encoding thread to exit.
+/// encoding thread flush and exit. The borrow checker prevents `stop()`
+/// from being called while an `AudioHandlerToken` is outstanding.
 pub struct AudioPipeline {
     handler: Option<Retained<AudioOutputHandler>>,
     queue: Retained<DispatchQueue>,
     encoding_thread: Option<JoinHandle<()>>,
 }
 
+/// Borrow-based handle for registering audio output on an `SCStream`.
+///
+/// Carries the handler, dispatch queue, and audio settings needed by
+/// `chronicle-capture::CaptureEngine::start`. The token borrows from
+/// `AudioPipeline`, so the pipeline cannot be mutably accessed (including
+/// `stop()`) while a token is outstanding. The borrow checker enforces
+/// handler-outlives-streams as a compile-time invariant.
+pub struct AudioHandlerToken<'p> {
+    handler: &'p Retained<AudioOutputHandler>,
+    queue: &'p Retained<DispatchQueue>,
+    pub sample_rate: u32,
+    pub channel_count: u32,
+    pub capture_microphone: bool,
+}
+
+impl<'p> AudioHandlerToken<'p> {
+    /// Protocol-erased clone of the handler, suitable for
+    /// `addStreamOutput_type_sampleHandlerQueue_error`.
+    pub fn handler_clone(&self) -> Retained<ProtocolObject<dyn SCStreamOutput>> {
+        ProtocolObject::from_retained(self.handler.clone())
+    }
+
+    /// Borrow of the dispatch queue shared with `SCStream`.
+    pub fn queue(&self) -> &Retained<DispatchQueue> {
+        self.queue
+    }
+}
+
 impl AudioPipeline {
     /// Create a new audio pipeline.
     ///
     /// Spawns the encoding thread immediately. Returns the pipeline and
-    /// a receiver for completed Opus segments. The caller should retrieve
-    /// the handler and queue via `handler()` and `queue()`, then register
-    /// them on an SCStream.
+    /// a receiver for completed Opus segments. The caller obtains a
+    /// borrow-based `AudioHandlerToken` via `token()` and passes it to
+    /// `chronicle-capture::CaptureEngine::start` for SCStream registration.
     pub fn create(config: AudioConfig) -> Result<(Self, mpsc::Receiver<CompletedSegment>)> {
         let (segment_tx, segment_rx) = mpsc::channel::<CompletedSegment>();
         let (buffer_tx, buffer_rx) = mpsc::sync_channel::<AudioBuffer>(64);
@@ -63,18 +91,24 @@ impl AudioPipeline {
         Ok((pipeline, segment_rx))
     }
 
-    /// Protocol-erased handler for registering on an SCStream.
+    /// Borrow a token bundle for SCStream registration.
     ///
-    /// Returns `None` after `stop()` has been called.
-    pub fn handler(&self) -> Option<Retained<ProtocolObject<dyn SCStreamOutput>>> {
-        self.handler
-            .as_ref()
-            .map(|h| ProtocolObject::from_retained(h.clone()))
-    }
-
-    /// Dispatch queue for audio sample delivery.
-    pub fn queue(&self) -> Retained<DispatchQueue> {
-        self.queue.clone()
+    /// Returns `None` after `stop()`. While the returned token is alive,
+    /// `stop()` cannot be called — the borrow checker prevents it.
+    pub fn token(
+        &self,
+        sample_rate: u32,
+        channel_count: u32,
+        capture_microphone: bool,
+    ) -> Option<AudioHandlerToken<'_>> {
+        let handler = self.handler.as_ref()?;
+        Some(AudioHandlerToken {
+            handler,
+            queue: &self.queue,
+            sample_rate,
+            channel_count,
+            capture_microphone,
+        })
     }
 
     /// Stop the encoding pipeline.
@@ -83,9 +117,8 @@ impl AudioPipeline {
     /// `recv()` returns `Err`, which triggers a flush of any remaining
     /// samples. Blocks until the encoding thread exits.
     ///
-    /// The caller must drop any `Retained` references from `handler()`
-    /// before calling this, otherwise the handler stays alive and the
-    /// encoding thread won't exit.
+    /// While an [`AudioHandlerToken`] is outstanding, this method cannot be
+    /// called; the borrow checker enforces it.
     pub fn stop(&mut self) -> Result<()> {
         // Drop the handler to close the buffer sender channel.
         self.handler = None;
@@ -186,9 +219,7 @@ mod tests {
             output_dir: dir.path().to_path_buf(),
         };
         let (pipeline, _segment_rx) = AudioPipeline::create(config).unwrap();
-        // Handler and queue should be available
-        let _handler = pipeline.handler().expect("handler should be Some before stop");
-        let _queue = pipeline.queue();
+        let _token = pipeline.token(48_000, 1, false).expect("token available before stop");
     }
 
     #[test]
@@ -352,17 +383,30 @@ mod tests {
     }
 
     #[test]
-    fn handler_returns_none_after_stop() {
+    fn token_exposes_audio_settings() {
         let dir = tempfile::tempdir().unwrap();
         let config = AudioConfig {
             segment_duration_secs: 30,
             bitrate: 64_000,
             output_dir: dir.path().to_path_buf(),
         };
-        let (mut pipeline, _segment_rx) = AudioPipeline::create(config).unwrap();
+        let (pipeline, _rx) = AudioPipeline::create(config).unwrap();
+        let token = pipeline.token(48_000, 1, false).expect("token available");
+        assert_eq!(token.sample_rate, 48_000);
+        assert_eq!(token.channel_count, 1);
+        assert!(!token.capture_microphone);
+    }
 
-        assert!(pipeline.handler().is_some(), "handler should exist before stop");
+    #[test]
+    fn token_is_none_after_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = AudioConfig {
+            segment_duration_secs: 30,
+            bitrate: 64_000,
+            output_dir: dir.path().to_path_buf(),
+        };
+        let (mut pipeline, _rx) = AudioPipeline::create(config).unwrap();
         pipeline.stop().unwrap();
-        assert!(pipeline.handler().is_none(), "handler should be None after stop");
+        assert!(pipeline.token(48_000, 1, false).is_none());
     }
 }

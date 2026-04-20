@@ -11,7 +11,7 @@ mod engine;
 pub mod handler;
 
 pub use encoder::OggOpusEncoder;
-pub use engine::AudioPipeline;
+pub use engine::{AudioHandlerToken, AudioPipeline};
 
 use std::path::{Path, PathBuf};
 
