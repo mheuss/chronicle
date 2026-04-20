@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chronicle_audio::{AudioConfig, AudioPipeline, CHANNEL_COUNT, SAMPLE_RATE};
-use chronicle_capture::{AudioOutputConfig, CaptureConfig, CaptureEngine};
+use chronicle_capture::{AudioOutputConfig, CaptureConfig, CaptureEngine, CaptureError};
 use chronicle_ipc::{CancellationToken, IpcServer};
 use chronicle_storage::{Storage, StorageConfig};
 
@@ -63,7 +63,21 @@ async fn main() -> Result<()> {
         }),
         ..Default::default()
     };
-    let (mut engine, frame_rx) = CaptureEngine::start(capture_config)?;
+    let (mut engine, frame_rx) = match CaptureEngine::start(capture_config) {
+        Ok(pair) => pair,
+        Err(chronicle_capture::CaptureError::PartialTeardown {
+            survivors,
+            stop_errors,
+            original,
+        }) => {
+            log::error!(
+                "capture startup rollback failed; exiting. survivors={survivors:?} \
+                 stop_errors={stop_errors:?} original={original}"
+            );
+            std::process::exit(3);
+        }
+        Err(e) => return Err(e.into()),
+    };
     log::info!("Capture engine started (audio on primary display)");
 
     let (ocr_tx, ocr_rx) = tokio::sync::mpsc::channel(1024);
@@ -97,8 +111,18 @@ async fn main() -> Result<()> {
     // Stop capture engine FIRST — stops SCStream, no more audio callbacks.
     // Must drop before audio_pipeline.stop() so the handler Retained ref
     // is released and the buffer channel can close.
-    if let Err(e) = engine.stop() {
-        log::error!("Capture engine stop failed: {e}");
+    let stop_result = engine.stop();
+    let mut poisoned = false;
+    match &stop_result {
+        Ok(()) => log::info!("Capture engine stopped cleanly"),
+        Err(CaptureError::PartialTeardown { survivors, stop_errors, .. }) => {
+            poisoned = true;
+            log::error!(
+                "engine stop failed; entering Poisoned. survivors={survivors:?} \
+                 stop_errors={stop_errors:?}"
+            );
+        }
+        Err(e) => log::error!("engine stop failed: {e}"),
     }
     drop(engine);
     log::info!("Capture engine stopped");
@@ -126,5 +150,9 @@ async fn main() -> Result<()> {
     }
 
     log::info!("chronicle-daemon stopped");
+    if poisoned {
+        log::error!("daemon exiting with code 3 (engine poisoned)");
+        std::process::exit(3);
+    }
     Ok(())
 }

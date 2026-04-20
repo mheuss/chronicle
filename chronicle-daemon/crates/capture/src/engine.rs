@@ -18,6 +18,7 @@ use objc2_screen_capture_kit::{
 };
 use tokio::sync::mpsc;
 
+use crate::deps::EngineDeps;
 use crate::error::{CaptureError, Result};
 use crate::handler::CaptureOutputHandler;
 use crate::{CaptureConfig, CaptureStatus, CapturedFrame};
@@ -31,6 +32,19 @@ unsafe extern "C" {
     fn CGMainDisplayID() -> u32;
 }
 
+/// Post-construction lifecycle state of `CaptureEngine`.
+///
+/// Set to `Running` on successful construction. Transitions via `stop()` to
+/// `Stopping` and then either `Idle` (clean teardown) or `Poisoned` (one or
+/// more streams failed to stop).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EngineState {
+    Running,
+    Stopping,
+    Idle,
+    Poisoned,
+}
+
 /// Multi-display capture engine.
 ///
 /// Call [`CaptureEngine::start`] to enumerate displays, create one `SCStream`
@@ -40,9 +54,12 @@ unsafe extern "C" {
 pub struct CaptureEngine {
     streams: Vec<Retained<SCStream>>,
     handlers: Vec<Retained<CaptureOutputHandler>>,
+    display_ids: Vec<u32>,
     _sender: mpsc::Sender<CapturedFrame>,
     frames_captured: Arc<AtomicU64>,
     frames_dropped: Arc<AtomicU64>,
+    state: EngineState,
+    deps: EngineDeps,
 }
 
 impl CaptureEngine {
@@ -56,6 +73,18 @@ impl CaptureEngine {
     /// * `CaptureError::NoDisplays` -- no displays found
     /// * `CaptureError::ScreenCaptureKit` -- SCK returned an error
     pub fn start(config: CaptureConfig) -> Result<(Self, mpsc::Receiver<CapturedFrame>)> {
+        Self::start_with_deps(config, EngineDeps::default())
+    }
+
+    /// Internal entry point that accepts an injectable set of SCK seams.
+    ///
+    /// Public callers use [`start`](Self::start), which delegates here with
+    /// `EngineDeps::default()`. Unit tests substitute alternate implementations
+    /// to exercise rollback and failure paths without a real SCK runtime.
+    pub(crate) fn start_with_deps(
+        config: CaptureConfig,
+        deps: EngineDeps,
+    ) -> Result<(Self, mpsc::Receiver<CapturedFrame>)> {
         if config.frame_interval_secs <= 0.0 {
             return Err(CaptureError::ScreenCaptureKit(
                 "frame_interval_secs must be positive".into(),
@@ -69,7 +98,7 @@ impl CaptureEngine {
 
         let (sender, receiver) = mpsc::channel(config.channel_buffer_size);
 
-        let displays = enumerate_displays()?;
+        let displays = (deps.enumerate_displays)()?;
         if displays.is_empty() {
             return Err(CaptureError::NoDisplays);
         }
@@ -101,6 +130,7 @@ impl CaptureEngine {
 
         let mut streams: Vec<Retained<SCStream>> = Vec::with_capacity(displays.len());
         let mut handlers: Vec<Retained<CaptureOutputHandler>> = Vec::with_capacity(displays.len());
+        let mut started_display_ids: Vec<u32> = Vec::with_capacity(displays.len());
 
         for display in &displays {
             let display_id = unsafe { display.displayID() };
@@ -235,14 +265,30 @@ impl CaptureEngine {
             }
 
             // Start capture.
-            if let Err(e) = start_stream(&stream) {
-                // Stop all previously-started streams before propagating.
-                for started in &streams {
-                    let _ = stop_stream(started);
+            if let Err(start_err) = (deps.start_stream)(&stream) {
+                let mut stop_errors: Vec<(u32, String)> = Vec::new();
+                let mut survivors: Vec<u32> = Vec::new();
+                for (started, started_id) in streams.iter().zip(started_display_ids.iter()) {
+                    if let Err(stop_err) = (deps.stop_stream)(started) {
+                        log::error!(
+                            "rollback stop_stream failed for display {started_id}: {stop_err}"
+                        );
+                        stop_errors.push((*started_id, stop_err));
+                        survivors.push(*started_id);
+                    }
                 }
-                return Err(CaptureError::ScreenCaptureKit(format!(
-                    "failed to start capture on display {display_id}: {e}"
-                )));
+                let original = CaptureError::ScreenCaptureKit(format!(
+                    "failed to start capture on display {display_id}: {start_err}"
+                ));
+                return if stop_errors.is_empty() {
+                    Err(original)
+                } else {
+                    Err(CaptureError::PartialTeardown {
+                        survivors,
+                        stop_errors,
+                        original: Box::new(original),
+                    })
+                };
             }
 
             log::info!(
@@ -250,32 +296,63 @@ impl CaptureEngine {
                 if is_primary { ", primary" } else { "" }
             );
             streams.push(stream);
+            started_display_ids.push(display_id);
             handlers.push(handler);
         }
 
         let engine = Self {
             streams,
             handlers,
+            display_ids: started_display_ids,
             _sender: sender,
             frames_captured,
             frames_dropped,
+            state: EngineState::Running,
+            deps,
         };
 
         Ok((engine, receiver))
     }
 
-    /// Stop all active capture streams.
+    /// Stop all active capture streams and collect per-stream teardown errors.
     ///
-    /// After calling this the receiver will eventually drain and close.
+    /// Idempotent on `Stopping`. On `Idle` or `Poisoned`, returns
+    /// `CaptureError::Poisoned` without doing anything. On `Running`, iterates
+    /// every stream; any `stop_stream` failure is collected and the engine
+    /// transitions to `Poisoned`.
     pub fn stop(&mut self) -> Result<()> {
-        for stream in &self.streams {
-            if let Err(e) = stop_stream(stream) {
-                log::warn!("Error stopping stream: {e}");
+        match self.state {
+            EngineState::Idle | EngineState::Poisoned => return Err(CaptureError::Poisoned),
+            EngineState::Stopping => return Ok(()),
+            EngineState::Running => {}
+        }
+        self.state = EngineState::Stopping;
+
+        let mut errors: Vec<(u32, String)> = Vec::new();
+        for (stream, display_id) in self.streams.iter().zip(self.display_ids.iter()) {
+            if let Err(e) = (self.deps.stop_stream)(stream) {
+                log::error!("stop_stream failed for display {display_id}: {e}");
+                errors.push((*display_id, e));
             }
         }
         self.streams.clear();
         self.handlers.clear();
-        Ok(())
+        self.display_ids.clear();
+
+        if errors.is_empty() {
+            self.state = EngineState::Idle;
+            Ok(())
+        } else {
+            self.state = EngineState::Poisoned;
+            let survivors: Vec<u32> = errors.iter().map(|(id, _)| *id).collect();
+            Err(CaptureError::PartialTeardown {
+                survivors,
+                stop_errors: errors,
+                original: Box::new(CaptureError::ScreenCaptureKit(
+                    "engine stop failed".into(),
+                )),
+            })
+        }
     }
 
     /// Return a point-in-time health snapshot.
@@ -286,17 +363,23 @@ impl CaptureEngine {
             total_frames_dropped: self.frames_dropped.load(Ordering::Relaxed),
         }
     }
+
+    /// Return the current post-construction state.
+    pub fn state(&self) -> EngineState {
+        self.state
+    }
 }
 
 impl Drop for CaptureEngine {
     fn drop(&mut self) {
         for stream in &self.streams {
-            if let Err(e) = stop_stream(stream) {
+            if let Err(e) = (self.deps.stop_stream)(stream) {
                 log::warn!("Failed to stop stream on drop: {e}");
             }
         }
         self.streams.clear();
         self.handlers.clear();
+        self.display_ids.clear();
     }
 }
 
@@ -307,7 +390,7 @@ impl Drop for CaptureEngine {
 /// Enumerate all connected displays via SCShareableContent.
 ///
 /// Uses a synchronous channel + block2 callback to bridge the async SCK API.
-fn enumerate_displays() -> Result<Vec<Retained<SCDisplay>>> {
+pub(crate) fn enumerate_displays() -> Result<Vec<Retained<SCDisplay>>> {
     let (tx, rx) =
         std::sync::mpsc::sync_channel::<std::result::Result<Vec<Retained<SCDisplay>>, String>>(1);
 
@@ -351,7 +434,7 @@ fn enumerate_displays() -> Result<Vec<Retained<SCDisplay>>> {
 ///
 /// Times out after 10 seconds to avoid hanging indefinitely if SCK
 /// never invokes the completion handler.
-fn start_stream(stream: &SCStream) -> std::result::Result<(), String> {
+pub(crate) fn start_stream(stream: &SCStream) -> std::result::Result<(), String> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<Option<String>>(1);
 
     let block = RcBlock::new(move |error: *mut NSError| {
@@ -383,7 +466,7 @@ fn start_stream(stream: &SCStream) -> std::result::Result<(), String> {
 ///
 /// Times out after 5 seconds. This is shorter than start because stop runs
 /// in the Drop path — a hung stop would make the daemon unkillable.
-fn stop_stream(stream: &SCStream) -> std::result::Result<(), String> {
+pub(crate) fn stop_stream(stream: &SCStream) -> std::result::Result<(), String> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<Option<String>>(1);
 
     let block = RcBlock::new(move |error: *mut NSError| {
@@ -423,6 +506,7 @@ fn seconds_to_cmtime(secs: f64) -> CMTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::deps::EngineDeps;
 
     #[test]
     fn seconds_to_cmtime_converts_correctly() {
@@ -441,5 +525,164 @@ mod tests {
         let timescale = { time.timescale };
         assert_eq!(value, 500);
         assert_eq!(timescale, 1000);
+    }
+
+    #[test]
+    fn engine_state_variants_compile_and_compare() {
+        assert_eq!(EngineState::Running, EngineState::Running);
+        assert_ne!(EngineState::Running, EngineState::Idle);
+        assert_ne!(EngineState::Stopping, EngineState::Poisoned);
+    }
+
+    #[test]
+    fn engine_deps_default_uses_real_implementations() {
+        // Compile-time check: Default::default() builds.
+        let _deps = crate::deps::EngineDeps::default();
+    }
+
+    #[test]
+    fn start_with_deps_rejects_empty_display_list() {
+        fn empty_displays() -> Result<Vec<Retained<SCDisplay>>> {
+            Ok(Vec::new())
+        }
+        fn unreachable_start(_: &SCStream) -> std::result::Result<(), String> {
+            unreachable!("start should not be called when there are no displays")
+        }
+        fn unreachable_stop(_: &SCStream) -> std::result::Result<(), String> {
+            unreachable!("stop should not be called when there are no displays")
+        }
+
+        let deps = crate::deps::EngineDeps {
+            enumerate_displays: empty_displays,
+            start_stream: unreachable_start,
+            stop_stream: unreachable_stop,
+        };
+        let result = CaptureEngine::start_with_deps(CaptureConfig::default(), deps);
+        assert!(matches!(result, Err(CaptureError::NoDisplays)));
+    }
+
+    // Rollback tests run only on macOS where the SCK framework links.
+    // The `EngineDeps` seam intercepts before any ObjC call reaches SCK;
+    // the streams constructed inside the loop are never started because
+    // fake `start_stream` fires first.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore] // Requires real SCDisplay enumeration, which needs Screen Recording TCC.
+    fn rollback_reports_partial_teardown_when_stop_fails() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static START_CALLS: AtomicUsize = AtomicUsize::new(0);
+        static STOP_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        fn fail_on_third_start(_: &SCStream) -> std::result::Result<(), String> {
+            let n = START_CALLS.fetch_add(1, Ordering::SeqCst);
+            if n == 2 { Err("injected failure on 3rd stream".into()) } else { Ok(()) }
+        }
+        fn fail_on_first_stop(_: &SCStream) -> std::result::Result<(), String> {
+            let n = STOP_CALLS.fetch_add(1, Ordering::SeqCst);
+            if n == 0 { Err("injected stop failure".into()) } else { Ok(()) }
+        }
+
+        let deps = crate::deps::EngineDeps {
+            enumerate_displays: crate::engine::enumerate_displays,
+            start_stream: fail_on_third_start,
+            stop_stream: fail_on_first_stop,
+        };
+        let err = CaptureEngine::start_with_deps(CaptureConfig::default(), deps)
+            .err()
+            .expect("rollback should fail");
+        match err {
+            CaptureError::PartialTeardown { survivors, stop_errors, .. } => {
+                assert_eq!(survivors.len(), 1, "expected one survivor");
+                assert_eq!(stop_errors.len(), 1, "expected one stop error");
+            }
+            other => panic!("expected PartialTeardown, got {other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore] // Requires real SCDisplay enumeration, which needs Screen Recording TCC.
+    fn rollback_no_error_when_all_stops_succeed() {
+        // When rollback's stop_stream calls all succeed, the caller should
+        // see the original `ScreenCaptureKit` start error — not a
+        // `PartialTeardown` — because no streams survived.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static START_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        fn fail_on_second_start(_: &SCStream) -> std::result::Result<(), String> {
+            let n = START_CALLS.fetch_add(1, Ordering::SeqCst);
+            if n == 1 { Err("injected failure on 2nd stream".into()) } else { Ok(()) }
+        }
+        fn always_stop_ok(_: &SCStream) -> std::result::Result<(), String> {
+            Ok(())
+        }
+
+        let deps = crate::deps::EngineDeps {
+            enumerate_displays: crate::engine::enumerate_displays,
+            start_stream: fail_on_second_start,
+            stop_stream: always_stop_ok,
+        };
+        let err = CaptureEngine::start_with_deps(CaptureConfig::default(), deps)
+            .err()
+            .expect("rollback should surface the start error");
+        assert!(
+            matches!(err, CaptureError::ScreenCaptureKit(_)),
+            "clean rollback should return ScreenCaptureKit, got {err:?}"
+        );
+    }
+
+    fn test_engine_with_state(state: EngineState) -> CaptureEngine {
+        let (sender, _rx) = mpsc::channel(1);
+        CaptureEngine {
+            streams: Vec::new(),
+            handlers: Vec::new(),
+            display_ids: Vec::new(),
+            _sender: sender,
+            frames_captured: Arc::new(AtomicU64::new(0)),
+            frames_dropped: Arc::new(AtomicU64::new(0)),
+            state,
+            deps: EngineDeps::default(),
+        }
+    }
+
+    #[test]
+    fn stop_on_idle_returns_poisoned_err() {
+        let mut engine = test_engine_with_state(EngineState::Idle);
+        let err = engine.stop().expect_err("stop on Idle must error");
+        assert!(matches!(err, CaptureError::Poisoned));
+        assert_eq!(engine.state, EngineState::Idle);
+    }
+
+    #[test]
+    fn stop_success_transitions_to_idle() {
+        // Empty streams vec → no deps.stop_stream calls → clean transition.
+        let mut engine = test_engine_with_state(EngineState::Running);
+        engine.stop().expect("stop on Running with no streams must succeed");
+        assert_eq!(engine.state, EngineState::Idle);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore] // Requires real SCStream (TCC) to populate the streams vec.
+    fn stop_failure_transitions_to_poisoned() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static STOP_CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn always_fails(_: &SCStream) -> std::result::Result<(), String> {
+            STOP_CALLS.fetch_add(1, Ordering::SeqCst);
+            Err("injected stop failure".into())
+        }
+
+        // Use the real start path to get a populated engine, then swap deps
+        // so the next stop() call fails deterministically.
+        let (mut engine, _rx) = CaptureEngine::start(CaptureConfig::default())
+            .expect("engine must start on macOS with TCC granted");
+        engine.deps = EngineDeps {
+            stop_stream: always_fails,
+            ..EngineDeps::default()
+        };
+
+        let err = engine.stop().expect_err("stop must fail when deps.stop_stream fails");
+        assert!(matches!(err, CaptureError::PartialTeardown { .. }));
+        assert_eq!(engine.state, EngineState::Poisoned);
     }
 }

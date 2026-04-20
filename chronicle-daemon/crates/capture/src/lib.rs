@@ -14,6 +14,8 @@ use objc2_screen_capture_kit::SCStreamOutput;
 /// Error types for capture operations.
 pub mod error;
 
+pub(crate) mod deps;
+
 /// Capture engine managing per-display SCStreams.
 pub mod engine;
 
@@ -29,7 +31,7 @@ pub mod metadata;
 /// CoreVideo pixel buffer FFI.
 pub(crate) mod pixel_buffer;
 
-pub use engine::CaptureEngine;
+pub use engine::{CaptureEngine, EngineState};
 pub use encoder::encode_heif;
 pub use error::{CaptureError, Result};
 pub use metadata::{AppMetadata, get_frontmost_app};

@@ -14,6 +14,22 @@ pub enum CaptureError {
     /// HEIF encoding failed.
     #[error("heif encoding failed: {0}")]
     Encoding(String),
+
+    /// Startup rollback left one or more capture streams running.
+    ///
+    /// Survivors are identified by display ID. The `original` cause is the
+    /// first error that triggered rollback.
+    #[error("startup rollback failed; {} stream(s) may still be running: {survivors:?}", survivors.len())]
+    PartialTeardown {
+        survivors: Vec<u32>,
+        stop_errors: Vec<(u32, String)>,
+        #[source]
+        original: Box<CaptureError>,
+    },
+
+    /// Engine entered a poisoned state after `stop()` failed.
+    #[error("engine is poisoned after stop failure")]
+    Poisoned,
 }
 
 /// Convenience alias for capture operations.
@@ -40,5 +56,23 @@ mod tests {
         let err = CaptureError::Encoding("pixel buffer locked".into());
         assert!(err.to_string().contains("pixel buffer locked"));
         assert!(err.to_string().contains("heif encoding failed"));
+    }
+
+    #[test]
+    fn partial_teardown_error_includes_survivor_count() {
+        let err = CaptureError::PartialTeardown {
+            survivors: vec![1, 2],
+            stop_errors: vec![(1, "timeout".into()), (2, "hung".into())],
+            original: Box::new(CaptureError::ScreenCaptureKit("boom".into())),
+        };
+        let s = err.to_string();
+        assert!(s.contains("2"), "message should include survivor count: {s}");
+        assert!(s.contains("[1, 2]"), "message should include survivor ids: {s}");
+    }
+
+    #[test]
+    fn poisoned_error_displays() {
+        let err = CaptureError::Poisoned;
+        assert_eq!(err.to_string(), "engine is poisoned after stop failure");
     }
 }
