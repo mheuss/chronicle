@@ -29,7 +29,7 @@ pub mod metadata;
 pub(crate) mod pixel_buffer;
 
 pub use encoder::encode_heif;
-pub use engine::{CaptureEngine, EngineState};
+pub use engine::{CaptureEngine, EngineState, EngineStatusProbe, EngineStatusSnapshot};
 pub use error::{CaptureError, Result};
 pub use metadata::{AppMetadata, get_frontmost_app};
 

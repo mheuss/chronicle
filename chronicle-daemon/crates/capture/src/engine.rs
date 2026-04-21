@@ -4,7 +4,7 @@
 //! per display, and delivers frames over a bounded mpsc channel.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
@@ -37,12 +37,24 @@ unsafe extern "C" {
 /// Set to `Running` on successful construction. Transitions via `stop()` to
 /// `Stopping` and then either `Idle` (clean teardown) or `Poisoned` (one or
 /// more streams failed to stop).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[repr(u8)]
 pub enum EngineState {
-    Running,
-    Stopping,
-    Idle,
-    Poisoned,
+    Running = 0,
+    Stopping = 1,
+    Idle = 2,
+    Poisoned = 3,
+}
+
+impl EngineState {
+    pub(crate) fn from_u8(value: u8) -> Self {
+        match value {
+            0 => EngineState::Running,
+            1 => EngineState::Stopping,
+            2 => EngineState::Idle,
+            _ => EngineState::Poisoned,
+        }
+    }
 }
 
 /// Multi-display capture engine.
@@ -59,6 +71,8 @@ pub struct CaptureEngine<'a> {
     frames_captured: Arc<AtomicU64>,
     frames_dropped: Arc<AtomicU64>,
     state: EngineState,
+    state_atom: Arc<AtomicU8>,
+    active_displays_atom: Arc<AtomicUsize>,
     deps: EngineDeps,
     /// Borrows the `AudioPipeline` for as long as the engine lives. Lets
     /// the borrow checker enforce that callers keep the pipeline alive
@@ -305,6 +319,8 @@ impl<'a> CaptureEngine<'a> {
             handlers.push(handler);
         }
 
+        let state_atom = Arc::new(AtomicU8::new(EngineState::Running as u8));
+        let active_displays_atom = Arc::new(AtomicUsize::new(streams.len()));
         let engine = Self {
             streams,
             handlers,
@@ -313,6 +329,8 @@ impl<'a> CaptureEngine<'a> {
             frames_captured,
             frames_dropped,
             state: EngineState::Running,
+            state_atom,
+            active_displays_atom,
             deps,
             _audio_token: config.audio,
         };
@@ -332,7 +350,7 @@ impl<'a> CaptureEngine<'a> {
             EngineState::Stopping => return Ok(()),
             EngineState::Running => {}
         }
-        self.state = EngineState::Stopping;
+        self.set_state(EngineState::Stopping);
 
         let mut errors: Vec<(u32, String)> = Vec::new();
         for (stream, display_id) in self.streams.iter().zip(self.display_ids.iter()) {
@@ -344,12 +362,13 @@ impl<'a> CaptureEngine<'a> {
         self.streams.clear();
         self.handlers.clear();
         self.display_ids.clear();
+        self.active_displays_atom.store(0, Ordering::Release);
 
         if errors.is_empty() {
-            self.state = EngineState::Idle;
+            self.set_state(EngineState::Idle);
             Ok(())
         } else {
-            self.state = EngineState::Poisoned;
+            self.set_state(EngineState::Poisoned);
             let survivors: Vec<u32> = errors.iter().map(|(id, _)| *id).collect();
             Err(CaptureError::PartialTeardown {
                 survivors,
@@ -357,6 +376,11 @@ impl<'a> CaptureEngine<'a> {
                 original: Box::new(CaptureError::ScreenCaptureKit("engine stop failed".into())),
             })
         }
+    }
+
+    fn set_state(&mut self, next: EngineState) {
+        self.state = next;
+        self.state_atom.store(next as u8, Ordering::Release);
     }
 
     /// Return a point-in-time health snapshot.
@@ -371,6 +395,53 @@ impl<'a> CaptureEngine<'a> {
     /// Return the current post-construction state.
     pub fn state(&self) -> EngineState {
         self.state
+    }
+
+    /// Return a cloneable probe into the engine's live atomics.
+    pub fn status_probe(&self) -> EngineStatusProbe {
+        EngineStatusProbe {
+            frames_captured: Arc::clone(&self.frames_captured),
+            frames_dropped: Arc::clone(&self.frames_dropped),
+            state: Arc::clone(&self.state_atom),
+            active_displays: Arc::clone(&self.active_displays_atom),
+        }
+    }
+}
+
+/// Lightweight read-only view of the capture engine's live health state.
+///
+/// Allows a background refresher to observe capture health without
+/// borrowing `CaptureEngine` itself (which lives on the main task and
+/// isn't `Send` across the refresher boundary).
+#[derive(Clone)]
+pub struct EngineStatusProbe {
+    pub frames_captured: Arc<AtomicU64>,
+    pub frames_dropped: Arc<AtomicU64>,
+    pub state: Arc<AtomicU8>,
+    pub active_displays: Arc<AtomicUsize>,
+}
+
+/// One tick's worth of engine status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EngineStatusSnapshot {
+    pub frames_captured: u64,
+    pub frames_dropped: u64,
+    pub state: EngineState,
+    pub active_displays: usize,
+}
+
+impl EngineStatusProbe {
+    /// Load all four values. `Relaxed` for counters (monotonically
+    /// increasing), `Acquire` for state/active_displays (they change in
+    /// lockstep with engine transitions and readers want to see a coherent
+    /// snapshot — a cache-line refresh per tick is fine).
+    pub fn snapshot(&self) -> EngineStatusSnapshot {
+        EngineStatusSnapshot {
+            frames_captured: self.frames_captured.load(Ordering::Relaxed),
+            frames_dropped: self.frames_dropped.load(Ordering::Relaxed),
+            state: EngineState::from_u8(self.state.load(Ordering::Acquire)),
+            active_displays: self.active_displays.load(Ordering::Acquire),
+        }
     }
 }
 
@@ -659,6 +730,8 @@ mod tests {
             frames_captured: Arc::new(AtomicU64::new(0)),
             frames_dropped: Arc::new(AtomicU64::new(0)),
             state,
+            state_atom: Arc::new(AtomicU8::new(state as u8)),
+            active_displays_atom: Arc::new(AtomicUsize::new(0)),
             deps: EngineDeps::default(),
             _audio_token: None,
         }
@@ -707,5 +780,35 @@ mod tests {
             .expect_err("stop must fail when deps.stop_stream fails");
         assert!(matches!(err, CaptureError::PartialTeardown { .. }));
         assert_eq!(engine.state, EngineState::Poisoned);
+    }
+
+    #[test]
+    fn status_probe_reads_live_state_and_counters() {
+        use crate::{EngineState, EngineStatusProbe};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+
+        let captured = Arc::new(AtomicU64::new(42));
+        let dropped = Arc::new(AtomicU64::new(3));
+        let state = Arc::new(AtomicU8::new(EngineState::Running as u8));
+        let active = Arc::new(AtomicUsize::new(2));
+        let probe = EngineStatusProbe {
+            frames_captured: Arc::clone(&captured),
+            frames_dropped: Arc::clone(&dropped),
+            state: Arc::clone(&state),
+            active_displays: Arc::clone(&active),
+        };
+        let snap = probe.snapshot();
+        assert_eq!(snap.frames_captured, 42);
+        assert_eq!(snap.frames_dropped, 3);
+        assert_eq!(snap.state, EngineState::Running);
+        assert_eq!(snap.active_displays, 2);
+
+        // Simulate a transition to `Idle`; probe must observe it.
+        state.store(EngineState::Idle as u8, Ordering::Release);
+        active.store(0, Ordering::Release);
+        let snap2 = probe.snapshot();
+        assert_eq!(snap2.state, EngineState::Idle);
+        assert_eq!(snap2.active_displays, 0);
     }
 }

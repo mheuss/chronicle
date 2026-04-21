@@ -250,6 +250,32 @@ struct StatusResponse: Codable {
 struct StatusData: Codable {
     let uptimeSecs: UInt64
     let version: String
+    let capture: CaptureStats?
+    let ocr: OcrStats?
+    let audio: AudioStats?
+    let storage: StorageStats?
+}
+
+struct CaptureStats: Codable {
+    let state: String
+    let activeDisplays: Int
+    let framesCaptured: UInt64
+    let framesDropped: UInt64
+    let framesProcessed: UInt64
+    let framesFailed: UInt64
+}
+
+struct OcrStats: Codable {
+    let enqueued: UInt64
+    let dropped: UInt64
+}
+
+struct AudioStats: Codable {
+    let segmentsPersisted: UInt64
+}
+
+struct StorageStats: Codable {
+    let dbSizeBytes: UInt64
 }
 
 struct ErrorResponse: Codable {

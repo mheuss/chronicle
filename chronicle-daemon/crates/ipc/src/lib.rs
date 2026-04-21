@@ -29,6 +29,42 @@ pub enum Response {
 pub struct StatusData {
     pub uptime_secs: u64,
     pub version: String,
+    pub capture: CaptureStats,
+    pub ocr: OcrStats,
+    pub audio: AudioStats,
+    pub storage: StorageStats,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureStats {
+    /// Engine state: "running" | "stopping" | "idle" | "poisoned".
+    pub state: String,
+    pub active_displays: usize,
+    /// Total frames delivered by SCK (from CaptureEngine::status()).
+    pub frames_captured: u64,
+    /// Frames dropped at the capture boundary (from CaptureEngine::status()).
+    pub frames_dropped: u64,
+    /// Frames fully processed by the pipeline (PipelineCounters).
+    pub frames_processed: u64,
+    /// Frames that failed post-capture processing (PipelineCounters).
+    pub frames_failed: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OcrStats {
+    pub enqueued: u64,
+    /// Aggregate: channel full + channel closed.
+    pub dropped: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioStats {
+    pub segments_persisted: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageStats {
+    pub db_size_bytes: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -71,6 +107,10 @@ mod tests {
             data: StatusData {
                 uptime_secs: 3412,
                 version: "0.1.0".to_string(),
+                capture: CaptureStats::default(),
+                ocr: OcrStats::default(),
+                audio: AudioStats::default(),
+                storage: StorageStats::default(),
             },
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -79,6 +119,25 @@ mod tests {
         assert_eq!(value["ok"], true);
         assert_eq!(value["data"]["uptime_secs"], 3412);
         assert_eq!(value["data"]["version"], "0.1.0");
+        assert!(value["data"]["capture"].is_object());
+        assert!(value["data"]["ocr"].is_object());
+        assert!(value["data"]["audio"].is_object());
+        assert!(value["data"]["storage"].is_object());
+    }
+
+    #[test]
+    fn capture_stats_round_trip() {
+        let stats = CaptureStats {
+            state: "running".into(),
+            active_displays: 2,
+            frames_captured: 100,
+            frames_dropped: 3,
+            frames_processed: 97,
+            frames_failed: 0,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let parsed: CaptureStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, stats);
     }
 
     #[test]
