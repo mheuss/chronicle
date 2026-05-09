@@ -2,5 +2,5 @@
 name = "chronicle-transcription"
 version = "0.1.0"
 edition = "2024"
-description = "Audio transcription pipeline — local speech-to-text via whisper.cpp"
+description = "Audio transcription placeholder — speech-to-text engine TBD"
 license = "MIT"

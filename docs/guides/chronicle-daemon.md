@@ -141,8 +141,9 @@ capture is off by default and toggled from the UI.
 | `chronicle-transcription` | Placeholder for future speech-to-text work | none today |
 | `chronicle-ipc` | JSON over Unix socket status server | `serde`, `serde_json` |
 
-All crates are independent of each other. The daemon binary is the only thing
-that depends on all of them.
+All crates are independent of each other. The daemon binary depends on every
+crate above except `chronicle-transcription`, which is currently an unused
+workspace member kept as a placeholder for future speech-to-text work.
 
 ### What depends on the daemon
 

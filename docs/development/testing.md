@@ -43,7 +43,7 @@ with SIGABRT.
 
 The `swift-5.5` segment in the path may differ by system. Check what's at:
 
-```
+```text
 /Library/Developer/CommandLineTools/usr/lib/
 ```
 
