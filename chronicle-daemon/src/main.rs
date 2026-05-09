@@ -9,9 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use chronicle_audio::{AudioConfig, AudioPipeline, CHANNEL_COUNT, SAMPLE_RATE};
-use chronicle_capture::{
-    AppMetadata, CaptureConfig, CaptureEngine, CaptureError, get_frontmost_app,
-};
+use chronicle_capture::{CaptureConfig, CaptureEngine, CaptureError};
 use chronicle_ipc::{CancellationToken, IpcServer};
 use chronicle_storage::{Storage, StorageConfig};
 

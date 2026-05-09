@@ -340,14 +340,15 @@ impl<'a> CaptureEngine<'a> {
 
     /// Stop all active capture streams and collect per-stream teardown errors.
     ///
-    /// Idempotent on `Stopping`. On `Idle` or `Poisoned`, returns
-    /// `CaptureError::Poisoned` without doing anything. On `Running`, iterates
-    /// every stream; any `stop_stream` failure is collected and the engine
-    /// transitions to `Poisoned`.
+    /// Idempotent on `Idle` and `Stopping` (returns `Ok(())` without doing
+    /// anything). On `Poisoned`, returns `CaptureError::Poisoned` because the
+    /// engine cannot be stopped cleanly from a poisoned state. On `Running`,
+    /// iterates every stream; any `stop_stream` failure is collected and the
+    /// engine transitions to `Poisoned`.
     pub fn stop(&mut self) -> Result<()> {
         match self.state {
-            EngineState::Idle | EngineState::Poisoned => return Err(CaptureError::Poisoned),
-            EngineState::Stopping => return Ok(()),
+            EngineState::Idle | EngineState::Stopping => return Ok(()),
+            EngineState::Poisoned => return Err(CaptureError::Poisoned),
             EngineState::Running => {}
         }
         self.set_state(EngineState::Stopping);
@@ -362,14 +363,16 @@ impl<'a> CaptureEngine<'a> {
         self.streams.clear();
         self.handlers.clear();
         self.display_ids.clear();
-        self.active_displays_atom.store(0, Ordering::Release);
 
         if errors.is_empty() {
+            self.active_displays_atom.store(0, Ordering::Release);
             self.set_state(EngineState::Idle);
             Ok(())
         } else {
-            self.set_state(EngineState::Poisoned);
             let survivors: Vec<u32> = errors.iter().map(|(id, _)| *id).collect();
+            self.active_displays_atom
+                .store(survivors.len(), Ordering::Release);
+            self.set_state(EngineState::Poisoned);
             Err(CaptureError::PartialTeardown {
                 survivors,
                 stop_errors: errors,
@@ -738,11 +741,18 @@ mod tests {
     }
 
     #[test]
-    fn stop_on_idle_returns_poisoned_err() {
+    fn stop_on_idle_is_idempotent() {
         let mut engine = test_engine_with_state(EngineState::Idle);
-        let err = engine.stop().expect_err("stop on Idle must error");
-        assert!(matches!(err, CaptureError::Poisoned));
+        engine.stop().expect("stop on Idle must be idempotent");
         assert_eq!(engine.state, EngineState::Idle);
+    }
+
+    #[test]
+    fn stop_on_poisoned_returns_poisoned_err() {
+        let mut engine = test_engine_with_state(EngineState::Poisoned);
+        let err = engine.stop().expect_err("stop on Poisoned must error");
+        assert!(matches!(err, CaptureError::Poisoned));
+        assert_eq!(engine.state, EngineState::Poisoned);
     }
 
     #[test]

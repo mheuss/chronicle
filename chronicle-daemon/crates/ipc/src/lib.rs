@@ -37,7 +37,9 @@ pub struct StatusData {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptureStats {
-    /// Engine state: "running" | "stopping" | "idle" | "poisoned".
+    /// Engine state: "running" | "stopping" | "idle" | "poisoned" | "unknown".
+    /// "unknown" is reported before the daemon's first 1 Hz status snapshot
+    /// has populated the engine's live state.
     pub state: String,
     pub active_displays: usize,
     /// Total frames delivered by SCK (from CaptureEngine::status()).

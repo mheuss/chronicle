@@ -15,11 +15,14 @@ pub enum CaptureError {
     #[error("heif encoding failed: {0}")]
     Encoding(String),
 
-    /// Startup rollback left one or more capture streams running.
+    /// One or more capture streams could not be torn down cleanly.
     ///
-    /// Survivors are identified by display ID. The `original` cause is the
-    /// first error that triggered rollback.
-    #[error("startup rollback failed; {} stream(s) may still be running: {survivors:?}", survivors.len())]
+    /// Returned from both startup rollback (when a `start_stream` failure
+    /// triggers stop of already-started peers) and `CaptureEngine::stop()`
+    /// (when one or more `stop_stream` calls fail). Survivors are identified
+    /// by display ID. The `original` cause is the error that triggered the
+    /// teardown.
+    #[error("capture teardown failed; {} stream(s) may still be running: {survivors:?}", survivors.len())]
     PartialTeardown {
         survivors: Vec<u32>,
         stop_errors: Vec<(u32, String)>,
@@ -66,8 +69,14 @@ mod tests {
             original: Box::new(CaptureError::ScreenCaptureKit("boom".into())),
         };
         let s = err.to_string();
-        assert!(s.contains("2"), "message should include survivor count: {s}");
-        assert!(s.contains("[1, 2]"), "message should include survivor ids: {s}");
+        assert!(
+            s.contains("2"),
+            "message should include survivor count: {s}"
+        );
+        assert!(
+            s.contains("[1, 2]"),
+            "message should include survivor ids: {s}"
+        );
     }
 
     #[test]
