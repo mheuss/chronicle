@@ -30,15 +30,15 @@ use crate::pixel_buffer;
 #[link(name = "ImageIO", kind = "framework")]
 unsafe extern "C" {
     fn CGImageDestinationCreateWithURL(
-        url: *const c_void,      // CFURLRef
-        uti: *const c_void,      // CFStringRef
+        url: *const c_void, // CFURLRef
+        uti: *const c_void, // CFStringRef
         count: usize,
-        options: *const c_void,  // CFDictionaryRef, nullable
-    ) -> *mut c_void;            // CGImageDestinationRef
+        options: *const c_void, // CFDictionaryRef, nullable
+    ) -> *mut c_void; // CGImageDestinationRef
 
     fn CGImageDestinationAddImage(
-        dest: *mut c_void,       // CGImageDestinationRef
-        image: *const c_void,    // CGImageRef
+        dest: *mut c_void,         // CGImageDestinationRef
+        image: *const c_void,      // CGImageRef
         properties: *const c_void, // CFDictionaryRef, nullable
     );
 
@@ -70,11 +70,7 @@ unsafe extern "C" {
 ///
 /// # Errors
 /// Returns `CaptureError::Encoding` if any step fails.
-pub fn encode_heif(
-    sample_buffer: &CMSampleBuffer,
-    output_path: &Path,
-    quality: f64,
-) -> Result<()> {
+pub fn encode_heif(sample_buffer: &CMSampleBuffer, output_path: &Path, quality: f64) -> Result<()> {
     if !(0.0..=1.0).contains(&quality) {
         return Err(CaptureError::Encoding(
             "quality must be between 0.0 and 1.0".into(),
@@ -142,14 +138,14 @@ fn create_cgimage_from_bgra(
     Ok(CGImage::new(
         width,
         height,
-        8,              // bits per component
-        32,             // bits per pixel
+        8,  // bits per component
+        32, // bits per pixel
         bytes_per_row,
         &color_space,
         bitmap_info,
         &provider,
-        false,          // should_interpolate
-        0,              // rendering intent: default
+        false, // should_interpolate
+        0,     // rendering intent: default
     ))
 }
 
@@ -203,7 +199,9 @@ fn write_cgimage_as_heif(image: &CGImage, path: &Path, quality: f64) -> Result<(
         CFRelease(dest as *const c_void);
 
         if !ok {
-            return Err(CaptureError::Encoding("failed to finalize HEIF output".into()));
+            return Err(CaptureError::Encoding(
+                "failed to finalize HEIF output".into(),
+            ));
         }
     }
 
@@ -225,8 +223,8 @@ mod tests {
         let bytes_per_row = width * 4;
         let mut data = vec![0u8; height * bytes_per_row];
         for pixel in data.chunks_exact_mut(4) {
-            pixel[0] = 0;   // B
-            pixel[1] = 0;   // G
+            pixel[0] = 0; // B
+            pixel[1] = 0; // G
             pixel[2] = 255; // R
             pixel[3] = 255; // A
         }
@@ -273,9 +271,7 @@ mod tests {
         let data = fs::read(&path).unwrap();
         // HEIF files contain "ftyp" in the first 12 bytes.
         assert!(data.len() >= 12, "file too small for HEIF");
-        let ftyp_pos = data[..12]
-            .windows(4)
-            .position(|w| w == b"ftyp");
+        let ftyp_pos = data[..12].windows(4).position(|w| w == b"ftyp");
         assert!(ftyp_pos.is_some(), "missing ftyp box in HEIF header");
     }
 

@@ -22,11 +22,12 @@ fn pipeline_creates_and_stops_cleanly() {
 
     let (mut pipeline, _rx) = AudioPipeline::create(config).expect("AudioPipeline::create failed");
 
-    // Handler and queue should be available for external registration.
-    // Verify, then drop the references before stopping.
+    // A token should be available for external registration.
+    // Drop the token before stopping so the borrow ends.
     {
-        let _handler = pipeline.handler().expect("handler should be Some before stop");
-        let _queue = pipeline.queue();
+        let _token = pipeline
+            .token(48_000, 1, false)
+            .expect("token should be Some before stop");
     }
 
     // Stop should complete without error.

@@ -11,7 +11,7 @@ mod engine;
 pub mod handler;
 
 pub use encoder::OggOpusEncoder;
-pub use engine::AudioPipeline;
+pub use engine::{AudioHandlerToken, AudioPipeline};
 
 use std::path::{Path, PathBuf};
 
@@ -137,9 +137,6 @@ mod tests {
     fn segment_path_mic_suffix() {
         let dir = PathBuf::from("/tmp");
         let path = segment_path(&dir, 1774526400_000, AudioSource::Microphone);
-        assert_eq!(
-            path,
-            PathBuf::from("/tmp/1774526400000_mic.opus")
-        );
+        assert_eq!(path, PathBuf::from("/tmp/1774526400000_mic.opus"));
     }
 }

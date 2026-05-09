@@ -3,10 +3,13 @@ mod permissions;
 mod pipeline;
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::time::Duration;
 
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use chronicle_audio::{AudioConfig, AudioPipeline, CHANNEL_COUNT, SAMPLE_RATE};
-use chronicle_capture::{AudioOutputConfig, CaptureConfig, CaptureEngine};
+use chronicle_capture::{CaptureConfig, CaptureEngine, CaptureError};
 use chronicle_ipc::{CancellationToken, IpcServer};
 use chronicle_storage::{Storage, StorageConfig};
 
@@ -32,10 +35,30 @@ async fn main() -> Result<()> {
         }
     }
 
+    // --- Pipeline observability primitives (constructed before IPC server
+    // so `DaemonHandler::new` can borrow them). The metadata provider is
+    // kept here as well so the `capture_store_loop` spawn can pass it in.
+    let counters = crate::pipeline::counters::PipelineCounters::new();
+    let capture_snapshot = Arc::new(ArcSwap::from_pointee(
+        crate::ipc_handler::CaptureStatusSnapshot::default(),
+    ));
+    let storage_db_size = Arc::new(AtomicU64::new(0));
+
+    let metadata_provider = Arc::new(
+        crate::pipeline::metadata::CachingAppMetadataProvider::with_default_clock(
+            chronicle_capture::get_frontmost_app,
+            Duration::from_millis(250),
+        ),
+    );
+
     // --- IPC server ---
     let cancel = CancellationToken::new();
     let socket_path = storage.base_dir().join("chronicle.sock");
-    let handler = ipc_handler::DaemonHandler::new();
+    let handler = ipc_handler::DaemonHandler::new(
+        Arc::clone(&counters),
+        Arc::clone(&capture_snapshot),
+        Arc::clone(&storage_db_size),
+    );
     let _ipc_server = IpcServer::start(&socket_path, handler, cancel.clone()).await?;
     log::info!("IPC server started");
 
@@ -51,28 +74,44 @@ async fn main() -> Result<()> {
     log::info!("Audio pipeline created");
 
     // --- Screen capture pipeline (with audio on primary display) ---
+    // Hold the token locally; CaptureEngine::start consumes it and the
+    // borrow ends when `start` returns. After this block, `audio_pipeline`
+    // is borrow-free and can be stopped at shutdown.
     let capture_config = CaptureConfig {
-        audio: Some(AudioOutputConfig {
-            handler: audio_pipeline
-                .handler()
-                .ok_or_else(|| anyhow::anyhow!("audio handler unavailable"))?,
-            queue: audio_pipeline.queue(),
-            sample_rate: SAMPLE_RATE,
-            channel_count: CHANNEL_COUNT,
-            capture_microphone: false, // HEU-329: mic off by default
-        }),
+        audio: audio_pipeline.token(SAMPLE_RATE, CHANNEL_COUNT, false),
         ..Default::default()
     };
-    let (mut engine, frame_rx) = CaptureEngine::start(capture_config)?;
+    let (mut engine, frame_rx) = match CaptureEngine::start(capture_config) {
+        Ok(pair) => pair,
+        Err(CaptureError::PartialTeardown {
+            survivors,
+            stop_errors,
+            original,
+        }) => {
+            log::error!(
+                "capture startup rollback failed; exiting. survivors={survivors:?} \
+                 stop_errors={stop_errors:?} original={original}"
+            );
+            std::process::exit(3);
+        }
+        Err(e) => return Err(e.into()),
+    };
     log::info!("Capture engine started (audio on primary display)");
 
     let (ocr_tx, ocr_rx) = tokio::sync::mpsc::channel(1024);
 
+    let ocr_sink: Arc<dyn crate::pipeline::sinks::OcrSink> =
+        Arc::new(crate::pipeline::sinks::TokioOcrSink(ocr_tx));
+
     let store_storage = Arc::clone(&storage);
+    let store_counters = Arc::clone(&counters);
+    let store_meta = Arc::clone(&metadata_provider);
     let store_handle = tokio::spawn(pipeline::capture_store_loop(
         store_storage,
         frame_rx,
-        ocr_tx,
+        ocr_sink,
+        store_meta,
+        store_counters,
     ));
 
     let ocr_storage = Arc::clone(&storage);
@@ -87,7 +126,57 @@ async fn main() -> Result<()> {
         .spawn(move || pipeline::bridge_audio_segments(audio_segment_rx, audio_tx))?;
 
     let audio_storage = Arc::clone(&storage);
-    let audio_store_handle = tokio::spawn(pipeline::audio_store_loop(audio_storage, audio_rx));
+    let audio_counters = Arc::clone(&counters);
+    let audio_store_handle = tokio::spawn(pipeline::audio_store_loop(
+        audio_storage,
+        audio_rx,
+        audio_counters,
+    ));
+
+    // Capture status refresher (1 Hz). Reads engine atomics so state and
+    // active_displays reflect shutdown/poisoning transitions.
+    let probe = engine.status_probe();
+    let refresher_cancel = cancel.clone();
+    let refresher_snapshot = Arc::clone(&capture_snapshot);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                _ = refresher_cancel.cancelled() => break,
+                _ = ticker.tick() => {
+                    let snap = probe.snapshot();
+                    let snapshot = crate::ipc_handler::CaptureStatusSnapshot {
+                        state: Some(snap.state),
+                        active_displays: snap.active_displays,
+                        frames_captured: snap.frames_captured,
+                        frames_dropped: snap.frames_dropped,
+                    };
+                    refresher_snapshot.store(Arc::new(snapshot));
+                }
+            }
+        }
+    });
+
+    let storage_refresher_storage = Arc::clone(&storage);
+    let storage_refresher_size = Arc::clone(&storage_db_size);
+    let storage_refresher_cancel = cancel.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                _ = storage_refresher_cancel.cancelled() => break,
+                _ = ticker.tick() => {
+                    match storage_refresher_storage.status().await {
+                        Ok(status) => storage_refresher_size.store(
+                            status.db_size_bytes,
+                            std::sync::atomic::Ordering::Relaxed,
+                        ),
+                        Err(e) => log::warn!("storage status refresh failed: {e}"),
+                    }
+                }
+            }
+        }
+    });
 
     // --- Shutdown ---
     tokio::signal::ctrl_c().await?;
@@ -97,8 +186,22 @@ async fn main() -> Result<()> {
     // Stop capture engine FIRST — stops SCStream, no more audio callbacks.
     // Must drop before audio_pipeline.stop() so the handler Retained ref
     // is released and the buffer channel can close.
-    if let Err(e) = engine.stop() {
-        log::error!("Capture engine stop failed: {e}");
+    let stop_result = engine.stop();
+    let mut poisoned = false;
+    match &stop_result {
+        Ok(()) => log::info!("Capture engine stopped cleanly"),
+        Err(CaptureError::PartialTeardown {
+            survivors,
+            stop_errors,
+            ..
+        }) => {
+            poisoned = true;
+            log::error!(
+                "engine stop failed; entering Poisoned. survivors={survivors:?} \
+                 stop_errors={stop_errors:?}"
+            );
+        }
+        Err(e) => log::error!("engine stop failed: {e}"),
     }
     drop(engine);
     log::info!("Capture engine stopped");
@@ -126,5 +229,9 @@ async fn main() -> Result<()> {
     }
 
     log::info!("chronicle-daemon stopped");
+    if poisoned {
+        log::error!("daemon exiting with code 3 (engine poisoned)");
+        std::process::exit(3);
+    }
     Ok(())
 }

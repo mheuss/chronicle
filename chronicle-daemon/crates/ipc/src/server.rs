@@ -209,7 +209,10 @@ impl IpcServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Request, RequestHandler, Response, StatusData};
+    use crate::{
+        AudioStats, CaptureStats, OcrStats, Request, RequestHandler, Response, StatusData,
+        StorageStats,
+    };
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
 
@@ -224,6 +227,10 @@ mod tests {
                     data: StatusData {
                         uptime_secs: 42,
                         version: "0.1.0-test".to_string(),
+                        capture: CaptureStats::default(),
+                        ocr: OcrStats::default(),
+                        audio: AudioStats::default(),
+                        storage: StorageStats::default(),
                     },
                 },
             }

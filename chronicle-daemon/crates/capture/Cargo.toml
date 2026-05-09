@@ -6,6 +6,7 @@ description = "Screen capture engine — multi-display adaptive capture via Scre
 license = "MIT"
 
 [dependencies]
+chronicle-audio = { path = "../audio" }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSError"] }
 objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication"] }

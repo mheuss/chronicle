@@ -110,14 +110,9 @@ impl PixelBufferGuard {
             .ok_or_else(|| {
                 // Unlock before returning.
                 unsafe {
-                    CVPixelBufferUnlockBaseAddress(
-                        pixel_buffer,
-                        K_CV_PIXEL_BUFFER_LOCK_READ_ONLY,
-                    );
+                    CVPixelBufferUnlockBaseAddress(pixel_buffer, K_CV_PIXEL_BUFFER_LOCK_READ_ONLY);
                 }
-                CaptureError::Encoding(
-                    "pixel buffer size overflow while computing data_len".into(),
-                )
+                CaptureError::Encoding("pixel buffer size overflow while computing data_len".into())
             })?;
 
         Ok(Self {

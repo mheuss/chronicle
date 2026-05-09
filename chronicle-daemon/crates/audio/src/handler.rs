@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
-use objc2::{define_class, AnyThread, DefinedClass};
+use objc2::{AnyThread, DefinedClass, define_class};
 use objc2_core_foundation::CFRetained;
 use objc2_core_media::{CMBlockBuffer, CMSampleBuffer};
 use objc2_screen_capture_kit::{SCStream, SCStreamOutput, SCStreamOutputType};
