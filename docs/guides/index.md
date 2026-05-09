@@ -3,7 +3,7 @@
 How the pieces of Chronicle work and how to change them. Start here if you're
 new to the codebase.
 
-For architecture decisions, see [docs/decisions/](../decisions/INDEX.md).
+For architecture decisions, see [Architectural Decisions](../decisions/INDEX.md).
 For the project overview, see the [README](../../README.md).
 
 ## Components
