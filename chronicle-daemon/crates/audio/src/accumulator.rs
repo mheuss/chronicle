@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::mpsc;
 
 use crate::encoder::OggOpusEncoder;
-use crate::{segment_path, AudioSource, CompletedSegment, Result};
+use crate::{AudioSource, CompletedSegment, Result, segment_path};
 
 /// Buffers incoming PCM samples for a single audio source and encodes them
 /// to Opus/Ogg files when a segment boundary is reached.
@@ -63,8 +63,7 @@ impl SegmentAccumulator {
         self.buffer.extend_from_slice(samples);
 
         while self.buffer.len() >= self.samples_per_segment {
-            let segment_samples: Vec<f32> =
-                self.buffer.drain(..self.samples_per_segment).collect();
+            let segment_samples: Vec<f32> = self.buffer.drain(..self.samples_per_segment).collect();
             self.flush_segment(&segment_samples)?;
             // Next segment starts right after the previous one ended.
             let duration_ms =
@@ -127,10 +126,7 @@ mod tests {
     const BITRATE: u32 = 64_000;
     const SAMPLES_PER_SEGMENT: usize = SAMPLE_RATE as usize * SEGMENT_SECS as usize;
 
-    fn make_accumulator(
-        dir: &Path,
-        sender: mpsc::Sender<CompletedSegment>,
-    ) -> SegmentAccumulator {
+    fn make_accumulator(dir: &Path, sender: mpsc::Sender<CompletedSegment>) -> SegmentAccumulator {
         SegmentAccumulator::new(
             AudioSource::Microphone,
             SAMPLE_RATE,
@@ -188,7 +184,9 @@ mod tests {
         // Flush remaining on stop.
         acc.flush().unwrap();
 
-        let segment = rx.try_recv().expect("flush should produce a partial segment");
+        let segment = rx
+            .try_recv()
+            .expect("flush should produce a partial segment");
         assert_eq!(segment.source, AudioSource::Microphone);
         assert_eq!(segment.start_timestamp, timestamp_ms);
         let expected_end = timestamp_ms + 500; // 0.5 seconds = 500ms
@@ -225,7 +223,9 @@ mod tests {
         // Flush remaining 0.5s.
         acc.flush().unwrap();
 
-        let seg3 = rx.try_recv().expect("flush should produce third partial segment");
+        let seg3 = rx
+            .try_recv()
+            .expect("flush should produce third partial segment");
         assert_eq!(seg3.start_timestamp, timestamp_ms + 2000);
         assert_eq!(seg3.end_timestamp, timestamp_ms + 2500);
         assert!(seg3.path.exists());

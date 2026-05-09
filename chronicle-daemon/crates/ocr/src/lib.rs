@@ -29,9 +29,7 @@ pub type Result<T> = std::result::Result<T, OcrError>;
 /// no text is found.
 pub fn extract_text(image_path: &Path) -> Result<String> {
     if !image_path.is_file() {
-        return Err(OcrError::ImageNotFound(
-            image_path.display().to_string(),
-        ));
+        return Err(OcrError::ImageNotFound(image_path.display().to_string()));
     }
 
     let path_str = image_path
@@ -47,10 +45,12 @@ pub fn extract_text(image_path: &Path) -> Result<String> {
 /// Must be called within an autoreleasepool. All objc2 calls are
 /// encapsulated here.
 unsafe fn extract_text_inner(path_str: &str) -> Result<String> {
-    use objc2::runtime::AnyObject;
     use objc2::AnyThread; // Required for VNImageRequestHandler::alloc() trait resolution
+    use objc2::runtime::AnyObject;
     use objc2_foundation::{NSArray, NSDictionary, NSString, NSURL};
-    use objc2_vision::{VNImageRequestHandler, VNRecognizeTextRequest, VNRequestTextRecognitionLevel};
+    use objc2_vision::{
+        VNImageRequestHandler, VNRecognizeTextRequest, VNRequestTextRecognitionLevel,
+    };
 
     // 1. Create NSURL from file path.
     let ns_path = NSString::from_str(path_str);
@@ -59,11 +59,7 @@ unsafe fn extract_text_inner(path_str: &str) -> Result<String> {
     // 2. Create image request handler.
     let options: objc2::rc::Retained<NSDictionary<NSString, AnyObject>> = NSDictionary::new();
     let handler = unsafe {
-        VNImageRequestHandler::initWithURL_options(
-            VNImageRequestHandler::alloc(),
-            &url,
-            &options,
-        )
+        VNImageRequestHandler::initWithURL_options(VNImageRequestHandler::alloc(), &url, &options)
     };
 
     // 3. Create and configure text recognition request.
@@ -73,9 +69,8 @@ unsafe fn extract_text_inner(path_str: &str) -> Result<String> {
     // 4. Perform the request.
     //    Upcast VNRecognizeTextRequest -> VNImageBasedRequest -> VNRequest.
     // Clone needed: into_super consumes the Retained, but we need request again for .results().
-    let request_as_vn = objc2::rc::Retained::into_super(
-        objc2::rc::Retained::into_super(request.clone()),
-    );
+    let request_as_vn =
+        objc2::rc::Retained::into_super(objc2::rc::Retained::into_super(request.clone()));
     let requests = NSArray::from_retained_slice(&[request_as_vn]);
     handler
         .performRequests_error(&requests)

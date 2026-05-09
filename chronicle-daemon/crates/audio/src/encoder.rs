@@ -66,7 +66,7 @@ impl OggOpusEncoder {
             n => {
                 return Err(AudioError::Encoding(format!(
                     "unsupported channel count: {n}"
-                )))
+                )));
             }
         };
 
@@ -74,10 +74,7 @@ impl OggOpusEncoder {
             .map_err(|e| AudioError::Encoding(format!("opus encoder create: {e}")))?;
 
         // Query the encoder's lookahead for RFC 7845 pre-skip.
-        let pre_skip = opus_enc
-            .get_lookahead()
-            .map(|v| v as u16)
-            .unwrap_or(0);
+        let pre_skip = opus_enc.get_lookahead().map(|v| v as u16).unwrap_or(0);
 
         opus_enc
             .set_bitrate(opus::Bitrate::Bits(self.bitrate as i32))
@@ -87,23 +84,13 @@ impl OggOpusEncoder {
 
         // RFC 7845 Section 5.1: OpusHead identification header.
         let opus_head = self.build_opus_head(pre_skip);
-        pw.write_packet(
-            opus_head,
-            STREAM_SERIAL,
-            PacketWriteEndInfo::EndPage,
-            0,
-        )
-        .map_err(|e| AudioError::Encoding(format!("write opus head: {e}")))?;
+        pw.write_packet(opus_head, STREAM_SERIAL, PacketWriteEndInfo::EndPage, 0)
+            .map_err(|e| AudioError::Encoding(format!("write opus head: {e}")))?;
 
         // RFC 7845 Section 5.2: OpusTags comment header.
         let opus_tags = Self::build_opus_tags();
-        pw.write_packet(
-            opus_tags,
-            STREAM_SERIAL,
-            PacketWriteEndInfo::EndPage,
-            0,
-        )
-        .map_err(|e| AudioError::Encoding(format!("write opus tags: {e}")))?;
+        pw.write_packet(opus_tags, STREAM_SERIAL, PacketWriteEndInfo::EndPage, 0)
+            .map_err(|e| AudioError::Encoding(format!("write opus tags: {e}")))?;
 
         // Encode audio frames.
         let total_samples = samples.len();

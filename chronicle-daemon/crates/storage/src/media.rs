@@ -118,12 +118,7 @@ impl MediaManager {
         // the storage root. If validation fails because the file (and its
         // parent) are already gone, that's a benign NotFound — return Ok(0).
         if let Err(e) = self.validate_path(path) {
-            if !path.exists()
-                && path
-                    .parent()
-                    .map(|p| !p.exists())
-                    .unwrap_or(false)
-            {
+            if !path.exists() && path.parent().map(|p| !p.exists()).unwrap_or(false) {
                 return Ok(0);
             }
             return Err(e);

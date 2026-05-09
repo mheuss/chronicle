@@ -219,7 +219,9 @@ mod tests {
             output_dir: dir.path().to_path_buf(),
         };
         let (pipeline, _segment_rx) = AudioPipeline::create(config).unwrap();
-        let _token = pipeline.token(48_000, 1, false).expect("token available before stop");
+        let _token = pipeline
+            .token(48_000, 1, false)
+            .expect("token available before stop");
     }
 
     #[test]
@@ -330,11 +332,7 @@ mod tests {
             segments.push(seg);
         }
 
-        assert_eq!(
-            segments.len(),
-            1,
-            "expected 1 partial segment from flush"
-        );
+        assert_eq!(segments.len(), 1, "expected 1 partial segment from flush");
         assert_eq!(segments[0].source, AudioSource::Microphone);
         assert!(segments[0].path.exists(), "flushed file should exist");
     }

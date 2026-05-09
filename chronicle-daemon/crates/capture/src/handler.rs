@@ -6,13 +6,13 @@
 //! over a bounded channel via `try_send` to avoid blocking the SCK callback
 //! thread.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
-use objc2::{Message, define_class, AnyThread, DefinedClass};
+use objc2::{AnyThread, DefinedClass, Message, define_class};
 use objc2_core_media::CMSampleBuffer;
 use objc2_screen_capture_kit::{SCStream, SCStreamOutput, SCStreamOutputType};
 use tokio::sync::mpsc;
@@ -60,7 +60,12 @@ define_class!(
             // Extract dimensions from the pixel buffer metadata (no lock needed).
             // Fall back to the values stored at construction time.
             let (width, height) = pixel_buffer::get_image_buffer(sample_buffer)
-                .map(|px_buf| (pixel_buffer::width(px_buf) as u32, pixel_buffer::height(px_buf) as u32))
+                .map(|px_buf| {
+                    (
+                        pixel_buffer::width(px_buf) as u32,
+                        pixel_buffer::height(px_buf) as u32,
+                    )
+                })
                 .unwrap_or((ivars.width, ivars.height));
 
             // Retain the sample buffer so it lives beyond this callback.

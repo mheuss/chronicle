@@ -5,8 +5,7 @@ use std::time::Instant;
 use arc_swap::ArcSwap;
 use chronicle_capture::EngineState;
 use chronicle_ipc::{
-    AudioStats, CaptureStats, OcrStats, Request, RequestHandler, Response,
-    StatusData, StorageStats,
+    AudioStats, CaptureStats, OcrStats, Request, RequestHandler, Response, StatusData, StorageStats,
 };
 
 use crate::pipeline::counters::PipelineCounters;
@@ -127,9 +126,9 @@ mod tests {
     #[tokio::test]
     async fn integration_status_round_trip_through_server() {
         use arc_swap::ArcSwap;
+        use chronicle_ipc::{CancellationToken, IpcServer};
         use std::sync::Arc;
         use std::sync::atomic::AtomicU64;
-        use chronicle_ipc::{CancellationToken, IpcServer};
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::UnixStream;
 
