@@ -3,6 +3,42 @@ import Foundation
 import Darwin
 @testable import ChronicleUI
 
+// MARK: - Test helpers
+
+/// Writes all `bytes` to `fd`, looping in case of partial writes.
+@discardableResult
+private func writeAll(_ bytes: [UInt8], to fd: Int32) -> Bool {
+    var offset = 0
+    while offset < bytes.count {
+        let n = bytes.withUnsafeBufferPointer { buf -> Int in
+            Darwin.write(fd, buf.baseAddress!.advanced(by: offset), bytes.count - offset)
+        }
+        if n <= 0 { return false }
+        offset += n
+    }
+    return true
+}
+
+@discardableResult
+private func writeAll(_ string: String, to fd: Int32) -> Bool {
+    writeAll(Array(string.utf8), to: fd)
+}
+
+/// Reads bytes from `fd` until LF (0x0A) or `maxBytes` is hit. Returns the
+/// payload without the trailing LF. Returns nil on read error or EOF before
+/// any bytes were read.
+private func readLineSync(from fd: Int32, maxBytes: Int = 64 * 1024) -> [UInt8]? {
+    var buffer: [UInt8] = []
+    var byte: UInt8 = 0
+    while buffer.count < maxBytes {
+        let n = Darwin.read(fd, &byte, 1)
+        if n <= 0 { return buffer.isEmpty ? nil : buffer }
+        if byte == 0x0A { return buffer }
+        buffer.append(byte)
+    }
+    return buffer
+}
+
 @Suite("DaemonConnection IPC gate")
 @MainActor
 struct DaemonConnectionGateTests {
@@ -16,5 +52,31 @@ struct DaemonConnectionGateTests {
         }
         let conn = DaemonConnection(testingSocketFD: pair.clientFD)
         #expect(conn.state == .connected)
+    }
+
+    @Test("readLine throws invalidUTF8 on bad bytes")
+    func readLineThrowsOnInvalidUTF8() async throws {
+        let pair = try SocketPairHelper.make()
+        let conn = DaemonConnection(testingSocketFD: pair.clientFD)
+        let serverFD = pair.serverFD
+
+        // Fake daemon: read the request line, then write invalid UTF-8 + LF.
+        // 0xFF and 0xFE are invalid as standalone UTF-8 leading bytes.
+        let serverTask = Task.detached {
+            _ = readLineSync(from: serverFD)
+            writeAll([0xFF, 0xFE, 0x0A], to: serverFD)
+            Darwin.close(serverFD)
+        }
+
+        do {
+            _ = try await conn.requestStatus()
+            Issue.record("Expected throw")
+        } catch IPCError.invalidUTF8 {
+            // expected
+        } catch {
+            Issue.record("Expected IPCError.invalidUTF8, got \(error)")
+        }
+
+        _ = await serverTask.value
     }
 }

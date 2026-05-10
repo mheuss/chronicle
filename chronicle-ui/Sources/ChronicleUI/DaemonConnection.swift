@@ -232,7 +232,10 @@ final class DaemonConnection {
                         return
                     }
                 }
-                let line = String(bytes: buffer, encoding: .utf8) ?? ""
+                guard let line = String(bytes: buffer, encoding: .utf8) else {
+                    cont.resume(throwing: IPCError.invalidUTF8)
+                    return
+                }
                 cont.resume(returning: line)
             }
         }
