@@ -118,8 +118,10 @@ final class DaemonConnection {
     }
 
     /// Generic request helper. ALL request methods must route through this —
-    /// direct calls to `write()`/`readLine()` from request paths bypass FIFO
-    /// serialization and the connection-generation check.
+    /// raw socket I/O lives on the nested `IO` struct, which only `sendRequest`
+    /// constructs. There is no other way to call `write`/`readLine`, so a
+    /// future request method cannot accidentally bypass FIFO serialization or
+    /// the connection-generation check.
     ///
     /// The unstructured `Task` here is intentional: caller cancellation must
     /// not abort socket I/O mid-write/read, or we'd leave the newline-delimited
@@ -129,12 +131,22 @@ final class DaemonConnection {
     /// `self.requestQueue`, creating a temporary retain cycle. This is safe:
     /// `closeSocket()` closes the underlying fd, which aborts any blocked
     /// `Darwin.read`/`write`, which lets the task complete and the cycle break.
+    /// Hosts should still call `disconnect()` on teardown rather than relying
+    /// on ARC alone — that's the only path that drops the cycle deterministically.
     private func sendRequest<Req: Encodable & Sendable, Res: Decodable & Sendable>(
         _ request: Req,
         expecting: Res.Type
     ) async throws -> Res {
         let myGeneration = connectionGeneration
         let prev = requestQueue
+        guard let handle = socketHandle else {
+            throw IPCError.notConnected
+        }
+        let io = IO(fd: handle.fileDescriptor, maxResponseSize: Self.maxResponseSize)
+        // The Task closure inherits @MainActor from this enclosing context, so
+        // accesses to `self.connectionGeneration`/`encoder`/`decoder` below are
+        // actor-isolated and require no `await` — only the socket I/O on `io`
+        // suspends.
         let task = Task<Res, Error> {
             _ = await prev?.value  // wait for predecessor
             guard self.connectionGeneration == myGeneration else {
@@ -145,19 +157,16 @@ final class DaemonConnection {
                 throw IPCError.encodingFailed
             }
             line.append("\n")
-            try await self.write(line)
-            let responseLine = try await self.readLine()
+            try await io.write(line)
+            let responseLine = try await io.readLine()
             let responseData = Data(responseLine.utf8)
-            if let res = try? self.decoder.decode(Res.self, from: responseData) {
-                return res
-            }
-            if let err = try? self.decoder.decode(ErrorResponse.self, from: responseData) {
-                throw IPCError.daemonError(err.message)
-            }
             do {
                 return try self.decoder.decode(Res.self, from: responseData)
-            } catch {
-                throw IPCError.malformedResponse(String(describing: error))
+            } catch let firstError {
+                if let err = try? self.decoder.decode(ErrorResponse.self, from: responseData) {
+                    throw IPCError.daemonError(err.message)
+                }
+                throw IPCError.malformedResponse(String(describing: firstError))
             }
         }
         requestQueue = Task { _ = try? await task.value }
@@ -165,6 +174,69 @@ final class DaemonConnection {
     }
 
     // MARK: - Socket Operations
+
+    /// Raw socket I/O. Only `sendRequest` constructs this, so other methods on
+    /// `DaemonConnection` cannot reach `write`/`readLine` directly.
+    private struct IO: Sendable {
+        let fd: Int32
+        let maxResponseSize: Int
+
+        func write(_ string: String) async throws {
+            let fd = self.fd
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                DispatchQueue.global().async {
+                    let data = Array(string.utf8)
+                    data.withUnsafeBytes { rawBuffer in
+                        var offset = 0
+                        while offset < rawBuffer.count {
+                            let written = Darwin.write(
+                                fd,
+                                rawBuffer.baseAddress! + offset,
+                                rawBuffer.count - offset
+                            )
+                            if written <= 0 {
+                                cont.resume(throwing: IPCError.writeFailed(errno: errno))
+                                return
+                            }
+                            offset += written
+                        }
+                        cont.resume()
+                    }
+                }
+            }
+        }
+
+        func readLine() async throws -> String {
+            let fd = self.fd
+            let maxSize = self.maxResponseSize
+            return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
+                DispatchQueue.global().async {
+                    var buffer = [UInt8]()
+                    var byte: UInt8 = 0
+                    while true {
+                        let bytesRead = Darwin.read(fd, &byte, 1)
+                        if bytesRead <= 0 {
+                            cont.resume(throwing: IPCError.connectionClosed)
+                            return
+                        }
+                        if byte == UInt8(ascii: "\n") {
+                            break
+                        }
+                        buffer.append(byte)
+                        if buffer.count > maxSize {
+                            cont.resume(throwing: IPCError.responseTooLarge)
+                            return
+                        }
+                    }
+                    guard let line = String(bytes: buffer, encoding: .utf8) else {
+                        cont.resume(throwing: IPCError.invalidUTF8)
+                        return
+                    }
+                    cont.resume(returning: line)
+                }
+            }
+        }
+    }
 
     private func establishConnection() async throws {
         let path = Self.socketPath
@@ -234,72 +306,16 @@ final class DaemonConnection {
         }
     }
 
-    private func write(_ string: String) async throws {
-        guard let handle = socketHandle else {
-            throw IPCError.notConnected
-        }
-        let fd = handle.fileDescriptor
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            DispatchQueue.global().async {
-                let data = Array(string.utf8)
-                data.withUnsafeBytes { rawBuffer in
-                    var offset = 0
-                    while offset < rawBuffer.count {
-                        let written = Darwin.write(
-                            fd,
-                            rawBuffer.baseAddress! + offset,
-                            rawBuffer.count - offset
-                        )
-                        if written <= 0 {
-                            cont.resume(throwing: IPCError.writeFailed(errno: errno))
-                            return
-                        }
-                        offset += written
-                    }
-                    cont.resume()
-                }
-            }
-        }
-    }
-
-    private func readLine() async throws -> String {
-        guard let handle = socketHandle else {
-            throw IPCError.notConnected
-        }
-        let fd = handle.fileDescriptor
-        let maxSize = Self.maxResponseSize
-        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
-            DispatchQueue.global().async {
-                var buffer = [UInt8]()
-                var byte: UInt8 = 0
-                while true {
-                    let bytesRead = Darwin.read(fd, &byte, 1)
-                    if bytesRead <= 0 {
-                        cont.resume(throwing: IPCError.connectionClosed)
-                        return
-                    }
-                    if byte == UInt8(ascii: "\n") {
-                        break
-                    }
-                    buffer.append(byte)
-                    if buffer.count > maxSize {
-                        cont.resume(throwing: IPCError.responseTooLarge)
-                        return
-                    }
-                }
-                guard let line = String(bytes: buffer, encoding: .utf8) else {
-                    cont.resume(throwing: IPCError.invalidUTF8)
-                    return
-                }
-                cont.resume(returning: line)
-            }
-        }
-    }
-
     private func closeSocket() {
         if let handle = socketHandle {
-            // closeOnDealloc is true, but we close explicitly for immediate cleanup
-            try? handle.close()
+            // closeOnDealloc is true, but we close explicitly for immediate cleanup.
+            // Close errors on a socket are unrecoverable and not actionable for the
+            // caller — the fd is reaped on dealloc regardless. We swallow the error.
+            do {
+                try handle.close()
+            } catch {
+                // intentionally ignored
+            }
             socketHandle = nil
         }
         connectionGeneration &+= 1
