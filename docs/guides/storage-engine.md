@@ -14,7 +14,7 @@ The database file lives at `<base_dir>/chronicle.db`. Media files live under
 directory is `~/Library/Application Support/Chronicle`.
 
 WAL mode is enabled on every connection so the UI can search while the daemon
-writes. See [ADR-007](../decisions/007-wal-mode-sqlite.md) for why.
+writes. See ADR-007 for why.
 
 ## Data flow
 
@@ -76,8 +76,7 @@ Connection pooling uses `r2d2`. A `ConnectionCustomizer` runs
 
 ## How search works
 
-Search uses external content FTS5 tables. See
-[ADR-006](../decisions/006-external-content-fts5.md) for the design rationale.
+Search uses external content FTS5 tables. See ADR-006 for the design rationale.
 
 **FTS5 tables:**
 

@@ -62,10 +62,6 @@ cd chronicle-ui
 swift build
 ```
 
-## Architectural Decisions
-
-Design decisions are documented as ADRs in [`docs/decisions/`](docs/decisions/).
-
 ## License
 
 MIT — see [LICENSE](LICENSE).
