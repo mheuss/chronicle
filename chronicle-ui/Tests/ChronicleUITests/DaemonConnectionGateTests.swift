@@ -46,6 +46,14 @@ private func respondToOneRequest(on fd: Int32, with response: String) {
     writeAll(response + "\n", to: fd)
 }
 
+/// Sets `fd` to non-blocking mode. Used in the FIFO probe.
+@discardableResult
+private func setNonBlocking(_ fd: Int32) -> Bool {
+    let flags = fcntl(fd, F_GETFL, 0)
+    if flags < 0 { return false }
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0
+}
+
 @Suite("DaemonConnection IPC gate")
 @MainActor
 struct DaemonConnectionGateTests {
@@ -194,5 +202,83 @@ struct DaemonConnectionGateTests {
         }
 
         _ = await serverTask.value
+    }
+
+    @Test("two concurrent requestStatus calls are serialized FIFO")
+    func concurrentRequestsAreSerialized() async throws {
+        let pair = try SocketPairHelper.make()
+        let conn = DaemonConnection(testingSocketFD: pair.clientFD)
+        let serverFD = pair.serverFD
+
+        // Server fd is non-blocking so the probe step can detect "no data"
+        // immediately rather than blocking forever.
+        #expect(setNonBlocking(serverFD))
+
+        let r1 = #"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"0.0.1"}}"#
+        let r2 = #"{"type":"status","ok":true,"data":{"uptime_secs":2,"version":"0.0.2"}}"#
+
+        // Server task returns true if it observed early request-2 bytes
+        // (i.e., FIFO is broken). Returns false under correct FIFO behavior.
+        let serverTask: Task<Bool, Never> = Task.detached {
+            // 1. Read first request line, busy-looping on EAGAIN.
+            var byte: UInt8 = 0
+            while true {
+                let n = Darwin.read(serverFD, &byte, 1)
+                if n == 1 {
+                    if byte == 0x0A { break }
+                } else if n < 0 && errno == EAGAIN {
+                    try? await Task.sleep(for: .milliseconds(1))
+                } else {
+                    return false
+                }
+            }
+
+            // 2. Sleep 50ms. Under broken FIFO, this is enough time for
+            //    caller B's task to write its request to the socket.
+            //    Under correct FIFO, caller B is suspended awaiting caller A.
+            try? await Task.sleep(for: .milliseconds(50))
+
+            // 3. Probe: are there any bytes queued from request 2?
+            var probe = [UInt8](repeating: 0, count: 256)
+            let bytesProbed = probe.withUnsafeMutableBufferPointer { buf in
+                Darwin.read(serverFD, buf.baseAddress, buf.count)
+            }
+            let sawEarlySecondRequest = bytesProbed > 0
+
+            // 4. Send response 1 (lets caller A's task return; caller B's
+            //    task is now allowed to start its own write).
+            writeAll(r1 + "\n", to: serverFD)
+
+            // 5. Read second request line. (If FIFO is broken, the probe in
+            //    step 3 may have already consumed all of request 2; in that
+            //    case the test will fail at the assertion below regardless,
+            //    so we don't need to recover those bytes.)
+            if !sawEarlySecondRequest {
+                while true {
+                    let n = Darwin.read(serverFD, &byte, 1)
+                    if n == 1 {
+                        if byte == 0x0A { break }
+                    } else if n < 0 && errno == EAGAIN {
+                        try? await Task.sleep(for: .milliseconds(1))
+                    } else {
+                        break
+                    }
+                }
+            }
+
+            // 6. Send response 2.
+            writeAll(r2 + "\n", to: serverFD)
+            return sawEarlySecondRequest
+        }
+
+        async let resp1 = conn.requestStatus()
+        async let resp2 = conn.requestStatus()
+        let (got1, got2) = try await (resp1, resp2)
+        let sawEarly = await serverTask.value
+
+        #expect(sawEarly == false,
+                "FIFO broken: request 2 bytes arrived at server before response 1 was sent")
+        #expect(got1.data.uptimeSecs == 1)
+        #expect(got2.data.uptimeSecs == 2)
     }
 }
