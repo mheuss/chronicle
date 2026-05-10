@@ -57,6 +57,7 @@ struct CodableTests {
             (.notConnected, "Not connected to daemon"),
             (.connectionClosed, "Connection closed by daemon"),
             (.encodingFailed, "Failed to encode request"),
+            (.invalidUTF8, "Response contained invalid UTF-8"),
         ]
         for (error, expected) in errors {
             #expect(error.errorDescription == expected)

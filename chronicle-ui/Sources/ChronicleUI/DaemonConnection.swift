@@ -296,6 +296,7 @@ enum IPCError: Error, LocalizedError {
     case encodingFailed
     case responseTooLarge
     case daemonError(String)
+    case invalidUTF8
 
     var errorDescription: String? {
         switch self {
@@ -308,6 +309,7 @@ enum IPCError: Error, LocalizedError {
         case .encodingFailed: "Failed to encode request"
         case .responseTooLarge: "Response exceeded maximum size"
         case .daemonError(let msg): "Daemon error: \(msg)"
+        case .invalidUTF8: "Response contained invalid UTF-8"
         }
     }
 }
