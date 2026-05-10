@@ -60,3 +60,15 @@ Two permissions are required to run the daemon or its integration tests:
   for audio capture via AVFoundation.
 
 Grant these to Terminal (or whichever app runs the tests).
+
+## swift-testing --filter
+
+`swift test --filter <name>` matches the **Swift function name** as a regex, not the `@Test("...")` display title. The display title with spaces and quotes consistently matches zero tests:
+
+```bash
+# Wrong (matches 0):
+swift test --filter "two concurrent requestStatus calls are serialized FIFO"
+
+# Right:
+swift test --filter concurrentRequestsAreSerialized
+```
