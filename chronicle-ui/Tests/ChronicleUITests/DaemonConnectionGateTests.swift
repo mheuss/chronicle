@@ -54,7 +54,7 @@ private func setNonBlocking(_ fd: Int32) -> Bool {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0
 }
 
-@Suite("DaemonConnection IPC gate")
+@Suite("DaemonConnection IPC gate", .timeLimit(.minutes(1)))
 @MainActor
 struct DaemonConnectionGateTests {
 
@@ -72,8 +72,8 @@ struct DaemonConnectionGateTests {
     @Test("DaemonConnection sets SO_NOSIGPIPE on its socket")
     func socketHasNoSigPipeOption() throws {
         let pair = try SocketPairHelper.make()
+        defer { Darwin.close(pair.serverFD) }
         let conn = DaemonConnection(testingSocketFD: pair.clientFD)
-        _ = conn  // hold the connection so the fd stays alive for getsockopt
 
         var noSigPipeValue: Int32 = 0
         var optLen = socklen_t(MemoryLayout<Int32>.size)
@@ -86,6 +86,8 @@ struct DaemonConnectionGateTests {
         )
         #expect(result == 0, "getsockopt failed with errno \(errno)")
         #expect(noSigPipeValue != 0, "SO_NOSIGPIPE should be enabled on the IPC socket")
+        // `conn` retained until end of scope so the fd stays open for getsockopt.
+        _ = conn
     }
 
     @Test("write to closed peer fails cleanly without SIGPIPE crash")
@@ -229,7 +231,9 @@ struct DaemonConnectionGateTests {
                 } else if n < 0 && errno == EAGAIN {
                     try? await Task.sleep(for: .milliseconds(1))
                 } else {
-                    return false
+                    Issue.record("unexpected read error in step 1: n=\(n) errno=\(errno)")
+                    Darwin.close(serverFD)
+                    return true  // force the FIFO assertion to fail loudly
                 }
             }
 
@@ -268,6 +272,7 @@ struct DaemonConnectionGateTests {
 
             // 6. Send response 2.
             writeAll(r2 + "\n", to: serverFD)
+            Darwin.close(serverFD)
             return sawEarlySecondRequest
         }
 
