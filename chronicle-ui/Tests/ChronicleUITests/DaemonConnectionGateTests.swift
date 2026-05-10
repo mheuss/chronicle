@@ -142,4 +142,57 @@ struct DaemonConnectionGateTests {
 
         _ = await serverTask.value
     }
+
+    @Test("sendRequest wraps decode failures in IPCError.malformedResponse")
+    func sendRequestWrapsMalformedResponse() async throws {
+        let pair = try SocketPairHelper.make()
+        let conn = DaemonConnection(testingSocketFD: pair.clientFD)
+        let serverFD = pair.serverFD
+
+        // Valid UTF-8, valid JSON, but does NOT match StatusResponse OR
+        // ErrorResponse schemas — so we exit through the catch arm.
+        let badResponse = #"{"unexpected":"shape"}"#
+        let serverTask = Task.detached {
+            respondToOneRequest(on: serverFD, with: badResponse)
+            Darwin.close(serverFD)
+        }
+
+        do {
+            _ = try await conn.requestStatus()
+            Issue.record("Expected throw")
+        } catch IPCError.malformedResponse(let detail) {
+            #expect(!detail.isEmpty)
+        } catch {
+            Issue.record("Expected IPCError.malformedResponse, got \(error)")
+        }
+
+        _ = await serverTask.value
+    }
+
+    @Test("sendRequest surfaces daemon-side errors as IPCError.daemonError")
+    func sendRequestPropagatesDaemonError() async throws {
+        let pair = try SocketPairHelper.make()
+        let conn = DaemonConnection(testingSocketFD: pair.clientFD)
+        let serverFD = pair.serverFD
+
+        // Valid ErrorResponse JSON. After the Task 7 refactor, sendRequest
+        // must still route this through IPCError.daemonError(message), not
+        // wrap it in malformedResponse.
+        let errorResponse = #"{"type":"error","ok":false,"message":"internal failure"}"#
+        let serverTask = Task.detached {
+            respondToOneRequest(on: serverFD, with: errorResponse)
+            Darwin.close(serverFD)
+        }
+
+        do {
+            _ = try await conn.requestStatus()
+            Issue.record("Expected throw")
+        } catch IPCError.daemonError(let message) {
+            #expect(message == "internal failure")
+        } catch {
+            Issue.record("Expected IPCError.daemonError, got \(error)")
+        }
+
+        _ = await serverTask.value
+    }
 }
