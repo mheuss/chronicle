@@ -39,6 +39,13 @@ private func readLineSync(from fd: Int32, maxBytes: Int = 64 * 1024) -> [UInt8]?
     return buffer
 }
 
+/// Reads one newline-delimited request from `fd`, then writes `response`
+/// followed by LF. Closes neither side.
+private func respondToOneRequest(on fd: Int32, with response: String) {
+    _ = readLineSync(from: fd)
+    writeAll(response + "\n", to: fd)
+}
+
 @Suite("DaemonConnection IPC gate")
 @MainActor
 struct DaemonConnectionGateTests {
@@ -111,6 +118,27 @@ struct DaemonConnectionGateTests {
         } catch {
             Issue.record("Expected IPCError.invalidUTF8, got \(error)")
         }
+
+        _ = await serverTask.value
+    }
+
+    @Test("sendRequest round-trip happy path")
+    func sendRequestHappyPath() async throws {
+        let pair = try SocketPairHelper.make()
+        let conn = DaemonConnection(testingSocketFD: pair.clientFD)
+        let serverFD = pair.serverFD
+
+        let validResponse = #"{"type":"status","ok":true,"data":{"uptime_secs":42,"version":"0.1.0"}}"#
+        let serverTask = Task.detached {
+            respondToOneRequest(on: serverFD, with: validResponse)
+            Darwin.close(serverFD)
+        }
+
+        let response = try await conn.requestStatus()
+        #expect(response.type == "status")
+        #expect(response.ok == true)
+        #expect(response.data.uptimeSecs == 42)
+        #expect(response.data.version == "0.1.0")
 
         _ = await serverTask.value
     }

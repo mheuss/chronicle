@@ -41,6 +41,8 @@ final class DaemonConnection {
 
     private var socketHandle: FileHandle?
     private var reconnectTask: Task<Void, Never>?
+    private var requestQueue: Task<Void, Never>?
+    private var connectionGeneration: UInt64 = 0
     private let encoder = JSONEncoder()
     private let decoder: JSONDecoder = {
         let d = JSONDecoder()
@@ -107,29 +109,59 @@ final class DaemonConnection {
 
     /// Send a status request and return the response.
     func requestStatus() async throws -> StatusResponse {
-        let request = IPCRequest(type: "status")
-        let data = try encoder.encode(request)
-        guard var line = String(data: data, encoding: .utf8) else {
-            throw IPCError.encodingFailed
-        }
-        line.append("\n")
-
-        try await write(line)
-        let responseLine = try await readLine()
-        let responseData = Data(responseLine.utf8)
-
-        // Try decoding as status response first, then as error response
-        if let response = try? decoder.decode(StatusResponse.self, from: responseData) {
-            lastStatus = response
-            return response
-        }
-        if let errorResp = try? decoder.decode(ErrorResponse.self, from: responseData) {
-            throw IPCError.daemonError(errorResp.message)
-        }
-        // Neither parsed — surface as a decoding error
-        let response = try decoder.decode(StatusResponse.self, from: responseData)
+        let response = try await sendRequest(
+            IPCRequest(type: "status"),
+            expecting: StatusResponse.self
+        )
         lastStatus = response
         return response
+    }
+
+    /// Generic request helper. ALL request methods must route through this —
+    /// direct calls to `write()`/`readLine()` from request paths bypass FIFO
+    /// serialization and the connection-generation check.
+    ///
+    /// The unstructured `Task` here is intentional: caller cancellation must
+    /// not abort socket I/O mid-write/read, or we'd leave the newline-delimited
+    /// protocol in a corrupt state.
+    ///
+    /// The Task strongly captures `self` and is then stored in
+    /// `self.requestQueue`, creating a temporary retain cycle. This is safe:
+    /// `closeSocket()` closes the underlying fd, which aborts any blocked
+    /// `Darwin.read`/`write`, which lets the task complete and the cycle break.
+    private func sendRequest<Req: Encodable & Sendable, Res: Decodable & Sendable>(
+        _ request: Req,
+        expecting: Res.Type
+    ) async throws -> Res {
+        let myGeneration = connectionGeneration
+        let prev = requestQueue
+        let task = Task<Res, Error> {
+            _ = await prev?.value  // wait for predecessor
+            guard self.connectionGeneration == myGeneration else {
+                throw IPCError.notConnected
+            }
+            let data = try self.encoder.encode(request)
+            guard var line = String(data: data, encoding: .utf8) else {
+                throw IPCError.encodingFailed
+            }
+            line.append("\n")
+            try await self.write(line)
+            let responseLine = try await self.readLine()
+            let responseData = Data(responseLine.utf8)
+            if let res = try? self.decoder.decode(Res.self, from: responseData) {
+                return res
+            }
+            if let err = try? self.decoder.decode(ErrorResponse.self, from: responseData) {
+                throw IPCError.daemonError(err.message)
+            }
+            do {
+                return try self.decoder.decode(Res.self, from: responseData)
+            } catch {
+                throw IPCError.malformedResponse(String(describing: error))
+            }
+        }
+        requestQueue = Task { _ = try? await task.value }
+        return try await task.value
     }
 
     // MARK: - Socket Operations
@@ -270,22 +302,24 @@ final class DaemonConnection {
             try? handle.close()
             socketHandle = nil
         }
+        connectionGeneration &+= 1
+        requestQueue = nil
     }
 }
 
 // MARK: - Protocol Types
 
-struct IPCRequest: Codable {
+struct IPCRequest: Codable, Sendable {
     let type: String
 }
 
-struct StatusResponse: Codable {
+struct StatusResponse: Codable, Sendable {
     let type: String
     let ok: Bool
     let data: StatusData
 }
 
-struct StatusData: Codable {
+struct StatusData: Codable, Sendable {
     let uptimeSecs: UInt64
     let version: String
     let capture: CaptureStats?
@@ -294,7 +328,7 @@ struct StatusData: Codable {
     let storage: StorageStats?
 }
 
-struct CaptureStats: Codable {
+struct CaptureStats: Codable, Sendable {
     let state: String
     let activeDisplays: Int
     let framesCaptured: UInt64
@@ -303,20 +337,20 @@ struct CaptureStats: Codable {
     let framesFailed: UInt64
 }
 
-struct OcrStats: Codable {
+struct OcrStats: Codable, Sendable {
     let enqueued: UInt64
     let dropped: UInt64
 }
 
-struct AudioStats: Codable {
+struct AudioStats: Codable, Sendable {
     let segmentsPersisted: UInt64
 }
 
-struct StorageStats: Codable {
+struct StorageStats: Codable, Sendable {
     let dbSizeBytes: UInt64
 }
 
-struct ErrorResponse: Codable {
+struct ErrorResponse: Codable, Sendable {
     let type: String
     let ok: Bool
     let message: String
