@@ -48,6 +48,18 @@ final class DaemonConnection {
         return d
     }()
 
+    // MARK: - Init
+
+    init() {}
+
+    /// **Test-only.** Not for production use. Wires `DaemonConnection` to a
+    /// pre-connected fd (e.g., one side of a `socketpair()`). The fd is taken
+    /// over and closed when the connection deallocates.
+    internal init(testingSocketFD fd: Int32) {
+        self.socketHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        self.state = .connected
+    }
+
     // MARK: - Lifecycle
 
     /// Begin connecting to the daemon. Auto-reconnects on failure.
