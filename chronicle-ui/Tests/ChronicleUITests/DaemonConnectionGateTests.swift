@@ -54,6 +54,41 @@ struct DaemonConnectionGateTests {
         #expect(conn.state == .connected)
     }
 
+    @Test("DaemonConnection sets SO_NOSIGPIPE on its socket")
+    func socketHasNoSigPipeOption() throws {
+        let pair = try SocketPairHelper.make()
+        let conn = DaemonConnection(testingSocketFD: pair.clientFD)
+        _ = conn  // hold the connection so the fd stays alive for getsockopt
+
+        var noSigPipeValue: Int32 = 0
+        var optLen = socklen_t(MemoryLayout<Int32>.size)
+        let result = getsockopt(
+            pair.clientFD,
+            SOL_SOCKET,
+            SO_NOSIGPIPE,
+            &noSigPipeValue,
+            &optLen
+        )
+        #expect(result == 0, "getsockopt failed with errno \(errno)")
+        #expect(noSigPipeValue != 0, "SO_NOSIGPIPE should be enabled on the IPC socket")
+    }
+
+    @Test("write to closed peer fails cleanly without SIGPIPE crash")
+    func brokenPipeDoesNotCrash() async throws {
+        let pair = try SocketPairHelper.make()
+        let conn = DaemonConnection(testingSocketFD: pair.clientFD)
+
+        // Close the peer end so any write returns EPIPE.
+        Darwin.close(pair.serverFD)
+
+        do {
+            _ = try await conn.requestStatus()
+            Issue.record("Expected throw — peer closed")
+        } catch is IPCError {
+            // expected; the key assertion is "we got here, process is alive"
+        }
+    }
+
     @Test("readLine throws invalidUTF8 on bad bytes")
     func readLineThrowsOnInvalidUTF8() async throws {
         let pair = try SocketPairHelper.make()

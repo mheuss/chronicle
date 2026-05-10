@@ -56,6 +56,14 @@ final class DaemonConnection {
     /// pre-connected fd (e.g., one side of a `socketpair()`). The fd is taken
     /// over and closed when the connection deallocates.
     internal init(testingSocketFD fd: Int32) {
+        var noSigPipe: Int32 = 1
+        _ = setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_NOSIGPIPE,
+            &noSigPipe,
+            socklen_t(MemoryLayout<Int32>.size)
+        )
         self.socketHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         self.state = .connected
     }
@@ -133,6 +141,21 @@ final class DaemonConnection {
                 let fd = socket(AF_UNIX, SOCK_STREAM, 0)
                 guard fd >= 0 else {
                     cont.resume(throwing: IPCError.socketCreationFailed(errno: errno))
+                    return
+                }
+
+                var noSigPipe: Int32 = 1
+                let setoptResult = setsockopt(
+                    fd,
+                    SOL_SOCKET,
+                    SO_NOSIGPIPE,
+                    &noSigPipe,
+                    socklen_t(MemoryLayout<Int32>.size)
+                )
+                guard setoptResult == 0 else {
+                    let setoptErrno = errno
+                    Darwin.close(fd)
+                    cont.resume(throwing: IPCError.socketCreationFailed(errno: setoptErrno))
                     return
                 }
 
