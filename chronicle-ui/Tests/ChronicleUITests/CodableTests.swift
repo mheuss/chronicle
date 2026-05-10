@@ -64,6 +64,13 @@ struct CodableTests {
         }
     }
 
+    @Test("malformedResponse description includes detail")
+    func malformedResponseDescription() {
+        let detail = "keyNotFound(\"data\")"
+        let err = IPCError.malformedResponse(detail)
+        #expect(err.errorDescription == "Malformed daemon response: keyNotFound(\"data\")")
+    }
+
     @Test("StatusData decodes nested capture/ocr/audio/storage stats")
     func statusDataDecodesNestedStats() throws {
         let json = """
