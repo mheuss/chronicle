@@ -281,4 +281,50 @@ struct DaemonConnectionGateTests {
         #expect(got1.data.uptimeSecs == 1)
         #expect(got2.data.uptimeSecs == 2)
     }
+
+    @Test("queued request after disconnect throws notConnected")
+    func queuedRequestAfterDisconnectThrowsNotConnected() async throws {
+        let pair = try SocketPairHelper.make()
+        let conn = DaemonConnection(testingSocketFD: pair.clientFD)
+        let serverFD = pair.serverFD
+
+        // Fake daemon never replies — first request will hang in readLine.
+        // We enqueue a second request behind it, close the server peer to
+        // unblock the first task's read with EOF, then disconnect, and
+        // assert the second one throws notConnected (generation mismatch).
+
+        let firstTask = Task { try await conn.requestStatus() }
+        // Give the first request enough time to take the queue head and start
+        // its write+read. 50ms is plenty for a local socketpair.
+        try await Task.sleep(for: .milliseconds(50))
+
+        let secondTask = Task { try await conn.requestStatus() }
+        try await Task.sleep(for: .milliseconds(50))
+
+        // Close the server peer FIRST. This sends EOF to the client, so the
+        // first task's blocking Darwin.read returns 0 → IPCError.connectionClosed
+        // is raised. This guarantees firstTask completes and unblocks the
+        // chain wrapper that secondTask awaits on.
+        Darwin.close(serverFD)
+
+        // Now disconnect. closeSocket() bumps connectionGeneration. By the
+        // time secondTask resumes from `await prev?.value`, its captured
+        // myGeneration no longer matches → throws notConnected.
+        conn.disconnect()
+
+        do {
+            _ = try await secondTask.value
+            Issue.record("Expected throw — generation should have changed")
+        } catch IPCError.notConnected {
+            // expected
+        } catch {
+            Issue.record("Expected IPCError.notConnected, got \(error)")
+        }
+
+        // First task surfaces as connectionClosed (EOF from server close) or
+        // notConnected (if disconnect won the race). We don't assert which —
+        // only that it doesn't hang forever, which is now guaranteed because
+        // the server peer is closed before we await.
+        _ = try? await firstTask.value
+    }
 }
