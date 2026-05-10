@@ -57,15 +57,22 @@ final class DaemonConnection {
     /// **Test-only.** Not for production use. Wires `DaemonConnection` to a
     /// pre-connected fd (e.g., one side of a `socketpair()`). The fd is taken
     /// over and closed when the connection deallocates.
+    ///
+    /// `setsockopt(SO_NOSIGPIPE)` failure here aborts via `precondition` so a
+    /// genuine macOS quirk surfaces as a loud test-time crash rather than a
+    /// confusing SIGPIPE later inside `brokenPipeDoesNotCrash`. Production
+    /// callers go through `establishConnection`, which checks the result and
+    /// throws `IPCError.socketCreationFailed` on failure.
     internal init(testingSocketFD fd: Int32) {
         var noSigPipe: Int32 = 1
-        _ = setsockopt(
+        let result = setsockopt(
             fd,
             SOL_SOCKET,
             SO_NOSIGPIPE,
             &noSigPipe,
             socklen_t(MemoryLayout<Int32>.size)
         )
+        precondition(result == 0, "SO_NOSIGPIPE failed in testing init: errno=\(errno)")
         self.socketHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         self.state = .connected
     }
@@ -194,7 +201,15 @@ final class DaemonConnection {
                                 rawBuffer.baseAddress! + offset,
                                 rawBuffer.count - offset
                             )
-                            if written <= 0 {
+                            if written < 0 {
+                                if errno == EINTR { continue }
+                                cont.resume(throwing: IPCError.writeFailed(errno: errno))
+                                return
+                            }
+                            if written == 0 {
+                                // POSIX write should not return 0 on non-zero count for a
+                                // stream socket; treat it as a broken connection rather than
+                                // an infinite loop.
                                 cont.resume(throwing: IPCError.writeFailed(errno: errno))
                                 return
                             }
@@ -215,7 +230,12 @@ final class DaemonConnection {
                     var byte: UInt8 = 0
                     while true {
                         let bytesRead = Darwin.read(fd, &byte, 1)
-                        if bytesRead <= 0 {
+                        if bytesRead < 0 {
+                            if errno == EINTR { continue }
+                            cont.resume(throwing: IPCError.readFailed(errno: errno))
+                            return
+                        }
+                        if bytesRead == 0 {
                             cont.resume(throwing: IPCError.connectionClosed)
                             return
                         }
@@ -380,6 +400,7 @@ enum IPCError: Error, LocalizedError {
     case connectionFailed(errno: Int32)
     case notConnected
     case writeFailed(errno: Int32)
+    case readFailed(errno: Int32)
     case connectionClosed
     case encodingFailed
     case responseTooLarge
@@ -389,11 +410,12 @@ enum IPCError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .socketCreationFailed(let e): "Failed to create socket: \(String(cString: strerror(e)))"
+        case .socketCreationFailed(let e): "Socket setup failed: \(String(cString: strerror(e)))"
         case .pathTooLong: "Socket path too long"
         case .connectionFailed(let e): "Connection failed: \(String(cString: strerror(e)))"
         case .notConnected: "Not connected to daemon"
         case .writeFailed(let e): "Write failed: \(String(cString: strerror(e)))"
+        case .readFailed(let e): "Read failed: \(String(cString: strerror(e)))"
         case .connectionClosed: "Connection closed by daemon"
         case .encodingFailed: "Failed to encode request"
         case .responseTooLarge: "Response exceeded maximum size"

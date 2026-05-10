@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import Darwin
 @testable import ChronicleUI
 
 @Suite("IPC Protocol Codable Tests")
@@ -69,6 +70,12 @@ struct CodableTests {
         let detail = "keyNotFound(\"data\")"
         let err = IPCError.malformedResponse(detail)
         #expect(err.errorDescription == "Malformed daemon response: keyNotFound(\"data\")")
+    }
+
+    @Test("readFailed description includes errno text")
+    func readFailedDescription() {
+        let err = IPCError.readFailed(errno: EBADF)
+        #expect(err.errorDescription?.hasPrefix("Read failed: ") == true)
     }
 
     @Test("StatusData decodes nested capture/ocr/audio/storage stats")
