@@ -38,6 +38,7 @@ CLAUDE.md
 .claude/active-plan/
 .claude/scheduled_tasks.lock
 .claude/settings.local.json
+chronicle-daemon/.claude/settings.local.json
 
 docs/plans/
 docs/development/
@@ -45,5 +46,6 @@ docs/decisions/
 docs/use-cases/
 docs/standards/
 docs/audits/
+docs/qa/
 
 chronicle-daemon/docs/
