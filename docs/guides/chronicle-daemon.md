@@ -7,8 +7,8 @@
 
 The daemon is Chronicle's background process. It captures screens, records
 audio, runs OCR, and stores everything in SQLite with full-text search. It runs
-headless via launchd, independent of the UI. The UI communicates with it over a
-Unix socket (ADR-004). The current IPC surface is status-only.
+headless, independent of the UI. The UI communicates with it over a
+Unix socket. The current IPC surface is status-only.
 
 The daemon is a Cargo workspace with six crates, each owning one concern. The
 root binary (`chronicle-daemon`) orchestrates startup, wires crates into
@@ -60,7 +60,7 @@ flowchart TD
    frame receiver channel
 7. Spawn `capture_store_loop` (Task A) and `ocr_loop` (Task B)
 8. Spawn bridge thread and `audio_store_loop` (Task C)
-9. `ctrl_c().await` — blocks until shutdown signal
+9. Block on the shutdown signal (`SIGINT` from Ctrl-C or `SIGTERM`)
 
 ### Channel Topology
 
@@ -84,7 +84,8 @@ segment means data loss.
 
 ### Shutdown
 
-Triggered by `ctrl_c`. Cascades through the system:
+Triggered by `SIGINT` (Ctrl-C) or `SIGTERM`. Either signal enters the same
+ordered teardown that cascades through the system:
 
 1. `engine.stop()` + `drop(engine)` — stops SCStreams, closes `frame_rx`
 2. `audio_pipeline.stop()` — drops the audio handler and flushes the encoding thread
@@ -95,11 +96,11 @@ No forced cancellation. Everything drains naturally.
 
 ## Key Concepts
 
-**Two-process architecture (ADR-001):** The daemon and UI are separate
-processes. If the UI crashes, capture continues. The daemon starts via launchd
-at login.
+**Two-process architecture:** The daemon and UI are separate
+processes. If the UI crashes, capture continues. Persistent install at login
+is deferred to packaging work (see HEU-448).
 
-**Async OCR (and future transcription) (ADR-005):** Capture and storage are the
+**Async OCR (and future transcription):** Capture and storage are the
 critical path. OCR already runs behind the main ingestion loop, and any future
 transcription work should follow the same pattern.
 

@@ -12,8 +12,9 @@ the original Rewind app.
 Chronicle uses a two-process design:
 
 - **chronicle-daemon** (Rust): Background service that handles screen capture,
-  OCR, audio capture, storage, and IPC. Runs as a `launchd` agent and listens
-  on a Unix domain socket.
+  OCR, audio capture, storage, and IPC. Listens on a Unix domain socket. Today
+  it is started manually in development; persistent background install will
+  land alongside `.app` bundle packaging (see HEU-448).
 
 - **chronicle-ui** (Swift/SwiftUI): Menu bar app that connects to the daemon
   over IPC. Today it reports daemon connection and status only.
@@ -60,10 +61,6 @@ cargo build
 cd chronicle-ui
 swift build
 ```
-
-## Architectural Decisions
-
-Design decisions are documented as ADRs in [`docs/decisions/`](docs/decisions/).
 
 ## License
 

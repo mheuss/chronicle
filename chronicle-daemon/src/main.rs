@@ -179,8 +179,16 @@ async fn main() -> Result<()> {
     });
 
     // --- Shutdown ---
-    tokio::signal::ctrl_c().await?;
-    log::info!("Shutdown signal received");
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        res = tokio::signal::ctrl_c() => {
+            res?;
+            log::info!("SIGINT received, shutting down");
+        }
+        _ = sigterm.recv() => {
+            log::info!("SIGTERM received, shutting down");
+        }
+    }
     cancel.cancel();
 
     // Stop capture engine FIRST — stops SCStream, no more audio callbacks.
