@@ -8,7 +8,7 @@
 The daemon is Chronicle's background process. It captures screens, records
 audio, runs OCR, and stores everything in SQLite with full-text search. It runs
 headless, independent of the UI. The UI communicates with it over a
-Unix socket (ADR-004). The current IPC surface is status-only.
+Unix socket. The current IPC surface is status-only.
 
 The daemon is a Cargo workspace with six crates, each owning one concern. The
 root binary (`chronicle-daemon`) orchestrates startup, wires crates into
@@ -96,11 +96,11 @@ No forced cancellation. Everything drains naturally.
 
 ## Key Concepts
 
-**Two-process architecture (ADR-001):** The daemon and UI are separate
+**Two-process architecture:** The daemon and UI are separate
 processes. If the UI crashes, capture continues. Persistent install at login
 is deferred to packaging work (see HEU-448).
 
-**Async OCR (and future transcription) (ADR-005):** Capture and storage are the
+**Async OCR (and future transcription):** Capture and storage are the
 critical path. OCR already runs behind the main ingestion loop, and any future
 transcription work should follow the same pattern.
 
