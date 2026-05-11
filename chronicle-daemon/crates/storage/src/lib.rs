@@ -55,6 +55,12 @@ impl Storage {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&base_dir, std::fs::Permissions::from_mode(0o700))?;
 
+            // Establish WAL on a single connection so the pool's parallel init doesn't race on it.
+            {
+                let bootstrap = rusqlite::Connection::open(&db_path)?;
+                schema::setup_connection(&bootstrap)?;
+            }
+
             let pool = Pool::builder()
                 .max_size(pool_size)
                 .connection_customizer(Box::new(ConnectionCustomizer))
