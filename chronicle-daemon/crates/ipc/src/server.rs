@@ -131,8 +131,10 @@ impl IpcServer {
     /// while a connection handler is still finishing.
     pub async fn shutdown(mut self) {
         self.server_token.cancel();
-        if let Some(handle) = self.accept_handle.take() {
-            let _ = handle.await;
+        if let Some(handle) = self.accept_handle.take()
+            && let Err(e) = handle.await
+        {
+            log::warn!("IPC accept-loop task did not exit cleanly: {e}");
         }
     }
 
