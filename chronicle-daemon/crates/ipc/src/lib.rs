@@ -16,12 +16,25 @@ pub enum Request {
     Status,
 }
 
+/// Stable, machine-readable error code on an error response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    /// Request line exceeded the maximum length.
+    RequestTooLarge,
+    /// Request bytes were not valid UTF-8.
+    InvalidUtf8,
+    /// Request was valid UTF-8 but not a valid `Request` JSON value —
+    /// malformed JSON, unknown `type`, or schema mismatch.
+    InvalidRequest,
+}
+
 /// A response from the daemon to the UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
     Status { ok: bool, data: StatusData },
-    Error { ok: bool, message: String },
+    Error { ok: bool, code: ErrorCode, message: String },
 }
 
 /// Payload for a successful status response.
@@ -146,12 +159,14 @@ mod tests {
     fn response_error_serializes_correctly() {
         let resp = Response::Error {
             ok: false,
+            code: ErrorCode::InvalidRequest,
             message: "unknown request type: foo".to_string(),
         };
         let json = serde_json::to_string(&resp).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["type"], "error");
         assert_eq!(value["ok"], false);
+        assert_eq!(value["code"], "invalid_request");
         assert_eq!(value["message"], "unknown request type: foo");
     }
 

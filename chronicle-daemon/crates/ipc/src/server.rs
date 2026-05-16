@@ -6,7 +6,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio_util::sync::CancellationToken;
 
-use crate::{Request, RequestHandler, Response};
+use crate::{ErrorCode, Request, RequestHandler, Response};
 
 /// Maximum line length for incoming requests (64 KB).
 const MAX_REQUEST_LINE: u64 = 64 * 1024;
@@ -156,6 +156,7 @@ impl IpcServer {
                                 log::warn!("IPC request exceeded max line length");
                                 let resp = Response::Error {
                                     ok: false,
+                                    code: ErrorCode::RequestTooLarge,
                                     message: "request too large".to_string(),
                                 };
                                 if let Ok(mut json) = serde_json::to_string(&resp) {
@@ -170,6 +171,7 @@ impl IpcServer {
                                 Err(_) => {
                                     let resp = Response::Error {
                                         ok: false,
+                                        code: ErrorCode::InvalidUtf8,
                                         message: "invalid UTF-8".to_string(),
                                     };
                                     let mut json = serde_json::to_string(&resp).unwrap();
@@ -187,6 +189,7 @@ impl IpcServer {
                                     log::warn!("Invalid IPC request: {e}");
                                     Response::Error {
                                         ok: false,
+                                        code: ErrorCode::InvalidRequest,
                                         message: "invalid request".to_string(),
                                     }
                                 }
@@ -299,6 +302,60 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(value["type"], "error");
         assert_eq!(value["ok"], false);
+        assert_eq!(value["code"], "invalid_request");
+
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn server_error_for_oversized_request_has_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("test.sock");
+        let cancel = CancellationToken::new();
+        let _server = IpcServer::start(&sock, MockHandler, cancel.clone())
+            .await
+            .unwrap();
+
+        let stream = UnixStream::connect(&sock).await.unwrap();
+        let (reader, mut writer) = tokio::io::split(stream);
+        let mut buf_reader = BufReader::new(reader);
+
+        // More than MAX_REQUEST_LINE (64 KiB), with no newline delimiter.
+        // The write may fail with BrokenPipe because the server closes the
+        // connection after reading exactly 64 KiB and sending the error.
+        let big = vec![b'x'; 64 * 1024 + 1];
+        let _ = writer.write_all(&big).await;
+
+        let mut line = String::new();
+        buf_reader.read_line(&mut line).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["type"], "error");
+        assert_eq!(value["code"], "request_too_large");
+
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn server_error_for_invalid_utf8_has_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("test.sock");
+        let cancel = CancellationToken::new();
+        let _server = IpcServer::start(&sock, MockHandler, cancel.clone())
+            .await
+            .unwrap();
+
+        let stream = UnixStream::connect(&sock).await.unwrap();
+        let (reader, mut writer) = tokio::io::split(stream);
+        let mut buf_reader = BufReader::new(reader);
+
+        // Invalid UTF-8 byte, then a newline delimiter.
+        writer.write_all(&[0xff, b'\n']).await.unwrap();
+
+        let mut line = String::new();
+        buf_reader.read_line(&mut line).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["type"], "error");
+        assert_eq!(value["code"], "invalid_utf8");
 
         cancel.cancel();
     }
