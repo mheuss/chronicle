@@ -2,6 +2,7 @@
 name = "chronicle-ipc"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 description = "IPC server — JSON-over-Unix-domain-socket protocol for UI communication"
 license = "MIT"
 
