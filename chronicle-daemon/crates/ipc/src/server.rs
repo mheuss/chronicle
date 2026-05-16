@@ -26,6 +26,15 @@ pub enum ServerError {
     },
 }
 
+/// Remove the socket file, logging any failure other than "not found".
+fn remove_socket_file(path: &Path) {
+    if let Err(e) = std::fs::remove_file(path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("failed to remove socket file {}: {e}", path.display());
+    }
+}
+
 /// Unix domain socket server for IPC with the Chronicle UI.
 ///
 /// Accepts connections on a Unix socket, reads newline-delimited JSON
@@ -66,7 +75,7 @@ impl IpcServer {
                 Err(_) => {
                     // Nobody home — remove the stale file
                     log::info!("Removing stale socket file: {}", socket_path.display());
-                    std::fs::remove_file(socket_path).ok();
+                    remove_socket_file(socket_path);
                 }
             }
         }
@@ -92,7 +101,7 @@ impl IpcServer {
         tokio::spawn(async move {
             Self::accept_loop(listener, handler, task_cancel).await;
             // Clean up socket file on shutdown
-            std::fs::remove_file(&path).ok();
+            remove_socket_file(&path);
             log::info!("IPC server stopped");
         });
 
@@ -396,6 +405,19 @@ mod tests {
         assert_eq!(mode, 0o600, "socket should be owner-only, got {:#o}", mode);
 
         cancel.cancel();
+    }
+
+    #[test]
+    fn remove_socket_file_deletes_existing_and_ignores_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sock");
+        std::fs::write(&path, b"x").unwrap();
+
+        remove_socket_file(&path);
+        assert!(!path.exists(), "file should be removed");
+
+        // Second call on a now-missing path must not panic.
+        remove_socket_file(&path);
     }
 
     #[tokio::test]
