@@ -33,8 +33,15 @@ pub enum ErrorCode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
-    Status { ok: bool, data: StatusData },
-    Error { ok: bool, code: ErrorCode, message: String },
+    Status {
+        ok: bool,
+        data: StatusData,
+    },
+    Error {
+        ok: bool,
+        code: ErrorCode,
+        message: String,
+    },
 }
 
 /// Payload for a successful status response.
