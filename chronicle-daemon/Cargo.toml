@@ -10,11 +10,14 @@ members = [
 ]
 resolver = "2"
 
+[workspace.package]
+rust-version = "1.88"
+
 [package]
 name = "chronicle-daemon"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version.workspace = true
 description = "Background daemon for Chronicle — continuous screen and audio capture with full-text search"
 license = "MIT"
 

@@ -137,7 +137,7 @@ where
         }
         OcrEnqueueResult::ChannelFull => {
             let n = counters.ocr_dropped.fetch_add(1, Ordering::Relaxed) + 1;
-            if n % 100 == 0 {
+            if n.is_multiple_of(100) {
                 log::warn!("OCR channel full; shedding load (total drops: {n})");
             }
         }
