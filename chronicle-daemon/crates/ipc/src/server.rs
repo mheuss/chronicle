@@ -57,7 +57,8 @@ fn harden_socket_permissions(path: &Path) -> Result<(), ServerError> {
 pub struct IpcServer {
     /// Child of the caller's token; cancelling it stops only this server.
     server_token: CancellationToken,
-    /// Accept-loop task handle; taken by `shutdown()` so `Drop` is a no-op after.
+    /// Accept-loop task handle. `shutdown()` takes it, so a later `Drop`
+    /// finds `None` and skips its cancellation.
     accept_handle: Option<JoinHandle<()>>,
 }
 
@@ -124,6 +125,10 @@ impl IpcServer {
 
     /// Stop the server: cancel the accept loop and await its exit, which
     /// guarantees the socket file has been removed before this returns.
+    ///
+    /// In-flight connection tasks are signalled to stop via the shared
+    /// cancellation token but are not awaited — `shutdown()` may return
+    /// while a connection handler is still finishing.
     pub async fn shutdown(mut self) {
         self.server_token.cancel();
         if let Some(handle) = self.accept_handle.take() {
@@ -439,6 +444,11 @@ mod tests {
 
     #[test]
     fn harden_socket_permissions_errors_on_missing_path() {
+        // Covers the error-return path: set_permissions fails (ENOENT) and the
+        // helper returns ServerError::Permissions. The unlink-on-failure branch
+        // is not directly observable here — a missing path has no file to
+        // unlink; remove_socket_file's removal is covered separately by
+        // remove_socket_file_deletes_existing_and_ignores_missing.
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does-not-exist.sock");
 

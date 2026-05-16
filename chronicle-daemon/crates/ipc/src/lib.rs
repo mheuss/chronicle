@@ -30,6 +30,10 @@ pub enum ErrorCode {
 }
 
 /// A response from the daemon to the UI.
+///
+/// Only ever decoded by a same-version client over the live IPC socket, so
+/// the `Error.code` field is required (no `#[serde(default)]`). Cross-version
+/// decoding is out of scope until protocol version negotiation (HEU-456).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
