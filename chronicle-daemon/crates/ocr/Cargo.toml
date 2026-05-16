@@ -2,6 +2,7 @@
 name = "chronicle-ocr"
 version = "0.1.0"
 edition = "2024"
+rust-version.workspace = true
 description = "OCR pipeline — text extraction from screenshots via Apple Vision framework"
 license = "MIT"
 
