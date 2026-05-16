@@ -1,3 +1,4 @@
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,6 +16,11 @@ const MAX_REQUEST_LINE: u64 = 64 * 1024;
 pub enum ServerError {
     #[error("failed to bind socket at {path}: {source}")]
     Bind {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to set permissions on socket at {path}: {source}")]
+    Permissions {
         path: PathBuf,
         source: std::io::Error,
     },
@@ -69,6 +75,13 @@ impl IpcServer {
             path: socket_path.to_path_buf(),
             source: e,
         })?;
+
+        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600)).map_err(
+            |e| ServerError::Permissions {
+                path: socket_path.to_path_buf(),
+                source: e,
+            },
+        )?;
 
         log::info!("IPC server listening on {}", socket_path.display());
 
@@ -306,6 +319,24 @@ mod tests {
 
         // Should be able to connect — stale file was replaced
         let _stream = UnixStream::connect(&sock).await.unwrap();
+
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn server_socket_has_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("test.sock");
+        let cancel = CancellationToken::new();
+
+        let _server = IpcServer::start(&sock, MockHandler, cancel.clone())
+            .await
+            .unwrap();
+
+        let mode = std::fs::metadata(&sock).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "socket should be owner-only, got {:#o}", mode);
 
         cancel.cancel();
     }
