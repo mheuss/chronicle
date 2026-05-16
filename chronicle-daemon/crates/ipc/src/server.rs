@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::{ErrorCode, Request, RequestHandler, Response};
@@ -54,10 +55,10 @@ fn harden_socket_permissions(path: &Path) -> Result<(), ServerError> {
 /// Accepts connections on a Unix socket, reads newline-delimited JSON
 /// requests, dispatches to a [`RequestHandler`], and writes JSON responses.
 pub struct IpcServer {
-    #[allow(dead_code)]
-    socket_path: PathBuf,
-    #[allow(dead_code)]
-    cancel: CancellationToken,
+    /// Child of the caller's token; cancelling it stops only this server.
+    server_token: CancellationToken,
+    /// Accept-loop task handle; taken by `shutdown()` so `Drop` is a no-op after.
+    accept_handle: Option<JoinHandle<()>>,
 }
 
 impl IpcServer {
@@ -105,9 +106,10 @@ impl IpcServer {
 
         let handler = Arc::new(handler);
         let path = socket_path.to_path_buf();
-        let task_cancel = cancel.clone();
+        let server_token = cancel.child_token();
+        let task_cancel = server_token.clone();
 
-        tokio::spawn(async move {
+        let accept_handle = tokio::spawn(async move {
             Self::accept_loop(listener, handler, task_cancel).await;
             // Clean up socket file on shutdown
             remove_socket_file(&path);
@@ -115,9 +117,18 @@ impl IpcServer {
         });
 
         Ok(Self {
-            socket_path: socket_path.to_path_buf(),
-            cancel,
+            server_token,
+            accept_handle: Some(accept_handle),
         })
+    }
+
+    /// Stop the server: cancel the accept loop and await its exit, which
+    /// guarantees the socket file has been removed before this returns.
+    pub async fn shutdown(mut self) {
+        self.server_token.cancel();
+        if let Some(handle) = self.accept_handle.take() {
+            let _ = handle.await;
+        }
     }
 
     async fn accept_loop(
@@ -236,6 +247,16 @@ impl IpcServer {
                     }
                 }
             }
+        }
+    }
+}
+
+impl Drop for IpcServer {
+    fn drop(&mut self) {
+        // Best-effort: cancel the accept loop. Cannot await here, so socket
+        // cleanup happens asynchronously; shutdown() is the deterministic path.
+        if self.accept_handle.is_some() {
+            self.server_token.cancel();
         }
     }
 }
@@ -467,5 +488,53 @@ mod tests {
         }
 
         cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_server_and_removes_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("test.sock");
+        let cancel = CancellationToken::new();
+
+        let server = IpcServer::start(&sock, MockHandler, cancel.clone())
+            .await
+            .unwrap();
+        assert!(sock.exists());
+
+        server.shutdown().await;
+
+        assert!(
+            !sock.exists(),
+            "socket file should be removed after shutdown() returns"
+        );
+    }
+
+    #[tokio::test]
+    async fn drop_without_shutdown_eventually_stops_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("test.sock");
+        let cancel = CancellationToken::new();
+
+        {
+            let _server = IpcServer::start(&sock, MockHandler, cancel.clone())
+                .await
+                .unwrap();
+            assert!(sock.exists());
+        } // handle dropped here — Drop cancels, cleanup is asynchronous
+
+        // Drop only cancels; the accept task removes the socket asynchronously.
+        // Poll for eventual cleanup rather than asserting immediately.
+        let mut removed = false;
+        for _ in 0..50 {
+            if !sock.exists() {
+                removed = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            removed,
+            "socket file should be removed after the handle is dropped"
+        );
     }
 }
