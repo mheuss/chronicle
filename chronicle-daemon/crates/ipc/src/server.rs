@@ -35,6 +35,20 @@ fn remove_socket_file(path: &Path) {
     }
 }
 
+/// Set the socket file to owner-only (`0600`). On failure, remove the
+/// just-created socket file so a failed start leaves no under-permissioned
+/// socket on disk, then surface the error.
+fn harden_socket_permissions(path: &Path) -> Result<(), ServerError> {
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        remove_socket_file(path);
+        return Err(ServerError::Permissions {
+            path: path.to_path_buf(),
+            source: e,
+        });
+    }
+    Ok(())
+}
+
 /// Unix domain socket server for IPC with the Chronicle UI.
 ///
 /// Accepts connections on a Unix socket, reads newline-delimited JSON
@@ -85,12 +99,7 @@ impl IpcServer {
             source: e,
         })?;
 
-        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600)).map_err(
-            |e| ServerError::Permissions {
-                path: socket_path.to_path_buf(),
-                source: e,
-            },
-        )?;
+        harden_socket_permissions(socket_path)?;
 
         log::info!("IPC server listening on {}", socket_path.display());
 
@@ -405,6 +414,19 @@ mod tests {
         assert_eq!(mode, 0o600, "socket should be owner-only, got {:#o}", mode);
 
         cancel.cancel();
+    }
+
+    #[test]
+    fn harden_socket_permissions_errors_on_missing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist.sock");
+
+        let result = harden_socket_permissions(&missing);
+
+        assert!(
+            matches!(result, Err(ServerError::Permissions { .. })),
+            "expected ServerError::Permissions, got {result:?}"
+        );
     }
 
     #[test]
