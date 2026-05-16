@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
         Arc::clone(&capture_snapshot),
         Arc::clone(&storage_db_size),
     );
-    let _ipc_server = IpcServer::start(&socket_path, handler, cancel.clone()).await?;
+    let ipc_server = IpcServer::start(&socket_path, handler, cancel.clone()).await?;
     log::info!("IPC server started");
 
     // --- Audio pipeline (create first — capture engine needs the handler) ---
@@ -190,6 +190,10 @@ async fn main() -> Result<()> {
         }
     }
     cancel.cancel();
+
+    // Stop the IPC server before the capture engine: stop accepting
+    // requests and await socket cleanup.
+    ipc_server.shutdown().await;
 
     // Stop capture engine FIRST — stops SCStream, no more audio callbacks.
     // Must drop before audio_pipeline.stop() so the handler Retained ref

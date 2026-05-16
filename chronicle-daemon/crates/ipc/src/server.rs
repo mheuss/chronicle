@@ -1,11 +1,13 @@
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::{Request, RequestHandler, Response};
+use crate::{ErrorCode, Request, RequestHandler, Response};
 
 /// Maximum line length for incoming requests (64 KB).
 const MAX_REQUEST_LINE: u64 = 64 * 1024;
@@ -18,6 +20,34 @@ pub enum ServerError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("failed to set permissions on socket at {path}: {source}")]
+    Permissions {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+}
+
+/// Remove the socket file, logging any failure other than "not found".
+fn remove_socket_file(path: &Path) {
+    if let Err(e) = std::fs::remove_file(path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("failed to remove socket file {}: {e}", path.display());
+    }
+}
+
+/// Set the socket file to owner-only (`0600`). On failure, remove the
+/// just-created socket file so a failed start leaves no under-permissioned
+/// socket on disk, then surface the error.
+fn harden_socket_permissions(path: &Path) -> Result<(), ServerError> {
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        remove_socket_file(path);
+        return Err(ServerError::Permissions {
+            path: path.to_path_buf(),
+            source: e,
+        });
+    }
+    Ok(())
 }
 
 /// Unix domain socket server for IPC with the Chronicle UI.
@@ -25,10 +55,11 @@ pub enum ServerError {
 /// Accepts connections on a Unix socket, reads newline-delimited JSON
 /// requests, dispatches to a [`RequestHandler`], and writes JSON responses.
 pub struct IpcServer {
-    #[allow(dead_code)]
-    socket_path: PathBuf,
-    #[allow(dead_code)]
-    cancel: CancellationToken,
+    /// Child of the caller's token; cancelling it stops only this server.
+    server_token: CancellationToken,
+    /// Accept-loop task handle. `shutdown()` takes it, so a later `Drop`
+    /// finds `None` and skips its cancellation.
+    accept_handle: Option<JoinHandle<()>>,
 }
 
 impl IpcServer {
@@ -60,7 +91,7 @@ impl IpcServer {
                 Err(_) => {
                     // Nobody home — remove the stale file
                     log::info!("Removing stale socket file: {}", socket_path.display());
-                    std::fs::remove_file(socket_path).ok();
+                    remove_socket_file(socket_path);
                 }
             }
         }
@@ -70,23 +101,41 @@ impl IpcServer {
             source: e,
         })?;
 
+        harden_socket_permissions(socket_path)?;
+
         log::info!("IPC server listening on {}", socket_path.display());
 
         let handler = Arc::new(handler);
         let path = socket_path.to_path_buf();
-        let task_cancel = cancel.clone();
+        let server_token = cancel.child_token();
+        let task_cancel = server_token.clone();
 
-        tokio::spawn(async move {
+        let accept_handle = tokio::spawn(async move {
             Self::accept_loop(listener, handler, task_cancel).await;
             // Clean up socket file on shutdown
-            std::fs::remove_file(&path).ok();
+            remove_socket_file(&path);
             log::info!("IPC server stopped");
         });
 
         Ok(Self {
-            socket_path: socket_path.to_path_buf(),
-            cancel,
+            server_token,
+            accept_handle: Some(accept_handle),
         })
+    }
+
+    /// Stop the server: cancel the accept loop and await its exit, which
+    /// guarantees the socket file has been removed before this returns.
+    ///
+    /// In-flight connection tasks are signalled to stop via the shared
+    /// cancellation token but are not awaited — `shutdown()` may return
+    /// while a connection handler is still finishing.
+    pub async fn shutdown(mut self) {
+        self.server_token.cancel();
+        if let Some(handle) = self.accept_handle.take()
+            && let Err(e) = handle.await
+        {
+            log::warn!("IPC accept-loop task did not exit cleanly: {e}");
+        }
     }
 
     async fn accept_loop(
@@ -143,6 +192,7 @@ impl IpcServer {
                                 log::warn!("IPC request exceeded max line length");
                                 let resp = Response::Error {
                                     ok: false,
+                                    code: ErrorCode::RequestTooLarge,
                                     message: "request too large".to_string(),
                                 };
                                 if let Ok(mut json) = serde_json::to_string(&resp) {
@@ -157,6 +207,7 @@ impl IpcServer {
                                 Err(_) => {
                                     let resp = Response::Error {
                                         ok: false,
+                                        code: ErrorCode::InvalidUtf8,
                                         message: "invalid UTF-8".to_string(),
                                     };
                                     let mut json = serde_json::to_string(&resp).unwrap();
@@ -174,6 +225,7 @@ impl IpcServer {
                                     log::warn!("Invalid IPC request: {e}");
                                     Response::Error {
                                         ok: false,
+                                        code: ErrorCode::InvalidRequest,
                                         message: "invalid request".to_string(),
                                     }
                                 }
@@ -202,6 +254,16 @@ impl IpcServer {
                     }
                 }
             }
+        }
+    }
+}
+
+impl Drop for IpcServer {
+    fn drop(&mut self) {
+        // Best-effort: cancel the accept loop. Cannot await here, so socket
+        // cleanup happens asynchronously; shutdown() is the deterministic path.
+        if self.accept_handle.is_some() {
+            self.server_token.cancel();
         }
     }
 }
@@ -286,6 +348,60 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(value["type"], "error");
         assert_eq!(value["ok"], false);
+        assert_eq!(value["code"], "invalid_request");
+
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn server_error_for_oversized_request_has_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("test.sock");
+        let cancel = CancellationToken::new();
+        let _server = IpcServer::start(&sock, MockHandler, cancel.clone())
+            .await
+            .unwrap();
+
+        let stream = UnixStream::connect(&sock).await.unwrap();
+        let (reader, mut writer) = tokio::io::split(stream);
+        let mut buf_reader = BufReader::new(reader);
+
+        // More than MAX_REQUEST_LINE (64 KiB), with no newline delimiter.
+        // The write may fail with BrokenPipe because the server closes the
+        // connection after reading exactly 64 KiB and sending the error.
+        let big = vec![b'x'; 64 * 1024 + 1];
+        let _ = writer.write_all(&big).await;
+
+        let mut line = String::new();
+        buf_reader.read_line(&mut line).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["type"], "error");
+        assert_eq!(value["code"], "request_too_large");
+
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn server_error_for_invalid_utf8_has_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("test.sock");
+        let cancel = CancellationToken::new();
+        let _server = IpcServer::start(&sock, MockHandler, cancel.clone())
+            .await
+            .unwrap();
+
+        let stream = UnixStream::connect(&sock).await.unwrap();
+        let (reader, mut writer) = tokio::io::split(stream);
+        let mut buf_reader = BufReader::new(reader);
+
+        // Invalid UTF-8 byte, then a newline delimiter.
+        writer.write_all(&[0xff, b'\n']).await.unwrap();
+
+        let mut line = String::new();
+        buf_reader.read_line(&mut line).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["type"], "error");
+        assert_eq!(value["code"], "invalid_utf8");
 
         cancel.cancel();
     }
@@ -308,6 +424,55 @@ mod tests {
         let _stream = UnixStream::connect(&sock).await.unwrap();
 
         cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn server_socket_has_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("test.sock");
+        let cancel = CancellationToken::new();
+
+        let _server = IpcServer::start(&sock, MockHandler, cancel.clone())
+            .await
+            .unwrap();
+
+        let mode = std::fs::metadata(&sock).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "socket should be owner-only, got {:#o}", mode);
+
+        cancel.cancel();
+    }
+
+    #[test]
+    fn harden_socket_permissions_errors_on_missing_path() {
+        // Covers the error-return path: set_permissions fails (ENOENT) and the
+        // helper returns ServerError::Permissions. The unlink-on-failure branch
+        // is not directly observable here — a missing path has no file to
+        // unlink; remove_socket_file's removal is covered separately by
+        // remove_socket_file_deletes_existing_and_ignores_missing.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist.sock");
+
+        let result = harden_socket_permissions(&missing);
+
+        assert!(
+            matches!(result, Err(ServerError::Permissions { .. })),
+            "expected ServerError::Permissions, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn remove_socket_file_deletes_existing_and_ignores_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sock");
+        std::fs::write(&path, b"x").unwrap();
+
+        remove_socket_file(&path);
+        assert!(!path.exists(), "file should be removed");
+
+        // Second call on a now-missing path must not panic.
+        remove_socket_file(&path);
     }
 
     #[tokio::test]
@@ -335,5 +500,53 @@ mod tests {
         }
 
         cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_server_and_removes_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("test.sock");
+        let cancel = CancellationToken::new();
+
+        let server = IpcServer::start(&sock, MockHandler, cancel.clone())
+            .await
+            .unwrap();
+        assert!(sock.exists());
+
+        server.shutdown().await;
+
+        assert!(
+            !sock.exists(),
+            "socket file should be removed after shutdown() returns"
+        );
+    }
+
+    #[tokio::test]
+    async fn drop_without_shutdown_eventually_stops_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("test.sock");
+        let cancel = CancellationToken::new();
+
+        {
+            let _server = IpcServer::start(&sock, MockHandler, cancel.clone())
+                .await
+                .unwrap();
+            assert!(sock.exists());
+        } // handle dropped here — Drop cancels, cleanup is asynchronous
+
+        // Drop only cancels; the accept task removes the socket asynchronously.
+        // Poll for eventual cleanup rather than asserting immediately.
+        let mut removed = false;
+        for _ in 0..50 {
+            if !sock.exists() {
+                removed = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            removed,
+            "socket file should be removed after the handle is dropped"
+        );
     }
 }
