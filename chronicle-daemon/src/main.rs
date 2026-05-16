@@ -191,7 +191,8 @@ async fn main() -> Result<()> {
     }
     cancel.cancel();
 
-    // Stop the IPC server first: stop accepting requests and await socket cleanup.
+    // Stop the IPC server before the capture engine: stop accepting
+    // requests and await socket cleanup.
     ipc_server.shutdown().await;
 
     // Stop capture engine FIRST — stops SCStream, no more audio callbacks.
