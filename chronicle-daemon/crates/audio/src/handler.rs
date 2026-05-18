@@ -50,12 +50,12 @@ fn bytes_to_f32_samples(bytes: &[u8]) -> Vec<f32> {
 
 /// Map an `SCStreamOutputType` to an `AudioSource`.
 ///
-/// Returns `None` for screen output (type 0), which we ignore.
+/// Returns `None` for screen output (type 0) and microphone (type 2), which
+/// the SCStream no longer delivers — the microphone has its own
+/// `AVAudioEngine` capture path.
 fn source_from_output_type(output_type: SCStreamOutputType) -> Option<AudioSource> {
     if output_type == SCStreamOutputType::Audio {
         Some(AudioSource::System)
-    } else if output_type == SCStreamOutputType::Microphone {
-        Some(AudioSource::Microphone)
     } else {
         None
     }
@@ -263,12 +263,6 @@ mod tests {
     fn source_from_output_type_maps_audio_to_system() {
         let result = source_from_output_type(SCStreamOutputType::Audio);
         assert_eq!(result, Some(AudioSource::System));
-    }
-
-    #[test]
-    fn source_from_output_type_maps_microphone_to_mic() {
-        let result = source_from_output_type(SCStreamOutputType::Microphone);
-        assert_eq!(result, Some(AudioSource::Microphone));
     }
 
     #[test]

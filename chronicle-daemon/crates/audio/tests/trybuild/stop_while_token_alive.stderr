@@ -1,7 +1,7 @@
 error[E0502]: cannot borrow `pipeline` as mutable because it is also borrowed as immutable
  --> tests/trybuild/stop_while_token_alive.rs:6:5
   |
-5 |     let token = pipeline.token(48_000, 1, false).unwrap();
+5 |     let token = pipeline.token(48_000, 1).unwrap();
   |                 -------- immutable borrow occurs here
 6 |     pipeline.stop().unwrap(); //~ ERROR cannot borrow `pipeline` as mutable
   |     ^^^^^^^^^^^^^^^ mutable borrow occurs here

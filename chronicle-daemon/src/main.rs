@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
     // borrow ends when `start` returns. After this block, `audio_pipeline`
     // is borrow-free and can be stopped at shutdown.
     let capture_config = CaptureConfig {
-        audio: audio_pipeline.token(SAMPLE_RATE, CHANNEL_COUNT, false),
+        audio: audio_pipeline.token(SAMPLE_RATE, CHANNEL_COUNT),
         ..Default::default()
     };
     let (mut engine, frame_rx) = match CaptureEngine::start(capture_config) {

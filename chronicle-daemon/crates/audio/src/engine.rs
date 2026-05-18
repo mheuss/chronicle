@@ -68,7 +68,6 @@ pub struct AudioHandlerToken<'p> {
     queue: &'p Retained<DispatchQueue>,
     pub sample_rate: u32,
     pub channel_count: u32,
-    pub capture_microphone: bool,
 }
 
 impl<'p> AudioHandlerToken<'p> {
@@ -134,19 +133,13 @@ impl AudioPipeline {
     ///
     /// Returns `None` after `stop()`. While the returned token is alive,
     /// `stop()` cannot be called — the borrow checker prevents it.
-    pub fn token(
-        &self,
-        sample_rate: u32,
-        channel_count: u32,
-        capture_microphone: bool,
-    ) -> Option<AudioHandlerToken<'_>> {
+    pub fn token(&self, sample_rate: u32, channel_count: u32) -> Option<AudioHandlerToken<'_>> {
         let handler = self.handler.as_ref()?;
         Some(AudioHandlerToken {
             handler,
             queue: &self.queue,
             sample_rate,
             channel_count,
-            capture_microphone,
         })
     }
 
@@ -330,7 +323,7 @@ mod tests {
         };
         let (pipeline, _segment_rx) = AudioPipeline::create(config).unwrap();
         let _token = pipeline
-            .token(48_000, 1, false)
+            .token(48_000, 1)
             .expect("token available before stop");
     }
 
@@ -553,10 +546,9 @@ mod tests {
             output_dir: dir.path().to_path_buf(),
         };
         let (pipeline, _rx) = AudioPipeline::create(config).unwrap();
-        let token = pipeline.token(48_000, 1, false).expect("token available");
+        let token = pipeline.token(48_000, 1).expect("token available");
         assert_eq!(token.sample_rate, 48_000);
         assert_eq!(token.channel_count, 1);
-        assert!(!token.capture_microphone);
     }
 
     #[test]
@@ -569,7 +561,7 @@ mod tests {
         };
         let (mut pipeline, _rx) = AudioPipeline::create(config).unwrap();
         pipeline.stop().unwrap();
-        assert!(pipeline.token(48_000, 1, false).is_none());
+        assert!(pipeline.token(48_000, 1).is_none());
     }
 
     /// Build a pipeline whose `microphone` field is `None` — the soft-failure
