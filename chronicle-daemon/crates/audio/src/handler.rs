@@ -1,8 +1,8 @@
 //! SCStreamOutput handler for audio capture.
 //!
 //! Receives CMSampleBuffer callbacks from ScreenCaptureKit, extracts
-//! raw PCM audio data, and forwards it as `AudioBuffer` values over
-//! a bounded channel.
+//! raw PCM audio data, and forwards it as `AudioMessage::Buffer` values
+//! over a bounded channel.
 
 use std::ffi::c_char;
 use std::sync::mpsc::SyncSender;
@@ -26,6 +26,16 @@ pub struct AudioBuffer {
     pub timestamp_ms: i64,
     /// Whether this came from system audio or the microphone.
     pub source: AudioSource,
+}
+
+/// A message on the audio encoding channel: captured PCM, or a request to
+/// finalize the in-progress microphone segment. Both travel the same channel
+/// so a flush is always ordered after every buffer already queued.
+#[derive(Debug)]
+pub enum AudioMessage {
+    Buffer(AudioBuffer),
+    /// Finalize the current mic segment now — sent when the mic is disabled.
+    FlushMic,
 }
 
 /// Convert a raw byte slice of little-endian f32 PCM data into a Vec of f32 samples.
@@ -92,7 +102,7 @@ unsafe fn extract_pcm_bytes(sample_buffer: &CMSampleBuffer) -> Option<Vec<u8>> {
 
 /// Ivars for the `AudioOutputHandler` ObjC class.
 pub struct AudioOutputHandlerIvars {
-    sender: SyncSender<AudioBuffer>,
+    sender: SyncSender<AudioMessage>,
 }
 
 define_class!(
@@ -147,7 +157,7 @@ define_class!(
             };
 
             // Best-effort send. Drop on full to avoid blocking the SCK callback thread.
-            if let Err(e) = self.ivars().sender.try_send(buffer) {
+            if let Err(e) = self.ivars().sender.try_send(AudioMessage::Buffer(buffer)) {
                 match e {
                     std::sync::mpsc::TrySendError::Full(_) => {
                         log::warn!(
@@ -169,7 +179,7 @@ define_class!(
 
 impl AudioOutputHandler {
     /// Create a new handler that sends audio buffers over the given channel.
-    pub fn new(sender: SyncSender<AudioBuffer>) -> Retained<Self> {
+    pub fn new(sender: SyncSender<AudioMessage>) -> Retained<Self> {
         let this = Self::alloc().set_ivars(AudioOutputHandlerIvars { sender });
         unsafe { objc2::msg_send![super(this), init] }
     }
@@ -269,7 +279,7 @@ mod tests {
 
     #[test]
     fn audio_buffer_sent_through_sync_channel() {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<AudioBuffer>(4);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<AudioMessage>(4);
 
         let buf = AudioBuffer {
             samples: vec![0.0; 960],
@@ -277,21 +287,29 @@ mod tests {
             source: AudioSource::System,
         };
 
-        tx.try_send(buf).expect("channel should accept the buffer");
+        tx.try_send(AudioMessage::Buffer(buf))
+            .expect("channel should accept the buffer");
 
-        let received = rx.try_recv().expect("should receive the buffer");
-        assert_eq!(received.samples.len(), 960);
-        assert_eq!(received.source, AudioSource::System);
+        let received = rx.try_recv().expect("should receive the message");
+        match received {
+            AudioMessage::Buffer(b) => {
+                assert_eq!(b.samples.len(), 960);
+                assert_eq!(b.source, AudioSource::System);
+            }
+            AudioMessage::FlushMic => panic!("expected a buffer message"),
+        }
     }
 
     #[test]
     fn sync_channel_drops_on_full() {
-        let (tx, _rx) = std::sync::mpsc::sync_channel::<AudioBuffer>(1);
+        let (tx, _rx) = std::sync::mpsc::sync_channel::<AudioMessage>(1);
 
-        let make_buf = || AudioBuffer {
-            samples: vec![0.0],
-            timestamp_ms: 100,
-            source: AudioSource::Microphone,
+        let make_buf = || {
+            AudioMessage::Buffer(AudioBuffer {
+                samples: vec![0.0],
+                timestamp_ms: 100,
+                source: AudioSource::Microphone,
+            })
         };
 
         tx.try_send(make_buf()).expect("first send should work");
@@ -304,7 +322,7 @@ mod tests {
     fn handler_class_registers_with_runtime() {
         // Verifies that the ObjC class created by define_class! is valid
         // and can be instantiated.
-        let (tx, _rx) = std::sync::mpsc::sync_channel::<AudioBuffer>(4);
+        let (tx, _rx) = std::sync::mpsc::sync_channel::<AudioMessage>(4);
         let handler = AudioOutputHandler::new(tx);
 
         // The handler should be usable as an SCStreamOutput protocol object.

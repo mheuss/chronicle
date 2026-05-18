@@ -14,7 +14,7 @@ use objc2::runtime::ProtocolObject;
 use objc2_screen_capture_kit::SCStreamOutput;
 
 use crate::accumulator::SegmentAccumulator;
-use crate::handler::{AudioBuffer, AudioOutputHandler};
+use crate::handler::{AudioMessage, AudioOutputHandler};
 use crate::{AudioConfig, AudioError, AudioSource, CompletedSegment, Result};
 
 /// Audio encoding pipeline.
@@ -72,7 +72,7 @@ impl AudioPipeline {
     /// `chronicle-capture::CaptureEngine::start` for SCStream registration.
     pub fn create(config: AudioConfig) -> Result<(Self, mpsc::Receiver<CompletedSegment>)> {
         let (segment_tx, segment_rx) = mpsc::channel::<CompletedSegment>();
-        let (buffer_tx, buffer_rx) = mpsc::sync_channel::<AudioBuffer>(64);
+        let (buffer_tx, buffer_rx) = mpsc::sync_channel::<AudioMessage>(64);
 
         let encoding_thread = spawn_encoding_thread(buffer_rx, segment_tx, config);
 
@@ -144,10 +144,10 @@ impl Drop for AudioPipeline {
     }
 }
 
-/// Spawn the encoding thread that reads AudioBuffers and dispatches
+/// Spawn the encoding thread that reads AudioMessages and dispatches
 /// them to the appropriate SegmentAccumulator.
 fn spawn_encoding_thread(
-    buffer_rx: mpsc::Receiver<AudioBuffer>,
+    buffer_rx: mpsc::Receiver<AudioMessage>,
     segment_tx: mpsc::Sender<CompletedSegment>,
     config: AudioConfig,
 ) -> JoinHandle<()> {
@@ -159,10 +159,10 @@ fn spawn_encoding_thread(
         .expect("failed to spawn audio encoding thread")
 }
 
-/// The encoding loop. Reads buffers, dispatches to accumulators,
-/// and flushes on shutdown.
+/// The encoding loop. Reads messages, dispatches buffers to accumulators,
+/// handles flush requests, and flushes on shutdown.
 fn run_encoding_loop(
-    buffer_rx: mpsc::Receiver<AudioBuffer>,
+    buffer_rx: mpsc::Receiver<AudioMessage>,
     segment_tx: mpsc::Sender<CompletedSegment>,
     config: &AudioConfig,
 ) {
@@ -186,14 +186,23 @@ fn run_encoding_loop(
         segment_tx,
     );
 
-    // Process buffers until the channel disconnects.
-    while let Ok(buf) = buffer_rx.recv() {
-        let acc = match buf.source {
-            AudioSource::Microphone => &mut mic_acc,
-            AudioSource::System => &mut sys_acc,
-        };
-        if let Err(e) = acc.push(&buf.samples, buf.timestamp_ms) {
-            log::error!("encoding error for {}: {e}", buf.source.as_str());
+    // Process messages until the channel disconnects.
+    while let Ok(msg) = buffer_rx.recv() {
+        match msg {
+            AudioMessage::Buffer(buf) => {
+                let acc = match buf.source {
+                    AudioSource::Microphone => &mut mic_acc,
+                    AudioSource::System => &mut sys_acc,
+                };
+                if let Err(e) = acc.push(&buf.samples, buf.timestamp_ms) {
+                    log::error!("encoding error for {}: {e}", buf.source.as_str());
+                }
+            }
+            AudioMessage::FlushMic => {
+                if let Err(e) = mic_acc.flush() {
+                    log::error!("failed to flush mic accumulator on request: {e}");
+                }
+            }
         }
     }
 
@@ -209,6 +218,7 @@ fn run_encoding_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handler::AudioBuffer;
 
     #[test]
     fn create_returns_pipeline_and_segment_receiver() {
@@ -234,7 +244,7 @@ mod tests {
         };
 
         let (segment_tx, segment_rx) = mpsc::channel::<CompletedSegment>();
-        let (buffer_tx, buffer_rx) = mpsc::sync_channel::<AudioBuffer>(64);
+        let (buffer_tx, buffer_rx) = mpsc::sync_channel::<AudioMessage>(64);
 
         // Spawn the encoding loop in a thread.
         let config_clone = config.clone();
@@ -247,21 +257,21 @@ mod tests {
         // Send enough mic samples for one full segment (1 second at 48kHz).
         let mic_samples = vec![0.0_f32; 48_000];
         buffer_tx
-            .send(AudioBuffer {
+            .send(AudioMessage::Buffer(AudioBuffer {
                 samples: mic_samples,
                 timestamp_ms: timestamp,
                 source: AudioSource::Microphone,
-            })
+            }))
             .unwrap();
 
         // Send enough system samples for one full segment.
         let sys_samples = vec![0.0_f32; 48_000];
         buffer_tx
-            .send(AudioBuffer {
+            .send(AudioMessage::Buffer(AudioBuffer {
                 samples: sys_samples,
                 timestamp_ms: timestamp,
                 source: AudioSource::System,
-            })
+            }))
             .unwrap();
 
         // Drop sender to signal shutdown.
@@ -304,7 +314,7 @@ mod tests {
         };
 
         let (segment_tx, segment_rx) = mpsc::channel::<CompletedSegment>();
-        let (buffer_tx, buffer_rx) = mpsc::sync_channel::<AudioBuffer>(64);
+        let (buffer_tx, buffer_rx) = mpsc::sync_channel::<AudioMessage>(64);
 
         let config_clone = config.clone();
         let handle = thread::spawn(move || {
@@ -316,11 +326,11 @@ mod tests {
         // Send half a segment of mic samples.
         let half_samples = vec![0.0_f32; 24_000];
         buffer_tx
-            .send(AudioBuffer {
+            .send(AudioMessage::Buffer(AudioBuffer {
                 samples: half_samples,
                 timestamp_ms: timestamp,
                 source: AudioSource::Microphone,
-            })
+            }))
             .unwrap();
 
         // Drop sender to trigger shutdown + flush.
@@ -338,6 +348,60 @@ mod tests {
     }
 
     #[test]
+    fn flush_request_finalizes_partial_mic_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = AudioConfig {
+            segment_duration_secs: 30,
+            bitrate: 64_000,
+            output_dir: dir.path().to_path_buf(),
+        };
+
+        let (segment_tx, segment_rx) = mpsc::channel::<CompletedSegment>();
+        let (buffer_tx, buffer_rx) = mpsc::sync_channel::<AudioMessage>(64);
+
+        let config_clone = config.clone();
+        let handle = thread::spawn(move || {
+            run_encoding_loop(buffer_rx, segment_tx, &config_clone);
+        });
+
+        let timestamp = 1_700_000_000_000_i64;
+
+        // Send half a second of mic samples — well below the 30s boundary.
+        let partial_samples = vec![0.0_f32; 24_000];
+        buffer_tx
+            .send(AudioMessage::Buffer(AudioBuffer {
+                samples: partial_samples,
+                timestamp_ms: timestamp,
+                source: AudioSource::Microphone,
+            }))
+            .unwrap();
+
+        // Request a mic flush. This must finalize the partial segment now,
+        // ordered after the buffer above.
+        buffer_tx.send(AudioMessage::FlushMic).unwrap();
+
+        // Assert the segment arrives while the sender is still alive, so a
+        // channel-close shutdown flush cannot be the cause.
+        let segment = segment_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("FlushMic should finalize the partial mic segment");
+        assert_eq!(segment.source, AudioSource::Microphone);
+        assert_eq!(segment.start_timestamp, timestamp);
+        assert_eq!(segment.end_timestamp, timestamp + 500);
+        assert!(segment.path.exists(), "flushed mic file should exist");
+
+        // Now drop the sender and join the encoding thread.
+        drop(buffer_tx);
+        handle.join().unwrap();
+
+        // No further segments — the buffer was fully drained by FlushMic.
+        assert!(
+            segment_rx.try_recv().is_err(),
+            "no extra segment expected from shutdown flush"
+        );
+    }
+
+    #[test]
     fn encoding_loop_exits_cleanly_with_no_buffers() {
         let dir = tempfile::tempdir().unwrap();
         let config = AudioConfig {
@@ -347,7 +411,7 @@ mod tests {
         };
 
         let (segment_tx, segment_rx) = mpsc::channel::<CompletedSegment>();
-        let (buffer_tx, buffer_rx) = mpsc::sync_channel::<AudioBuffer>(64);
+        let (buffer_tx, buffer_rx) = mpsc::sync_channel::<AudioMessage>(64);
 
         let config_clone = config.clone();
         let handle = thread::spawn(move || {
