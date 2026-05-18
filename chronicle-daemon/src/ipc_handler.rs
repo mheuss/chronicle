@@ -91,10 +91,110 @@ impl RequestHandler for DaemonHandler {
     }
 }
 
+/// Map a microphone-toggle outcome to the wire-level mic state. A failed
+/// toggle is classified by the current microphone permission: a missing grant
+/// (including `NotDetermined`) is reported as `permission_denied` so the user
+/// has something actionable; an authorized-but-still-failed toggle is `error`.
+// HEU-330: called by the daemon control plane once wired (Task 9).
+#[allow(dead_code)]
+pub(crate) fn map_outcome(
+    outcome: chronicle_audio::MicToggleOutcome,
+    mic_permission: crate::permissions::MicrophoneStatus,
+) -> chronicle_ipc::MicState {
+    use crate::permissions::MicrophoneStatus;
+    use chronicle_audio::MicToggleOutcome;
+    use chronicle_ipc::MicState;
+    match outcome {
+        MicToggleOutcome::Enabled => MicState::On,
+        MicToggleOutcome::Disabled => MicState::Off,
+        MicToggleOutcome::Failed { reason } => {
+            // Design §3.4: log the reason daemon-side; the IPC response
+            // carries only MicState, never internal error detail.
+            log::warn!("microphone toggle failed: {reason}");
+            match mic_permission {
+                MicrophoneStatus::Denied
+                | MicrophoneStatus::Restricted
+                | MicrophoneStatus::NotDetermined => MicState::PermissionDenied,
+                MicrophoneStatus::Authorized => MicState::Error,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chronicle_ipc::{Request, RequestHandler, Response};
+    use crate::permissions::MicrophoneStatus;
+    use chronicle_audio::MicToggleOutcome;
+    use chronicle_ipc::{MicState, Request, RequestHandler, Response};
+
+    #[test]
+    fn map_outcome_enabled_returns_on() {
+        assert_eq!(
+            map_outcome(MicToggleOutcome::Enabled, MicrophoneStatus::Authorized),
+            MicState::On
+        );
+    }
+
+    #[test]
+    fn map_outcome_disabled_returns_off() {
+        assert_eq!(
+            map_outcome(MicToggleOutcome::Disabled, MicrophoneStatus::Authorized),
+            MicState::Off
+        );
+    }
+
+    #[test]
+    fn map_outcome_failed_denied_returns_permission_denied() {
+        assert_eq!(
+            map_outcome(
+                MicToggleOutcome::Failed {
+                    reason: "denied".to_string()
+                },
+                MicrophoneStatus::Denied
+            ),
+            MicState::PermissionDenied,
+        );
+    }
+
+    #[test]
+    fn map_outcome_failed_restricted_returns_permission_denied() {
+        assert_eq!(
+            map_outcome(
+                MicToggleOutcome::Failed {
+                    reason: "restricted".to_string()
+                },
+                MicrophoneStatus::Restricted
+            ),
+            MicState::PermissionDenied,
+        );
+    }
+
+    #[test]
+    fn map_outcome_failed_not_determined_returns_permission_denied() {
+        assert_eq!(
+            map_outcome(
+                MicToggleOutcome::Failed {
+                    reason: "not determined".to_string()
+                },
+                MicrophoneStatus::NotDetermined
+            ),
+            MicState::PermissionDenied,
+        );
+    }
+
+    #[test]
+    fn map_outcome_failed_authorized_returns_error() {
+        assert_eq!(
+            map_outcome(
+                MicToggleOutcome::Failed {
+                    reason: "pipeline error".to_string()
+                },
+                MicrophoneStatus::Authorized
+            ),
+            MicState::Error,
+        );
+    }
 
     #[test]
     fn status_returns_version_and_uptime_and_nested_stats() {

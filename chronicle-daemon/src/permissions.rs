@@ -71,7 +71,7 @@ fn check_screen_recording() -> ScreenRecordingStatus {
     }
 }
 
-fn check_microphone() -> MicrophoneStatus {
+pub(crate) fn check_microphone() -> MicrophoneStatus {
     let status: isize = unsafe {
         objc2::msg_send![
             objc2::class!(AVCaptureDevice),
