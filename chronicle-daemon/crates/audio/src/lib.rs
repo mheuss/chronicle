@@ -9,9 +9,11 @@ mod accumulator;
 mod encoder;
 mod engine;
 pub mod handler;
+pub mod microphone;
 
 pub use encoder::OggOpusEncoder;
 pub use engine::{AudioHandlerToken, AudioPipeline};
+pub use microphone::MicrophoneCapture;
 
 use std::path::{Path, PathBuf};
 
@@ -21,6 +23,10 @@ pub enum AudioError {
     /// ScreenCaptureKit setup or runtime failure.
     #[error("screen capture kit error: {0}")]
     ScreenCaptureKit(String),
+
+    /// AVAudioEngine microphone-capture setup or runtime failure.
+    #[error("microphone capture error: {0}")]
+    Microphone(String),
 
     /// Opus encoding failure.
     #[error("encoding error: {0}")]
