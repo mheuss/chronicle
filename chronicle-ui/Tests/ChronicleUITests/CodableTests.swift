@@ -100,7 +100,8 @@ struct CodableTests {
               "dropped": 3
             },
             "audio": {
-              "segments_persisted": 55
+              "segments_persisted": 55,
+              "mic_state": "on"
             },
             "storage": {
               "db_size_bytes": 52428800
@@ -129,6 +130,7 @@ struct CodableTests {
 
         let audio = try #require(response.data.audio)
         #expect(audio.segmentsPersisted == 55)
+        #expect(audio.micState == .on)
 
         let storage = try #require(response.data.storage)
         #expect(storage.dbSizeBytes == 52428800)
@@ -146,5 +148,36 @@ struct CodableTests {
         #expect(response.data.ocr == nil)
         #expect(response.data.audio == nil)
         #expect(response.data.storage == nil)
+    }
+
+    @Test("MicState decodes from wire values")
+    func micStateDecodesFromWireValues() throws {
+        let decoder = JSONDecoder()
+        #expect(try decoder.decode(MicState.self, from: Data("\"off\"".utf8)) == .off)
+        #expect(try decoder.decode(MicState.self, from: Data("\"on\"".utf8)) == .on)
+        #expect(try decoder.decode(MicState.self, from: Data("\"permission_denied\"".utf8)) == .permissionDenied)
+        #expect(try decoder.decode(MicState.self, from: Data("\"error\"".utf8)) == .error)
+    }
+
+    @Test("SetMicEnabledRequest encodes to wire format")
+    func setMicEnabledRequestEncodes() throws {
+        let request = SetMicEnabledRequest(type: "set_mic_enabled", enabled: true)
+        let data = try JSONEncoder().encode(request)
+        let dict = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        #expect(dict["type"] as? String == "set_mic_enabled")
+        #expect(dict["enabled"] as? Bool == true)
+    }
+
+    @Test("SetMicEnabledResponse decodes from wire format")
+    func setMicEnabledResponseDecodes() throws {
+        let json = """
+        {"type":"set_mic_enabled","ok":true,"state":"on"}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let response = try decoder.decode(SetMicEnabledResponse.self, from: Data(json.utf8))
+        #expect(response.type == "set_mic_enabled")
+        #expect(response.ok == true)
+        #expect(response.state == .on)
     }
 }
