@@ -1,6 +1,7 @@
 mod ipc_handler;
 mod permissions;
 mod pipeline;
+mod settings;
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
