@@ -272,8 +272,8 @@ impl Drop for IpcServer {
 mod tests {
     use super::*;
     use crate::{
-        AudioStats, CaptureStats, OcrStats, Request, RequestHandler, Response, StatusData,
-        StorageStats,
+        AudioStats, CaptureStats, MicState, OcrStats, Request, RequestHandler, Response,
+        StatusData, StorageStats,
     };
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
@@ -294,6 +294,10 @@ mod tests {
                         audio: AudioStats::default(),
                         storage: StorageStats::default(),
                     },
+                },
+                Request::SetMicEnabled { .. } => Response::SetMicEnabled {
+                    ok: true,
+                    state: MicState::On,
                 },
             }
         }
@@ -322,6 +326,36 @@ mod tests {
         assert_eq!(value["type"], "status");
         assert_eq!(value["ok"], true);
         assert_eq!(value["data"]["uptime_secs"], 42);
+
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn server_responds_to_set_mic_enabled_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("test.sock");
+        let cancel = CancellationToken::new();
+
+        let _server = IpcServer::start(&sock, MockHandler, cancel.clone())
+            .await
+            .unwrap();
+
+        let stream = UnixStream::connect(&sock).await.unwrap();
+        let (reader, mut writer) = tokio::io::split(stream);
+        let mut buf_reader = BufReader::new(reader);
+
+        writer
+            .write_all(b"{\"type\":\"set_mic_enabled\",\"enabled\":true}\n")
+            .await
+            .unwrap();
+
+        let mut line = String::new();
+        buf_reader.read_line(&mut line).await.unwrap();
+
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["type"], "set_mic_enabled");
+        assert_eq!(value["ok"], true);
+        assert!(value["state"].is_string(), "state should be present");
 
         cancel.cancel();
     }

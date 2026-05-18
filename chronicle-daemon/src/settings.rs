@@ -12,8 +12,6 @@ const MIC_KEY: &str = "mic_enabled";
 
 /// Read the persisted microphone setting. A missing file, an unreadable file,
 /// or an unrecognized value all return `false` (microphone off).
-// HEU-330: called by main() once the control plane is wired (Task 9).
-#[allow(dead_code)]
 pub fn read_mic_setting(base_dir: &Path) -> bool {
     let Ok(contents) = std::fs::read_to_string(base_dir.join(SETTINGS_FILE)) else {
         return false;
@@ -31,8 +29,6 @@ pub fn read_mic_setting(base_dir: &Path) -> bool {
 /// Persist the microphone setting. Best-effort: a write failure is logged, not
 /// returned — the live toggle has already taken effect. Written atomically
 /// (temp file + rename) at `0600`.
-// HEU-330: called by main() once the control plane is wired (Task 9).
-#[allow(dead_code)]
 pub fn write_mic_setting(base_dir: &Path, on: bool) {
     let path = base_dir.join(SETTINGS_FILE);
     let tmp = base_dir.join(format!("{SETTINGS_FILE}.tmp"));
