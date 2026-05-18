@@ -1,9 +1,11 @@
 //! Audio encoding pipeline for Chronicle.
 //!
 //! Provides an Opus encoding pipeline for microphone and system audio.
-//! Exposes an ObjC handler and dispatch queue for external SCStream
-//! registration. Completed Opus segments are delivered over an mpsc
-//! channel for downstream storage and transcription.
+//! System audio is captured through an ObjC handler the caller registers on
+//! an external SCStream; the microphone is captured through a dedicated
+//! `AVAudioEngine` path the pipeline owns and toggles at runtime. Completed
+//! Opus segments are delivered over an mpsc channel for downstream storage
+//! and transcription.
 
 mod accumulator;
 mod encoder;
@@ -12,7 +14,7 @@ pub mod handler;
 pub mod microphone;
 
 pub use encoder::OggOpusEncoder;
-pub use engine::{AudioHandlerToken, AudioPipeline};
+pub use engine::{AudioHandlerToken, AudioPipeline, MicToggleOutcome};
 pub use microphone::MicrophoneCapture;
 
 use std::path::{Path, PathBuf};
