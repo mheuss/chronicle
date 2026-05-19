@@ -325,7 +325,7 @@ mod tests {
         let (data, w, h, bpr) = make_test_pixel_data();
         let image = create_cgimage_from_bgra(&data, w, h, bpr).unwrap();
         let path = Path::new("/nonexistent/directory/out.heif");
-        let result = write_cgimage_as_heif(&image, &path, 0.65);
+        let result = write_cgimage_as_heif(&image, path, 0.65);
         assert!(result.is_err());
     }
 }
