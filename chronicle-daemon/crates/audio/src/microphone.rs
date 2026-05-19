@@ -61,13 +61,16 @@ fn mono_samples(channel: &[f32], frame_count: usize) -> Vec<f32> {
 /// tap normalizes each buffer to mono/48 kHz/f32 and forwards it over the
 /// encoding channel as [`AudioMessage::Buffer`].
 ///
+/// Dropping `MicrophoneCapture` releases the `AVAudioEngine`, which tears the
+/// input-node tap down with it — there is no explicit `removeTapOnBus`.
+///
 /// [`start`]: Self::start
 pub struct MicrophoneCapture {
     /// The capture engine. `start`/`stop`/`is_running` drive it directly.
     engine: Retained<AVAudioEngine>,
-    /// The installed tap block. The engine holds a raw pointer to it, so it
-    /// must stay alive for as long as the tap is installed — i.e. for the
-    /// lifetime of this struct.
+    /// The installed tap block. `installTapOnBus` copies the block, so the
+    /// engine owns its own retained copy; this field also keeps the Rust-side
+    /// `RcBlock` alive for the struct's lifetime.
     _tap_block: RcBlock<dyn Fn(NonNull<AVAudioPCMBuffer>, NonNull<AVAudioTime>)>,
 }
 
