@@ -180,9 +180,16 @@ impl AudioPipeline {
                     // Finalize the partial mic segment so a later re-enable does
                     // not produce one segment spanning the off-period.
                     if let Some(tx) = &self.flush_tx
-                        && tx.try_send(AudioMessage::FlushMic).is_err()
+                        && let Err(e) = tx.send(AudioMessage::FlushMic)
                     {
-                        log::warn!("mic flush request dropped: encoding channel full or closed");
+                        // FlushMic is a control message, not an audio buffer —
+                        // it must not be dropped under backpressure, so this
+                        // blocks for a channel slot rather than `try_send`. A
+                        // send error means the encoding channel is closed,
+                        // which is a genuine failure.
+                        return MicToggleOutcome::Failed {
+                            reason: format!("failed to finalize microphone segment: {e}"),
+                        };
                     }
                     MicToggleOutcome::Disabled
                 }
