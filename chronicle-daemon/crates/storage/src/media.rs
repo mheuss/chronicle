@@ -353,7 +353,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mgr = MediaManager::new(dir.path().to_path_buf()).unwrap();
         let path = dir.path().join("deleteme.dat");
-        std::fs::write(&path, &[0u8; 256]).unwrap();
+        std::fs::write(&path, [0u8; 256]).unwrap();
 
         let freed = mgr.delete_file(&path).unwrap();
         assert_eq!(freed, 256);
@@ -453,8 +453,8 @@ mod tests {
         let mgr = MediaManager::new(dir.path().to_path_buf()).unwrap();
         let sub = dir.path().join("audio");
         std::fs::create_dir_all(&sub).unwrap();
-        std::fs::write(sub.join("a.opus"), &[0u8; 100]).unwrap();
-        std::fs::write(sub.join("b.opus"), &[0u8; 200]).unwrap();
+        std::fs::write(sub.join("a.opus"), [0u8; 100]).unwrap();
+        std::fs::write(sub.join("b.opus"), [0u8; 200]).unwrap();
 
         assert_eq!(mgr.dir_size("audio"), 300);
     }
@@ -551,7 +551,7 @@ mod tests {
         // Create a real directory with files outside the expected subdir
         let real_dir = dir.path().join("real_audio");
         std::fs::create_dir_all(&real_dir).unwrap();
-        std::fs::write(real_dir.join("a.opus"), &[0u8; 500]).unwrap();
+        std::fs::write(real_dir.join("a.opus"), [0u8; 500]).unwrap();
 
         // Symlink the subdir to the real directory
         let symlink_dir = dir.path().join("audio");
