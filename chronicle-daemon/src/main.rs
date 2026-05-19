@@ -1,9 +1,10 @@
 mod ipc_handler;
 mod permissions;
 mod pipeline;
+mod settings;
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -54,10 +55,22 @@ async fn main() -> Result<()> {
     // --- IPC server ---
     let cancel = CancellationToken::new();
     let socket_path = storage.base_dir().join("chronicle.sock");
+    // Control channel: the IPC handler forwards mic toggles to the event loop
+    // below; the shared atom carries the latest result back for `Status`.
+    let (mic_tx, mut mic_rx) = tokio::sync::mpsc::channel::<ipc_handler::MicCommand>(8);
+    let mic_state_atom = Arc::new(std::sync::atomic::AtomicU8::new(
+        chronicle_ipc::MicState::Off as u8,
+    ));
+    // Readiness gate: the handler rejects mic toggles until the event loop
+    // below starts draining `mic_rx`. Opened just before the loop begins.
+    let mic_ready = Arc::new(AtomicBool::new(false));
     let handler = ipc_handler::DaemonHandler::new(
         Arc::clone(&counters),
         Arc::clone(&capture_snapshot),
         Arc::clone(&storage_db_size),
+        mic_tx,
+        Arc::clone(&mic_state_atom),
+        Arc::clone(&mic_ready),
     );
     let ipc_server = IpcServer::start(&socket_path, handler, cancel.clone()).await?;
     log::info!("IPC server started");
@@ -74,11 +87,12 @@ async fn main() -> Result<()> {
     log::info!("Audio pipeline created");
 
     // --- Screen capture pipeline (with audio on primary display) ---
-    // Hold the token locally; CaptureEngine::start consumes it and the
-    // borrow ends when `start` returns. After this block, `audio_pipeline`
-    // is borrow-free and can be stopped at shutdown.
+    // CaptureEngine::start consumes the token, but the engine holds the
+    // `AudioHandlerToken` for its whole life. `set_microphone_enabled(&self)`
+    // only borrows `audio_pipeline` shared, so the event loop below can toggle
+    // the mic while the engine runs; the pipeline is still stopped at shutdown.
     let capture_config = CaptureConfig {
-        audio: audio_pipeline.token(SAMPLE_RATE, CHANNEL_COUNT, false),
+        audio: audio_pipeline.token(SAMPLE_RATE, CHANNEL_COUNT),
         ..Default::default()
     };
     let (mut engine, frame_rx) = match CaptureEngine::start(capture_config) {
@@ -97,6 +111,17 @@ async fn main() -> Result<()> {
         Err(e) => return Err(e.into()),
     };
     log::info!("Capture engine started (audio on primary display)");
+
+    // Restore the persisted microphone setting. The mic is off by default;
+    // only an explicit prior "on" turns it back on at startup.
+    if settings::read_mic_setting(storage.base_dir()) {
+        let outcome = audio_pipeline.set_microphone_enabled(true);
+        let state = ipc_handler::map_outcome(outcome, permissions::check_microphone());
+        log::info!("restored persisted mic setting: result={state:?}");
+        // A failed restore updates the runtime atom but deliberately leaves the
+        // persisted setting untouched so the next daemon start retries it.
+        mic_state_atom.store(state as u8, std::sync::atomic::Ordering::Release);
+    }
 
     let (ocr_tx, ocr_rx) = tokio::sync::mpsc::channel(1024);
 
@@ -178,16 +203,49 @@ async fn main() -> Result<()> {
         }
     });
 
-    // --- Shutdown ---
+    // --- Event loop: serve mic toggles until a shutdown signal arrives ---
+    // Toggles are handled inline, one per iteration. This loop is the only
+    // caller of write_mic_setting, which writes a fixed temp path — the
+    // one-at-a-time processing here is what keeps that path safe. (The startup
+    // restore block above also toggles the mic, but deliberately does not
+    // persist, so it never races this loop's write.)
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    tokio::select! {
-        res = tokio::signal::ctrl_c() => {
-            res?;
-            log::info!("SIGINT received, shutting down");
+    // Open the readiness gate: from here the loop drains `mic_rx`, so the IPC
+    // handler can forward mic toggles instead of rejecting them.
+    mic_ready.store(true, Ordering::Release);
+    loop {
+        tokio::select! {
+            res = tokio::signal::ctrl_c() => {
+                res?;
+                log::info!("SIGINT received, shutting down");
+                break;
+            }
+            _ = sigterm.recv() => {
+                log::info!("SIGTERM received, shutting down");
+                break;
+            }
+            Some(cmd) = mic_rx.recv() => {
+                let outcome = audio_pipeline.set_microphone_enabled(cmd.enabled);
+                let state = ipc_handler::map_outcome(outcome, permissions::check_microphone());
+                // NFR-5: every toggle logs the requested state and the result.
+                log::info!("mic toggle: requested enabled={}, result={state:?}", cmd.enabled);
+                if matches!(state, chronicle_ipc::MicState::On | chronicle_ipc::MicState::Off) {
+                    settings::write_mic_setting(
+                        storage.base_dir(),
+                        state == chronicle_ipc::MicState::On,
+                    );
+                }
+                // The atom always mirrors the latest result so Status is honest.
+                mic_state_atom.store(state as u8, std::sync::atomic::Ordering::Release);
+                let _ = cmd.reply.send(state); // ignore if the handler already timed out
+            }
         }
-        _ = sigterm.recv() => {
-            log::info!("SIGTERM received, shutting down");
-        }
+    }
+    // Drain any mic command that raced this shutdown signal: reply Error now so
+    // the IPC handler returns immediately instead of waiting out its timeout.
+    mic_rx.close();
+    while let Ok(cmd) = mic_rx.try_recv() {
+        let _ = cmd.reply.send(chronicle_ipc::MicState::Error);
     }
     cancel.cancel();
 

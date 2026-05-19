@@ -26,7 +26,7 @@ fn pipeline_creates_and_stops_cleanly() {
     // Drop the token before stopping so the borrow ends.
     {
         let _token = pipeline
-            .token(48_000, 1, false)
+            .token(48_000, 1)
             .expect("token should be Some before stop");
     }
 

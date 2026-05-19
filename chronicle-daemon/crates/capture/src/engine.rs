@@ -193,9 +193,6 @@ impl<'a> CaptureEngine<'a> {
                         sc_config.setSampleRate(audio.sample_rate as isize);
                         sc_config.setChannelCount(audio.channel_count as isize);
                         sc_config.setExcludesCurrentProcessAudio(true);
-                        if audio.capture_microphone {
-                            sc_config.setCaptureMicrophone(true);
-                        }
                     }
                 }
 
@@ -260,25 +257,6 @@ impl<'a> CaptureEngine<'a> {
                             ))
                         })
                 })?;
-
-                // Microphone — soft error. Permission may be denied or
-                // hardware may be absent. Log and continue.
-                if audio.capture_microphone {
-                    let mic_handler = audio.handler_clone();
-                    let mic_result = autoreleasepool(|_| unsafe {
-                        stream.addStreamOutput_type_sampleHandlerQueue_error(
-                            &mic_handler,
-                            SCStreamOutputType::Microphone,
-                            Some(audio.queue()),
-                        )
-                    });
-                    if let Err(e) = mic_result {
-                        log::warn!(
-                            "Microphone registration failed (permission denied?): {}",
-                            e.localizedDescription()
-                        );
-                    }
-                }
 
                 log::info!("Registered audio handler on primary display {display_id}");
             }

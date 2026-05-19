@@ -3,7 +3,7 @@ name = "chronicle-audio"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
-description = "Audio capture — microphone and system audio via ScreenCaptureKit"
+description = "Audio encoding pipeline — system audio via ScreenCaptureKit, microphone via AVAudioEngine"
 license = "MIT"
 
 [dependencies]
@@ -13,6 +13,18 @@ objc2-screen-capture-kit = { version = "0.3", features = [
     "objc2-core-media",
     "dispatch2",
 ] }
+objc2-avf-audio = { version = "0.3", features = [
+    "AVAudioEngine",
+    "AVAudioNode",
+    "AVAudioIONode",
+    "AVAudioBuffer",
+    "AVAudioFormat",
+    "AVAudioTime",
+    "AVAudioTypes",
+    "AVAudioConverter",
+    "block2",
+] }
+block2 = "0.6"
 objc2-core-media = { version = "0.3", features = [
     "CMSampleBuffer",
     "CMBlockBuffer",

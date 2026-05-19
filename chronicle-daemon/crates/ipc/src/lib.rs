@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
     Status,
+    /// Turn microphone capture on or off at runtime.
+    SetMicEnabled {
+        enabled: bool,
+    },
 }
 
 /// Stable, machine-readable error code on an error response.
@@ -29,6 +33,38 @@ pub enum ErrorCode {
     InvalidRequest,
 }
 
+/// Current microphone capture state, reported to the UI.
+///
+/// `#[repr(u8)]` so the daemon can publish it through an `AtomicU8` for the
+/// `Status` read path (mirrors `chronicle_capture::EngineState`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum MicState {
+    /// Microphone capture is off.
+    #[default]
+    Off = 0,
+    /// Microphone capture is on.
+    On = 1,
+    /// A toggle failed because microphone permission is not granted.
+    PermissionDenied = 2,
+    /// A toggle failed for another reason (see daemon logs).
+    Error = 3,
+}
+
+impl MicState {
+    /// Reconstruct from the `u8` published in an `AtomicU8`. Any unknown
+    /// value maps to `Off` — the safe default.
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => MicState::On,
+            2 => MicState::PermissionDenied,
+            3 => MicState::Error,
+            _ => MicState::Off,
+        }
+    }
+}
+
 /// A response from the daemon to the UI.
 ///
 /// Only ever decoded by a same-version client over the live IPC socket, so
@@ -40,6 +76,11 @@ pub enum Response {
     Status {
         ok: bool,
         data: StatusData,
+    },
+    /// Result of a `SetMicEnabled` request: the resulting microphone state.
+    SetMicEnabled {
+        ok: bool,
+        state: MicState,
     },
     Error {
         ok: bool,
@@ -86,6 +127,8 @@ pub struct OcrStats {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioStats {
     pub segments_persisted: u64,
+    /// Current microphone capture state.
+    pub mic_state: MicState,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,5 +230,111 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let decoded: Request = serde_json::from_str(&json).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn mic_state_permission_denied_serializes_correctly() {
+        let json = serde_json::to_string(&MicState::PermissionDenied).unwrap();
+        assert_eq!(json, r#""permission_denied""#);
+    }
+
+    #[test]
+    fn mic_state_on_serializes_correctly() {
+        let json = serde_json::to_string(&MicState::On).unwrap();
+        assert_eq!(json, r#""on""#);
+    }
+
+    #[test]
+    fn mic_state_all_variants_round_trip() {
+        let variants = [
+            MicState::Off,
+            MicState::On,
+            MicState::PermissionDenied,
+            MicState::Error,
+        ];
+        for variant in variants {
+            let json = serde_json::to_string(&variant).unwrap();
+            let decoded: MicState = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, variant);
+        }
+    }
+
+    #[test]
+    fn mic_state_default_is_off() {
+        assert_eq!(MicState::default(), MicState::Off);
+    }
+
+    #[test]
+    fn mic_state_from_u8_on() {
+        assert_eq!(MicState::from_u8(1), MicState::On);
+    }
+
+    #[test]
+    fn mic_state_from_u8_unknown_maps_to_off() {
+        assert_eq!(MicState::from_u8(99), MicState::Off);
+    }
+
+    #[test]
+    fn mic_state_atom_round_trip_holds_for_every_variant() {
+        // The daemon publishes MicState through an AtomicU8 (store `as u8`,
+        // read via from_u8). Lock the discriminant↔variant contract so a
+        // reordered enum cannot silently corrupt the Status read path.
+        for variant in [
+            MicState::Off,
+            MicState::On,
+            MicState::PermissionDenied,
+            MicState::Error,
+        ] {
+            assert_eq!(MicState::from_u8(variant as u8), variant);
+        }
+    }
+
+    #[test]
+    fn request_set_mic_enabled_serializes_to_tagged_json() {
+        let json = serde_json::to_string(&Request::SetMicEnabled { enabled: true }).unwrap();
+        assert_eq!(json, r#"{"type":"set_mic_enabled","enabled":true}"#);
+    }
+
+    #[test]
+    fn request_set_mic_enabled_round_trips_through_json() {
+        let original = Request::SetMicEnabled { enabled: true };
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn response_set_mic_enabled_serializes_correctly() {
+        let resp = Response::SetMicEnabled {
+            ok: true,
+            state: MicState::On,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["type"], "set_mic_enabled");
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["state"], "on");
+    }
+
+    #[test]
+    fn status_response_serializes_audio_with_mic_state() {
+        let resp = Response::Status {
+            ok: true,
+            data: StatusData {
+                uptime_secs: 1,
+                version: "0.1.0".to_string(),
+                capture: CaptureStats::default(),
+                ocr: OcrStats::default(),
+                audio: AudioStats {
+                    segments_persisted: 7,
+                    mic_state: MicState::Off,
+                },
+                storage: StorageStats::default(),
+            },
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["data"]["audio"]["segments_persisted"], 7);
+        assert_eq!(value["data"]["audio"]["mic_state"], "off");
     }
 }

@@ -1,17 +1,21 @@
 //! Audio encoding pipeline for Chronicle.
 //!
 //! Provides an Opus encoding pipeline for microphone and system audio.
-//! Exposes an ObjC handler and dispatch queue for external SCStream
-//! registration. Completed Opus segments are delivered over an mpsc
-//! channel for downstream storage and transcription.
+//! System audio is captured through an ObjC handler the caller registers on
+//! an external SCStream; the microphone is captured through a dedicated
+//! `AVAudioEngine` path the pipeline owns and toggles at runtime. Completed
+//! Opus segments are delivered over an mpsc channel for downstream storage
+//! and transcription.
 
 mod accumulator;
 mod encoder;
 mod engine;
 pub mod handler;
+pub mod microphone;
 
 pub use encoder::OggOpusEncoder;
-pub use engine::{AudioHandlerToken, AudioPipeline};
+pub use engine::{AudioHandlerToken, AudioPipeline, MicToggleOutcome};
+pub use microphone::MicrophoneCapture;
 
 use std::path::{Path, PathBuf};
 
@@ -21,6 +25,10 @@ pub enum AudioError {
     /// ScreenCaptureKit setup or runtime failure.
     #[error("screen capture kit error: {0}")]
     ScreenCaptureKit(String),
+
+    /// AVAudioEngine microphone-capture setup or runtime failure.
+    #[error("microphone capture error: {0}")]
+    Microphone(String),
 
     /// Opus encoding failure.
     #[error("encoding error: {0}")]
@@ -125,7 +133,7 @@ mod tests {
     #[test]
     fn segment_path_is_flat() {
         let dir = PathBuf::from("/data/staging");
-        let ts = 1774526400_000_i64;
+        let ts = 1_774_526_400_000_i64;
         let path = segment_path(&dir, ts, AudioSource::System);
         assert_eq!(
             path,
@@ -136,7 +144,7 @@ mod tests {
     #[test]
     fn segment_path_mic_suffix() {
         let dir = PathBuf::from("/tmp");
-        let path = segment_path(&dir, 1774526400_000, AudioSource::Microphone);
+        let path = segment_path(&dir, 1_774_526_400_000, AudioSource::Microphone);
         assert_eq!(path, PathBuf::from("/tmp/1774526400000_mic.opus"));
     }
 }

@@ -124,6 +124,16 @@ final class DaemonConnection {
         return response
     }
 
+    /// Toggle microphone capture on the daemon. Returns the resulting state.
+    /// Callers read the outcome from the returned `MicState`.
+    func setMicEnabled(_ enabled: Bool) async throws -> MicState {
+        let response = try await sendRequest(
+            SetMicEnabledRequest(type: "set_mic_enabled", enabled: enabled),
+            expecting: SetMicEnabledResponse.self
+        )
+        return response.state
+    }
+
     /// Generic request helper. ALL request methods must route through this —
     /// raw socket I/O lives on the nested `IO` struct, which only `sendRequest`
     /// constructs. There is no other way to call `write`/`readLine`, so a
@@ -349,6 +359,23 @@ struct IPCRequest: Codable, Sendable {
     let type: String
 }
 
+enum MicState: String, Codable, Sendable {
+    case off, on
+    case permissionDenied = "permission_denied"
+    case error
+}
+
+struct SetMicEnabledRequest: Codable, Sendable {
+    let type: String
+    let enabled: Bool
+}
+
+struct SetMicEnabledResponse: Codable, Sendable {
+    let type: String
+    let ok: Bool
+    let state: MicState
+}
+
 struct StatusResponse: Codable, Sendable {
     let type: String
     let ok: Bool
@@ -380,6 +407,7 @@ struct OcrStats: Codable, Sendable {
 
 struct AudioStats: Codable, Sendable {
     let segmentsPersisted: UInt64
+    let micState: MicState
 }
 
 struct StorageStats: Codable, Sendable {
