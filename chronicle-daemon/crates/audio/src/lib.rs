@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn segment_path_is_flat() {
         let dir = PathBuf::from("/data/staging");
-        let ts = 1774526400_000_i64;
+        let ts = 1_774_526_400_000_i64;
         let path = segment_path(&dir, ts, AudioSource::System);
         assert_eq!(
             path,
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn segment_path_mic_suffix() {
         let dir = PathBuf::from("/tmp");
-        let path = segment_path(&dir, 1774526400_000, AudioSource::Microphone);
+        let path = segment_path(&dir, 1_774_526_400_000, AudioSource::Microphone);
         assert_eq!(path, PathBuf::from("/tmp/1774526400000_mic.opus"));
     }
 }

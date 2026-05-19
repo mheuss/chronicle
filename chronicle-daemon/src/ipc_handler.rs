@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
@@ -39,6 +39,10 @@ pub struct DaemonHandler {
     mic_tx: mpsc::Sender<MicCommand>,
     /// Latest microphone state, published by the event loop, read by `Status`.
     mic_state: Arc<AtomicU8>,
+    /// Set true once the event loop is draining `mic_tx`. Until then a mic
+    /// toggle has no consumer, so the handler rejects it instead of blocking
+    /// the caller for the full reply timeout.
+    mic_ready: Arc<AtomicBool>,
     /// Backstop for a wedged daemon — a real toggle replies well under 1 s.
     mic_reply_timeout: Duration,
 }
@@ -50,6 +54,7 @@ impl DaemonHandler {
         storage_db_size: Arc<AtomicU64>,
         mic_tx: mpsc::Sender<MicCommand>,
         mic_state: Arc<AtomicU8>,
+        mic_ready: Arc<AtomicBool>,
     ) -> Self {
         Self {
             started_at: Instant::now(),
@@ -58,6 +63,7 @@ impl DaemonHandler {
             storage_db_size,
             mic_tx,
             mic_state,
+            mic_ready,
             mic_reply_timeout: Duration::from_secs(20),
         }
     }
@@ -99,7 +105,7 @@ impl RequestHandler for DaemonHandler {
                         },
                         audio: AudioStats {
                             segments_persisted: c.audio_segments_persisted,
-                            mic_state: MicState::from_u8(self.mic_state.load(Ordering::Relaxed)),
+                            mic_state: MicState::from_u8(self.mic_state.load(Ordering::Acquire)),
                         },
                         storage: StorageStats {
                             db_size_bytes: self.storage_db_size.load(Ordering::Relaxed),
@@ -108,6 +114,16 @@ impl RequestHandler for DaemonHandler {
                 }
             }
             Request::SetMicEnabled { enabled } => {
+                // The event loop is the only consumer of `mic_tx`, and it does
+                // not start until daemon startup finishes. A toggle arriving in
+                // that window has no consumer, so reject it now rather than
+                // blocking the caller for the full reply timeout.
+                if !self.mic_ready.load(Ordering::Acquire) {
+                    return Response::SetMicEnabled {
+                        ok: false,
+                        state: MicState::Error,
+                    };
+                }
                 let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel::<MicState>(1);
                 if self
                     .mic_tx
@@ -118,7 +134,7 @@ impl RequestHandler for DaemonHandler {
                     .is_err()
                 {
                     return Response::SetMicEnabled {
-                        ok: true,
+                        ok: false,
                         state: MicState::Error,
                     };
                 }
@@ -129,7 +145,10 @@ impl RequestHandler for DaemonHandler {
                 let state =
                     tokio::task::block_in_place(|| reply_rx.recv_timeout(self.mic_reply_timeout))
                         .unwrap_or(MicState::Error);
-                Response::SetMicEnabled { ok: true, state }
+                // `ok` and `state` must agree: the toggle succeeded only if the
+                // mic is now On or Off; Error/PermissionDenied mean it did not.
+                let ok = matches!(state, MicState::On | MicState::Off);
+                Response::SetMicEnabled { ok, state }
             }
         }
     }
@@ -242,14 +261,15 @@ mod tests {
     fn status_returns_version_and_uptime_and_nested_stats() {
         use arc_swap::ArcSwap;
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicU8, AtomicU64};
+        use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64};
 
         let counters = crate::pipeline::counters::PipelineCounters::new();
         let snapshot = Arc::new(ArcSwap::from_pointee(CaptureStatusSnapshot::default()));
         let db_size = Arc::new(AtomicU64::new(0));
         let (mic_tx, _mic_rx) = tokio::sync::mpsc::channel(8);
         let mic_state = Arc::new(AtomicU8::new(0));
-        let handler = DaemonHandler::new(counters, snapshot, db_size, mic_tx, mic_state);
+        let mic_ready = Arc::new(AtomicBool::new(true));
+        let handler = DaemonHandler::new(counters, snapshot, db_size, mic_tx, mic_state, mic_ready);
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         let resp = handler.handle(Request::Status);
@@ -272,7 +292,7 @@ mod tests {
         use arc_swap::ArcSwap;
         use chronicle_ipc::{CancellationToken, IpcServer};
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicU8, AtomicU64};
+        use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64};
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::UnixStream;
 
@@ -285,7 +305,8 @@ mod tests {
         let db_size = Arc::new(AtomicU64::new(0));
         let (mic_tx, _mic_rx) = tokio::sync::mpsc::channel(8);
         let mic_state = Arc::new(AtomicU8::new(0));
-        let handler = DaemonHandler::new(counters, snapshot, db_size, mic_tx, mic_state);
+        let mic_ready = Arc::new(AtomicBool::new(true));
+        let handler = DaemonHandler::new(counters, snapshot, db_size, mic_tx, mic_state, mic_ready);
         let _server = IpcServer::start(&sock, handler, cancel.clone())
             .await
             .unwrap();
@@ -313,31 +334,40 @@ mod tests {
     }
 
     /// Build a `DaemonHandler` with a control channel of the given capacity.
-    /// Returns the handler and the receiver so a test can play the daemon
-    /// loop's role (consume `MicCommand`, reply on `cmd.reply`).
+    /// `ready` sets the readiness gate; pass `true` to exercise post-startup
+    /// behavior. Returns the handler and the receiver so a test can play the
+    /// daemon loop's role (consume `MicCommand`, reply on `cmd.reply`).
     fn handler_with_mic_channel(
         capacity: usize,
+        ready: bool,
     ) -> (
         DaemonHandler,
         tokio::sync::mpsc::Receiver<MicCommand>,
         Arc<std::sync::atomic::AtomicU8>,
     ) {
         use arc_swap::ArcSwap;
-        use std::sync::atomic::AtomicU64;
+        use std::sync::atomic::{AtomicBool, AtomicU64};
 
         let counters = crate::pipeline::counters::PipelineCounters::new();
         let snapshot = Arc::new(ArcSwap::from_pointee(CaptureStatusSnapshot::default()));
         let db_size = Arc::new(AtomicU64::new(0));
         let (mic_tx, mic_rx) = tokio::sync::mpsc::channel(capacity);
         let mic_state = Arc::new(std::sync::atomic::AtomicU8::new(0));
-        let handler =
-            DaemonHandler::new(counters, snapshot, db_size, mic_tx, Arc::clone(&mic_state));
+        let mic_ready = Arc::new(AtomicBool::new(ready));
+        let handler = DaemonHandler::new(
+            counters,
+            snapshot,
+            db_size,
+            mic_tx,
+            Arc::clone(&mic_state),
+            mic_ready,
+        );
         (handler, mic_rx, mic_state)
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn set_mic_enabled_success() {
-        let (handler, mut mic_rx, _atom) = handler_with_mic_channel(8);
+        let (handler, mut mic_rx, _atom) = handler_with_mic_channel(8, true);
 
         // Play the daemon loop: receive the command, reply with On.
         tokio::spawn(async move {
@@ -348,27 +378,52 @@ mod tests {
 
         let resp = handler.handle(Request::SetMicEnabled { enabled: true });
         match resp {
-            Response::SetMicEnabled { state, .. } => assert_eq!(state, MicState::On),
+            // A successful toggle reports ok: true alongside the On state.
+            Response::SetMicEnabled { ok, state } => {
+                assert!(ok);
+                assert_eq!(state, MicState::On);
+            }
+            other => panic!("expected SetMicEnabled response, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_mic_enabled_not_ready_returns_error() {
+        // mic_ready = false: the event loop is not yet draining the channel.
+        // The handler must reject the toggle immediately — no try_send, no
+        // block — so this is a plain #[test] (it returns before block_in_place).
+        let (handler, _mic_rx, _atom) = handler_with_mic_channel(8, false);
+
+        let resp = handler.handle(Request::SetMicEnabled { enabled: true });
+        match resp {
+            Response::SetMicEnabled { ok, state } => {
+                assert!(!ok, "ok must be false when the toggle was rejected");
+                assert_eq!(state, MicState::Error);
+            }
             other => panic!("expected SetMicEnabled response, got: {other:?}"),
         }
     }
 
     #[test]
     fn set_mic_enabled_channel_closed() {
-        let (handler, mic_rx, _atom) = handler_with_mic_channel(8);
+        let (handler, mic_rx, _atom) = handler_with_mic_channel(8, true);
         // Drop the receiver: try_send fails, handle early-returns Error.
         drop(mic_rx);
 
         let resp = handler.handle(Request::SetMicEnabled { enabled: true });
         match resp {
-            Response::SetMicEnabled { state, .. } => assert_eq!(state, MicState::Error),
+            // A failed try_send reports ok: false alongside the Error state.
+            Response::SetMicEnabled { ok, state } => {
+                assert!(!ok);
+                assert_eq!(state, MicState::Error);
+            }
             other => panic!("expected SetMicEnabled response, got: {other:?}"),
         }
     }
 
     #[test]
     fn set_mic_enabled_channel_full() {
-        let (handler, _mic_rx, _atom) = handler_with_mic_channel(1);
+        let (handler, _mic_rx, _atom) = handler_with_mic_channel(1, true);
         // Pre-fill the capacity-1 channel with one unconsumed command so the
         // handler's try_send fails.
         let (pre_reply, _pre_rx) = std::sync::mpsc::sync_channel(1);
@@ -389,7 +444,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn set_mic_enabled_reply_timeout() {
-        let (mut handler, mut mic_rx, _atom) = handler_with_mic_channel(8);
+        let (mut handler, mut mic_rx, _atom) = handler_with_mic_channel(8, true);
         handler.mic_reply_timeout = std::time::Duration::from_millis(50);
 
         // Receive the command but never reply — keep it alive so the reply
@@ -409,7 +464,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn set_mic_enabled_reply_sender_dropped() {
-        let (handler, mut mic_rx, _atom) = handler_with_mic_channel(8);
+        let (handler, mut mic_rx, _atom) = handler_with_mic_channel(8, true);
 
         // Receive the command and drop the reply sender without sending —
         // recv_timeout sees a disconnected channel and the handler maps it
@@ -428,8 +483,8 @@ mod tests {
 
     #[test]
     fn status_includes_mic_state() {
-        let (handler, _mic_rx, atom) = handler_with_mic_channel(8);
-        atom.store(MicState::On as u8, Ordering::Relaxed);
+        let (handler, _mic_rx, atom) = handler_with_mic_channel(8, true);
+        atom.store(MicState::On as u8, Ordering::Release);
 
         let resp = handler.handle(Request::Status);
         match resp {

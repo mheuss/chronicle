@@ -4,7 +4,7 @@ mod pipeline;
 mod settings;
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -61,12 +61,16 @@ async fn main() -> Result<()> {
     let mic_state_atom = Arc::new(std::sync::atomic::AtomicU8::new(
         chronicle_ipc::MicState::Off as u8,
     ));
+    // Readiness gate: the handler rejects mic toggles until the event loop
+    // below starts draining `mic_rx`. Opened just before the loop begins.
+    let mic_ready = Arc::new(AtomicBool::new(false));
     let handler = ipc_handler::DaemonHandler::new(
         Arc::clone(&counters),
         Arc::clone(&capture_snapshot),
         Arc::clone(&storage_db_size),
         mic_tx,
         Arc::clone(&mic_state_atom),
+        Arc::clone(&mic_ready),
     );
     let ipc_server = IpcServer::start(&socket_path, handler, cancel.clone()).await?;
     log::info!("IPC server started");
@@ -200,9 +204,15 @@ async fn main() -> Result<()> {
     });
 
     // --- Event loop: serve mic toggles until a shutdown signal arrives ---
-    // Toggles are handled inline, one per iteration. write_mic_setting writes
-    // a fixed temp path, so this sequential processing is what keeps it safe.
+    // Toggles are handled inline, one per iteration. This loop is the only
+    // caller of write_mic_setting, which writes a fixed temp path — the
+    // one-at-a-time processing here is what keeps that path safe. (The startup
+    // restore block above also toggles the mic, but deliberately does not
+    // persist, so it never races this loop's write.)
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    // Open the readiness gate: from here the loop drains `mic_rx`, so the IPC
+    // handler can forward mic toggles instead of rejecting them.
+    mic_ready.store(true, Ordering::Release);
     loop {
         tokio::select! {
             res = tokio::signal::ctrl_c() => {

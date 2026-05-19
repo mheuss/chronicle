@@ -8,8 +8,11 @@
 //! is hardware-dependent (e.g. 44.1 kHz on some mics). The encoder and
 //! [`SegmentAccumulator`](crate::accumulator) require exactly 48 kHz mono
 //! f32, so an `AVAudioConverter` normalizes every tap buffer to that target
-//! format. The conversion is an identity passthrough when the device already
-//! delivers 48 kHz mono f32, and a real resample/downmix otherwise.
+//! format. When the device already delivers 48 kHz mono f32 this is an
+//! identity passthrough. Otherwise it is a real resample/downmix — and since
+//! the converter currently signals end-of-stream after every tap buffer, its
+//! resampler resets per buffer, so a non-48 kHz mic gets minor seam artifacts
+//! at buffer boundaries rather than a perfectly continuous resample.
 
 use std::cell::Cell;
 use std::ptr::NonNull;
@@ -32,6 +35,8 @@ use crate::{AudioError, AudioSource, CHANNEL_COUNT, Result, SAMPLE_RATE};
 /// A resampler can produce a few more frames than the scaled input count due to
 /// its internal state (filter delay, polyphase rounding). This headroom ensures
 /// the output `AVAudioPCMBuffer` is large enough to hold those extra frames.
+/// 4096 is comfortably above any real resampler's leading/trailing frame count,
+/// and over-allocating the output buffer only wastes a little memory.
 const RESAMPLER_HEADROOM_FRAMES: u32 = 4096;
 
 /// Copy one deinterleaved f32 channel into an owned `Vec<f32>`.
@@ -381,6 +386,99 @@ mod tests {
     fn mono_samples_empty_channel_gives_empty_vec() {
         let result = mono_samples(&[], 0);
         assert!(result.is_empty());
+    }
+
+    /// Run a synthetic 44.1 kHz mono buffer through `convert_to_mono_samples`
+    /// with a real `AVAudioConverter`. Building an `AVAudioPCMBuffer` and an
+    /// `AVAudioConverter` touches no hardware and triggers no TCC prompt —
+    /// only starting an `AVAudioEngine` does — so this is a regular test.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn convert_resamples_44100_to_48000() {
+        autoreleasepool(|_| {
+            let input_rate = 44_100u32;
+            let input_frames = 4_410u32; // 0.1 s at 44.1 kHz
+
+            // Synthetic 44.1 kHz mono f32 input format.
+            // SAFETY: alloc yields a fresh AVAudioFormat; the standard
+            // initializer returns nil only on failure, unwrapped below.
+            let input_format = unsafe {
+                AVAudioFormat::initStandardFormatWithSampleRate_channels(
+                    AVAudioFormat::alloc(),
+                    input_rate as f64,
+                    CHANNEL_COUNT,
+                )
+            }
+            .expect("44.1 kHz mono format should build");
+
+            // Input buffer sized to hold exactly input_frames.
+            // SAFETY: input_format is a valid PCM format; input_frames is a
+            // non-zero frame count.
+            let input_buffer = unsafe {
+                AVAudioPCMBuffer::initWithPCMFormat_frameCapacity(
+                    AVAudioPCMBuffer::alloc(),
+                    &input_format,
+                    input_frames,
+                )
+            }
+            .expect("input buffer should allocate");
+
+            // frameLength defaults to 0; the converter only reads frameLength
+            // frames, so it must be set to the count of real samples.
+            // SAFETY: input_frames <= frameCapacity.
+            unsafe { input_buffer.setFrameLength(input_frames) };
+
+            // Fill channel zero with a known constant.
+            // SAFETY: the format is 32-bit float, so floatChannelData is
+            // non-nil and points to one channel pointer (mono) to
+            // frameLength f32 samples with stride 1.
+            let channel = unsafe { input_buffer.floatChannelData() };
+            let channel_zero = NonNull::new(channel)
+                .expect("float channel data should be non-nil for an f32 format");
+            // SAFETY: channel_zero points to at least one channel pointer.
+            let samples_ptr = unsafe { channel_zero.as_ptr().read() };
+            // SAFETY: samples_ptr points to input_frames valid, writable f32s.
+            let samples = unsafe {
+                std::slice::from_raw_parts_mut(samples_ptr.as_ptr(), input_frames as usize)
+            };
+            samples.fill(0.25_f32);
+
+            // 48 kHz mono f32 target — the same target the production path uses.
+            // SAFETY: alloc yields a fresh AVAudioFormat; unwrapped below.
+            let target_format = unsafe {
+                AVAudioFormat::initStandardFormatWithSampleRate_channels(
+                    AVAudioFormat::alloc(),
+                    SAMPLE_RATE as f64,
+                    CHANNEL_COUNT,
+                )
+            }
+            .expect("48 kHz mono format should build");
+
+            // SAFETY: both formats are valid PCM formats.
+            let converter = unsafe {
+                AVAudioConverter::initFromFormat_toFormat(
+                    AVAudioConverter::alloc(),
+                    &input_format,
+                    &target_format,
+                )
+            }
+            .expect("44.1 -> 48 kHz converter should build");
+
+            let out = convert_to_mono_samples(&converter, &target_format, &input_buffer)
+                .expect("conversion should yield samples");
+
+            assert!(!out.is_empty(), "converted output must not be empty");
+
+            // A resampler is not exact frame-for-frame, so allow a tolerance
+            // around the ideal scaled length.
+            let expected = (input_frames as u64 * SAMPLE_RATE as u64 / input_rate as u64) as usize;
+            let tolerance = expected / 10 + 64;
+            assert!(
+                out.len().abs_diff(expected) <= tolerance,
+                "output length {} should be near {expected} (tolerance {tolerance})",
+                out.len(),
+            );
+        });
     }
 
     /// Constructs `MicrophoneCapture`, starts and stops it, and checks that
