@@ -4,6 +4,7 @@ struct SearchPopoverView: View {
     @Environment(DaemonConnection.self) private var connection
     @Environment(StartupAlertState.self) private var startupAlert
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
 
     @State private var query: String = ""
     @State private var results: [SearchHit] = []
@@ -34,7 +35,7 @@ struct SearchPopoverView: View {
             // still use Cmd+, when the popover is focused.
             HStack(spacing: 8) {
                 Button {
-                    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                    openSettings()
                 } label: {
                     Label("Settings…", systemImage: "gear")
                 }
