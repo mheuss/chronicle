@@ -134,6 +134,63 @@ final class DaemonConnection {
         return response.state
     }
 
+    /// Search the daemon's OCR index. Returns up to `limit` screen-only hits
+    /// ranked by relevance. Audio results are added in HEU-470.
+    func search(_ query: String, limit: Int = 50, offset: Int = 0) async throws -> [SearchHit] {
+        struct Req: Codable, Sendable {
+            let type: String
+            let query: String
+            let limit: UInt32
+            let offset: UInt32
+        }
+        let response = try await sendRequest(
+            Req(type: "search", query: query, limit: UInt32(limit), offset: UInt32(offset)),
+            expecting: SearchResponse.self
+        )
+        return response.hits
+    }
+
+    /// Fetch a single screenshot's metadata by id. Returns `nil` when the id
+    /// is unknown (e.g. retention cleanup removed the row).
+    func getScreenshot(id: Int64) async throws -> SearchHit? {
+        struct Req: Codable, Sendable {
+            let type: String
+            let id: Int64
+        }
+        let response = try await sendRequest(
+            Req(type: "get_screenshot", id: id),
+            expecting: GetScreenshotResponse.self
+        )
+        return response.hit
+    }
+
+    /// Pause screen + audio capture. Returns the resulting paused state.
+    /// Issues a status refresh on success so the menu bar icon, Settings,
+    /// and any banner observers see the new state immediately.
+    func pauseCapture() async throws -> Bool {
+        let response = try await sendRequest(
+            IPCRequest(type: "pause_capture"),
+            expecting: PauseResumeResponse.self
+        )
+        if response.ok {
+            _ = try? await requestStatus()
+        }
+        return response.paused
+    }
+
+    /// Resume capture. Returns the resulting paused state.
+    /// Issues a status refresh on success (see `pauseCapture`).
+    func resumeCapture() async throws -> Bool {
+        let response = try await sendRequest(
+            IPCRequest(type: "resume_capture"),
+            expecting: PauseResumeResponse.self
+        )
+        if response.ok {
+            _ = try? await requestStatus()
+        }
+        return response.paused
+    }
+
     /// Generic request helper. ALL request methods must route through this —
     /// raw socket I/O lives on the nested `IO` struct, which only `sendRequest`
     /// constructs. There is no other way to call `write`/`readLine`, so a
@@ -331,8 +388,8 @@ final class DaemonConnection {
 
     private func monitorConnection() async throws {
         while !Task.isCancelled && socketHandle != nil {
-            try await Task.sleep(for: .seconds(30))
             _ = try await requestStatus()
+            try await Task.sleep(for: .seconds(30))
         }
     }
 
