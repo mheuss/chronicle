@@ -80,7 +80,6 @@ pub struct DaemonHandler {
     /// request — no per-IPC directory walk.
     storage_status: Arc<ArcSwap<StorageStatusSnapshot>>,
     /// Concrete storage handle for direct search / get_screenshot calls.
-    #[allow(dead_code)] // used by Search/GetScreenshot arms in HEU-242 T9/T10
     storage: Arc<chronicle_storage::Storage>,
     /// Control channel to the `main()` event loop for mic toggles.
     mic_tx: mpsc::Sender<MicCommand>,
@@ -190,12 +189,66 @@ impl RequestHandler for DaemonHandler {
                     },
                 }
             }
-            // Stub. Real handler lands in HEU-242 T9; HEU-470 adds audio results.
-            Request::Search { .. } => Response::Error {
-                ok: false,
-                code: chronicle_ipc::ErrorCode::InvalidRequest,
-                message: "search not yet implemented".to_string(),
-            },
+            Request::Search {
+                query,
+                limit,
+                offset,
+            } => {
+                let trimmed = query.trim();
+                if trimmed.is_empty() {
+                    return Response::Search {
+                        ok: true,
+                        hits: vec![],
+                    };
+                }
+                // Server-side clamp prevents a buggy or malicious caller from
+                // requesting huge result sets.
+                let limit = (limit.min(200)) as usize;
+                let offset = offset as usize;
+                let query = trimmed.to_string();
+                let storage = Arc::clone(&self.storage);
+                // NFR-5: capture the start time BEFORE the blocking call so the
+                // elapsed time we log reflects the actual query duration.
+                let started = Instant::now();
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        storage
+                            .search(
+                                &query,
+                                chronicle_storage::SearchFilter::ScreenOnly,
+                                limit,
+                                offset,
+                            )
+                            .await
+                    })
+                });
+                match result {
+                    Ok(rows) => {
+                        // [Security] Log the query LENGTH, not the query content.
+                        // The query is whatever the user typed and may contain PII
+                        // or other sensitive context they were searching for.
+                        log::debug!(
+                            "search q_len={} limit={} offset={} -> {} hits in {:?}",
+                            query.chars().count(),
+                            limit,
+                            offset,
+                            rows.len(),
+                            started.elapsed(),
+                        );
+                        Response::Search {
+                            ok: true,
+                            hits: rows.into_iter().map(search_hit_from_storage).collect(),
+                        }
+                    }
+                    Err(e) => Response::Error {
+                        ok: false,
+                        code: chronicle_ipc::ErrorCode::InvalidRequest,
+                        // [Security] Use Display, not Debug, so we don't leak the
+                        // wrapping enum variant name or any internal file paths.
+                        message: format!("search failed: {e}"),
+                    },
+                }
+            }
             // Stub. Real handler lands in HEU-242 T10.
             Request::GetScreenshot { .. } => Response::Error {
                 ok: false,
@@ -252,6 +305,29 @@ impl RequestHandler for DaemonHandler {
                 Response::SetMicEnabled { ok, state }
             }
         }
+    }
+}
+
+fn search_hit_from_storage(r: chronicle_storage::SearchResult) -> chronicle_ipc::SearchHit {
+    let screenshot = match r.source {
+        chronicle_storage::SearchSource::Screen(s) => s,
+        chronicle_storage::SearchSource::Audio(_) => {
+            // HEU-242 is screen-only. ScreenOnly filter guarantees this
+            // branch is unreachable. Defensive panic in case the
+            // contract is violated later.
+            unreachable!("HEU-242 search filter is ScreenOnly; audio hit returned");
+        }
+    };
+    chronicle_ipc::SearchHit {
+        id: screenshot.id,
+        source: chronicle_ipc::SearchHitSource::Screen,
+        timestamp_ms: screenshot.timestamp,
+        app_name: screenshot.app_name,
+        app_bundle_id: screenshot.app_bundle_id,
+        window_title: screenshot.window_title,
+        image_path: screenshot.image_path,
+        snippet: r.snippet,
+        rank: r.rank,
     }
 }
 
@@ -639,6 +715,54 @@ mod tests {
             capture_paused,
             storage_status,
         )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_empty_query_returns_empty_hits_not_error() {
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss) =
+            handler_with_full_channels(8, true).await;
+        let resp = handler.handle(Request::Search {
+            query: "   ".into(),
+            limit: 10,
+            offset: 0,
+        });
+        match resp {
+            Response::Search { ok, hits } => {
+                assert!(ok);
+                assert!(hits.is_empty());
+            }
+            other => panic!("expected Search response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_with_no_data_returns_empty_hits() {
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss) =
+            handler_with_full_channels(8, true).await;
+        let resp = handler.handle(Request::Search {
+            query: "nothing".into(),
+            limit: 10,
+            offset: 0,
+        });
+        match resp {
+            Response::Search { ok, hits } => {
+                assert!(ok);
+                assert!(hits.is_empty());
+            }
+            other => panic!("expected Search response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_limit_is_clamped_to_max() {
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss) =
+            handler_with_full_channels(8, true).await;
+        let resp = handler.handle(Request::Search {
+            query: "any".into(),
+            limit: 1_000_000,
+            offset: 0,
+        });
+        assert!(matches!(resp, Response::Search { ok: true, .. }));
     }
 
     #[tokio::test(flavor = "multi_thread")]
