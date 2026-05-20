@@ -98,6 +98,7 @@ impl RequestHandler for DaemonHandler {
                             frames_dropped: cap.frames_dropped,
                             frames_processed: c.frames_processed,
                             frames_failed: c.frames_failed,
+                            paused: false,
                         },
                         ocr: OcrStats {
                             enqueued: c.ocr_enqueued,
@@ -109,6 +110,7 @@ impl RequestHandler for DaemonHandler {
                         },
                         storage: StorageStats {
                             db_size_bytes: self.storage_db_size.load(Ordering::Relaxed),
+                            ..Default::default()
                         },
                     },
                 }

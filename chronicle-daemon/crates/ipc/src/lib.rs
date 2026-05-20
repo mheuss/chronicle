@@ -145,19 +145,21 @@ pub struct StatusData {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptureStats {
-    /// Engine state: "running" | "stopping" | "idle" | "poisoned" | "unknown".
-    /// "unknown" is reported before the daemon's first 1 Hz status snapshot
-    /// has populated the engine's live state.
+    /// Engine state: "running" | "stopping" | "idle" | "poisoned" | "paused" | "unknown".
+    /// "paused" is reported when capture is intentionally stopped via PauseCapture.
     pub state: String,
     pub active_displays: usize,
     /// Total frames delivered by SCK (from CaptureEngine::status()).
     pub frames_captured: u64,
-    /// Frames dropped at the capture boundary (from CaptureEngine::status()).
+    /// Frames dropped at the capture boundary.
     pub frames_dropped: u64,
-    /// Frames fully processed by the pipeline (PipelineCounters).
+    /// Frames fully processed by the pipeline.
     pub frames_processed: u64,
-    /// Frames that failed post-capture processing (PipelineCounters).
+    /// Frames that failed post-capture processing.
     pub frames_failed: u64,
+    /// True when capture has been paused via PauseCapture (persists across
+    /// daemon restarts via the settings file).
+    pub paused: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +179,15 @@ pub struct AudioStats {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageStats {
     pub db_size_bytes: u64,
+    /// Total bytes used by chronicle.db + screenshots/ + audio/ subdirectories.
+    pub total_disk_usage_bytes: u64,
+    pub screenshot_count: u64,
+    pub audio_segment_count: u64,
+    /// Unix millis of the oldest record, or None if the database is empty.
+    pub oldest_entry_ms: Option<i64>,
+    /// Retention period from `storage::get_config("retention_days")`, defaulting
+    /// to 30 if unset/invalid.
+    pub retention_days: u32,
 }
 
 /// One search result row. Mirrors the storage-layer `SearchResult` shape,
@@ -275,6 +286,7 @@ mod tests {
             frames_dropped: 3,
             frames_processed: 97,
             frames_failed: 0,
+            paused: false,
         };
         let json = serde_json::to_string(&stats).unwrap();
         let parsed: CaptureStats = serde_json::from_str(&json).unwrap();
@@ -513,6 +525,57 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "resume_capture");
         assert_eq!(v["paused"], false);
+    }
+
+    #[test]
+    fn capture_stats_includes_paused_field() {
+        let stats = CaptureStats {
+            state: "running".into(),
+            active_displays: 1,
+            frames_captured: 0,
+            frames_dropped: 0,
+            frames_processed: 0,
+            frames_failed: 0,
+            paused: false,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["paused"], false);
+    }
+
+    #[test]
+    fn storage_stats_includes_expanded_fields() {
+        let stats = StorageStats {
+            db_size_bytes: 1024,
+            total_disk_usage_bytes: 2048,
+            screenshot_count: 100,
+            audio_segment_count: 10,
+            oldest_entry_ms: Some(1_700_000_000_000),
+            retention_days: 30,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["db_size_bytes"], 1024);
+        assert_eq!(v["total_disk_usage_bytes"], 2048);
+        assert_eq!(v["screenshot_count"], 100);
+        assert_eq!(v["audio_segment_count"], 10);
+        assert_eq!(v["oldest_entry_ms"], 1_700_000_000_000_i64);
+        assert_eq!(v["retention_days"], 30);
+    }
+
+    #[test]
+    fn storage_stats_with_no_oldest_entry_serializes_as_null() {
+        let stats = StorageStats {
+            db_size_bytes: 0,
+            total_disk_usage_bytes: 0,
+            screenshot_count: 0,
+            audio_segment_count: 0,
+            oldest_entry_ms: None,
+            retention_days: 30,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["oldest_entry_ms"].is_null());
     }
 
     #[test]
