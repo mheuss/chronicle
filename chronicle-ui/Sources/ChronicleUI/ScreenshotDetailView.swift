@@ -39,11 +39,11 @@ struct ScreenshotDetailView: View {
                     systemImage: "trash",
                     description: Text("This screenshot has been removed (retention cleanup).")
                 )
-            case .fileMissing(let hit):
+            case .fileMissing:
                 ContentUnavailableView(
                     "Image file missing",
                     systemImage: "questionmark.folder",
-                    description: Text("The metadata is present but the file at \(hit.imagePath) is gone.")
+                    description: Text("The metadata is present but the image file was not found on disk.")
                 )
             case .error(let msg):
                 ContentUnavailableView(
