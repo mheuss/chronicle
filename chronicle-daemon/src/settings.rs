@@ -93,7 +93,6 @@ pub fn write_mic_setting(base_dir: &Path, on: bool) {
 
 /// Read the persisted capture-paused setting. A missing file, an unreadable
 /// file, a missing key, or an unrecognized value all return `false` (not paused).
-#[allow(dead_code)] // wired into the daemon in later HEU-242 tasks
 pub fn read_capture_paused(base_dir: &Path) -> bool {
     read_all(base_dir)
         .get(PAUSED_KEY)
@@ -104,7 +103,6 @@ pub fn read_capture_paused(base_dir: &Path) -> bool {
 /// Persist the capture-paused setting. Best-effort: a write failure is logged,
 /// not returned — the live pause has already taken effect. Preserves other
 /// keys in the settings file (e.g. `mic_enabled`).
-#[allow(dead_code)] // wired into the daemon in later HEU-242 tasks
 pub fn write_capture_paused(base_dir: &Path, on: bool) {
     let mut map = read_all(base_dir);
     map.insert(PAUSED_KEY.into(), on.to_string());

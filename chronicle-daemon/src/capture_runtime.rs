@@ -21,10 +21,6 @@
 //!   for best-effort cleanup. The engine's own `Drop` impl tears down
 //!   SCStreams. Final state is not guaranteed clean — prefer `stop().await`.
 
-// T12 wires this into main.rs. Until then, the wrapper is unreferenced; allow
-// dead code at module scope so clippy --all-targets -D warnings stays clean.
-#![allow(dead_code)]
-
 use std::path::PathBuf;
 use std::sync::Arc;
 

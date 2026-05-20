@@ -20,8 +20,7 @@ pub(crate) struct MicCommand {
 
 /// In-process control message: a capture pause/resume request plus its
 /// reply channel. The reply carries the resulting `paused` flag.
-/// Fields are read by the T12 main-loop drain (not yet landed in HEU-242).
-#[allow(dead_code)]
+/// Fields are read by the T12 main-loop drain.
 pub(crate) struct CaptureCommand {
     pub action: CaptureAction,
     pub reply: std::sync::mpsc::SyncSender<bool>,
