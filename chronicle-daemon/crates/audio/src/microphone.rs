@@ -69,6 +69,13 @@ fn mono_samples(channel: &[f32], frame_count: usize) -> Vec<f32> {
 pub struct MicrophoneCapture {
     /// The capture engine. `start`/`stop`/`is_running` drive it directly.
     engine: Retained<AVAudioEngine>,
+    /// The shared format converter — the same one the tap block uses.
+    /// Held here so [`stop`] can `reset()` it after the engine stops, which
+    /// drops the converter's held-back filter tail and keeps the previous
+    /// session's audio from leaking into the next one.
+    ///
+    /// [`stop`]: Self::stop
+    converter: Retained<AVAudioConverter>,
     /// The installed tap block. `installTapOnBus` copies the block, so the
     /// engine owns its own retained copy; this field also keeps the Rust-side
     /// `RcBlock` alive for the struct's lifetime.
@@ -131,7 +138,10 @@ impl MicrophoneCapture {
                 AudioError::Microphone("failed to build microphone format converter".into())
             })?;
 
-            let tap_block = make_tap_block(converter, target_format, buffer_tx);
+            // The tap block runs the converter on every input buffer; we
+            // also keep an owned reference on `Self` so `stop()` can reset
+            // it. `Retained::clone` just bumps the ObjC retain count.
+            let tap_block = make_tap_block(converter.clone(), target_format, buffer_tx);
 
             // Install a nil-format tap. nil means "deliver the native
             // hardware format" — installing an explicit non-native format on
@@ -155,6 +165,7 @@ impl MicrophoneCapture {
 
             Ok(Self {
                 engine,
+                converter,
                 _tap_block: tap_block,
             })
         })
@@ -175,11 +186,21 @@ impl MicrophoneCapture {
     }
 
     /// Stop capture. Releases the OS microphone. Microphone off.
+    ///
+    /// Also resets the shared `AVAudioConverter` after stopping the engine.
+    /// The converter holds back a small filter tail under `NoDataNow` (see
+    /// [`convert_to_mono_samples`]); resetting it on stop drops that tail
+    /// so it does not leak into the next capture session as stale audio
+    /// timestamped to the new session.
     pub fn stop(&self) -> Result<()> {
         autoreleasepool(|_| {
             // SAFETY: stop is safe to call whether or not the engine is
             // running; it releases the resources allocated by prepare.
             unsafe { self.engine.stop() };
+            // After the engine stops, no further tap callbacks fire, so it
+            // is safe to reset the converter without racing the tap block.
+            // SAFETY: reset has no preconditions beyond &self.
+            unsafe { self.converter.reset() };
         });
         Ok(())
     }
@@ -263,13 +284,10 @@ fn make_tap_block(
 /// converter could ideally produce: it keeps the trailing partial block of
 /// its internal packetization (~700 frames, ~15 ms at 48 kHz) buffered for
 /// the next call. The next tap buffer flushes that tail, so within a
-/// capture session the stream is continuous. Across capture sessions the
-/// shared converter retains its buffered tail — re-enabling the microphone
-/// emits the previous session's tail at the start of the new session. That
-/// is acceptable for this use case: the cross-session seam is ~15 ms of
-/// stale audio, well below perceptual relevance for transcription, and
-/// resampler continuity within a session matters more than seam-free
-/// session boundaries.
+/// capture session the stream is continuous. To prevent the buffered tail
+/// from carrying into the next capture session, [`MicrophoneCapture::stop`]
+/// calls `reset()` on the shared converter after stopping the engine, so
+/// each new session starts with a clean resampler.
 ///
 /// The output is always a single (mono) channel, so the `AudioBuffer.samples`
 /// contract — "interleaved f32" — is trivially satisfied: for one channel,
