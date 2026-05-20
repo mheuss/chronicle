@@ -7,7 +7,11 @@ import AppKit
 // is the SwiftUI-idiomatic place to host this kind of NSApplication
 // lifecycle setup.
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    // Use applicationWillFinishLaunching (not Did) so the policy is set
+    // BEFORE SwiftUI constructs scenes and MenuBarExtra creates its
+    // NSStatusItem. Setting the policy after status item creation
+    // invalidates the item on macOS.
+    func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
     }
 }
