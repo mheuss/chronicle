@@ -93,7 +93,8 @@ struct CodableTests {
               "frames_captured": 3456,
               "frames_dropped": 12,
               "frames_processed": 3440,
-              "frames_failed": 4
+              "frames_failed": 4,
+              "paused": false
             },
             "ocr": {
               "enqueued": 1200,
@@ -104,7 +105,12 @@ struct CodableTests {
               "mic_state": "on"
             },
             "storage": {
-              "db_size_bytes": 52428800
+              "db_size_bytes": 52428800,
+              "total_disk_usage_bytes": 104857600,
+              "screenshot_count": 1024,
+              "audio_segment_count": 32,
+              "oldest_entry_ms": null,
+              "retention_days": 30
             }
           }
         }
@@ -179,5 +185,87 @@ struct CodableTests {
         #expect(response.type == "set_mic_enabled")
         #expect(response.ok == true)
         #expect(response.state == .on)
+    }
+
+    @Test("SearchResponse decodes from Rust wire format")
+    func searchResponseDecodes() throws {
+        let json = """
+        {"type":"search","ok":true,"hits":[
+          {"id":1,"source":"screen","timestamp_ms":1700000000000,
+           "app_name":"Terminal","app_bundle_id":"com.apple.Terminal",
+           "window_title":"zsh","image_path":"/x.heif",
+           "snippet":"hello <b>world</b>","rank":-1.5}
+        ]}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(SearchResponse.self, from: Data(json.utf8))
+        #expect(resp.type == "search")
+        #expect(resp.ok == true)
+        #expect(resp.hits.count == 1)
+        let hit = resp.hits[0]
+        #expect(hit.id == 1)
+        #expect(hit.source == .screen)
+        #expect(hit.timestampMs == 1_700_000_000_000)
+        #expect(hit.appName == "Terminal")
+        #expect(hit.snippet == "hello <b>world</b>")
+    }
+
+    @Test("GetScreenshotResponse with null hit decodes")
+    func getScreenshotNullHit() throws {
+        let json = """
+        {"type":"get_screenshot","ok":true,"hit":null}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(GetScreenshotResponse.self, from: Data(json.utf8))
+        #expect(resp.hit == nil)
+    }
+
+    @Test("PauseResumeResponse decodes both variants")
+    func pauseResumeResponseDecodes() throws {
+        let pauseJson = """
+        {"type":"pause_capture","ok":true,"paused":true}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let p = try decoder.decode(PauseResumeResponse.self, from: Data(pauseJson.utf8))
+        #expect(p.type == "pause_capture")
+        #expect(p.paused == true)
+
+        let resumeJson = """
+        {"type":"resume_capture","ok":true,"paused":false}
+        """
+        let r = try decoder.decode(PauseResumeResponse.self, from: Data(resumeJson.utf8))
+        #expect(r.type == "resume_capture")
+        #expect(r.paused == false)
+    }
+
+    @Test("Expanded StatusData decodes new fields")
+    func expandedStatusDataDecodes() throws {
+        let json = """
+        {"type":"status","ok":true,"data":{
+          "uptime_secs":42,"version":"0.1.0",
+          "capture":{"state":"paused","active_displays":1,
+            "frames_captured":0,"frames_dropped":0,
+            "frames_processed":0,"frames_failed":0,"paused":true},
+          "ocr":{"enqueued":0,"dropped":0},
+          "audio":{"segments_persisted":0,"mic_state":"off"},
+          "storage":{"db_size_bytes":1024,"total_disk_usage_bytes":2048,
+            "screenshot_count":50,"audio_segment_count":5,
+            "oldest_entry_ms":1700000000000,"retention_days":14}
+        }}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(StatusResponse.self, from: Data(json.utf8))
+        let capture = try #require(resp.data.capture)
+        let storage = try #require(resp.data.storage)
+        #expect(capture.paused == true)
+        #expect(capture.state == "paused")
+        #expect(storage.totalDiskUsageBytes == 2048)
+        #expect(storage.screenshotCount == 50)
+        #expect(storage.retentionDays == 14)
+        #expect(storage.oldestEntryMs == 1_700_000_000_000)
     }
 }

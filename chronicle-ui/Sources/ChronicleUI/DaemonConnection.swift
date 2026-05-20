@@ -398,6 +398,7 @@ struct CaptureStats: Codable, Sendable {
     let framesDropped: UInt64
     let framesProcessed: UInt64
     let framesFailed: UInt64
+    let paused: Bool
 }
 
 struct OcrStats: Codable, Sendable {
@@ -412,12 +413,53 @@ struct AudioStats: Codable, Sendable {
 
 struct StorageStats: Codable, Sendable {
     let dbSizeBytes: UInt64
+    let totalDiskUsageBytes: UInt64
+    let screenshotCount: UInt64
+    let audioSegmentCount: UInt64
+    let oldestEntryMs: Int64?
+    let retentionDays: UInt32
 }
 
 struct ErrorResponse: Codable, Sendable {
     let type: String
     let ok: Bool
     let message: String
+}
+
+// MARK: - Search
+
+struct SearchHit: Codable, Sendable, Identifiable, Hashable {
+    let id: Int64
+    let source: SearchHitSource
+    let timestampMs: Int64
+    let appName: String?
+    let appBundleId: String?
+    let windowTitle: String?
+    let imagePath: String
+    let snippet: String
+    let rank: Double
+}
+
+enum SearchHitSource: String, Codable, Sendable {
+    case screen
+}
+
+struct SearchResponse: Codable, Sendable {
+    let type: String
+    let ok: Bool
+    let hits: [SearchHit]
+}
+
+struct GetScreenshotResponse: Codable, Sendable {
+    let type: String
+    let ok: Bool
+    let hit: SearchHit?
+}
+
+struct PauseResumeResponse: Codable, Sendable {
+    let type: String
+    let ok: Bool
+    let paused: Bool
 }
 
 // MARK: - Errors
