@@ -14,6 +14,21 @@ use chronicle_capture::{CaptureConfig, CaptureEngine, CaptureError};
 use chronicle_ipc::{CancellationToken, IpcServer};
 use chronicle_storage::{Storage, StorageConfig};
 
+/// Parse a `retention_days` setting from the config table. An unset key uses
+/// the 30-day default; an unparseable value also falls back to 30 with a warn.
+fn parse_retention_days(s: Option<String>) -> u32 {
+    match s {
+        Some(v) => v.parse::<u32>().unwrap_or_else(|_| {
+            log::warn!("settings: invalid retention_days={v:?}, defaulting to 30");
+            30
+        }),
+        None => {
+            log::info!("settings: retention_days not configured, defaulting to 30");
+            30
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
@@ -44,6 +59,11 @@ async fn main() -> Result<()> {
         crate::ipc_handler::CaptureStatusSnapshot::default(),
     ));
     let storage_db_size = Arc::new(AtomicU64::new(0));
+    // The richer snapshot lives alongside the old atom until Task 8 swaps the
+    // Status read path over to it. The refresher below populates both in lockstep.
+    let storage_status_snapshot = Arc::new(ArcSwap::from_pointee(
+        crate::ipc_handler::StorageStatusSnapshot::default(),
+    ));
 
     let metadata_provider = Arc::new(
         crate::pipeline::metadata::CachingAppMetadataProvider::with_default_clock(
@@ -182,20 +202,66 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Prime the storage status snapshot before the refresher task spawns, so the
+    // snapshot has real data when the first 30-second tick eventually arrives.
+    // First-load cost is one directory walk; subsequent reads are O(1) ArcSwap reads.
+    {
+        let snapshot = match storage.status().await {
+            Ok(s) => {
+                // Keep the legacy atom in sync at boot so Status doesn't lie
+                // for the first 30 seconds. The refresher (below) keeps both
+                // in sync after that. Removed in T8 when DaemonHandler::new
+                // switches to read from the snapshot.
+                storage_db_size.store(s.db_size_bytes, Ordering::Relaxed);
+                crate::ipc_handler::StorageStatusSnapshot {
+                    db_size_bytes: s.db_size_bytes,
+                    total_disk_usage_bytes: s.total_disk_usage_bytes,
+                    screenshot_count: s.screenshot_count,
+                    audio_segment_count: s.audio_segment_count,
+                    oldest_entry_ms: s.oldest_entry,
+                    retention_days: parse_retention_days(
+                        storage.get_config("retention_days").await.ok().flatten(),
+                    ),
+                }
+            }
+            Err(e) => {
+                log::warn!("initial storage status read failed: {e}");
+                crate::ipc_handler::StorageStatusSnapshot::default()
+            }
+        };
+        storage_status_snapshot.store(Arc::new(snapshot));
+    }
+
     let storage_refresher_storage = Arc::clone(&storage);
-    let storage_refresher_size = Arc::clone(&storage_db_size);
+    let storage_refresher_snapshot = Arc::clone(&storage_status_snapshot);
+    let storage_refresher_size = Arc::clone(&storage_db_size); // kept for now; removed in Task 8
     let storage_refresher_cancel = cancel.clone();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(30));
+        // First tick fires immediately; skip it so we don't double-prime.
+        ticker.tick().await;
         loop {
             tokio::select! {
                 _ = storage_refresher_cancel.cancelled() => break,
                 _ = ticker.tick() => {
                     match storage_refresher_storage.status().await {
-                        Ok(status) => storage_refresher_size.store(
-                            status.db_size_bytes,
-                            std::sync::atomic::Ordering::Relaxed,
-                        ),
+                        Ok(s) => {
+                            let retention = parse_retention_days(
+                                storage_refresher_storage
+                                    .get_config("retention_days").await.ok().flatten(),
+                            );
+                            let snap = crate::ipc_handler::StorageStatusSnapshot {
+                                db_size_bytes: s.db_size_bytes,
+                                total_disk_usage_bytes: s.total_disk_usage_bytes,
+                                screenshot_count: s.screenshot_count,
+                                audio_segment_count: s.audio_segment_count,
+                                oldest_entry_ms: s.oldest_entry,
+                                retention_days: retention,
+                            };
+                            storage_refresher_snapshot.store(Arc::new(snap));
+                            // Keep the old atom in sync until Task 8 removes it.
+                            storage_refresher_size.store(s.db_size_bytes, Ordering::Relaxed);
+                        }
                         Err(e) => log::warn!("storage status refresh failed: {e}"),
                     }
                 }

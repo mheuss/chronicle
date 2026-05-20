@@ -29,6 +29,33 @@ pub struct CaptureStatusSnapshot {
     pub frames_dropped: u64,
 }
 
+/// Cached storage status snapshot. Written every 30s by the storage
+/// refresher task in `main()`. Read by `RequestHandler::handle` on every
+/// `Status` request — no per-request directory walk.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // fields read by Status handler in HEU-242 T8
+pub struct StorageStatusSnapshot {
+    pub db_size_bytes: u64,
+    pub total_disk_usage_bytes: u64,
+    pub screenshot_count: u64,
+    pub audio_segment_count: u64,
+    pub oldest_entry_ms: Option<i64>,
+    pub retention_days: u32,
+}
+
+impl Default for StorageStatusSnapshot {
+    fn default() -> Self {
+        Self {
+            db_size_bytes: 0,
+            total_disk_usage_bytes: 0,
+            screenshot_count: 0,
+            audio_segment_count: 0,
+            oldest_entry_ms: None,
+            retention_days: 30,
+        }
+    }
+}
+
 /// Daemon-side request handler.
 pub struct DaemonHandler {
     started_at: Instant,
@@ -214,6 +241,17 @@ mod tests {
     use crate::permissions::MicrophoneStatus;
     use chronicle_audio::MicToggleOutcome;
     use chronicle_ipc::{MicState, Request, RequestHandler, Response};
+
+    #[test]
+    fn storage_status_snapshot_default_has_zeroes() {
+        let snap = StorageStatusSnapshot::default();
+        assert_eq!(snap.db_size_bytes, 0);
+        assert_eq!(snap.total_disk_usage_bytes, 0);
+        assert_eq!(snap.screenshot_count, 0);
+        assert_eq!(snap.audio_segment_count, 0);
+        assert_eq!(snap.oldest_entry_ms, None);
+        assert_eq!(snap.retention_days, 30);
+    }
 
     #[test]
     fn map_outcome_enabled_returns_on() {
