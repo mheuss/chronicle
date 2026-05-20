@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct SearchPopoverView: View {
@@ -35,6 +36,7 @@ struct SearchPopoverView: View {
             // still use Cmd+, when the popover is focused.
             HStack(spacing: 8) {
                 Button {
+                    NSApp.activate(ignoringOtherApps: true)
                     openSettings()
                 } label: {
                     Label("Settings…", systemImage: "gear")
@@ -110,6 +112,7 @@ struct SearchPopoverView: View {
             // accessible (Tab/Shift-Tab to focus, Return/Space to open).
             List(results) { hit in
                 Button {
+                    NSApp.activate(ignoringOtherApps: true)
                     openWindow(id: "screenshot", value: hit.id)
                 } label: {
                     ResultRow(hit: hit)
