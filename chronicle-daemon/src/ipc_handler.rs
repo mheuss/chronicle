@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
@@ -18,6 +18,22 @@ pub(crate) struct MicCommand {
     pub reply: std::sync::mpsc::SyncSender<chronicle_ipc::MicState>,
 }
 
+/// In-process control message: a capture pause/resume request plus its
+/// reply channel. The reply carries the resulting `paused` flag.
+/// Used by T11 (send_capture_command helper) and T12 (main loop drain).
+#[allow(dead_code)] // wired into the handler in HEU-242 T11
+pub(crate) struct CaptureCommand {
+    pub action: CaptureAction,
+    pub reply: std::sync::mpsc::SyncSender<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // see CaptureCommand above
+pub(crate) enum CaptureAction {
+    Pause,
+    Resume,
+}
+
 /// Engine status as observed by the background refresher. Owned by the
 /// daemon; published via `ArcSwap` so the sync `RequestHandler::handle`
 /// can read without blocking.
@@ -33,7 +49,6 @@ pub struct CaptureStatusSnapshot {
 /// refresher task in `main()`. Read by `RequestHandler::handle` on every
 /// `Status` request — no per-request directory walk.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // fields read by Status handler in HEU-242 T8
 pub struct StorageStatusSnapshot {
     pub db_size_bytes: u64,
     pub total_disk_usage_bytes: u64,
@@ -61,7 +76,12 @@ pub struct DaemonHandler {
     started_at: Instant,
     counters: Arc<PipelineCounters>,
     engine_status: Arc<ArcSwap<CaptureStatusSnapshot>>,
-    storage_db_size: Arc<AtomicU64>,
+    /// Cached storage status, refreshed every 30s. Read on every `Status`
+    /// request — no per-IPC directory walk.
+    storage_status: Arc<ArcSwap<StorageStatusSnapshot>>,
+    /// Concrete storage handle for direct search / get_screenshot calls.
+    #[allow(dead_code)] // used by Search/GetScreenshot arms in HEU-242 T9/T10
+    storage: Arc<chronicle_storage::Storage>,
     /// Control channel to the `main()` event loop for mic toggles.
     mic_tx: mpsc::Sender<MicCommand>,
     /// Latest microphone state, published by the event loop, read by `Status`.
@@ -72,31 +92,54 @@ pub struct DaemonHandler {
     mic_ready: Arc<AtomicBool>,
     /// Backstop for a wedged daemon — a real toggle replies well under 1 s.
     mic_reply_timeout: Duration,
+    /// Control channel to the main event loop for capture pause/resume.
+    #[allow(dead_code)] // wired into Pause/Resume arms in HEU-242 T11
+    capture_tx: mpsc::Sender<CaptureCommand>,
+    /// Latest capture-paused state, read by `Status`.
+    capture_paused: Arc<AtomicBool>,
+    /// Gate that opens once the main loop starts draining `capture_tx`.
+    #[allow(dead_code)] // checked by Pause/Resume arms in HEU-242 T11
+    capture_ready: Arc<AtomicBool>,
+    #[allow(dead_code)] // used by Pause/Resume arms in HEU-242 T11
+    capture_reply_timeout: Duration,
 }
 
 impl DaemonHandler {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         counters: Arc<PipelineCounters>,
         engine_status: Arc<ArcSwap<CaptureStatusSnapshot>>,
-        storage_db_size: Arc<AtomicU64>,
+        storage_status: Arc<ArcSwap<StorageStatusSnapshot>>,
+        storage: Arc<chronicle_storage::Storage>,
         mic_tx: mpsc::Sender<MicCommand>,
         mic_state: Arc<AtomicU8>,
         mic_ready: Arc<AtomicBool>,
+        capture_tx: mpsc::Sender<CaptureCommand>,
+        capture_paused: Arc<AtomicBool>,
+        capture_ready: Arc<AtomicBool>,
     ) -> Self {
         Self {
             started_at: Instant::now(),
             counters,
             engine_status,
-            storage_db_size,
+            storage_status,
+            storage,
             mic_tx,
             mic_state,
             mic_ready,
             mic_reply_timeout: Duration::from_secs(20),
+            capture_tx,
+            capture_paused,
+            capture_ready,
+            capture_reply_timeout: Duration::from_secs(20),
         }
     }
 }
 
-fn engine_state_str(state: Option<EngineState>) -> String {
+fn engine_state_str(state: Option<EngineState>, paused: bool) -> &'static str {
+    if paused {
+        return "paused";
+    }
     match state {
         Some(EngineState::Running) => "running",
         Some(EngineState::Stopping) => "stopping",
@@ -104,7 +147,6 @@ fn engine_state_str(state: Option<EngineState>) -> String {
         Some(EngineState::Poisoned) => "poisoned",
         None => "unknown",
     }
-    .to_string()
 }
 
 impl RequestHandler for DaemonHandler {
@@ -113,19 +155,21 @@ impl RequestHandler for DaemonHandler {
             Request::Status => {
                 let c = self.counters.snapshot();
                 let cap = self.engine_status.load();
+                let storage = self.storage_status.load();
+                let paused = self.capture_paused.load(Ordering::Acquire);
                 Response::Status {
                     ok: true,
                     data: StatusData {
                         uptime_secs: self.started_at.elapsed().as_secs(),
                         version: env!("CARGO_PKG_VERSION").to_string(),
                         capture: CaptureStats {
-                            state: engine_state_str(cap.state),
+                            state: engine_state_str(cap.state, paused).to_string(),
                             active_displays: cap.active_displays,
                             frames_captured: cap.frames_captured,
                             frames_dropped: cap.frames_dropped,
                             frames_processed: c.frames_processed,
                             frames_failed: c.frames_failed,
-                            paused: false,
+                            paused,
                         },
                         ocr: OcrStats {
                             enqueued: c.ocr_enqueued,
@@ -136,8 +180,12 @@ impl RequestHandler for DaemonHandler {
                             mic_state: MicState::from_u8(self.mic_state.load(Ordering::Acquire)),
                         },
                         storage: StorageStats {
-                            db_size_bytes: self.storage_db_size.load(Ordering::Relaxed),
-                            ..Default::default()
+                            db_size_bytes: storage.db_size_bytes,
+                            total_disk_usage_bytes: storage.total_disk_usage_bytes,
+                            screenshot_count: storage.screenshot_count,
+                            audio_segment_count: storage.audio_segment_count,
+                            oldest_entry_ms: storage.oldest_entry_ms,
+                            retention_days: storage.retention_days,
                         },
                     },
                 }
@@ -321,19 +369,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn status_returns_version_and_uptime_and_nested_stats() {
-        use arc_swap::ArcSwap;
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64};
-
-        let counters = crate::pipeline::counters::PipelineCounters::new();
-        let snapshot = Arc::new(ArcSwap::from_pointee(CaptureStatusSnapshot::default()));
-        let db_size = Arc::new(AtomicU64::new(0));
-        let (mic_tx, _mic_rx) = tokio::sync::mpsc::channel(8);
-        let mic_state = Arc::new(AtomicU8::new(0));
-        let mic_ready = Arc::new(AtomicBool::new(true));
-        let handler = DaemonHandler::new(counters, snapshot, db_size, mic_tx, mic_state, mic_ready);
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_returns_version_and_uptime_and_nested_stats() {
+        let (handler, _mic_rx, _atom) = handler_with_mic_channel(8, true).await;
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         let resp = handler.handle(Request::Status);
@@ -346,17 +384,16 @@ mod tests {
                 assert_eq!(data.ocr.enqueued, 0);
                 assert_eq!(data.audio.segments_persisted, 0);
                 assert_eq!(data.storage.db_size_bytes, 0);
+                assert!(!data.capture.paused);
+                assert_eq!(data.capture.state, "unknown");
             }
             other => panic!("expected Status response, got: {other:?}"),
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn integration_status_round_trip_through_server() {
-        use arc_swap::ArcSwap;
         use chronicle_ipc::{CancellationToken, IpcServer};
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64};
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::UnixStream;
 
@@ -364,13 +401,7 @@ mod tests {
         let sock = dir.path().join("test.sock");
         let cancel = CancellationToken::new();
 
-        let counters = crate::pipeline::counters::PipelineCounters::new();
-        let snapshot = Arc::new(ArcSwap::from_pointee(CaptureStatusSnapshot::default()));
-        let db_size = Arc::new(AtomicU64::new(0));
-        let (mic_tx, _mic_rx) = tokio::sync::mpsc::channel(8);
-        let mic_state = Arc::new(AtomicU8::new(0));
-        let mic_ready = Arc::new(AtomicBool::new(true));
-        let handler = DaemonHandler::new(counters, snapshot, db_size, mic_tx, mic_state, mic_ready);
+        let (handler, _mic_rx, _atom) = handler_with_mic_channel(8, true).await;
         let _server = IpcServer::start(&sock, handler, cancel.clone())
             .await
             .unwrap();
@@ -401,7 +432,12 @@ mod tests {
     /// `ready` sets the readiness gate; pass `true` to exercise post-startup
     /// behavior. Returns the handler and the receiver so a test can play the
     /// daemon loop's role (consume `MicCommand`, reply on `cmd.reply`).
-    fn handler_with_mic_channel(
+    ///
+    /// Delegates to `handler_with_full_channels` and drops the capture-side
+    /// return values; tests that don't care about pause/resume use this
+    /// thinner shape. `async` because the inner helper opens a real
+    /// `Storage` — callers must use `#[tokio::test]`.
+    async fn handler_with_mic_channel(
         capacity: usize,
         ready: bool,
     ) -> (
@@ -409,29 +445,14 @@ mod tests {
         tokio::sync::mpsc::Receiver<MicCommand>,
         Arc<std::sync::atomic::AtomicU8>,
     ) {
-        use arc_swap::ArcSwap;
-        use std::sync::atomic::{AtomicBool, AtomicU64};
-
-        let counters = crate::pipeline::counters::PipelineCounters::new();
-        let snapshot = Arc::new(ArcSwap::from_pointee(CaptureStatusSnapshot::default()));
-        let db_size = Arc::new(AtomicU64::new(0));
-        let (mic_tx, mic_rx) = tokio::sync::mpsc::channel(capacity);
-        let mic_state = Arc::new(std::sync::atomic::AtomicU8::new(0));
-        let mic_ready = Arc::new(AtomicBool::new(ready));
-        let handler = DaemonHandler::new(
-            counters,
-            snapshot,
-            db_size,
-            mic_tx,
-            Arc::clone(&mic_state),
-            mic_ready,
-        );
+        let (handler, mic_rx, mic_state, _capture_rx, _capture_paused, _storage_status) =
+            handler_with_full_channels(capacity, ready).await;
         (handler, mic_rx, mic_state)
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn set_mic_enabled_success() {
-        let (handler, mut mic_rx, _atom) = handler_with_mic_channel(8, true);
+        let (handler, mut mic_rx, _atom) = handler_with_mic_channel(8, true).await;
 
         // Play the daemon loop: receive the command, reply with On.
         tokio::spawn(async move {
@@ -451,12 +472,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn set_mic_enabled_not_ready_returns_error() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_mic_enabled_not_ready_returns_error() {
         // mic_ready = false: the event loop is not yet draining the channel.
-        // The handler must reject the toggle immediately — no try_send, no
-        // block — so this is a plain #[test] (it returns before block_in_place).
-        let (handler, _mic_rx, _atom) = handler_with_mic_channel(8, false);
+        // The handler rejects the toggle immediately — no try_send, no block.
+        // Helper opens a real Storage asynchronously, so this runs under tokio
+        // even though the handler arm returns early.
+        let (handler, _mic_rx, _atom) = handler_with_mic_channel(8, false).await;
 
         let resp = handler.handle(Request::SetMicEnabled { enabled: true });
         match resp {
@@ -468,9 +490,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn set_mic_enabled_channel_closed() {
-        let (handler, mic_rx, _atom) = handler_with_mic_channel(8, true);
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_mic_enabled_channel_closed() {
+        let (handler, mic_rx, _atom) = handler_with_mic_channel(8, true).await;
         // Drop the receiver: try_send fails, handle early-returns Error.
         drop(mic_rx);
 
@@ -485,9 +507,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn set_mic_enabled_channel_full() {
-        let (handler, _mic_rx, _atom) = handler_with_mic_channel(1, true);
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_mic_enabled_channel_full() {
+        let (handler, _mic_rx, _atom) = handler_with_mic_channel(1, true).await;
         // Pre-fill the capacity-1 channel with one unconsumed command so the
         // handler's try_send fails.
         let (pre_reply, _pre_rx) = std::sync::mpsc::sync_channel(1);
@@ -508,7 +530,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn set_mic_enabled_reply_timeout() {
-        let (mut handler, mut mic_rx, _atom) = handler_with_mic_channel(8, true);
+        let (mut handler, mut mic_rx, _atom) = handler_with_mic_channel(8, true).await;
         handler.mic_reply_timeout = std::time::Duration::from_millis(50);
 
         // Receive the command but never reply — keep it alive so the reply
@@ -528,7 +550,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn set_mic_enabled_reply_sender_dropped() {
-        let (handler, mut mic_rx, _atom) = handler_with_mic_channel(8, true);
+        let (handler, mut mic_rx, _atom) = handler_with_mic_channel(8, true).await;
 
         // Receive the command and drop the reply sender without sending —
         // recv_timeout sees a disconnected channel and the handler maps it
@@ -545,9 +567,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn status_includes_mic_state() {
-        let (handler, _mic_rx, atom) = handler_with_mic_channel(8, true);
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_includes_mic_state() {
+        let (handler, _mic_rx, atom) = handler_with_mic_channel(8, true).await;
         atom.store(MicState::On as u8, Ordering::Release);
 
         let resp = handler.handle(Request::Status);
@@ -555,5 +577,100 @@ mod tests {
             Response::Status { data, .. } => assert_eq!(data.audio.mic_state, MicState::On),
             other => panic!("expected Status response, got: {other:?}"),
         }
+    }
+
+    /// Build a `DaemonHandler` with the full constructor signature. Returns the
+    /// receivers and the shared atoms so a test can play the daemon loop's role
+    /// (consume `MicCommand` / `CaptureCommand`, flip `capture_paused`) and
+    /// inspect the storage status snapshot.
+    ///
+    /// `async` because opening a real `Storage` requires the tokio runtime —
+    /// callers must use `#[tokio::test]` (sync `#[test]` cannot reach it).
+    async fn handler_with_full_channels(
+        capacity: usize,
+        mic_ready: bool,
+    ) -> (
+        DaemonHandler,
+        tokio::sync::mpsc::Receiver<MicCommand>,
+        Arc<std::sync::atomic::AtomicU8>,
+        tokio::sync::mpsc::Receiver<CaptureCommand>,
+        Arc<AtomicBool>,
+        Arc<ArcSwap<StorageStatusSnapshot>>,
+    ) {
+        let counters = crate::pipeline::counters::PipelineCounters::new();
+        let cap_snapshot = Arc::new(ArcSwap::from_pointee(CaptureStatusSnapshot::default()));
+        let storage_status = Arc::new(ArcSwap::from_pointee(StorageStatusSnapshot::default()));
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            chronicle_storage::Storage::open(chronicle_storage::StorageConfig {
+                base_dir: dir.path().to_path_buf(),
+                pool_size: 1,
+            })
+            .await
+            .unwrap(),
+        );
+        // Defuse the TempDir drop guard so it does not delete the directory
+        // while storage still holds open file handles inside it. Test-process
+        // exit cleans it up. Never do this in production.
+        let _ = dir.keep();
+        let (mic_tx, mic_rx) = tokio::sync::mpsc::channel(capacity);
+        let mic_state = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let mic_ready_atom = Arc::new(AtomicBool::new(mic_ready));
+        let (capture_tx, capture_rx) = tokio::sync::mpsc::channel(capacity);
+        let capture_paused = Arc::new(AtomicBool::new(false));
+        let capture_ready = Arc::new(AtomicBool::new(true));
+        let handler = DaemonHandler::new(
+            counters,
+            cap_snapshot,
+            Arc::clone(&storage_status),
+            storage,
+            mic_tx,
+            Arc::clone(&mic_state),
+            mic_ready_atom,
+            capture_tx,
+            Arc::clone(&capture_paused),
+            capture_ready,
+        );
+        (
+            handler,
+            mic_rx,
+            mic_state,
+            capture_rx,
+            capture_paused,
+            storage_status,
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_includes_paused_field_and_storage_snapshot_fields() {
+        let (handler, _mic_rx, _atom, _capture_rx, capture_paused, storage_status) =
+            handler_with_full_channels(8, true).await;
+
+        storage_status.store(Arc::new(StorageStatusSnapshot {
+            db_size_bytes: 1024,
+            total_disk_usage_bytes: 8192,
+            screenshot_count: 50,
+            audio_segment_count: 5,
+            oldest_entry_ms: Some(1_700_000_000_000),
+            retention_days: 14,
+        }));
+        capture_paused.store(true, std::sync::atomic::Ordering::Release);
+
+        let resp = handler.handle(Request::Status);
+        let data = match resp {
+            Response::Status { data, .. } => data,
+            other => panic!("expected Status response, got: {other:?}"),
+        };
+        assert!(data.capture.paused, "paused should be true");
+        assert_eq!(
+            data.capture.state, "paused",
+            "state string should be 'paused' when paused"
+        );
+        assert_eq!(data.storage.db_size_bytes, 1024);
+        assert_eq!(data.storage.total_disk_usage_bytes, 8192);
+        assert_eq!(data.storage.screenshot_count, 50);
+        assert_eq!(data.storage.audio_segment_count, 5);
+        assert_eq!(data.storage.oldest_entry_ms, Some(1_700_000_000_000));
+        assert_eq!(data.storage.retention_days, 14);
     }
 }

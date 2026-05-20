@@ -5,7 +5,7 @@ mod pipeline;
 mod settings;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -59,9 +59,6 @@ async fn main() -> Result<()> {
     let capture_snapshot = Arc::new(ArcSwap::from_pointee(
         crate::ipc_handler::CaptureStatusSnapshot::default(),
     ));
-    let storage_db_size = Arc::new(AtomicU64::new(0));
-    // The richer snapshot lives alongside the old atom until Task 8 swaps the
-    // Status read path over to it. The refresher below populates both in lockstep.
     let storage_status_snapshot = Arc::new(ArcSwap::from_pointee(
         crate::ipc_handler::StorageStatusSnapshot::default(),
     ));
@@ -72,6 +69,30 @@ async fn main() -> Result<()> {
             Duration::from_millis(250),
         ),
     );
+
+    // Prime the storage status snapshot BEFORE the IPC server starts. The
+    // refresher task below ticks every 30 s; without this prime, the first
+    // `Status` request that lands during boot would see Default zeros. First
+    // load cost is one directory walk; subsequent reads are O(1) ArcSwap reads.
+    {
+        let snapshot = match storage.status().await {
+            Ok(s) => crate::ipc_handler::StorageStatusSnapshot {
+                db_size_bytes: s.db_size_bytes,
+                total_disk_usage_bytes: s.total_disk_usage_bytes,
+                screenshot_count: s.screenshot_count,
+                audio_segment_count: s.audio_segment_count,
+                oldest_entry_ms: s.oldest_entry,
+                retention_days: parse_retention_days(
+                    storage.get_config("retention_days").await.ok().flatten(),
+                ),
+            },
+            Err(e) => {
+                log::warn!("initial storage status read failed: {e}");
+                crate::ipc_handler::StorageStatusSnapshot::default()
+            }
+        };
+        storage_status_snapshot.store(Arc::new(snapshot));
+    }
 
     // --- IPC server ---
     let cancel = CancellationToken::new();
@@ -85,13 +106,25 @@ async fn main() -> Result<()> {
     // Readiness gate: the handler rejects mic toggles until the event loop
     // below starts draining `mic_rx`. Opened just before the loop begins.
     let mic_ready = Arc::new(AtomicBool::new(false));
+    // Capture pause/resume control channel. The handler forwards Pause/Resume
+    // requests here; the event loop below drains them (wired in T12). For T8
+    // the receiver is unused — _capture_rx is unprefixed in T12.
+    let (capture_tx, _capture_rx) = tokio::sync::mpsc::channel::<ipc_handler::CaptureCommand>(8);
+    let capture_paused = Arc::new(AtomicBool::new(settings::read_capture_paused(
+        storage.base_dir(),
+    )));
+    let capture_ready = Arc::new(AtomicBool::new(false));
     let handler = ipc_handler::DaemonHandler::new(
         Arc::clone(&counters),
         Arc::clone(&capture_snapshot),
-        Arc::clone(&storage_db_size),
+        Arc::clone(&storage_status_snapshot),
+        Arc::clone(&storage),
         mic_tx,
         Arc::clone(&mic_state_atom),
         Arc::clone(&mic_ready),
+        capture_tx,
+        Arc::clone(&capture_paused),
+        Arc::clone(&capture_ready),
     );
     let ipc_server = IpcServer::start(&socket_path, handler, cancel.clone()).await?;
     log::info!("IPC server started");
@@ -203,43 +236,13 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Prime the storage status snapshot before the refresher task spawns, so the
-    // snapshot has real data when the first 30-second tick eventually arrives.
-    // First-load cost is one directory walk; subsequent reads are O(1) ArcSwap reads.
-    {
-        let snapshot = match storage.status().await {
-            Ok(s) => {
-                // Keep the legacy atom in sync at boot so Status doesn't lie
-                // for the first 30 seconds. The refresher (below) keeps both
-                // in sync after that. Removed in T8 when DaemonHandler::new
-                // switches to read from the snapshot.
-                storage_db_size.store(s.db_size_bytes, Ordering::Relaxed);
-                crate::ipc_handler::StorageStatusSnapshot {
-                    db_size_bytes: s.db_size_bytes,
-                    total_disk_usage_bytes: s.total_disk_usage_bytes,
-                    screenshot_count: s.screenshot_count,
-                    audio_segment_count: s.audio_segment_count,
-                    oldest_entry_ms: s.oldest_entry,
-                    retention_days: parse_retention_days(
-                        storage.get_config("retention_days").await.ok().flatten(),
-                    ),
-                }
-            }
-            Err(e) => {
-                log::warn!("initial storage status read failed: {e}");
-                crate::ipc_handler::StorageStatusSnapshot::default()
-            }
-        };
-        storage_status_snapshot.store(Arc::new(snapshot));
-    }
-
     let storage_refresher_storage = Arc::clone(&storage);
     let storage_refresher_snapshot = Arc::clone(&storage_status_snapshot);
-    let storage_refresher_size = Arc::clone(&storage_db_size); // kept for now; removed in Task 8
     let storage_refresher_cancel = cancel.clone();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(30));
-        // First tick fires immediately; skip it so we don't double-prime.
+        // First tick fires immediately; skip it so we don't double-prime
+        // (the boot prime above already wrote a fresh snapshot).
         ticker.tick().await;
         loop {
             tokio::select! {
@@ -260,8 +263,6 @@ async fn main() -> Result<()> {
                                 retention_days: retention,
                             };
                             storage_refresher_snapshot.store(Arc::new(snap));
-                            // Keep the old atom in sync until Task 8 removes it.
-                            storage_refresher_size.store(s.db_size_bytes, Ordering::Relaxed);
                         }
                         Err(e) => log::warn!("storage status refresh failed: {e}"),
                     }
