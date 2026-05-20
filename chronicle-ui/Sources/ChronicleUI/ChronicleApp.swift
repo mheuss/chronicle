@@ -1,7 +1,20 @@
 import SwiftUI
+import AppKit
+
+// Sets the activation policy to .accessory so the app is a true
+// menu-bar-only background app — no Dock icon, no App Switcher entry,
+// but the MenuBarExtra icon renders correctly. NSApplicationDelegateAdaptor
+// is the SwiftUI-idiomatic place to host this kind of NSApplication
+// lifecycle setup.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+    }
+}
 
 @main
 struct ChronicleApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var connection = DaemonConnection()
     @State private var startupAlert = StartupAlertState()
 
