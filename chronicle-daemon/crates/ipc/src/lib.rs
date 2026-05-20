@@ -25,6 +25,12 @@ pub enum Request {
         limit: u32,
         offset: u32,
     },
+    /// Fetch a single screenshot's metadata by row id.
+    /// Used by the UI's detail window for both live click flow and
+    /// window restoration after app relaunch.
+    GetScreenshot {
+        id: i64,
+    },
 }
 
 /// Stable, machine-readable error code on an error response.
@@ -93,6 +99,12 @@ pub enum Response {
     Search {
         ok: bool,
         hits: Vec<SearchHit>,
+    },
+    /// Result of a `GetScreenshot` request. `hit: None` when the id is
+    /// not in the database (e.g., after retention cleanup, or bad id).
+    GetScreenshot {
+        ok: bool,
+        hit: Option<SearchHit>,
     },
     Error {
         ok: bool,
@@ -417,6 +429,56 @@ mod tests {
         assert_eq!(v["ok"], true);
         assert!(v["hits"].is_array());
         assert_eq!(v["hits"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn request_get_screenshot_serializes_to_tagged_json() {
+        let req = Request::GetScreenshot { id: 123 };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"type":"get_screenshot","id":123}"#);
+    }
+
+    #[test]
+    fn request_get_screenshot_round_trips() {
+        let original = Request::GetScreenshot { id: 999 };
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn response_get_screenshot_with_none_serializes_correctly() {
+        let resp = Response::GetScreenshot {
+            ok: true,
+            hit: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "get_screenshot");
+        assert_eq!(v["ok"], true);
+        assert!(v["hit"].is_null());
+    }
+
+    #[test]
+    fn response_get_screenshot_with_hit_serializes_correctly() {
+        let hit = SearchHit {
+            id: 7,
+            source: SearchHitSource::Screen,
+            timestamp_ms: 0,
+            app_name: None,
+            app_bundle_id: None,
+            window_title: None,
+            image_path: "/x".into(),
+            snippet: String::new(),
+            rank: 0.0,
+        };
+        let resp = Response::GetScreenshot {
+            ok: true,
+            hit: Some(hit),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["hit"]["id"], 7);
     }
 
     #[test]

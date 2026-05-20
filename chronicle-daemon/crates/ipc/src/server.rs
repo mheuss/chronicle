@@ -303,6 +303,10 @@ mod tests {
                     ok: true,
                     hits: vec![],
                 },
+                Request::GetScreenshot { .. } => Response::GetScreenshot {
+                    ok: true,
+                    hit: None,
+                },
             }
         }
     }

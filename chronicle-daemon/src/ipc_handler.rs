@@ -119,6 +119,12 @@ impl RequestHandler for DaemonHandler {
                 code: chronicle_ipc::ErrorCode::InvalidRequest,
                 message: "search not yet implemented".to_string(),
             },
+            // Stub. Real handler lands in HEU-242 T10.
+            Request::GetScreenshot { .. } => Response::Error {
+                ok: false,
+                code: chronicle_ipc::ErrorCode::InvalidRequest,
+                message: "get_screenshot not yet implemented".to_string(),
+            },
             Request::SetMicEnabled { enabled } => {
                 // The event loop is the only consumer of `mic_tx`, and it does
                 // not start until daemon startup finishes. A toggle arriving in
