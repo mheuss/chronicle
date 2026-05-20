@@ -307,6 +307,14 @@ mod tests {
                     ok: true,
                     hit: None,
                 },
+                Request::PauseCapture => Response::PauseCapture {
+                    ok: true,
+                    paused: false,
+                },
+                Request::ResumeCapture => Response::ResumeCapture {
+                    ok: true,
+                    paused: false,
+                },
             }
         }
     }

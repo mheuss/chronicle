@@ -31,6 +31,13 @@ pub enum Request {
     GetScreenshot {
         id: i64,
     },
+    /// Pause screen + audio capture. Persists across daemon restarts via
+    /// the settings file. Mic toggle (HEU-330) remains a separate granular
+    /// control; pause is the master switch.
+    PauseCapture,
+    /// Resume capture. Mic is restored to its persisted `mic_enabled`
+    /// preference.
+    ResumeCapture,
 }
 
 /// Stable, machine-readable error code on an error response.
@@ -105,6 +112,18 @@ pub enum Response {
     GetScreenshot {
         ok: bool,
         hit: Option<SearchHit>,
+    },
+    /// Result of a `PauseCapture` request. `paused` is the resulting state.
+    /// `ok: false` when the daemon isn't ready to accept the command yet
+    /// (early startup).
+    PauseCapture {
+        ok: bool,
+        paused: bool,
+    },
+    /// Result of a `ResumeCapture` request. `paused` is the resulting state.
+    ResumeCapture {
+        ok: bool,
+        paused: bool,
     },
     Error {
         ok: bool,
@@ -457,6 +476,43 @@ mod tests {
         assert_eq!(v["type"], "get_screenshot");
         assert_eq!(v["ok"], true);
         assert!(v["hit"].is_null());
+    }
+
+    #[test]
+    fn request_pause_capture_serializes_to_tagged_json() {
+        let json = serde_json::to_string(&Request::PauseCapture).unwrap();
+        assert_eq!(json, r#"{"type":"pause_capture"}"#);
+    }
+
+    #[test]
+    fn request_resume_capture_serializes_to_tagged_json() {
+        let json = serde_json::to_string(&Request::ResumeCapture).unwrap();
+        assert_eq!(json, r#"{"type":"resume_capture"}"#);
+    }
+
+    #[test]
+    fn response_pause_capture_serializes_correctly() {
+        let resp = Response::PauseCapture {
+            ok: true,
+            paused: true,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "pause_capture");
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["paused"], true);
+    }
+
+    #[test]
+    fn response_resume_capture_serializes_correctly() {
+        let resp = Response::ResumeCapture {
+            ok: true,
+            paused: false,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "resume_capture");
+        assert_eq!(v["paused"], false);
     }
 
     #[test]
