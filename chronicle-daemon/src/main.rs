@@ -1,3 +1,4 @@
+mod capture_runtime;
 mod ipc_handler;
 mod permissions;
 mod pipeline;
