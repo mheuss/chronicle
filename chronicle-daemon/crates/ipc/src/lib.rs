@@ -18,6 +18,13 @@ pub enum Request {
     SetMicEnabled {
         enabled: bool,
     },
+    /// Search the OCR index for screen-only results.
+    /// Audio results are added in HEU-470.
+    Search {
+        query: String,
+        limit: u32,
+        offset: u32,
+    },
 }
 
 /// Stable, machine-readable error code on an error response.
@@ -70,7 +77,7 @@ impl MicState {
 /// Only ever decoded by a same-version client over the live IPC socket, so
 /// the `Error.code` field is required (no `#[serde(default)]`). Cross-version
 /// decoding is out of scope until protocol version negotiation (HEU-456).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
     Status {
@@ -81,6 +88,11 @@ pub enum Response {
     SetMicEnabled {
         ok: bool,
         state: MicState,
+    },
+    /// Result of a `Search` request.
+    Search {
+        ok: bool,
+        hits: Vec<SearchHit>,
     },
     Error {
         ok: bool,
@@ -134,6 +146,35 @@ pub struct AudioStats {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageStats {
     pub db_size_bytes: u64,
+}
+
+/// One search result row. Mirrors the storage-layer `SearchResult` shape,
+/// flattened for wire transport. Audio fields are deliberately omitted in
+/// HEU-242; they'll be added alongside `SearchHitSource::Audio` in HEU-470.
+///
+/// `Eq` is intentionally not derived: `rank: f64` can be NaN and `Eq`'s
+/// reflexivity would be violated. Tests use `assert_eq!` which only needs
+/// `PartialEq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchHit {
+    pub id: i64,
+    pub source: SearchHitSource,
+    pub timestamp_ms: i64,
+    pub app_name: Option<String>,
+    pub app_bundle_id: Option<String>,
+    pub window_title: Option<String>,
+    pub image_path: String,
+    /// FTS5 snippet with `<b>...</b>` markup around matched substrings.
+    pub snippet: String,
+    /// FTS5 relevance rank (lower is better).
+    pub rank: f64,
+}
+
+/// Backing source of a search hit. `Audio` is reserved for HEU-470.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchHitSource {
+    Screen,
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +355,68 @@ mod tests {
         assert_eq!(value["type"], "set_mic_enabled");
         assert_eq!(value["ok"], true);
         assert_eq!(value["state"], "on");
+    }
+
+    #[test]
+    fn request_search_serializes_to_tagged_json() {
+        let req = Request::Search {
+            query: "kubectl".into(),
+            limit: 50,
+            offset: 0,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "search");
+        assert_eq!(v["query"], "kubectl");
+        assert_eq!(v["limit"], 50);
+        assert_eq!(v["offset"], 0);
+    }
+
+    #[test]
+    fn request_search_round_trips_through_json() {
+        let original = Request::Search {
+            query: "deploy".into(),
+            limit: 25,
+            offset: 10,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn search_hit_serializes_with_screen_source() {
+        let hit = SearchHit {
+            id: 42,
+            source: SearchHitSource::Screen,
+            timestamp_ms: 1_700_000_000_000,
+            app_name: Some("Terminal".into()),
+            app_bundle_id: Some("com.apple.Terminal".into()),
+            window_title: Some("zsh".into()),
+            image_path: "/data/screenshots/shot.heif".into(),
+            snippet: "find this <b>text</b> here".into(),
+            rank: -1.5,
+        };
+        let json = serde_json::to_string(&hit).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["id"], 42);
+        assert_eq!(v["source"], "screen");
+        assert_eq!(v["timestamp_ms"], 1_700_000_000_000_i64);
+        assert_eq!(v["snippet"], "find this <b>text</b> here");
+    }
+
+    #[test]
+    fn response_search_serializes_with_hits_array() {
+        let resp = Response::Search {
+            ok: true,
+            hits: vec![],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "search");
+        assert_eq!(v["ok"], true);
+        assert!(v["hits"].is_array());
+        assert_eq!(v["hits"].as_array().unwrap().len(), 0);
     }
 
     #[test]

@@ -299,6 +299,10 @@ mod tests {
                     ok: true,
                     state: MicState::On,
                 },
+                Request::Search { .. } => Response::Search {
+                    ok: true,
+                    hits: vec![],
+                },
             }
         }
     }
