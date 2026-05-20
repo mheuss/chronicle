@@ -104,6 +104,13 @@ pub struct DaemonHandler {
 }
 
 impl DaemonHandler {
+    /// Test accessor: returns the storage handle so tests can seed data and
+    /// then exercise the handler against it.
+    #[cfg(test)]
+    pub(crate) fn storage_for_test(&self) -> Arc<chronicle_storage::Storage> {
+        Arc::clone(&self.storage)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         counters: Arc<PipelineCounters>,
@@ -249,12 +256,40 @@ impl RequestHandler for DaemonHandler {
                     },
                 }
             }
-            // Stub. Real handler lands in HEU-242 T10.
-            Request::GetScreenshot { .. } => Response::Error {
-                ok: false,
-                code: chronicle_ipc::ErrorCode::InvalidRequest,
-                message: "get_screenshot not yet implemented".to_string(),
-            },
+            Request::GetScreenshot { id } => {
+                let storage = Arc::clone(&self.storage);
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(async { storage.get_screenshot_opt(id).await })
+                });
+                match result {
+                    Ok(Some(s)) => Response::GetScreenshot {
+                        ok: true,
+                        hit: Some(chronicle_ipc::SearchHit {
+                            id: s.id,
+                            source: chronicle_ipc::SearchHitSource::Screen,
+                            timestamp_ms: s.timestamp,
+                            app_name: s.app_name,
+                            app_bundle_id: s.app_bundle_id,
+                            window_title: s.window_title,
+                            image_path: s.image_path,
+                            snippet: String::new(),
+                            rank: 0.0,
+                        }),
+                    },
+                    Ok(None) => Response::GetScreenshot {
+                        ok: true,
+                        hit: None,
+                    },
+                    Err(e) => Response::Error {
+                        ok: false,
+                        code: chronicle_ipc::ErrorCode::InvalidRequest,
+                        // [Security] Use Display, not Debug, so we don't leak
+                        // internal enum variant names or file paths.
+                        message: format!("get_screenshot failed: {e}"),
+                    },
+                }
+            }
             // Stub. Real handler lands in HEU-242 T11/T12.
             Request::PauseCapture => Response::Error {
                 ok: false,
@@ -763,6 +798,51 @@ mod tests {
             offset: 0,
         });
         assert!(matches!(resp, Response::Search { ok: true, .. }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_screenshot_unknown_id_returns_hit_none() {
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss) =
+            handler_with_full_channels(8, true).await;
+        let resp = handler.handle(Request::GetScreenshot { id: 999_999 });
+        match resp {
+            Response::GetScreenshot { ok, hit } => {
+                assert!(ok);
+                assert!(hit.is_none(), "expected None for unknown id, got {hit:?}");
+            }
+            other => panic!("expected GetScreenshot response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_screenshot_existing_id_returns_full_hit() {
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss) =
+            handler_with_full_channels(8, true).await;
+        let storage = handler.storage_for_test();
+
+        let meta = chronicle_storage::ScreenshotMetadata {
+            timestamp: 1_700_000_000_000,
+            display_id: "display1".into(),
+            app_name: Some("Terminal".into()),
+            app_bundle_id: Some("com.apple.Terminal".into()),
+            window_title: Some("zsh".into()),
+            image_path: "/tmp/x.heif".into(),
+            ocr_text: Some("hello".into()),
+            phash: None,
+            resolution: None,
+        };
+        let id = storage.insert_screenshot(meta).await.unwrap();
+
+        let resp = handler.handle(Request::GetScreenshot { id });
+        match resp {
+            Response::GetScreenshot { ok, hit: Some(h) } => {
+                assert!(ok);
+                assert_eq!(h.id, id);
+                assert_eq!(h.app_name, Some("Terminal".into()));
+                assert_eq!(h.image_path, "/tmp/x.heif");
+            }
+            other => panic!("expected GetScreenshot with Some(hit), got {other:?}"),
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
