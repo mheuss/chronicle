@@ -134,6 +134,22 @@ impl Storage {
         .await?
     }
 
+    /// Fetch a single screenshot by row id, returning `None` if the row
+    /// doesn't exist (instead of an error). Used by the IPC layer to map
+    /// not-found cleanly without depending on `rusqlite` internals.
+    pub async fn get_screenshot_opt(&self, id: i64) -> Result<Option<Screenshot>> {
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            match screenshots::get(&conn, id) {
+                Ok(s) => Ok(Some(s)),
+                Err(StorageError::Database(rusqlite::Error::QueryReturnedNoRows)) => Ok(None),
+                Err(e) => Err(e),
+            }
+        })
+        .await?
+    }
+
     /// Return screenshots within a time range, optionally filtered by display.
     pub async fn get_timeline(
         &self,
@@ -597,6 +613,19 @@ mod tests {
         let stats = storage.sweep_orphans().await.unwrap();
         assert!(stats.bytes_freed > 0, "should have freed orphan bytes");
         assert!(!orphan_file.exists(), "orphan file should be deleted");
+    }
+
+    #[tokio::test]
+    async fn get_screenshot_opt_returns_none_for_unknown_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 1,
+        })
+        .await
+        .unwrap();
+        let result = storage.get_screenshot_opt(999_999).await.unwrap();
+        assert!(result.is_none());
     }
 
     #[tokio::test]

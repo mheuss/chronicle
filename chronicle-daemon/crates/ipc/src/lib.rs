@@ -18,6 +18,26 @@ pub enum Request {
     SetMicEnabled {
         enabled: bool,
     },
+    /// Search the OCR index for screen-only results.
+    /// Audio results are added in HEU-470.
+    Search {
+        query: String,
+        limit: u32,
+        offset: u32,
+    },
+    /// Fetch a single screenshot's metadata by row id.
+    /// Used by the UI's detail window for both live click flow and
+    /// window restoration after app relaunch.
+    GetScreenshot {
+        id: i64,
+    },
+    /// Pause screen + audio capture. Persists across daemon restarts via
+    /// the settings file. Mic toggle (HEU-330) remains a separate granular
+    /// control; pause is the master switch.
+    PauseCapture,
+    /// Resume capture. Mic is restored to its persisted `mic_enabled`
+    /// preference.
+    ResumeCapture,
 }
 
 /// Stable, machine-readable error code on an error response.
@@ -70,7 +90,7 @@ impl MicState {
 /// Only ever decoded by a same-version client over the live IPC socket, so
 /// the `Error.code` field is required (no `#[serde(default)]`). Cross-version
 /// decoding is out of scope until protocol version negotiation (HEU-456).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
     Status {
@@ -81,6 +101,29 @@ pub enum Response {
     SetMicEnabled {
         ok: bool,
         state: MicState,
+    },
+    /// Result of a `Search` request.
+    Search {
+        ok: bool,
+        hits: Vec<SearchHit>,
+    },
+    /// Result of a `GetScreenshot` request. `hit: None` when the id is
+    /// not in the database (e.g., after retention cleanup, or bad id).
+    GetScreenshot {
+        ok: bool,
+        hit: Option<SearchHit>,
+    },
+    /// Result of a `PauseCapture` request. `paused` is the resulting state.
+    /// `ok: false` when the daemon isn't ready to accept the command yet
+    /// (early startup).
+    PauseCapture {
+        ok: bool,
+        paused: bool,
+    },
+    /// Result of a `ResumeCapture` request. `paused` is the resulting state.
+    ResumeCapture {
+        ok: bool,
+        paused: bool,
     },
     Error {
         ok: bool,
@@ -102,19 +145,21 @@ pub struct StatusData {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptureStats {
-    /// Engine state: "running" | "stopping" | "idle" | "poisoned" | "unknown".
-    /// "unknown" is reported before the daemon's first 1 Hz status snapshot
-    /// has populated the engine's live state.
+    /// Engine state: "running" | "stopping" | "idle" | "poisoned" | "paused" | "unknown".
+    /// "paused" is reported when capture is intentionally stopped via PauseCapture.
     pub state: String,
     pub active_displays: usize,
     /// Total frames delivered by SCK (from CaptureEngine::status()).
     pub frames_captured: u64,
-    /// Frames dropped at the capture boundary (from CaptureEngine::status()).
+    /// Frames dropped at the capture boundary.
     pub frames_dropped: u64,
-    /// Frames fully processed by the pipeline (PipelineCounters).
+    /// Frames fully processed by the pipeline.
     pub frames_processed: u64,
-    /// Frames that failed post-capture processing (PipelineCounters).
+    /// Frames that failed post-capture processing.
     pub frames_failed: u64,
+    /// True when capture has been paused via PauseCapture (persists across
+    /// daemon restarts via the settings file).
+    pub paused: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +179,44 @@ pub struct AudioStats {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageStats {
     pub db_size_bytes: u64,
+    /// Total bytes used by chronicle.db + screenshots/ + audio/ subdirectories.
+    pub total_disk_usage_bytes: u64,
+    pub screenshot_count: u64,
+    pub audio_segment_count: u64,
+    /// Unix millis of the oldest record, or None if the database is empty.
+    pub oldest_entry_ms: Option<i64>,
+    /// Retention period from `storage::get_config("retention_days")`, defaulting
+    /// to 30 if unset/invalid.
+    pub retention_days: u32,
+}
+
+/// One search result row. Mirrors the storage-layer `SearchResult` shape,
+/// flattened for wire transport. Audio fields are deliberately omitted in
+/// HEU-242; they'll be added alongside `SearchHitSource::Audio` in HEU-470.
+///
+/// `Eq` is intentionally not derived: `rank: f64` can be NaN and `Eq`'s
+/// reflexivity would be violated. Tests use `assert_eq!` which only needs
+/// `PartialEq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchHit {
+    pub id: i64,
+    pub source: SearchHitSource,
+    pub timestamp_ms: i64,
+    pub app_name: Option<String>,
+    pub app_bundle_id: Option<String>,
+    pub window_title: Option<String>,
+    pub image_path: String,
+    /// FTS5 snippet with `<b>...</b>` markup around matched substrings.
+    pub snippet: String,
+    /// FTS5 relevance rank (lower is better).
+    pub rank: f64,
+}
+
+/// Backing source of a search hit. `Audio` is reserved for HEU-470.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchHitSource {
+    Screen,
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +286,7 @@ mod tests {
             frames_dropped: 3,
             frames_processed: 97,
             frames_failed: 0,
+            paused: false,
         };
         let json = serde_json::to_string(&stats).unwrap();
         let parsed: CaptureStats = serde_json::from_str(&json).unwrap();
@@ -314,6 +398,206 @@ mod tests {
         assert_eq!(value["type"], "set_mic_enabled");
         assert_eq!(value["ok"], true);
         assert_eq!(value["state"], "on");
+    }
+
+    #[test]
+    fn request_search_serializes_to_tagged_json() {
+        let req = Request::Search {
+            query: "kubectl".into(),
+            limit: 50,
+            offset: 0,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "search");
+        assert_eq!(v["query"], "kubectl");
+        assert_eq!(v["limit"], 50);
+        assert_eq!(v["offset"], 0);
+    }
+
+    #[test]
+    fn request_search_round_trips_through_json() {
+        let original = Request::Search {
+            query: "deploy".into(),
+            limit: 25,
+            offset: 10,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn search_hit_serializes_with_screen_source() {
+        let hit = SearchHit {
+            id: 42,
+            source: SearchHitSource::Screen,
+            timestamp_ms: 1_700_000_000_000,
+            app_name: Some("Terminal".into()),
+            app_bundle_id: Some("com.apple.Terminal".into()),
+            window_title: Some("zsh".into()),
+            image_path: "/data/screenshots/shot.heif".into(),
+            snippet: "find this <b>text</b> here".into(),
+            rank: -1.5,
+        };
+        let json = serde_json::to_string(&hit).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["id"], 42);
+        assert_eq!(v["source"], "screen");
+        assert_eq!(v["timestamp_ms"], 1_700_000_000_000_i64);
+        assert_eq!(v["snippet"], "find this <b>text</b> here");
+    }
+
+    #[test]
+    fn response_search_serializes_with_hits_array() {
+        let resp = Response::Search {
+            ok: true,
+            hits: vec![],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "search");
+        assert_eq!(v["ok"], true);
+        assert!(v["hits"].is_array());
+        assert_eq!(v["hits"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn request_get_screenshot_serializes_to_tagged_json() {
+        let req = Request::GetScreenshot { id: 123 };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"type":"get_screenshot","id":123}"#);
+    }
+
+    #[test]
+    fn request_get_screenshot_round_trips() {
+        let original = Request::GetScreenshot { id: 999 };
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn response_get_screenshot_with_none_serializes_correctly() {
+        let resp = Response::GetScreenshot {
+            ok: true,
+            hit: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "get_screenshot");
+        assert_eq!(v["ok"], true);
+        assert!(v["hit"].is_null());
+    }
+
+    #[test]
+    fn request_pause_capture_serializes_to_tagged_json() {
+        let json = serde_json::to_string(&Request::PauseCapture).unwrap();
+        assert_eq!(json, r#"{"type":"pause_capture"}"#);
+    }
+
+    #[test]
+    fn request_resume_capture_serializes_to_tagged_json() {
+        let json = serde_json::to_string(&Request::ResumeCapture).unwrap();
+        assert_eq!(json, r#"{"type":"resume_capture"}"#);
+    }
+
+    #[test]
+    fn response_pause_capture_serializes_correctly() {
+        let resp = Response::PauseCapture {
+            ok: true,
+            paused: true,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "pause_capture");
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["paused"], true);
+    }
+
+    #[test]
+    fn response_resume_capture_serializes_correctly() {
+        let resp = Response::ResumeCapture {
+            ok: true,
+            paused: false,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "resume_capture");
+        assert_eq!(v["paused"], false);
+    }
+
+    #[test]
+    fn capture_stats_includes_paused_field() {
+        let stats = CaptureStats {
+            state: "running".into(),
+            active_displays: 1,
+            frames_captured: 0,
+            frames_dropped: 0,
+            frames_processed: 0,
+            frames_failed: 0,
+            paused: false,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["paused"], false);
+    }
+
+    #[test]
+    fn storage_stats_includes_expanded_fields() {
+        let stats = StorageStats {
+            db_size_bytes: 1024,
+            total_disk_usage_bytes: 2048,
+            screenshot_count: 100,
+            audio_segment_count: 10,
+            oldest_entry_ms: Some(1_700_000_000_000),
+            retention_days: 30,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["db_size_bytes"], 1024);
+        assert_eq!(v["total_disk_usage_bytes"], 2048);
+        assert_eq!(v["screenshot_count"], 100);
+        assert_eq!(v["audio_segment_count"], 10);
+        assert_eq!(v["oldest_entry_ms"], 1_700_000_000_000_i64);
+        assert_eq!(v["retention_days"], 30);
+    }
+
+    #[test]
+    fn storage_stats_with_no_oldest_entry_serializes_as_null() {
+        let stats = StorageStats {
+            db_size_bytes: 0,
+            total_disk_usage_bytes: 0,
+            screenshot_count: 0,
+            audio_segment_count: 0,
+            oldest_entry_ms: None,
+            retention_days: 30,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["oldest_entry_ms"].is_null());
+    }
+
+    #[test]
+    fn response_get_screenshot_with_hit_serializes_correctly() {
+        let hit = SearchHit {
+            id: 7,
+            source: SearchHitSource::Screen,
+            timestamp_ms: 0,
+            app_name: None,
+            app_bundle_id: None,
+            window_title: None,
+            image_path: "/x".into(),
+            snippet: String::new(),
+            rank: 0.0,
+        };
+        let resp = Response::GetScreenshot {
+            ok: true,
+            hit: Some(hit),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["hit"]["id"], 7);
     }
 
     #[test]

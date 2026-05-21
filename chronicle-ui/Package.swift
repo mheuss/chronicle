@@ -13,7 +13,16 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "ChronicleUI",
-            path: "Sources/ChronicleUI"
+            path: "Sources/ChronicleUI",
+            exclude: ["Info.plist"],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Sources/ChronicleUI/Info.plist",
+                ]),
+            ]
         ),
         .testTarget(
             name: "ChronicleUITests",

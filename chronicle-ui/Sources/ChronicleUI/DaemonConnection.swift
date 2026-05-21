@@ -134,6 +134,73 @@ final class DaemonConnection {
         return response.state
     }
 
+    /// Search the daemon's OCR index. Returns up to `limit` screen-only hits
+    /// ranked by relevance. Audio results are added in HEU-470.
+    ///
+    /// `limit`/`offset` are clamped into `UInt32` — the wire protocol uses
+    /// `u32`, and the unchecked `UInt32(_:)` initializer would trap on a
+    /// negative or oversized `Int`. Negative inputs clamp to 0, which the
+    /// daemon then bounds-checks against its own ceiling.
+    func search(_ query: String, limit: Int = 50, offset: Int = 0) async throws -> [SearchHit] {
+        struct Req: Codable, Sendable {
+            let type: String
+            let query: String
+            let limit: UInt32
+            let offset: UInt32
+        }
+        let response = try await sendRequest(
+            Req(
+                type: "search",
+                query: query,
+                limit: UInt32(clamping: limit),
+                offset: UInt32(clamping: offset)
+            ),
+            expecting: SearchResponse.self
+        )
+        return response.hits
+    }
+
+    /// Fetch a single screenshot's metadata by id. Returns `nil` when the id
+    /// is unknown (e.g. retention cleanup removed the row).
+    func getScreenshot(id: Int64) async throws -> SearchHit? {
+        struct Req: Codable, Sendable {
+            let type: String
+            let id: Int64
+        }
+        let response = try await sendRequest(
+            Req(type: "get_screenshot", id: id),
+            expecting: GetScreenshotResponse.self
+        )
+        return response.hit
+    }
+
+    /// Pause screen + audio capture. Returns the resulting paused state.
+    /// Issues a status refresh on success so the menu bar icon, Settings,
+    /// and any banner observers see the new state immediately.
+    func pauseCapture() async throws -> Bool {
+        let response = try await sendRequest(
+            IPCRequest(type: "pause_capture"),
+            expecting: PauseResumeResponse.self
+        )
+        if response.ok {
+            _ = try? await requestStatus()
+        }
+        return response.paused
+    }
+
+    /// Resume capture. Returns the resulting paused state.
+    /// Issues a status refresh on success (see `pauseCapture`).
+    func resumeCapture() async throws -> Bool {
+        let response = try await sendRequest(
+            IPCRequest(type: "resume_capture"),
+            expecting: PauseResumeResponse.self
+        )
+        if response.ok {
+            _ = try? await requestStatus()
+        }
+        return response.paused
+    }
+
     /// Generic request helper. ALL request methods must route through this —
     /// raw socket I/O lives on the nested `IO` struct, which only `sendRequest`
     /// constructs. There is no other way to call `write`/`readLine`, so a
@@ -331,8 +398,8 @@ final class DaemonConnection {
 
     private func monitorConnection() async throws {
         while !Task.isCancelled && socketHandle != nil {
-            try await Task.sleep(for: .seconds(30))
             _ = try await requestStatus()
+            try await Task.sleep(for: .seconds(30))
         }
     }
 
@@ -398,6 +465,7 @@ struct CaptureStats: Codable, Sendable {
     let framesDropped: UInt64
     let framesProcessed: UInt64
     let framesFailed: UInt64
+    let paused: Bool
 }
 
 struct OcrStats: Codable, Sendable {
@@ -412,12 +480,53 @@ struct AudioStats: Codable, Sendable {
 
 struct StorageStats: Codable, Sendable {
     let dbSizeBytes: UInt64
+    let totalDiskUsageBytes: UInt64
+    let screenshotCount: UInt64
+    let audioSegmentCount: UInt64
+    let oldestEntryMs: Int64?
+    let retentionDays: UInt32
 }
 
 struct ErrorResponse: Codable, Sendable {
     let type: String
     let ok: Bool
     let message: String
+}
+
+// MARK: - Search
+
+struct SearchHit: Codable, Sendable, Identifiable, Hashable {
+    let id: Int64
+    let source: SearchHitSource
+    let timestampMs: Int64
+    let appName: String?
+    let appBundleId: String?
+    let windowTitle: String?
+    let imagePath: String
+    let snippet: String
+    let rank: Double
+}
+
+enum SearchHitSource: String, Codable, Sendable {
+    case screen
+}
+
+struct SearchResponse: Codable, Sendable {
+    let type: String
+    let ok: Bool
+    let hits: [SearchHit]
+}
+
+struct GetScreenshotResponse: Codable, Sendable {
+    let type: String
+    let ok: Bool
+    let hit: SearchHit?
+}
+
+struct PauseResumeResponse: Codable, Sendable {
+    let type: String
+    let ok: Bool
+    let paused: Bool
 }
 
 // MARK: - Errors

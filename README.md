@@ -17,7 +17,10 @@ Chronicle uses a two-process design:
   land alongside `.app` bundle packaging.
 
 - **chronicle-ui** (Swift/SwiftUI): Menu bar app that connects to the daemon
-  over IPC. Today it reports daemon connection and status only.
+  over IPC. Left-click for a search popover (OCR-indexed screen history),
+  right-click or `Cmd+,` for a Settings window (disk usage, retention, pause /
+  resume capture). Click a search result to open the screenshot in its own
+  window.
 
 The two-process split gives us crash isolation (a UI crash doesn't stop
 capture), clean separation of concerns and independent testability.
@@ -53,15 +56,48 @@ chronicle-ui/              Swift package
 
 ```sh
 cd chronicle-daemon
-cargo build
+cargo build --release
 ```
 
 **UI:**
 
+The UI needs to run from a `.app` bundle, not a bare `swift run` binary —
+modern macOS Control Center won't register a menu bar icon for a loose
+executable. A helper script assembles a minimal bundle from the SPM build:
+
 ```sh
 cd chronicle-ui
-swift build
+./scripts/make-app.sh           # debug build (default)
+./scripts/make-app.sh release   # or release
 ```
+
+The script writes to `.build/Chronicle.app`. Re-run it after any code change.
+(Proper code-signed packaging and an autostart `SMAppService` are tracked
+separately under HEU-420.)
+
+## Running
+
+Start the daemon in one terminal:
+
+```sh
+cd chronicle-daemon
+cargo run --release
+```
+
+Wait for the `IPC server listening` log line, then in a second terminal from
+the repo root launch the UI:
+
+```sh
+open chronicle-ui/.build/Chronicle.app
+```
+
+A green `record.circle` icon should appear in the menu bar. Left-click it to
+open the search popover, or use `Cmd+,` for Settings.
+
+To stop the daemon cleanly, send `SIGTERM` (`Ctrl-C` in the terminal where it
+runs). Pause state persists in `~/Library/Application Support/Chronicle/settings`
+across restarts — if you paused capture before quitting, the daemon will boot
+paused and the UI will show a banner offering to resume.
 
 ## License
 
