@@ -19,8 +19,7 @@ cd "$(dirname "$0")/.."
 
 CONFIG="${1:-debug}"
 case "$CONFIG" in
-    debug)   ARCH_DIR="arm64-apple-macosx/debug" ;;
-    release) ARCH_DIR="arm64-apple-macosx/release" ;;
+    debug|release) ;;
     *)
         echo "Unknown config: $CONFIG (expected: debug or release)" >&2
         exit 2
@@ -28,13 +27,18 @@ case "$CONFIG" in
 esac
 
 echo "Building ChronicleUI ($CONFIG)..."
+# Resolve the binary directory from SwiftPM so this works on any host arch
+# (avoids hardcoding `arm64-apple-macosx/...`, which broke under Rosetta /
+# Intel hosts even though Chronicle's shipping target is Apple Silicon).
 if [ "$CONFIG" = "release" ]; then
     swift build -c release
+    BIN_DIR="$(swift build -c release --show-bin-path)"
 else
     swift build
+    BIN_DIR="$(swift build --show-bin-path)"
 fi
 
-BIN=".build/$ARCH_DIR/ChronicleUI"
+BIN="$BIN_DIR/ChronicleUI"
 if [ ! -f "$BIN" ]; then
     echo "Binary not found at $BIN" >&2
     exit 1
