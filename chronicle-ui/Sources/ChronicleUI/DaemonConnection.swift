@@ -136,6 +136,11 @@ final class DaemonConnection {
 
     /// Search the daemon's OCR index. Returns up to `limit` screen-only hits
     /// ranked by relevance. Audio results are added in HEU-470.
+    ///
+    /// `limit`/`offset` are clamped into `UInt32` — the wire protocol uses
+    /// `u32`, and the unchecked `UInt32(_:)` initializer would trap on a
+    /// negative or oversized `Int`. Negative inputs clamp to 0, which the
+    /// daemon then bounds-checks against its own ceiling.
     func search(_ query: String, limit: Int = 50, offset: Int = 0) async throws -> [SearchHit] {
         struct Req: Codable, Sendable {
             let type: String
@@ -144,7 +149,12 @@ final class DaemonConnection {
             let offset: UInt32
         }
         let response = try await sendRequest(
-            Req(type: "search", query: query, limit: UInt32(limit), offset: UInt32(offset)),
+            Req(
+                type: "search",
+                query: query,
+                limit: UInt32(clamping: limit),
+                offset: UInt32(clamping: offset)
+            ),
             expecting: SearchResponse.self
         )
         return response.hits
