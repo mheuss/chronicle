@@ -1,7 +1,9 @@
 import SwiftUI
 
 /// Menu bar status icon. Active = `record.circle` filled green;
-/// paused = `pause.circle` orange; disconnected = `xmark.circle` red.
+/// paused = `pause.circle` orange; connecting = `ellipsis.circle` yellow;
+/// disconnected = `xmark.circle` red. Every state has a distinct symbol
+/// shape so colorblind users can read it without relying on tint.
 struct MenuBarIcon: View {
     var connection: DaemonConnection
 
@@ -13,8 +15,10 @@ struct MenuBarIcon: View {
 
     private var symbolName: String {
         switch connection.state {
-        case .disconnected, .connecting:
+        case .disconnected:
             return "xmark.circle"
+        case .connecting:
+            return "ellipsis.circle"
         case .connected:
             if connection.lastStatus?.data.capture?.paused == true {
                 return "pause.circle.fill"
