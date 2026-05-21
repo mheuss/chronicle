@@ -113,6 +113,19 @@ async fn main() -> Result<()> {
     let capture_paused = Arc::new(AtomicBool::new(settings::read_capture_paused(
         storage.base_dir(),
     )));
+    // Whisper model presence check (HEU-421). Logs a one-time warning if
+    // the configured variant's ggml file isn't on disk; transcription
+    // stays idle but the rest of the daemon runs normally.
+    let whisper_variant = settings::read_whisper_model(storage.base_dir());
+    if !chronicle_transcription::model_present(storage.base_dir(), whisper_variant) {
+        let path = chronicle_transcription::model_path(storage.base_dir(), whisper_variant);
+        log::warn!(
+            "whisper model missing at {} — transcription will stay idle. \
+             Run chronicle-daemon/scripts/fetch-whisper-model.sh {} to provision.",
+            path.display(),
+            whisper_variant,
+        );
+    }
     let capture_ready = Arc::new(AtomicBool::new(false));
     let handler = ipc_handler::DaemonHandler::new(
         Arc::clone(&counters),

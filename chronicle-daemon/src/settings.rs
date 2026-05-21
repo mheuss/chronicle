@@ -18,7 +18,6 @@ const MIC_KEY: &str = "mic_enabled";
 // accessors below are public-but-unused at the T5 checkpoint.
 #[allow(dead_code)]
 const PAUSED_KEY: &str = "capture_paused";
-#[allow(dead_code)]
 const WHISPER_MODEL_KEY: &str = "whisper_model";
 
 /// Read all key=value lines into a BTreeMap. A missing file or read failure
@@ -121,7 +120,6 @@ pub fn write_capture_paused(base_dir: &Path, on: bool) {
 /// The returned `&'static str` is a slice from the allow-list itself,
 /// so it is safe to interpolate into a model filename without further
 /// sanitization.
-#[allow(dead_code)]
 pub fn read_whisper_model(base_dir: &Path) -> &'static str {
     let raw = read_all(base_dir)
         .get(WHISPER_MODEL_KEY)
