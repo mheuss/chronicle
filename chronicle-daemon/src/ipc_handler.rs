@@ -510,7 +510,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn status_returns_version_and_uptime_and_nested_stats() {
-        let (handler, _mic_rx, _atom) = handler_with_mic_channel(8, true).await;
+        let (handler, _mic_rx, _atom, _dir) = handler_with_mic_channel(8, true).await;
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         let resp = handler.handle(Request::Status);
@@ -540,7 +540,7 @@ mod tests {
         let sock = dir.path().join("test.sock");
         let cancel = CancellationToken::new();
 
-        let (handler, _mic_rx, _atom) = handler_with_mic_channel(8, true).await;
+        let (handler, _mic_rx, _atom, _dir) = handler_with_mic_channel(8, true).await;
         let _server = IpcServer::start(&sock, handler, cancel.clone())
             .await
             .unwrap();
@@ -583,15 +583,16 @@ mod tests {
         DaemonHandler,
         tokio::sync::mpsc::Receiver<MicCommand>,
         Arc<std::sync::atomic::AtomicU8>,
+        tempfile::TempDir,
     ) {
-        let (handler, mic_rx, mic_state, _capture_rx, _capture_paused, _storage_status) =
+        let (handler, mic_rx, mic_state, _capture_rx, _capture_paused, _storage_status, dir) =
             handler_with_full_channels(capacity, ready).await;
-        (handler, mic_rx, mic_state)
+        (handler, mic_rx, mic_state, dir)
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn set_mic_enabled_success() {
-        let (handler, mut mic_rx, _atom) = handler_with_mic_channel(8, true).await;
+        let (handler, mut mic_rx, _atom, _dir) = handler_with_mic_channel(8, true).await;
 
         // Play the daemon loop: receive the command, reply with On.
         tokio::spawn(async move {
@@ -617,7 +618,7 @@ mod tests {
         // The handler rejects the toggle immediately — no try_send, no block.
         // Helper opens a real Storage asynchronously, so this runs under tokio
         // even though the handler arm returns early.
-        let (handler, _mic_rx, _atom) = handler_with_mic_channel(8, false).await;
+        let (handler, _mic_rx, _atom, _dir) = handler_with_mic_channel(8, false).await;
 
         let resp = handler.handle(Request::SetMicEnabled { enabled: true });
         match resp {
@@ -631,7 +632,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn set_mic_enabled_channel_closed() {
-        let (handler, mic_rx, _atom) = handler_with_mic_channel(8, true).await;
+        let (handler, mic_rx, _atom, _dir) = handler_with_mic_channel(8, true).await;
         // Drop the receiver: try_send fails, handle early-returns Error.
         drop(mic_rx);
 
@@ -648,7 +649,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn set_mic_enabled_channel_full() {
-        let (handler, _mic_rx, _atom) = handler_with_mic_channel(1, true).await;
+        let (handler, _mic_rx, _atom, _dir) = handler_with_mic_channel(1, true).await;
         // Pre-fill the capacity-1 channel with one unconsumed command so the
         // handler's try_send fails.
         let (pre_reply, _pre_rx) = std::sync::mpsc::sync_channel(1);
@@ -669,7 +670,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn set_mic_enabled_reply_timeout() {
-        let (mut handler, mut mic_rx, _atom) = handler_with_mic_channel(8, true).await;
+        let (mut handler, mut mic_rx, _atom, _dir) = handler_with_mic_channel(8, true).await;
         handler.mic_reply_timeout = std::time::Duration::from_millis(50);
 
         // Receive the command but never reply — keep it alive so the reply
@@ -689,7 +690,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn set_mic_enabled_reply_sender_dropped() {
-        let (handler, mut mic_rx, _atom) = handler_with_mic_channel(8, true).await;
+        let (handler, mut mic_rx, _atom, _dir) = handler_with_mic_channel(8, true).await;
 
         // Receive the command and drop the reply sender without sending —
         // recv_timeout sees a disconnected channel and the handler maps it
@@ -708,7 +709,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn status_includes_mic_state() {
-        let (handler, _mic_rx, atom) = handler_with_mic_channel(8, true).await;
+        let (handler, _mic_rx, atom, _dir) = handler_with_mic_channel(8, true).await;
         atom.store(MicState::On as u8, Ordering::Release);
 
         let resp = handler.handle(Request::Status);
@@ -735,13 +736,14 @@ mod tests {
         tokio::sync::mpsc::Receiver<CaptureCommand>,
         Arc<AtomicBool>,
         Arc<ArcSwap<StorageStatusSnapshot>>,
+        tempfile::TempDir,
     ) {
         handler_with_full_channels_and_capture_ready(capacity, mic_ready, true).await
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn search_empty_query_returns_empty_hits_not_error() {
-        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss) =
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _dir) =
             handler_with_full_channels(8, true).await;
         let resp = handler.handle(Request::Search {
             query: "   ".into(),
@@ -759,7 +761,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn search_with_no_data_returns_empty_hits() {
-        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss) =
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _dir) =
             handler_with_full_channels(8, true).await;
         let resp = handler.handle(Request::Search {
             query: "nothing".into(),
@@ -777,7 +779,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn search_limit_is_clamped_to_max() {
-        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss) =
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _dir) =
             handler_with_full_channels(8, true).await;
         let resp = handler.handle(Request::Search {
             query: "any".into(),
@@ -789,7 +791,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn get_screenshot_unknown_id_returns_hit_none() {
-        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss) =
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _dir) =
             handler_with_full_channels(8, true).await;
         let resp = handler.handle(Request::GetScreenshot { id: 999_999 });
         match resp {
@@ -803,7 +805,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn get_screenshot_existing_id_returns_full_hit() {
-        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss) =
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _dir) =
             handler_with_full_channels(8, true).await;
         let storage = handler.storage_for_test();
 
@@ -835,6 +837,10 @@ mod tests {
     /// Like [`handler_with_full_channels`] but also accepts a `capture_ready`
     /// flag so tests can simulate the pre-startup state where the main loop has
     /// not yet begun draining `capture_tx`.
+    ///
+    /// Returns the backing `TempDir` so the caller can hold it for the test's
+    /// scope. Dropping it cleans up the storage directory; previously the
+    /// helper called `dir.keep()` and leaked one tempdir per test run.
     async fn handler_with_full_channels_and_capture_ready(
         capacity: usize,
         mic_ready: bool,
@@ -846,6 +852,7 @@ mod tests {
         tokio::sync::mpsc::Receiver<CaptureCommand>,
         Arc<AtomicBool>,
         Arc<ArcSwap<StorageStatusSnapshot>>,
+        tempfile::TempDir,
     ) {
         let counters = crate::pipeline::counters::PipelineCounters::new();
         let cap_snapshot = Arc::new(ArcSwap::from_pointee(CaptureStatusSnapshot::default()));
@@ -859,7 +866,6 @@ mod tests {
             .await
             .unwrap(),
         );
-        let _ = dir.keep();
         let (mic_tx, mic_rx) = tokio::sync::mpsc::channel(capacity);
         let mic_state = Arc::new(std::sync::atomic::AtomicU8::new(0));
         let mic_ready_atom = Arc::new(AtomicBool::new(mic_ready));
@@ -885,13 +891,14 @@ mod tests {
             capture_rx,
             capture_paused,
             storage_status,
+            dir,
         )
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn pause_capture_not_ready_returns_error_immediately() {
         // capture_ready = false: main loop hasn't started draining yet.
-        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss) =
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _dir) =
             handler_with_full_channels_and_capture_ready(8, true, false).await;
         let resp = handler.handle(Request::PauseCapture);
         match resp {
@@ -905,7 +912,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn pause_capture_round_trip_through_channel() {
-        let (mut handler, _mic_rx, _mic_atom, mut capture_rx, _capture_paused, _ss) =
+        let (mut handler, _mic_rx, _mic_atom, mut capture_rx, _capture_paused, _ss, _dir) =
             handler_with_full_channels(8, true).await;
         handler.capture_reply_timeout = std::time::Duration::from_millis(500);
 
@@ -927,7 +934,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn resume_capture_round_trip_through_channel() {
-        let (mut handler, _mic_rx, _mic_atom, mut capture_rx, _cap_paused, _ss) =
+        let (mut handler, _mic_rx, _mic_atom, mut capture_rx, _cap_paused, _ss, _dir) =
             handler_with_full_channels(8, true).await;
         handler.capture_reply_timeout = std::time::Duration::from_millis(500);
 
@@ -953,7 +960,7 @@ mod tests {
         // The spawned task receives the CaptureCommand but never replies, forcing
         // recv_timeout into the Err branch. The handler should return ok:false
         // with the current capture_paused value.
-        let (mut handler, _mic_rx, _mic_atom, mut capture_rx, capture_paused, _ss) =
+        let (mut handler, _mic_rx, _mic_atom, mut capture_rx, capture_paused, _ss, _dir) =
             handler_with_full_channels(8, true).await;
         handler.capture_reply_timeout = std::time::Duration::from_millis(50);
 
@@ -981,7 +988,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn status_includes_paused_field_and_storage_snapshot_fields() {
-        let (handler, _mic_rx, _atom, _capture_rx, capture_paused, storage_status) =
+        let (handler, _mic_rx, _atom, _capture_rx, capture_paused, storage_status, _dir) =
             handler_with_full_channels(8, true).await;
 
         storage_status.store(Arc::new(StorageStatusSnapshot {
