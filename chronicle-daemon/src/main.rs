@@ -113,7 +113,7 @@ async fn main() -> Result<()> {
     let capture_paused = Arc::new(AtomicBool::new(settings::read_capture_paused(
         storage.base_dir(),
     )));
-    // Whisper model presence check (HEU-421). Logs a one-time warning if
+    // Whisper model presence check (HEU-421). Logs a startup warning if
     // the configured variant's ggml file isn't on disk; transcription
     // stays idle but the rest of the daemon runs normally.
     let whisper_variant = settings::read_whisper_model(storage.base_dir());

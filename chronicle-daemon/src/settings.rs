@@ -14,9 +14,6 @@ use std::path::Path;
 
 const SETTINGS_FILE: &str = "settings";
 const MIC_KEY: &str = "mic_enabled";
-// Wired into the daemon's IPC + capture pipeline in later HEU-242 tasks; the
-// accessors below are public-but-unused at the T5 checkpoint.
-#[allow(dead_code)]
 const PAUSED_KEY: &str = "capture_paused";
 const WHISPER_MODEL_KEY: &str = "whisper_model";
 
