@@ -84,7 +84,8 @@ cd chronicle-daemon
 cargo run --release
 ```
 
-Wait for the `IPC server listening` log line, then launch the UI:
+Wait for the `IPC server listening` log line, then in a second terminal from
+the repo root launch the UI:
 
 ```sh
 open chronicle-ui/.build/Chronicle.app
