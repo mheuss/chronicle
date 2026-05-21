@@ -124,7 +124,7 @@ struct SearchPopoverView: View {
     }
 
     private var showPausedBanner: Bool {
-        !startupAlert.dismissed && startupAlert.hasShownThisLaunch
+        startupAlert.pausedOnBoot && !startupAlert.dismissed
     }
 
     private func runSearch() async {
@@ -153,8 +153,11 @@ struct SearchPopoverView: View {
     }
 
     private func resumeCapture() {
+        // Do NOT pre-dismiss the banner. `connection.resumeCapture` refreshes
+        // status on success, which calls `StartupAlertState.evaluate(status:)`
+        // and auto-dismisses via the resume edge. Pre-dismissing here would
+        // hide the warning even when the daemon failed to resume.
         Task { _ = try? await connection.resumeCapture() }
-        startupAlert.dismissed = true
     }
 }
 
