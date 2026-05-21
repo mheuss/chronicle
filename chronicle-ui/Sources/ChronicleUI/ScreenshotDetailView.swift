@@ -81,6 +81,11 @@ struct ScreenshotDetailView: View {
     }
 
     private func load() async {
+        // Reset to .loading up front so a refetch never paints stale `.loaded`
+        // content while the new fetch is in flight. `.task(id:)` re-runs this
+        // when `id` changes; today each search-result click opens a fresh
+        // window, but the guard is cheap and keeps the state machine honest.
+        state = .loading
         do {
             let hit = try await connection.getScreenshot(id: id)
             guard let hit else {
