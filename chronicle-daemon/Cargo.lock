@@ -226,6 +226,7 @@ dependencies = [
  "chronicle-ipc",
  "chronicle-ocr",
  "chronicle-storage",
+ "chronicle-transcription",
  "env_logger",
  "log",
  "objc2",
