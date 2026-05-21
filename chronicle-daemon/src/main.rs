@@ -17,16 +17,17 @@ use chronicle_storage::{Storage, StorageConfig};
 
 /// Parse a `retention_days` setting from the config table. An unset key uses
 /// the 30-day default; an unparseable value also falls back to 30 with a warn.
+///
+/// The `None` case stays silent: the storage refresher calls this every 30 s,
+/// and default configs have no `retention_days` key — logging on each tick
+/// would spam at info level forever.
 fn parse_retention_days(s: Option<String>) -> u32 {
     match s {
         Some(v) => v.parse::<u32>().unwrap_or_else(|_| {
             log::warn!("settings: invalid retention_days={v:?}, defaulting to 30");
             30
         }),
-        None => {
-            log::info!("settings: retention_days not configured, defaulting to 30");
-            30
-        }
+        None => 30,
     }
 }
 
