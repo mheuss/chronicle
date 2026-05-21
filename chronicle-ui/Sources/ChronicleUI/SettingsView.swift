@@ -47,16 +47,42 @@ struct SettingsView: View {
         }
     }
 
+    /// Three-way capture status. We don't show "Active" until we have both a
+    /// live connection AND a status snapshot that says we're not paused; a
+    /// missing snapshot or a disconnected daemon now shows a distinct badge
+    /// instead of falsely flashing green.
+    private enum CaptureStatus {
+        case disconnected
+        case paused
+        case active
+    }
+
+    private var captureStatus: CaptureStatus {
+        guard connection.state == .connected,
+              let paused = connection.lastStatus?.data.capture?.paused else {
+            return .disconnected
+        }
+        return paused ? .paused : .active
+    }
+
     private var statusBadge: some View {
         HStack(spacing: 6) {
-            Image(systemName: isPaused ? "pause.circle.fill" : "record.circle.fill")
-                .foregroundStyle(isPaused ? .orange : .green)
-            Text(isPaused ? "Paused" : "Active")
+            switch captureStatus {
+            case .disconnected:
+                Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                Text("Disconnected")
+            case .paused:
+                Image(systemName: "pause.circle.fill").foregroundStyle(.orange)
+                Text("Paused")
+            case .active:
+                Image(systemName: "record.circle.fill").foregroundStyle(.green)
+                Text("Active")
+            }
         }
     }
 
     private var isPaused: Bool {
-        connection.lastStatus?.data.capture?.paused == true
+        captureStatus == .paused
     }
 
     private var diskUsageText: String {
