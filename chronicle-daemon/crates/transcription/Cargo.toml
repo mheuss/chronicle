@@ -5,3 +5,6 @@ edition = "2024"
 rust-version.workspace = true
 description = "Audio transcription placeholder — speech-to-text engine TBD"
 license = "MIT"
+
+[dev-dependencies]
+tempfile = "3"

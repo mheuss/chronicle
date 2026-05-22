@@ -27,6 +27,7 @@ chronicle-ocr = { path = "crates/ocr" }
 chronicle-audio = { path = "crates/audio" }
 chronicle-storage = { path = "crates/storage" }
 chronicle-ipc = { path = "crates/ipc" }
+chronicle-transcription = { path = "crates/transcription" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 env_logger = "0.11"
 log = "0.4"

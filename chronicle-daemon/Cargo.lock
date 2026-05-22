@@ -226,6 +226,7 @@ dependencies = [
  "chronicle-ipc",
  "chronicle-ocr",
  "chronicle-storage",
+ "chronicle-transcription",
  "env_logger",
  "log",
  "objc2",
@@ -276,6 +277,9 @@ dependencies = [
 [[package]]
 name = "chronicle-transcription"
 version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "chrono"

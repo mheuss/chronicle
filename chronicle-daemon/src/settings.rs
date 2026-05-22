@@ -1,10 +1,12 @@
 //! Daemon settings persisted across restarts.
 //!
 //! A minimal `key=value` text file at `<base_dir>/settings`. Holds the
-//! microphone preference (`mic_enabled`) and the capture pause state
-//! (`capture_paused`). Deliberately not JSON — see the HEU-330 design's
+//! microphone preference (`mic_enabled`), the capture pause state
+//! (`capture_paused`), and the selected whisper-model variant
+//! (`whisper_model`). Deliberately not JSON — see the HEU-330 design's
 //! Data Architecture and anti-scope.
 
+use chronicle_transcription::{DEFAULT_VARIANT, ModelVariant, parse_variant};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -12,10 +14,8 @@ use std::path::Path;
 
 const SETTINGS_FILE: &str = "settings";
 const MIC_KEY: &str = "mic_enabled";
-// Wired into the daemon's IPC + capture pipeline in later HEU-242 tasks; the
-// accessors below are public-but-unused at the T5 checkpoint.
-#[allow(dead_code)]
 const PAUSED_KEY: &str = "capture_paused";
+const WHISPER_MODEL_KEY: &str = "whisper_model";
 
 /// Read all key=value lines into a BTreeMap. A missing file or read failure
 /// returns an empty map; malformed lines (no `=`) are silently dropped.
@@ -107,6 +107,21 @@ pub fn write_capture_paused(base_dir: &Path, on: bool) {
     let mut map = read_all(base_dir);
     map.insert(PAUSED_KEY.into(), on.to_string());
     write_all(base_dir, &map);
+}
+
+/// Read the persisted whisper-model variant and validate it against the
+/// allow-list in `chronicle-transcription`. Anything not in
+/// `SUPPORTED_VARIANTS` — including a missing file, missing key, empty
+/// string, or unrecognized value — returns `DEFAULT_VARIANT` ("base").
+///
+/// The returned [`ModelVariant`] can only hold an allow-listed name, so it
+/// is safe to interpolate into a model filename without further sanitization.
+pub fn read_whisper_model(base_dir: &Path) -> ModelVariant {
+    let raw = read_all(base_dir)
+        .get(WHISPER_MODEL_KEY)
+        .cloned()
+        .unwrap_or_default();
+    parse_variant(&raw).unwrap_or(DEFAULT_VARIANT)
 }
 
 #[cfg(test)]
@@ -244,5 +259,60 @@ mod tests {
             !read_capture_paused(dir.path()),
             "missing key reads as false"
         );
+    }
+
+    #[test]
+    fn read_whisper_model_missing_file_returns_default() {
+        let dir = tempdir().unwrap();
+        assert_eq!(read_whisper_model(dir.path()).as_str(), "base");
+    }
+
+    #[test]
+    fn read_whisper_model_round_trips_allow_listed_value() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join(SETTINGS_FILE), "whisper_model=small\n").unwrap();
+        assert_eq!(read_whisper_model(dir.path()).as_str(), "small");
+    }
+
+    #[test]
+    fn read_whisper_model_empty_value_returns_default() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join(SETTINGS_FILE), "whisper_model=\n").unwrap();
+        assert_eq!(read_whisper_model(dir.path()).as_str(), "base");
+    }
+
+    #[test]
+    fn read_whisper_model_unknown_value_returns_default() {
+        // Settings file edited by hand with a typo — fall back to default
+        // rather than carry an unknown variant through to the path layer.
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join(SETTINGS_FILE), "whisper_model=tiny\n").unwrap();
+        assert_eq!(read_whisper_model(dir.path()).as_str(), "base");
+    }
+
+    #[test]
+    fn read_whisper_model_traversal_attempt_returns_default() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(SETTINGS_FILE),
+            "whisper_model=../../etc/passwd\n",
+        )
+        .unwrap();
+        assert_eq!(read_whisper_model(dir.path()).as_str(), "base");
+    }
+
+    #[test]
+    fn read_whisper_model_preserves_other_keys() {
+        // mic_enabled and capture_paused must still parse normally when
+        // whisper_model coexists.
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(SETTINGS_FILE),
+            "mic_enabled=true\nwhisper_model=medium\ncapture_paused=false\n",
+        )
+        .unwrap();
+        assert!(read_mic_setting(dir.path()));
+        assert_eq!(read_whisper_model(dir.path()).as_str(), "medium");
+        assert!(!read_capture_paused(dir.path()));
     }
 }
