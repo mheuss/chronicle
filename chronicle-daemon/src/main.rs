@@ -121,7 +121,7 @@ async fn main() -> Result<()> {
         let path = chronicle_transcription::model_path(storage.base_dir(), whisper_variant);
         log::warn!(
             "whisper model missing at {} — transcription will stay idle. \
-             Run chronicle-daemon/scripts/fetch-whisper-model.sh {} to provision.",
+             Run chronicle-daemon/scripts/fetch-whisper-model.sh {} from the repo root to provision.",
             path.display(),
             whisper_variant,
         );
