@@ -7,11 +7,6 @@ set -euo pipefail
 VARIANT="${1:-base}"
 BASE_DIR="${HOME}/Library/Application Support/Chronicle"
 MODELS_DIR="${BASE_DIR}/models"
-DEST="${MODELS_DIR}/ggml-${VARIANT}.bin"
-
-# Clean up a partial download if the script aborts before the final mv
-# (e.g. curl fails). Harmless on the success path — the .tmp is gone by then.
-trap 'rm -f "$DEST.tmp"' EXIT
 
 # Pinned per-variant URL + SHA1. SHA1 matches the upstream
 # `whisper.cpp/models/README.md` published values. Update when upstream
@@ -34,6 +29,12 @@ case "$VARIANT" in
     exit 2
     ;;
 esac
+
+# The variant is now validated against the allow-list. Build the destination
+# path and install the cleanup trap — a partial download is removed if the
+# script aborts before the final mv (e.g. curl fails); harmless on success.
+DEST="${MODELS_DIR}/ggml-${VARIANT}.bin"
+trap 'rm -f "$DEST.tmp"' EXIT
 
 mkdir -p "$MODELS_DIR"
 
