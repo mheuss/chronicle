@@ -270,14 +270,14 @@ mod tests {
     #[test]
     fn read_whisper_model_round_trips_allow_listed_value() {
         let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("settings"), "whisper_model=small\n").unwrap();
+        std::fs::write(dir.path().join(SETTINGS_FILE), "whisper_model=small\n").unwrap();
         assert_eq!(read_whisper_model(dir.path()).as_str(), "small");
     }
 
     #[test]
     fn read_whisper_model_empty_value_returns_default() {
         let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("settings"), "whisper_model=\n").unwrap();
+        std::fs::write(dir.path().join(SETTINGS_FILE), "whisper_model=\n").unwrap();
         assert_eq!(read_whisper_model(dir.path()).as_str(), "base");
     }
 
@@ -286,7 +286,7 @@ mod tests {
         // Settings file edited by hand with a typo — fall back to default
         // rather than carry an unknown variant through to the path layer.
         let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("settings"), "whisper_model=tiny\n").unwrap();
+        std::fs::write(dir.path().join(SETTINGS_FILE), "whisper_model=tiny\n").unwrap();
         assert_eq!(read_whisper_model(dir.path()).as_str(), "base");
     }
 
@@ -294,7 +294,7 @@ mod tests {
     fn read_whisper_model_traversal_attempt_returns_default() {
         let dir = tempdir().unwrap();
         std::fs::write(
-            dir.path().join("settings"),
+            dir.path().join(SETTINGS_FILE),
             "whisper_model=../../etc/passwd\n",
         )
         .unwrap();
@@ -307,7 +307,7 @@ mod tests {
         // whisper_model coexists.
         let dir = tempdir().unwrap();
         std::fs::write(
-            dir.path().join("settings"),
+            dir.path().join(SETTINGS_FILE),
             "mic_enabled=true\nwhisper_model=medium\ncapture_paused=false\n",
         )
         .unwrap();
