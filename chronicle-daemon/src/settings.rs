@@ -6,7 +6,7 @@
 //! (`whisper_model`). Deliberately not JSON — see the HEU-330 design's
 //! Data Architecture and anti-scope.
 
-use chronicle_transcription::{DEFAULT_VARIANT, parse_variant};
+use chronicle_transcription::{DEFAULT_VARIANT, ModelVariant, parse_variant};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -114,10 +114,9 @@ pub fn write_capture_paused(base_dir: &Path, on: bool) {
 /// `SUPPORTED_VARIANTS` — including a missing file, missing key, empty
 /// string, or unrecognized value — returns `DEFAULT_VARIANT` ("base").
 ///
-/// The returned `&'static str` is a slice from the allow-list itself,
-/// so it is safe to interpolate into a model filename without further
-/// sanitization.
-pub fn read_whisper_model(base_dir: &Path) -> &'static str {
+/// The returned [`ModelVariant`] can only hold an allow-listed name, so it
+/// is safe to interpolate into a model filename without further sanitization.
+pub fn read_whisper_model(base_dir: &Path) -> ModelVariant {
     let raw = read_all(base_dir)
         .get(WHISPER_MODEL_KEY)
         .cloned()
@@ -265,21 +264,21 @@ mod tests {
     #[test]
     fn read_whisper_model_missing_file_returns_default() {
         let dir = tempdir().unwrap();
-        assert_eq!(read_whisper_model(dir.path()), "base");
+        assert_eq!(read_whisper_model(dir.path()).as_str(), "base");
     }
 
     #[test]
     fn read_whisper_model_round_trips_allow_listed_value() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("settings"), "whisper_model=small\n").unwrap();
-        assert_eq!(read_whisper_model(dir.path()), "small");
+        assert_eq!(read_whisper_model(dir.path()).as_str(), "small");
     }
 
     #[test]
     fn read_whisper_model_empty_value_returns_default() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("settings"), "whisper_model=\n").unwrap();
-        assert_eq!(read_whisper_model(dir.path()), "base");
+        assert_eq!(read_whisper_model(dir.path()).as_str(), "base");
     }
 
     #[test]
@@ -288,7 +287,7 @@ mod tests {
         // rather than carry an unknown variant through to the path layer.
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("settings"), "whisper_model=tiny\n").unwrap();
-        assert_eq!(read_whisper_model(dir.path()), "base");
+        assert_eq!(read_whisper_model(dir.path()).as_str(), "base");
     }
 
     #[test]
@@ -299,7 +298,7 @@ mod tests {
             "whisper_model=../../etc/passwd\n",
         )
         .unwrap();
-        assert_eq!(read_whisper_model(dir.path()), "base");
+        assert_eq!(read_whisper_model(dir.path()).as_str(), "base");
     }
 
     #[test]
@@ -313,7 +312,7 @@ mod tests {
         )
         .unwrap();
         assert!(read_mic_setting(dir.path()));
-        assert_eq!(read_whisper_model(dir.path()), "medium");
+        assert_eq!(read_whisper_model(dir.path()).as_str(), "medium");
         assert!(!read_capture_paused(dir.path()));
     }
 }
