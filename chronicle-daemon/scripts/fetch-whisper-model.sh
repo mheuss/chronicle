@@ -9,6 +9,10 @@ BASE_DIR="${HOME}/Library/Application Support/Chronicle"
 MODELS_DIR="${BASE_DIR}/models"
 DEST="${MODELS_DIR}/ggml-${VARIANT}.bin"
 
+# Clean up a partial download if the script aborts before the final mv
+# (e.g. curl fails). Harmless on the success path — the .tmp is gone by then.
+trap 'rm -f "$DEST.tmp"' EXIT
+
 # Pinned per-variant URL + SHA1. SHA1 matches the upstream
 # `whisper.cpp/models/README.md` published values. Update when upstream
 # rotates.
