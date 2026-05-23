@@ -111,6 +111,14 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         !self.user_paused && !self.system_asleep && !self.display_asleep
     }
 
+    /// Test-only snapshot of the three flags as `(user_paused, system_asleep,
+    /// display_asleep)`. Used to verify setter side-effects without exposing
+    /// the fields publicly.
+    #[cfg(test)]
+    fn flags_for_test(&self) -> (bool, bool, bool) {
+        (self.user_paused, self.system_asleep, self.display_asleep)
+    }
+
     /// Compare the three flags against the current run state and Start, Stop,
     /// or do nothing accordingly.
     ///
@@ -187,6 +195,76 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
                     CaptureRuntimeError::Engine(CaptureError::PartialTeardown { .. })
                 );
                 ReconcileOutcome::StartFailed { partial_teardown }
+            }
+        }
+    }
+
+    /// Flip `user_paused`, persist it, and reconcile. This is the only setter
+    /// that writes to disk — the sleep setters are transient. The persistence
+    /// path writes a single boolean (`capture_paused`), nothing more.
+    pub async fn set_user_paused(&mut self, paused: bool, audio: &'a AudioPipeline) {
+        self.user_paused = paused;
+        self.capture_paused.store(paused, Ordering::Release);
+        settings::write_capture_paused(&self.base_dir, paused);
+        log::info!("set_user_paused: paused={paused}");
+        self.reconcile(audio).await;
+    }
+
+    /// Flip `system_asleep` and reconcile. Transient — never persisted.
+    pub async fn set_system_asleep(&mut self, asleep: bool, audio: &'a AudioPipeline) {
+        self.system_asleep = asleep;
+        log::info!("set_system_asleep: asleep={asleep}");
+        self.reconcile(audio).await;
+    }
+
+    /// Flip `display_asleep` and reconcile. Transient — never persisted.
+    pub async fn set_display_asleep(&mut self, asleep: bool, audio: &'a AudioPipeline) {
+        self.display_asleep = asleep;
+        log::info!("set_display_asleep: asleep={asleep}");
+        self.reconcile(audio).await;
+    }
+
+    /// Clear BOTH sleep flags and reconcile. A `systemDidWake` implies the
+    /// display is on, so clearing `display_asleep` here is also a safety net
+    /// against a missed `screensDidWake`. Transient — never persisted.
+    pub async fn set_system_awake(&mut self, audio: &'a AudioPipeline) {
+        self.system_asleep = false;
+        self.display_asleep = false;
+        log::info!("set_system_awake: cleared system_asleep and display_asleep");
+        self.reconcile(audio).await;
+    }
+
+    /// Stop the runtime deterministically for daemon shutdown. Consumes
+    /// `self`, releasing the `&AudioPipeline` borrow so the caller can then
+    /// call `audio_pipeline.stop()` (which needs `&mut self`). This is the
+    /// ADR-009 borrow-checker dance — see `docs/development/objc2-interop.md`
+    /// "Global Shutdown Order".
+    ///
+    /// Returns `true` if teardown poisoned the engine (the boot caller
+    /// escalates this; runtime callers log).
+    pub async fn shutdown(mut self) -> bool {
+        let Some(rt) = self.runtime.take() else {
+            return false;
+        };
+        match rt.stop().await {
+            Ok(()) => {
+                log::info!("capture runtime stopped cleanly");
+                false
+            }
+            Err(CaptureRuntimeError::Engine(CaptureError::PartialTeardown {
+                survivors,
+                stop_errors,
+                ..
+            })) => {
+                log::error!(
+                    "runtime stop failed; engine poisoned. survivors={survivors:?} \
+                     stop_errors={stop_errors:?}"
+                );
+                true
+            }
+            Err(e) => {
+                log::error!("runtime stop failed: {e}");
+                false
             }
         }
     }
@@ -328,5 +406,196 @@ mod tests {
             supervisor.runtime.is_none(),
             "runtime must stay None when decide() returns None"
         );
+    }
+
+    /// Test-only helper: builds the prerequisites for a supervisor. Returns
+    /// the temp dir (drop = cleanup), the audio pipeline (caller borrows it
+    /// to construct the supervisor so the `'a` lifetime resolves locally),
+    /// the `capture_paused` atom, and the rest of the supervisor's args.
+    /// Metadata is returned as `Arc<dyn AppMetadataProvider>` so the test
+    /// supervisor's `M` parameter resolves without further annotations.
+    #[allow(clippy::type_complexity)]
+    async fn supervisor_fixtures() -> (
+        tempfile::TempDir,
+        AudioPipeline,
+        Arc<AtomicBool>,
+        Arc<Storage>,
+        Arc<dyn AppMetadataProvider>,
+        Arc<PipelineCounters>,
+        Arc<Mutex<Option<EngineStatusProbe>>>,
+        Arc<AtomicU8>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let audio_staging = dir.path().join("audio-staging");
+        std::fs::create_dir_all(&audio_staging).unwrap();
+        let audio_config = AudioConfig {
+            output_dir: audio_staging,
+            ..AudioConfig::default()
+        };
+        let (audio, _segment_rx) = AudioPipeline::create(audio_config).unwrap();
+
+        let storage = Arc::new(
+            Storage::open(chronicle_storage::StorageConfig {
+                base_dir: dir.path().to_path_buf(),
+                pool_size: 1,
+            })
+            .await
+            .unwrap(),
+        );
+        let metadata: Arc<dyn AppMetadataProvider> =
+            Arc::new(CachingAppMetadataProvider::with_default_clock(
+                chronicle_capture::get_frontmost_app,
+                Duration::from_millis(250),
+            ));
+        let counters = PipelineCounters::new();
+        let probe_holder = Arc::new(Mutex::new(None));
+        let capture_paused = Arc::new(AtomicBool::new(false));
+        let mic_state_atom = Arc::new(AtomicU8::new(MicState::Off as u8));
+
+        (
+            dir,
+            audio,
+            capture_paused,
+            storage,
+            metadata,
+            counters,
+            probe_holder,
+            mic_state_atom,
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_user_paused_persists_and_updates_atom() {
+        let (dir, audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+
+        // Construct with user_paused=false. We pre-set system_asleep below so
+        // flipping user_paused never crosses into Start.
+        let mut supervisor = CaptureSupervisor::new(
+            false,
+            storage,
+            metadata,
+            counters,
+            1024,
+            probe_holder,
+            Arc::clone(&capture_paused),
+            mic_atom,
+            dir.path().to_path_buf(),
+        );
+        supervisor.set_system_asleep(true, &audio).await;
+        // Sanity: persisted paused starts false (missing file => false).
+        assert!(!settings::read_capture_paused(dir.path()));
+
+        supervisor.set_user_paused(true, &audio).await;
+        assert!(
+            settings::read_capture_paused(dir.path()),
+            "set_user_paused(true) must persist"
+        );
+        assert!(
+            capture_paused.load(Ordering::Acquire),
+            "capture_paused atom must mirror user_paused=true"
+        );
+
+        supervisor.set_user_paused(false, &audio).await;
+        assert!(
+            !settings::read_capture_paused(dir.path()),
+            "set_user_paused(false) must persist"
+        );
+        assert!(
+            !capture_paused.load(Ordering::Acquire),
+            "capture_paused atom must mirror user_paused=false"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sleep_setters_flip_flags_without_persisting() {
+        let (dir, audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+
+        // user_paused stays false. Both sleep setters keep decide() at None
+        // because they leave at least one stop flag set.
+        let mut supervisor = CaptureSupervisor::new(
+            false,
+            storage,
+            metadata,
+            counters,
+            1024,
+            probe_holder,
+            capture_paused,
+            mic_atom,
+            dir.path().to_path_buf(),
+        );
+        assert!(!settings::read_capture_paused(dir.path()));
+
+        supervisor.set_system_asleep(true, &audio).await;
+        supervisor.set_display_asleep(true, &audio).await;
+
+        assert!(
+            !supervisor.should_run(),
+            "should_run() must be false while sleep flags are set"
+        );
+        assert!(
+            !settings::read_capture_paused(dir.path()),
+            "sleep setters MUST NOT persist user_paused"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_system_awake_clears_both_sleep_flags() {
+        let (dir, audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+
+        // user_paused stays set throughout so reconcile() never starts.
+        let mut supervisor = CaptureSupervisor::new(
+            true,
+            storage,
+            metadata,
+            counters,
+            1024,
+            probe_holder,
+            capture_paused,
+            mic_atom,
+            dir.path().to_path_buf(),
+        );
+        supervisor.set_system_asleep(true, &audio).await;
+        supervisor.set_display_asleep(true, &audio).await;
+
+        // Sanity: all three flags set.
+        let (u, s, d) = supervisor.flags_for_test();
+        assert!(u && s && d, "expected all three flags set before wake");
+
+        supervisor.set_system_awake(&audio).await;
+
+        let (u, s, d) = supervisor.flags_for_test();
+        assert!(u, "user_paused must be untouched by set_system_awake");
+        assert!(!s, "set_system_awake must clear system_asleep");
+        assert!(!d, "set_system_awake must clear display_asleep");
+        assert!(
+            !supervisor.should_run(),
+            "should_run() must stay false while user_paused holds"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_with_no_runtime_is_clean() {
+        let (dir, _audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+
+        // user_paused = true => runtime never started.
+        let supervisor = CaptureSupervisor::new(
+            true,
+            storage,
+            metadata,
+            counters,
+            1024,
+            probe_holder,
+            capture_paused,
+            mic_atom,
+            dir.path().to_path_buf(),
+        );
+        assert!(supervisor.runtime.is_none());
+
+        let poisoned = supervisor.shutdown().await;
+        assert!(!poisoned, "shutdown with no runtime must report no poison");
     }
 }
