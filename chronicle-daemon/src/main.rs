@@ -11,10 +11,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
-use chronicle_audio::{AudioConfig, AudioPipeline, CHANNEL_COUNT, SAMPLE_RATE};
-use chronicle_capture::{CaptureConfig, CaptureError};
+use chronicle_audio::{AudioConfig, AudioPipeline};
 use chronicle_ipc::{CancellationToken, IpcServer};
 use chronicle_storage::{Storage, StorageConfig};
+
+use crate::capture_supervisor::{CaptureSupervisor, ReconcileOutcome};
 
 /// Parse a `retention_days` setting from the config table. An unset key uses
 /// the 30-day default; an unparseable value also falls back to 30 with a warn.
@@ -111,9 +112,8 @@ async fn main() -> Result<()> {
     // Capture pause/resume control channel. The handler forwards Pause/Resume
     // requests here; the event loop below drains them.
     let (capture_tx, mut capture_rx) = tokio::sync::mpsc::channel::<ipc_handler::CaptureCommand>(8);
-    let capture_paused = Arc::new(AtomicBool::new(settings::read_capture_paused(
-        storage.base_dir(),
-    )));
+    let initial_capture_paused = settings::read_capture_paused(storage.base_dir());
+    let capture_paused = Arc::new(AtomicBool::new(initial_capture_paused));
     // Whisper model presence check (HEU-421). Logs a startup warning if
     // the configured variant's ggml file isn't on disk; transcription
     // stays idle but the rest of the daemon runs normally.
@@ -165,61 +165,41 @@ async fn main() -> Result<()> {
     // `set_microphone_enabled(&self)` only takes a shared borrow, so the
     // event loop below can still toggle the mic while the runtime runs;
     // the pipeline is still stopped at shutdown.
-    let mut capture_runtime: Option<
-        crate::capture_runtime::CaptureRuntime<
-            '_,
-            crate::pipeline::metadata::CachingAppMetadataProvider<_, _>,
-        >,
-    > = None;
     let capture_probe_holder: Arc<std::sync::Mutex<Option<chronicle_capture::EngineStatusProbe>>> =
         Arc::new(std::sync::Mutex::new(None));
 
-    if !capture_paused.load(Ordering::Acquire) {
-        let capture_config = CaptureConfig {
-            audio: audio_pipeline.token(SAMPLE_RATE, CHANNEL_COUNT),
-            ..Default::default()
-        };
-        match crate::capture_runtime::CaptureRuntime::start(
-            capture_config,
-            Arc::clone(&storage),
-            Arc::clone(&metadata_provider),
-            Arc::clone(&counters),
-            1024, // OCR channel capacity
-        ) {
-            Ok(rt) => {
-                *capture_probe_holder.lock().unwrap() = Some(rt.status_probe());
-                capture_runtime = Some(rt);
-                log::info!("Capture runtime started (audio on primary display)");
-            }
-            Err(crate::capture_runtime::CaptureRuntimeError::Engine(
-                CaptureError::PartialTeardown {
-                    survivors,
-                    stop_errors,
-                    original,
-                },
-            )) => {
-                log::error!(
-                    "capture startup rollback failed; exiting. survivors={survivors:?} \
-                     stop_errors={stop_errors:?} original={original}"
-                );
-                std::process::exit(3);
-            }
-            Err(e) => return Err(anyhow::anyhow!("capture startup failed: {e}")),
-        }
-    } else {
+    let mut supervisor: CaptureSupervisor<
+        '_,
+        crate::pipeline::metadata::CachingAppMetadataProvider<_, _>,
+    > = CaptureSupervisor::new(
+        initial_capture_paused,
+        Arc::clone(&storage),
+        Arc::clone(&metadata_provider),
+        Arc::clone(&counters),
+        1024, // OCR channel capacity
+        Arc::clone(&capture_probe_holder),
+        Arc::clone(&capture_paused),
+        Arc::clone(&mic_state_atom),
+        storage.base_dir().to_path_buf(),
+    );
+
+    if initial_capture_paused {
         log::info!("Capture is paused (persisted setting); skipping runtime start");
     }
 
-    // Restore the persisted microphone setting only if capture is not paused.
-    // A paused daemon must not light up the OS mic indicator at boot — the
-    // persisted mic preference is preserved untouched and re-applied on Resume.
-    if !capture_paused.load(Ordering::Acquire) && settings::read_mic_setting(storage.base_dir()) {
-        let outcome = audio_pipeline.set_microphone_enabled(true);
-        let state = ipc_handler::map_outcome(outcome, permissions::check_microphone());
-        log::info!("restored persisted mic setting: result={state:?}");
-        // A failed restore updates the runtime atom but deliberately leaves the
-        // persisted setting untouched so the next daemon start retries it.
-        mic_state_atom.store(state as u8, std::sync::atomic::Ordering::Release);
+    match supervisor.reconcile(&audio_pipeline).await {
+        ReconcileOutcome::StartFailed {
+            partial_teardown: true,
+        } => {
+            log::error!("capture startup rollback failed; exiting");
+            std::process::exit(3);
+        }
+        ReconcileOutcome::StartFailed {
+            partial_teardown: false,
+        } => {
+            return Err(anyhow::anyhow!("capture startup failed"));
+        }
+        _ => {}
     }
 
     // Bounded channel (64) with blocking_send — backpressure over data loss
@@ -409,97 +389,17 @@ async fn main() -> Result<()> {
                 let _ = cmd.reply.send(state); // ignore if the handler already timed out
             }
             Some(cmd) = capture_rx.recv() => {
-                let new_paused = match cmd.action {
+                let paused = match cmd.action {
                     ipc_handler::CaptureAction::Pause => {
-                        if let Some(rt) = capture_runtime.take()
-                            && let Err(e) = rt.stop().await
-                        {
-                            log::error!("CaptureRuntime stop on pause failed: {e}");
-                        }
-                        *capture_probe_holder.lock().unwrap() = None;
-                        // ADR-010: SCStream stop alone doesn't release the OS
-                        // mic indicator; explicit set_microphone_enabled(false)
-                        // is what releases it. Persisted `mic_enabled` is NOT
-                        // overwritten — pause is transient and Resume must
-                        // restore the user's intent.
-                        let outcome = audio_pipeline.set_microphone_enabled(false);
-                        let state =
-                            ipc_handler::map_outcome(outcome, permissions::check_microphone());
-                        // Mirror the result into the runtime atom so `Status`
-                        // reports the real mic state during pause (Off on
-                        // success; Error/PermissionDenied if the disable
-                        // failed). NFR-5 honesty — persisted preference is
-                        // untouched, only the runtime view is updated.
-                        mic_state_atom
-                            .store(state as u8, std::sync::atomic::Ordering::Release);
-                        log::info!("pause: disabled mic, result={state:?}");
-                        capture_paused.store(true, Ordering::Release);
-                        settings::write_capture_paused(storage.base_dir(), true);
+                        supervisor.set_user_paused(true, &audio_pipeline).await;
                         true
                     }
                     ipc_handler::CaptureAction::Resume => {
-                        if capture_runtime.is_none() {
-                            let capture_config = CaptureConfig {
-                                audio: audio_pipeline.token(SAMPLE_RATE, CHANNEL_COUNT),
-                                ..Default::default()
-                            };
-                            match crate::capture_runtime::CaptureRuntime::start(
-                                capture_config,
-                                Arc::clone(&storage),
-                                Arc::clone(&metadata_provider),
-                                Arc::clone(&counters),
-                                1024,
-                            ) {
-                                Ok(rt) => {
-                                    *capture_probe_holder.lock().unwrap() =
-                                        Some(rt.status_probe());
-                                    capture_runtime = Some(rt);
-                                    log::info!("resume: CaptureRuntime started");
-                                }
-                                Err(e) => {
-                                    match e {
-                                        crate::capture_runtime::CaptureRuntimeError::Engine(
-                                            CaptureError::PartialTeardown {
-                                                survivors,
-                                                stop_errors,
-                                                original,
-                                            },
-                                        ) => {
-                                            log::error!(
-                                                "resume: PartialTeardown — daemon may have orphan streams. \
-                                                 survivors={survivors:?} stop_errors={stop_errors:?} original={original}"
-                                            );
-                                        }
-                                        other => {
-                                            log::error!(
-                                                "resume: CaptureRuntime start failed: {other}"
-                                            );
-                                        }
-                                    }
-                                    // Reply with the current paused state and bail.
-                                    let _ = cmd.reply.send(true);
-                                    continue;
-                                }
-                            }
-                        }
-                        // Restore mic to persisted preference. The atom mirrors
-                        // the result so `Status` reflects reality even when the
-                        // restore fails (e.g. permission lost mid-session).
-                        let wanted_mic = settings::read_mic_setting(storage.base_dir());
-                        let outcome = audio_pipeline.set_microphone_enabled(wanted_mic);
-                        let state =
-                            ipc_handler::map_outcome(outcome, permissions::check_microphone());
-                        mic_state_atom
-                            .store(state as u8, std::sync::atomic::Ordering::Release);
-                        log::info!(
-                            "resume: restored mic to {wanted_mic}, result={state:?}"
-                        );
-                        capture_paused.store(false, Ordering::Release);
-                        settings::write_capture_paused(storage.base_dir(), false);
+                        supervisor.set_user_paused(false, &audio_pipeline).await;
                         false
                     }
                 };
-                let _ = cmd.reply.send(new_paused);
+                let _ = cmd.reply.send(paused);
             }
         }
     }
@@ -527,35 +427,16 @@ async fn main() -> Result<()> {
     // so the handler Retained ref is released and the audio buffer channel
     // can close. If no runtime is active (paused at shutdown), this is a
     // no-op.
-    let mut poisoned = false;
+    //
+    // shutdown() returns true only when the engine is poisoned
+    // (PartialTeardown) — escalates to exit(3) below. Consumes the
+    // supervisor, which releases the &audio_pipeline borrow so
+    // audio_pipeline.stop() (which needs &mut self) can run next.
+    let poisoned = supervisor.shutdown().await;
     // Set when an owned task/thread panicked during shutdown. Those panics are
     // deliberately swallowed mid-sequence so the transcription drain still runs;
     // this flag surfaces them in the exit code once the drain is done.
     let mut shutdown_failed = false;
-    if let Some(rt) = capture_runtime.take() {
-        match rt.stop().await {
-            Ok(()) => log::info!("Capture runtime stopped cleanly"),
-            Err(crate::capture_runtime::CaptureRuntimeError::Engine(
-                CaptureError::PartialTeardown {
-                    survivors,
-                    stop_errors,
-                    ..
-                },
-            )) => {
-                poisoned = true;
-                log::error!(
-                    "runtime stop failed; entering Poisoned. survivors={survivors:?} \
-                     stop_errors={stop_errors:?}"
-                );
-            }
-            Err(e) => log::error!("runtime stop failed: {e}"),
-        }
-    }
-    // The `Option<CaptureRuntime>` binding itself still carries the audio
-    // token lifetime in its type. Drop it explicitly so `audio_pipeline`'s
-    // immutable borrow is released before we call `stop()` (mutable). The
-    // Option is None after `take()`, so this is otherwise a no-op.
-    drop(capture_runtime);
 
     // Stop audio pipeline — encoding thread sees EOF, flushes segments.
     if let Err(e) = audio_pipeline.stop() {
