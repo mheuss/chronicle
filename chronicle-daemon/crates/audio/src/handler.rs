@@ -29,13 +29,16 @@ pub struct AudioBuffer {
 }
 
 /// A message on the audio encoding channel: captured PCM, or a request to
-/// finalize the in-progress microphone segment. Both travel the same channel
-/// so a flush is always ordered after every buffer already queued.
+/// finalize an in-progress segment. Both travel the same channel so a flush
+/// is always ordered after every buffer already queued.
 #[derive(Debug)]
 pub enum AudioMessage {
     Buffer(AudioBuffer),
     /// Finalize the current mic segment now — sent when the mic is disabled.
     FlushMic,
+    /// Finalize the current system-audio segment now — sent when capture is
+    /// stopped (sleep, display sleep, or IPC pause).
+    FlushSystem,
 }
 
 /// Convert a raw byte slice of little-endian f32 PCM data into a Vec of f32 samples.
@@ -290,7 +293,9 @@ mod tests {
                 assert_eq!(b.samples.len(), 960);
                 assert_eq!(b.source, AudioSource::System);
             }
-            AudioMessage::FlushMic => panic!("expected a buffer message"),
+            AudioMessage::FlushMic | AudioMessage::FlushSystem => {
+                panic!("expected a buffer message")
+            }
         }
     }
 

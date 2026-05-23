@@ -303,6 +303,11 @@ fn run_encoding_loop(
                     log::error!("failed to flush mic accumulator on request: {e}");
                 }
             }
+            AudioMessage::FlushSystem => {
+                if let Err(e) = sys_acc.flush() {
+                    log::error!("failed to flush system accumulator on request: {e}");
+                }
+            }
         }
     }
 
@@ -495,6 +500,60 @@ mod tests {
         handle.join().unwrap();
 
         // No further segments — the buffer was fully drained by FlushMic.
+        assert!(
+            segment_rx.try_recv().is_err(),
+            "no extra segment expected from shutdown flush"
+        );
+    }
+
+    #[test]
+    fn flush_request_finalizes_partial_system_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = AudioConfig {
+            segment_duration_secs: 30,
+            bitrate: 64_000,
+            output_dir: dir.path().to_path_buf(),
+        };
+
+        let (segment_tx, segment_rx) = mpsc::channel::<CompletedSegment>();
+        let (buffer_tx, buffer_rx) = mpsc::sync_channel::<AudioMessage>(64);
+
+        let config_clone = config.clone();
+        let handle = thread::spawn(move || {
+            run_encoding_loop(buffer_rx, segment_tx, &config_clone);
+        });
+
+        let timestamp = 1_700_000_000_000_i64;
+
+        // Send half a second of system samples — well below the 30s boundary.
+        let partial_samples = vec![0.0_f32; 24_000];
+        buffer_tx
+            .send(AudioMessage::Buffer(AudioBuffer {
+                samples: partial_samples,
+                timestamp_ms: timestamp,
+                source: AudioSource::System,
+            }))
+            .unwrap();
+
+        // Request a system flush. This must finalize the partial segment now,
+        // ordered after the buffer above.
+        buffer_tx.send(AudioMessage::FlushSystem).unwrap();
+
+        // Assert the segment arrives while the sender is still alive, so a
+        // channel-close shutdown flush cannot be the cause.
+        let segment = segment_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("FlushSystem should finalize the partial system segment");
+        assert_eq!(segment.source, AudioSource::System);
+        assert_eq!(segment.start_timestamp, timestamp);
+        assert_eq!(segment.end_timestamp, timestamp + 500);
+        assert!(segment.path.exists(), "flushed system file should exist");
+
+        // Now drop the sender and join the encoding thread.
+        drop(buffer_tx);
+        handle.join().unwrap();
+
+        // No further segments — the buffer was fully drained by FlushSystem.
         assert!(
             segment_rx.try_recv().is_err(),
             "no extra segment expected from shutdown flush"
