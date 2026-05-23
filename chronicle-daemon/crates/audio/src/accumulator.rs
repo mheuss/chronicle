@@ -9,7 +9,8 @@ use crate::{AudioSource, CompletedSegment, Result, segment_path};
 /// A forward wall-clock jump larger than this between consecutive pushes means
 /// capture was interrupted (sleep, display nap, restart). Comfortably above
 /// normal inter-buffer jitter (tens of ms), below the shortest sleep we care
-/// about.
+/// about. Backward jumps (clock skew, NTP correction) are ignored — the current
+/// segment continues, which preserves audio rather than discarding it.
 const GAP_THRESHOLD_MS: i64 = 2000;
 
 /// Buffers incoming PCM samples for a single audio source and encodes them
@@ -66,7 +67,7 @@ impl SegmentAccumulator {
         // means capture was interrupted. Close the current partial and start
         // fresh so no segment spans the gap.
         if let Some(start) = self.segment_start_ms {
-            let buffered_ms = (self.buffer.len() as f64 / self.sample_rate as f64 * 1000.0) as i64;
+            let buffered_ms = self.samples_to_ms(self.buffer.len());
             let expected_ms = start + buffered_ms;
             if timestamp_ms > expected_ms + GAP_THRESHOLD_MS {
                 self.flush()?;
@@ -87,8 +88,7 @@ impl SegmentAccumulator {
             let segment_samples: Vec<f32> = self.buffer.drain(..self.samples_per_segment).collect();
             self.flush_segment(&segment_samples)?;
             // Next segment starts right after the previous one ended.
-            let duration_ms =
-                (self.samples_per_segment as f64 / self.sample_rate as f64 * 1000.0) as i64;
+            let duration_ms = self.samples_to_ms(self.samples_per_segment);
             self.segment_start_ms = Some(self.segment_start_ms.unwrap() + duration_ms);
         }
 
@@ -109,10 +109,16 @@ impl SegmentAccumulator {
         Ok(())
     }
 
+    /// Convert a sample count into a millisecond duration at the accumulator's
+    /// sample rate. Single source of truth for buffer-length → wall-clock math.
+    fn samples_to_ms(&self, n: usize) -> i64 {
+        (n as f64 / self.sample_rate as f64 * 1000.0) as i64
+    }
+
     /// Encode samples to a file and send a CompletedSegment over the channel.
     fn flush_segment(&mut self, samples: &[f32]) -> Result<()> {
         let start_ms = self.segment_start_ms.unwrap_or(0);
-        let duration_ms = (samples.len() as f64 / self.sample_rate as f64 * 1000.0) as i64;
+        let duration_ms = self.samples_to_ms(samples.len());
         let end_ms = start_ms + duration_ms;
 
         let path = segment_path(&self.output_dir, start_ms, self.source);
