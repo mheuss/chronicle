@@ -200,6 +200,23 @@ impl AudioPipeline {
         }
     }
 
+    /// Finalize the system accumulator's partial segment now. Sent when capture
+    /// stops (sleep, display sleep, or IPC pause) so a later restart does not
+    /// produce one segment spanning the off-period. Symmetric with the `FlushMic`
+    /// send inside `set_microphone_enabled`.
+    ///
+    /// Blocking send — `FlushSystem` is a control message that must not be
+    /// dropped under backpressure. A send error means the encoding channel is
+    /// closed, which is a genuine failure. `Ok` no-op after `stop()`.
+    pub fn flush_system_segment(&self) -> Result<()> {
+        if let Some(tx) = &self.flush_tx {
+            tx.send(AudioMessage::FlushSystem).map_err(|e| {
+                AudioError::ScreenCaptureKit(format!("failed to flush system segment: {e}"))
+            })?;
+        }
+        Ok(())
+    }
+
     /// Stop the encoding pipeline.
     ///
     /// Stops the microphone first so the OS releases it synchronously, then
@@ -669,6 +686,31 @@ mod tests {
             MicToggleOutcome::Disabled
         );
         pipeline.stop().expect("pipeline should stop cleanly");
+    }
+
+    #[test]
+    fn flush_system_segment_succeeds_before_and_after_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = AudioConfig {
+            segment_duration_secs: 30,
+            bitrate: 64_000,
+            output_dir: dir.path().to_path_buf(),
+        };
+        let (mut pipeline, _segment_rx) = AudioPipeline::create(config).unwrap();
+
+        // Before stop: flush_tx is Some — should succeed.
+        assert!(
+            pipeline.flush_system_segment().is_ok(),
+            "flush_system_segment should return Ok before stop"
+        );
+
+        pipeline.stop().unwrap();
+
+        // After stop: flush_tx is None — must be a graceful Ok no-op.
+        assert!(
+            pipeline.flush_system_segment().is_ok(),
+            "flush_system_segment should return Ok after stop"
+        );
     }
 
     /// Exercises the real start/stop/idempotency paths on a live
