@@ -353,9 +353,9 @@ async fn main() -> Result<()> {
     // --- Event loop: serve mic toggles until a shutdown signal arrives ---
     // Toggles are handled inline, one per iteration. This loop is the only
     // caller of write_mic_setting, which writes a fixed temp path — the
-    // one-at-a-time processing here is what keeps that path safe. (The startup
-    // restore block above also toggles the mic, but deliberately does not
-    // persist, so it never races this loop's write.)
+    // one-at-a-time processing here is what keeps that path safe. (The
+    // supervisor's `start()` reads but never writes the mic setting when
+    // restoring it on boot/resume/wake, so it can't race this loop's write.)
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     // Open the readiness gates: from here the loop drains `mic_rx` and
     // `capture_rx`, so the IPC handler can forward toggles instead of
@@ -374,19 +374,26 @@ async fn main() -> Result<()> {
                 break;
             }
             Some(cmd) = mic_rx.recv() => {
-                let outcome = audio_pipeline.set_microphone_enabled(cmd.enabled);
-                let state = ipc_handler::map_outcome(outcome, permissions::check_microphone());
-                // NFR-5: every toggle logs the requested state and the result.
-                log::info!("mic toggle: requested enabled={}, result={state:?}", cmd.enabled);
-                if matches!(state, chronicle_ipc::MicState::On | chronicle_ipc::MicState::Off) {
-                    settings::write_mic_setting(
-                        storage.base_dir(),
-                        state == chronicle_ipc::MicState::On,
+                // Always persist the user's intent so the supervisor's next Start
+                // restores it.
+                settings::write_mic_setting(storage.base_dir(), cmd.enabled);
+                let state = if supervisor.should_run() {
+                    let outcome = audio_pipeline.set_microphone_enabled(cmd.enabled);
+                    let s = ipc_handler::map_outcome(outcome, permissions::check_microphone());
+                    log::info!("mic toggle: requested enabled={}, result={s:?}", cmd.enabled);
+                    s
+                } else {
+                    // Capture is stopped (pause or sleep) — record the preference but do
+                    // not engage the device. The mic genuinely is not running.
+                    log::info!(
+                        "mic toggle: requested enabled={} while capture stopped — \
+                         preference saved, device left off",
+                        cmd.enabled,
                     );
-                }
-                // The atom always mirrors the latest result so Status is honest.
+                    chronicle_ipc::MicState::Off
+                };
                 mic_state_atom.store(state as u8, std::sync::atomic::Ordering::Release);
-                let _ = cmd.reply.send(state); // ignore if the handler already timed out
+                let _ = cmd.reply.send(state);
             }
             Some(cmd) = capture_rx.recv() => {
                 let paused = match cmd.action {
