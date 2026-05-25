@@ -33,7 +33,10 @@ env_logger = "0.11"
 log = "0.4"
 anyhow = "1"
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSNotification", "NSOperation", "block2"] }
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace"] }
+objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
+block2 = "0.6"
 thiserror = "2"
 arc-swap = "1"
 async-trait = "0.1"

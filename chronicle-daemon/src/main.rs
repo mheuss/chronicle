@@ -3,6 +3,7 @@ mod capture_supervisor;
 mod ipc_handler;
 mod permissions;
 mod pipeline;
+mod power;
 mod settings;
 
 use std::sync::Arc;
