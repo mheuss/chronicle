@@ -115,6 +115,19 @@ async fn main() -> Result<()> {
     let (capture_tx, mut capture_rx) = tokio::sync::mpsc::channel::<ipc_handler::CaptureCommand>(8);
     let initial_capture_paused = settings::read_capture_paused(storage.base_dir());
     let capture_paused = Arc::new(AtomicBool::new(initial_capture_paused));
+    // Power observer (HEU-284). Sleep/wake transitions arrive on `power_rx`
+    // and drive the supervisor's sleep flags. The observer thread is not
+    // joined (design §4); dropping the handle is fine — process exit reaps
+    // the thread. If registration fails, capture continues normally without
+    // sleep/wake handling.
+    let (power_tx, mut power_rx) = tokio::sync::mpsc::channel::<power::PowerEvent>(8);
+    match power::spawn_power_observer(power_tx) {
+        Ok(_handle) => log::info!("power observer started"),
+        Err(e) => log::warn!(
+            "power observer failed to start: {e} — sleep/wake handling disabled, \
+             capture continues normally"
+        ),
+    }
     // Whisper model presence check (HEU-421). Logs a startup warning if
     // the configured variant's ggml file isn't on disk; transcription
     // stays idle but the rest of the daemon runs normally.
@@ -409,6 +422,19 @@ async fn main() -> Result<()> {
                 };
                 let _ = cmd.reply.send(paused);
             }
+            Some(evt) = power_rx.recv() => {
+                log::info!("power event: {evt:?}");
+                match evt {
+                    power::PowerEvent::SystemSleep =>
+                        supervisor.set_system_asleep(true, &audio_pipeline).await,
+                    power::PowerEvent::SystemWake =>
+                        supervisor.set_system_awake(&audio_pipeline).await,
+                    power::PowerEvent::DisplaySleep =>
+                        supervisor.set_display_asleep(true, &audio_pipeline).await,
+                    power::PowerEvent::DisplayWake =>
+                        supervisor.set_display_asleep(false, &audio_pipeline).await,
+                }
+            }
         }
     }
     // Drain any control commands that raced this shutdown signal: reply now
@@ -424,6 +450,11 @@ async fn main() -> Result<()> {
     while let Ok(cmd) = capture_rx.try_recv() {
         drop(cmd.reply);
     }
+    // Discard any power events that raced shutdown — no reply channel to
+    // satisfy. The observer thread itself is not joined; process exit reaps
+    // it via CFRunLoopRun().
+    power_rx.close();
+    while power_rx.try_recv().is_ok() {}
     cancel.cancel();
 
     // Stop the IPC server before the capture engine: stop accepting
