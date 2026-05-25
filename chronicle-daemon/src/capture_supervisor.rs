@@ -211,9 +211,6 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     }
 
     /// Flip `system_asleep` and reconcile. Transient — never persisted.
-    ///
-    /// Currently unused — wired by Task 11 (the NSWorkspace sleep observer).
-    #[allow(dead_code)]
     pub async fn set_system_asleep(&mut self, asleep: bool, audio: &'a AudioPipeline) {
         self.system_asleep = asleep;
         log::info!("set_system_asleep: asleep={asleep}");
@@ -221,9 +218,6 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     }
 
     /// Flip `display_asleep` and reconcile. Transient — never persisted.
-    ///
-    /// Currently unused — wired by Task 11 (the NSWorkspace sleep observer).
-    #[allow(dead_code)]
     pub async fn set_display_asleep(&mut self, asleep: bool, audio: &'a AudioPipeline) {
         self.display_asleep = asleep;
         log::info!("set_display_asleep: asleep={asleep}");
@@ -233,9 +227,6 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     /// Clear BOTH sleep flags and reconcile. A `systemDidWake` implies the
     /// display is on, so clearing `display_asleep` here is also a safety net
     /// against a missed `screensDidWake`. Transient — never persisted.
-    ///
-    /// Currently unused — wired by Task 11 (the NSWorkspace sleep observer).
-    #[allow(dead_code)]
     pub async fn set_system_awake(&mut self, audio: &'a AudioPipeline) {
         self.system_asleep = false;
         self.display_asleep = false;
