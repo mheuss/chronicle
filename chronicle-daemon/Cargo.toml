@@ -32,11 +32,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "syn
 env_logger = "0.11"
 log = "0.4"
 anyhow = "1"
+# objc2 + NSString for the AVCaptureDevice permission check in permissions.rs.
+# NSWorkspace / CFRunLoop / block2 were dropped when the power observer
+# switched from NSWorkspace to raw IOKit FFI (power.rs).
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSNotification", "NSOperation", "block2"] }
-objc2-app-kit = { version = "0.3", features = ["NSWorkspace"] }
-objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
-block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString"] }
 thiserror = "2"
 arc-swap = "1"
 async-trait = "0.1"

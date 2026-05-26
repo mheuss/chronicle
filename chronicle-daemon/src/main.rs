@@ -429,10 +429,6 @@ async fn main() -> Result<()> {
                         supervisor.set_system_asleep(true, &audio_pipeline).await,
                     power::PowerEvent::SystemWake =>
                         supervisor.set_system_awake(&audio_pipeline).await,
-                    power::PowerEvent::DisplaySleep =>
-                        supervisor.set_display_asleep(true, &audio_pipeline).await,
-                    power::PowerEvent::DisplayWake =>
-                        supervisor.set_display_asleep(false, &audio_pipeline).await,
                 }
             }
         }

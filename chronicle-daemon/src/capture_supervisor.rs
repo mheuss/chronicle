@@ -1,5 +1,11 @@
-//! Owns the capture runtime and reconciles it against three independent
-//! stop reasons: user pause, system sleep, display sleep.
+//! Owns the capture runtime and reconciles it against two independent
+//! stop reasons: user pause and system sleep.
+//!
+//! Display sleep is intentionally not a separate flag — see HEU-496 for the
+//! Apple-Silicon-specific investigation. The supervisor's two-flag design
+//! cleanly accommodates re-adding display sleep later (the existing
+//! `set_system_asleep` pattern generalizes to a `set_display_asleep` setter
+//! with no other architectural change).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -24,14 +30,9 @@ enum ReconcileAction {
     None,
 }
 
-/// Pure decision: capture should run only when none of the three flags is set.
-fn decide(
-    user_paused: bool,
-    system_asleep: bool,
-    display_asleep: bool,
-    running: bool,
-) -> ReconcileAction {
-    let should_run = !user_paused && !system_asleep && !display_asleep;
+/// Pure decision: capture should run only when neither stop flag is set.
+fn decide(user_paused: bool, system_asleep: bool, running: bool) -> ReconcileAction {
+    let should_run = !user_paused && !system_asleep;
     match (should_run, running) {
         (true, false) => ReconcileAction::Start,
         (false, true) => ReconcileAction::Stop,
@@ -49,7 +50,8 @@ pub enum ReconcileOutcome {
     StartFailed { partial_teardown: bool },
 }
 
-/// Drives the capture runtime against three independent stop reasons.
+/// Drives the capture runtime against two independent stop reasons: user
+/// pause and system sleep.
 ///
 /// `AudioPipeline` is deliberately NOT a field. `reconcile()` borrows it as
 /// `&'a AudioPipeline` so the borrow checker enforces ADR-009: the audio
@@ -58,7 +60,6 @@ pub enum ReconcileOutcome {
 pub struct CaptureSupervisor<'a, M: AppMetadataProvider + 'static + ?Sized> {
     user_paused: bool,
     system_asleep: bool,
-    display_asleep: bool,
     runtime: Option<CaptureRuntime<'a, M>>,
     storage: Arc<Storage>,
     metadata: Arc<M>,
@@ -75,9 +76,9 @@ pub struct CaptureSupervisor<'a, M: AppMetadataProvider + 'static + ?Sized> {
 }
 
 impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
-    /// Construct a supervisor. `system_asleep` and `display_asleep` start
-    /// `false` — only `user_paused` is caller-provided because it's loaded
-    /// from persisted settings on boot.
+    /// Construct a supervisor. `system_asleep` starts `false` — only
+    /// `user_paused` is caller-provided because it's loaded from persisted
+    /// settings on boot.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         user_paused: bool,
@@ -93,7 +94,6 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         Self {
             user_paused,
             system_asleep: false,
-            display_asleep: false,
             runtime: None,
             storage,
             metadata,
@@ -106,36 +106,30 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         }
     }
 
-    /// True when none of the three stop flags is set.
+    /// True when neither stop flag is set.
     pub fn should_run(&self) -> bool {
-        !self.user_paused && !self.system_asleep && !self.display_asleep
+        !self.user_paused && !self.system_asleep
     }
 
-    /// Test-only snapshot of the three flags as `(user_paused, system_asleep,
-    /// display_asleep)`. Used to verify setter side-effects without exposing
-    /// the fields publicly.
+    /// Test-only snapshot of the flags as `(user_paused, system_asleep)`.
+    /// Used to verify setter side-effects without exposing the fields
+    /// publicly.
     #[cfg(test)]
-    fn flags_for_test(&self) -> (bool, bool, bool) {
-        (self.user_paused, self.system_asleep, self.display_asleep)
+    fn flags_for_test(&self) -> (bool, bool) {
+        (self.user_paused, self.system_asleep)
     }
 
-    /// Compare the three flags against the current run state and Start, Stop,
-    /// or do nothing accordingly.
+    /// Compare the flags against the current run state and Start, Stop, or
+    /// do nothing accordingly.
     ///
     /// Log lines carry only state booleans and the action name — never PII
     /// or captured content.
     pub async fn reconcile(&mut self, audio: &'a AudioPipeline) -> ReconcileOutcome {
-        let action = decide(
-            self.user_paused,
-            self.system_asleep,
-            self.display_asleep,
-            self.runtime.is_some(),
-        );
+        let action = decide(self.user_paused, self.system_asleep, self.runtime.is_some());
         log::info!(
-            "reconcile: user_paused={} system_asleep={} display_asleep={} -> {:?}",
+            "reconcile: user_paused={} system_asleep={} -> {:?}",
             self.user_paused,
             self.system_asleep,
-            self.display_asleep,
             action,
         );
         match action {
@@ -217,20 +211,10 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         self.reconcile(audio).await;
     }
 
-    /// Flip `display_asleep` and reconcile. Transient — never persisted.
-    pub async fn set_display_asleep(&mut self, asleep: bool, audio: &'a AudioPipeline) {
-        self.display_asleep = asleep;
-        log::info!("set_display_asleep: asleep={asleep}");
-        self.reconcile(audio).await;
-    }
-
-    /// Clear BOTH sleep flags and reconcile. A `systemDidWake` implies the
-    /// display is on, so clearing `display_asleep` here is also a safety net
-    /// against a missed `screensDidWake`. Transient — never persisted.
+    /// Clear `system_asleep` and reconcile. Transient — never persisted.
     pub async fn set_system_awake(&mut self, audio: &'a AudioPipeline) {
         self.system_asleep = false;
-        self.display_asleep = false;
-        log::info!("set_system_awake: cleared system_asleep and display_asleep");
+        log::info!("set_system_awake: cleared system_asleep");
         self.reconcile(audio).await;
     }
 
@@ -315,41 +299,29 @@ mod tests {
 
     #[test]
     fn decide_truth_table() {
-        // All flags false + not running → should start
-        assert_eq!(decide(false, false, false, false), ReconcileAction::Start);
+        // Both flags false + not running → should start
+        assert_eq!(decide(false, false, false), ReconcileAction::Start);
 
-        // All flags false + already running → no change
-        assert_eq!(decide(false, false, false, true), ReconcileAction::None);
+        // Both flags false + already running → no change
+        assert_eq!(decide(false, false, true), ReconcileAction::None);
 
         // user_paused alone: running → stop
-        assert_eq!(decide(true, false, false, true), ReconcileAction::Stop);
+        assert_eq!(decide(true, false, true), ReconcileAction::Stop);
 
         // user_paused alone: not running → no change
-        assert_eq!(decide(true, false, false, false), ReconcileAction::None);
+        assert_eq!(decide(true, false, false), ReconcileAction::None);
 
         // system_asleep alone: running → stop
-        assert_eq!(decide(false, true, false, true), ReconcileAction::Stop);
+        assert_eq!(decide(false, true, true), ReconcileAction::Stop);
 
         // system_asleep alone: not running → no change
-        assert_eq!(decide(false, true, false, false), ReconcileAction::None);
+        assert_eq!(decide(false, true, false), ReconcileAction::None);
 
-        // display_asleep alone: running → stop
-        assert_eq!(decide(false, false, true, true), ReconcileAction::Stop);
+        // Both flags set + running → stop
+        assert_eq!(decide(true, true, true), ReconcileAction::Stop);
 
-        // display_asleep alone: not running → no change
-        assert_eq!(decide(false, false, true, false), ReconcileAction::None);
-
-        // All three flags set + running → stop
-        assert_eq!(decide(true, true, true, true), ReconcileAction::Stop);
-
-        // All three flags set + not running → no change
-        assert_eq!(decide(true, true, true, false), ReconcileAction::None);
-
-        // Mix: user_paused + system_asleep, running → stop
-        assert_eq!(decide(true, true, false, true), ReconcileAction::Stop);
-
-        // Mix: user_paused + system_asleep, not running → no change
-        assert_eq!(decide(true, true, false, false), ReconcileAction::None);
+        // Both flags set + not running → no change
+        assert_eq!(decide(true, true, false), ReconcileAction::None);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -508,12 +480,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn sleep_setters_flip_flags_without_persisting() {
+    async fn set_system_asleep_flips_flag_without_persisting() {
         let (dir, audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
             supervisor_fixtures().await;
 
-        // user_paused stays false. Both sleep setters keep decide() at None
-        // because they leave at least one stop flag set.
+        // user_paused stays false. set_system_asleep keeps decide() at None
+        // because the system_asleep flag is now set.
         let mut supervisor = CaptureSupervisor::new(
             false,
             storage,
@@ -528,11 +500,10 @@ mod tests {
         assert!(!settings::read_capture_paused(dir.path()));
 
         supervisor.set_system_asleep(true, &audio).await;
-        supervisor.set_display_asleep(true, &audio).await;
 
         assert!(
             !supervisor.should_run(),
-            "should_run() must be false while sleep flags are set"
+            "should_run() must be false while system_asleep is set"
         );
         assert!(
             !settings::read_capture_paused(dir.path()),
@@ -541,7 +512,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn set_system_awake_clears_both_sleep_flags() {
+    async fn set_system_awake_clears_system_asleep_only() {
         let (dir, audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
             supervisor_fixtures().await;
 
@@ -558,18 +529,16 @@ mod tests {
             dir.path().to_path_buf(),
         );
         supervisor.set_system_asleep(true, &audio).await;
-        supervisor.set_display_asleep(true, &audio).await;
 
-        // Sanity: all three flags set.
-        let (u, s, d) = supervisor.flags_for_test();
-        assert!(u && s && d, "expected all three flags set before wake");
+        // Sanity: both flags set.
+        let (u, s) = supervisor.flags_for_test();
+        assert!(u && s, "expected both flags set before wake");
 
         supervisor.set_system_awake(&audio).await;
 
-        let (u, s, d) = supervisor.flags_for_test();
+        let (u, s) = supervisor.flags_for_test();
         assert!(u, "user_paused must be untouched by set_system_awake");
         assert!(!s, "set_system_awake must clear system_asleep");
-        assert!(!d, "set_system_awake must clear display_asleep");
         assert!(
             !supervisor.should_run(),
             "should_run() must stay false while user_paused holds"
