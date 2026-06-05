@@ -11,6 +11,32 @@ struct SearchPopoverView: View {
     @State private var results: [SearchHit] = []
     @State private var isLoading: Bool = false
     @State private var requestID: UInt64 = 0
+    @State private var searchError: Bool = false
+
+    /// Which message the search area should render. A pure function of the
+    /// inputs so it can be unit-tested without driving the SwiftUI view — the
+    /// HEU-478 error-vs-no-match disambiguation lives here.
+    enum SearchContent: Equatable {
+        case disconnected
+        case prompt
+        case searchFailed
+        case noMatches
+        case results
+    }
+
+    static func searchContent(
+        connected: Bool,
+        queryEmpty: Bool,
+        isLoading: Bool,
+        searchError: Bool,
+        hasResults: Bool
+    ) -> SearchContent {
+        if !connected { return .disconnected }
+        if queryEmpty { return .prompt }
+        if !isLoading && searchError { return .searchFailed }
+        if !isLoading && !hasResults { return .noMatches }
+        return .results
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -97,17 +123,28 @@ struct SearchPopoverView: View {
 
     @ViewBuilder
     private var content: some View {
-        if connection.state != .connected {
+        switch Self.searchContent(
+            connected: connection.state == .connected,
+            queryEmpty: query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            isLoading: isLoading,
+            searchError: searchError,
+            hasResults: !results.isEmpty
+        ) {
+        case .disconnected:
             EmptyView()
-        } else if query.trimmingCharacters(in: .whitespaces).isEmpty {
+        case .prompt:
             Text("Start typing to search your history")
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if !isLoading && results.isEmpty {
+        case .searchFailed:
+            Text("Couldn't complete the search — try again.")
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .noMatches:
             Text("No matches")
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
+        case .results:
             // [A11y] Wrap each row in a Button so the result is keyboard-
             // accessible (Tab/Shift-Tab to focus, Return/Space to open).
             List(results) { hit in
@@ -130,16 +167,23 @@ struct SearchPopoverView: View {
     private func runSearch() async {
         let myID = requestID &+ 1
         requestID = myID
+        // Clear any prior error the instant the user edits, before the debounce
+        // sleep — otherwise the failure message lingers for ~200ms (HEU-478).
+        searchError = false
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             results = []
             isLoading = false
             return
         }
-        try? await Task.sleep(for: .milliseconds(200))
-        if Task.isCancelled || requestID != myID { return }
+        // Enter the loading state before the debounce so the pending window
+        // doesn't transiently render `.noMatches` while a search is queued
+        // (HEU-478). The requestID guard in the defer ensures only the latest
+        // request clears it.
         isLoading = true
         defer { if requestID == myID { isLoading = false } }
+        try? await Task.sleep(for: .milliseconds(200))
+        if Task.isCancelled || requestID != myID { return }
         do {
             let hits = try await connection.search(trimmed, limit: 50, offset: 0)
             if requestID == myID {
@@ -148,7 +192,13 @@ struct SearchPopoverView: View {
         } catch is CancellationError {
             // ignore — task cancelled before the request landed
         } catch {
-            if requestID == myID { results = [] }
+            // A non-cancellation error means the daemon or IPC failed. Surface
+            // it instead of rendering an empty result set as a misleading
+            // "No matches". See HEU-478.
+            if requestID == myID {
+                results = []
+                searchError = true
+            }
         }
     }
 
