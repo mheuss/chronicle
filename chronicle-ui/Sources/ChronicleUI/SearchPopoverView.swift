@@ -176,10 +176,14 @@ struct SearchPopoverView: View {
             isLoading = false
             return
         }
-        try? await Task.sleep(for: .milliseconds(200))
-        if Task.isCancelled || requestID != myID { return }
+        // Enter the loading state before the debounce so the pending window
+        // doesn't transiently render `.noMatches` while a search is queued
+        // (HEU-478). The requestID guard in the defer ensures only the latest
+        // request clears it.
         isLoading = true
         defer { if requestID == myID { isLoading = false } }
+        try? await Task.sleep(for: .milliseconds(200))
+        if Task.isCancelled || requestID != myID { return }
         do {
             let hits = try await connection.search(trimmed, limit: 50, offset: 0)
             if requestID == myID {
