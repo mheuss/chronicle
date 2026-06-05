@@ -18,6 +18,18 @@ pub(crate) fn search(
     // usage (small limit, small offset), memory overhead is negligible.
     let sub_limit = (limit + offset) as i64;
 
+    // FTS5 parses the MATCH argument as query syntax, so raw user input with
+    // punctuation (parens, quotes, `*`, ...) triggers a syntax error that would
+    // otherwise surface to the user as a misleading "No matches". Convert the
+    // input into quoted prefix terms via `sanitize_fts5_query` so arbitrary
+    // input is safe. A query with no alphanumeric characters has no search
+    // terms, so return empty rather than building a degenerate MATCH
+    // expression. See HEU-478 / HEU-483.
+    if !query.chars().any(char::is_alphanumeric) {
+        return Ok(Vec::new());
+    }
+    let match_query = sanitize_fts5_query(query);
+
     if *filter == SearchFilter::All || *filter == SearchFilter::ScreenOnly {
         let mut stmt = conn.prepare(
             "SELECT s.id, s.timestamp, s.display_id, s.app_name, s.app_bundle_id,
@@ -33,7 +45,7 @@ pub(crate) fn search(
         )?;
 
         let rows = stmt
-            .query_map(params![query, sub_limit], |row| {
+            .query_map(params![match_query, sub_limit], |row| {
                 let screenshot = Screenshot {
                     id: row.get(0)?,
                     timestamp: row.get(1)?,
@@ -76,7 +88,7 @@ pub(crate) fn search(
         )?;
 
         let rows = stmt
-            .query_map(params![query, sub_limit], |row| {
+            .query_map(params![match_query, sub_limit], |row| {
                 let segment = AudioSegment {
                     id: row.get(0)?,
                     start_timestamp: row.get(1)?,
@@ -116,11 +128,40 @@ pub(crate) fn search(
     Ok(results)
 }
 
-/// Map FTS5 syntax errors to a more descriptive `StorageError`.
+/// Convert raw user input into a safe FTS5 MATCH expression.
+///
+/// Each whitespace-delimited token is wrapped as a quoted literal phrase with a
+/// trailing prefix wildcard (`tok` -> `"tok"*`). Quoting makes FTS5-significant
+/// punctuation literal so arbitrary input cannot produce a syntax error;
+/// space-joining preserves the default AND semantics across tokens; and the
+/// wildcard enables prefix matching. Internal double quotes are escaped by
+/// doubling, per FTS5 string rules.
+fn sanitize_fts5_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|token| format!("\"{}\"*", token.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Map FTS5 syntax errors to a generic `StorageError`.
+///
+/// The raw query is deliberately excluded from the returned message. That
+/// message flows to the UI as `Response::Error`, and any caller that logs it
+/// would capture user query content, breaking the "log lengths only" PII
+/// discipline used in `ipc_handler`. The query length is logged at debug for
+/// diagnostics instead. See HEU-479. (Since `sanitize_fts5_query` makes user
+/// input valid FTS5, this path is not expected to fire from `search()`; it
+/// stays as defense-in-depth.)
 fn map_fts5_error(err: rusqlite::Error, query: &str) -> StorageError {
     let msg = err.to_string();
     if msg.contains("fts5: syntax error") {
-        StorageError::Other(format!("invalid search query: {}", query))
+        log::debug!(
+            "invalid FTS5 query (q_len={}): {}",
+            query.chars().count(),
+            msg
+        );
+        StorageError::Other("invalid search query syntax".into())
     } else {
         StorageError::Database(err)
     }
@@ -256,5 +297,81 @@ mod tests {
 
         let results = search(&conn, "nonexistentterm", &SearchFilter::All, 10, 0).unwrap();
         assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn search_with_punctuation_does_not_error() {
+        // FTS5-significant punctuation (parens, quotes, `*`) must be treated as
+        // literal text, not query syntax — otherwise a syntax error surfaces as
+        // a misleading "No matches". Regression: HEU-478.
+        let conn = setup_db();
+        insert_test_screenshot(&conn); // ocr: "deployment pipeline kubernetes cluster"
+
+        let results = search(&conn, "pipeline)", &SearchFilter::All, 10, 0)
+            .expect("punctuation query must not be an FTS5 syntax error");
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].source, SearchSource::Screen(_)));
+    }
+
+    #[test]
+    fn search_multi_word_uses_and_not_phrase() {
+        // Multi-word queries must match documents containing all the words in
+        // any order/position (AND), not only as an adjacent phrase. Guards
+        // against a phrase-quoting fix that would silently regress search.
+        let conn = setup_db();
+        insert_test_screenshot(&conn); // "deployment pipeline kubernetes cluster"
+
+        // Both words are present but reversed and non-adjacent in the doc.
+        let results = search(&conn, "kubernetes deployment", &SearchFilter::All, 10, 0).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].source, SearchSource::Screen(_)));
+    }
+
+    #[test]
+    fn search_supports_prefix_match() {
+        // A partial word should match longer terms (deploy -> deployment).
+        let conn = setup_db();
+        insert_test_screenshot(&conn); // "deployment pipeline kubernetes cluster"
+
+        let results = search(&conn, "deploy", &SearchFilter::All, 10, 0).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].source, SearchSource::Screen(_)));
+    }
+
+    #[test]
+    fn search_punctuation_only_returns_empty() {
+        let conn = setup_db();
+        insert_test_screenshot(&conn);
+        // A query with no actual search terms must return empty, not error.
+        let results = search(&conn, "()", &SearchFilter::All, 10, 0).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn sanitize_fts5_query_quotes_and_prefixes_tokens() {
+        assert_eq!(sanitize_fts5_query("foo bar"), "\"foo\"* \"bar\"*");
+        // FTS5-significant punctuation stays inside the quoted literal.
+        assert_eq!(sanitize_fts5_query("foo(bar)"), "\"foo(bar)\"*");
+        // Internal double quotes are escaped by doubling.
+        assert_eq!(
+            sanitize_fts5_query("say \"hi\""),
+            "\"say\"* \"\"\"hi\"\"\"*"
+        );
+    }
+
+    #[test]
+    fn map_fts5_error_does_not_leak_query() {
+        // HEU-479: a syntax error must not echo the raw query back to the UI.
+        let conn = setup_db();
+        let secret = "leakyterm)";
+        let mut stmt = conn
+            .prepare("SELECT rowid FROM screenshots_fts WHERE screenshots_fts MATCH ?1")
+            .unwrap();
+        let err = stmt
+            .query_map(params![secret], |_| -> rusqlite::Result<()> { Ok(()) })
+            .and_then(|rows| rows.collect::<rusqlite::Result<Vec<()>>>())
+            .expect_err("raw punctuation must trigger an FTS5 syntax error");
+        let msg = map_fts5_error(err, secret).to_string();
+        assert!(!msg.contains("leakyterm"), "must not leak the query: {msg}");
     }
 }
