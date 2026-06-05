@@ -11,6 +11,7 @@ struct SearchPopoverView: View {
     @State private var results: [SearchHit] = []
     @State private var isLoading: Bool = false
     @State private var requestID: UInt64 = 0
+    @State private var searchError: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -103,6 +104,10 @@ struct SearchPopoverView: View {
             Text("Start typing to search your history")
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if !isLoading && searchError {
+            Text("Couldn't complete the search — try again.")
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if !isLoading && results.isEmpty {
             Text("No matches")
                 .foregroundStyle(.secondary)
@@ -133,12 +138,14 @@ struct SearchPopoverView: View {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             results = []
+            searchError = false
             isLoading = false
             return
         }
         try? await Task.sleep(for: .milliseconds(200))
         if Task.isCancelled || requestID != myID { return }
         isLoading = true
+        searchError = false
         defer { if requestID == myID { isLoading = false } }
         do {
             let hits = try await connection.search(trimmed, limit: 50, offset: 0)
@@ -148,7 +155,13 @@ struct SearchPopoverView: View {
         } catch is CancellationError {
             // ignore — task cancelled before the request landed
         } catch {
-            if requestID == myID { results = [] }
+            // A non-cancellation error means the daemon or IPC failed. Surface
+            // it instead of rendering an empty result set as a misleading
+            // "No matches". See HEU-478.
+            if requestID == myID {
+                results = []
+                searchError = true
+            }
         }
     }
 
