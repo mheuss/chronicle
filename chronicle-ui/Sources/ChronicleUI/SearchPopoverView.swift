@@ -13,6 +13,31 @@ struct SearchPopoverView: View {
     @State private var requestID: UInt64 = 0
     @State private var searchError: Bool = false
 
+    /// Which message the search area should render. A pure function of the
+    /// inputs so it can be unit-tested without driving the SwiftUI view — the
+    /// HEU-478 error-vs-no-match disambiguation lives here.
+    enum SearchContent: Equatable {
+        case disconnected
+        case prompt
+        case searchFailed
+        case noMatches
+        case results
+    }
+
+    static func searchContent(
+        connected: Bool,
+        queryEmpty: Bool,
+        isLoading: Bool,
+        searchError: Bool,
+        hasResults: Bool
+    ) -> SearchContent {
+        if !connected { return .disconnected }
+        if queryEmpty { return .prompt }
+        if !isLoading && searchError { return .searchFailed }
+        if !isLoading && !hasResults { return .noMatches }
+        return .results
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if showPausedBanner {
@@ -98,21 +123,28 @@ struct SearchPopoverView: View {
 
     @ViewBuilder
     private var content: some View {
-        if connection.state != .connected {
+        switch Self.searchContent(
+            connected: connection.state == .connected,
+            queryEmpty: query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            isLoading: isLoading,
+            searchError: searchError,
+            hasResults: !results.isEmpty
+        ) {
+        case .disconnected:
             EmptyView()
-        } else if query.trimmingCharacters(in: .whitespaces).isEmpty {
+        case .prompt:
             Text("Start typing to search your history")
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if !isLoading && searchError {
+        case .searchFailed:
             Text("Couldn't complete the search — try again.")
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if !isLoading && results.isEmpty {
+        case .noMatches:
             Text("No matches")
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
+        case .results:
             // [A11y] Wrap each row in a Button so the result is keyboard-
             // accessible (Tab/Shift-Tab to focus, Return/Space to open).
             List(results) { hit in
@@ -135,17 +167,18 @@ struct SearchPopoverView: View {
     private func runSearch() async {
         let myID = requestID &+ 1
         requestID = myID
+        // Clear any prior error the instant the user edits, before the debounce
+        // sleep — otherwise the failure message lingers for ~200ms (HEU-478).
+        searchError = false
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             results = []
-            searchError = false
             isLoading = false
             return
         }
         try? await Task.sleep(for: .milliseconds(200))
         if Task.isCancelled || requestID != myID { return }
         isLoading = true
-        searchError = false
         defer { if requestID == myID { isLoading = false } }
         do {
             let hits = try await connection.search(trimmed, limit: 50, offset: 0)
