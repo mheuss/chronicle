@@ -67,7 +67,7 @@ pub(crate) fn search(
                     rank,
                 })
             })
-            .map_err(|e| map_fts5_error(e, query))?;
+            .map_err(|e| map_fts5_error(e, query.chars().count()))?;
 
         for row in rows {
             results.push(row?);
@@ -108,7 +108,7 @@ pub(crate) fn search(
                     rank,
                 })
             })
-            .map_err(|e| map_fts5_error(e, query))?;
+            .map_err(|e| map_fts5_error(e, query.chars().count()))?;
 
         for row in rows {
             results.push(row?);
@@ -135,7 +135,10 @@ pub(crate) fn search(
 /// punctuation literal so arbitrary input cannot produce a syntax error;
 /// space-joining preserves the default AND semantics across tokens; and the
 /// wildcard enables prefix matching. Internal double quotes are escaped by
-/// doubling, per FTS5 string rules.
+/// doubling, per FTS5 string rules. Non-alphanumeric tokens survive as quoted
+/// literals (e.g. `()` -> `"()"*`); `search()` short-circuits input with no
+/// alphanumeric characters before calling this, since FTS5 rejects an empty
+/// MATCH expression.
 fn sanitize_fts5_query(query: &str) -> String {
     query
         .split_whitespace()
@@ -146,21 +149,18 @@ fn sanitize_fts5_query(query: &str) -> String {
 
 /// Map FTS5 syntax errors to a generic `StorageError`.
 ///
-/// The raw query is deliberately excluded from the returned message. That
-/// message flows to the UI as `Response::Error`, and any caller that logs it
-/// would capture user query content, breaking the "log lengths only" PII
-/// discipline used in `ipc_handler`. The query length is logged at debug for
-/// diagnostics instead. See HEU-479. (Since `sanitize_fts5_query` makes user
-/// input valid FTS5, this path is not expected to fire from `search()`; it
-/// stays as defense-in-depth.)
-fn map_fts5_error(err: rusqlite::Error, query: &str) -> StorageError {
+/// Takes the query *length*, not the query, so it cannot leak user content. The
+/// returned message flows to the UI as `Response::Error`, and the underlying
+/// SQLite message can itself echo a query token (e.g. "no such column:
+/// <token>") — so neither the query nor `msg` is included anywhere that
+/// escapes, only the length at debug. This keeps the "log lengths only" PII
+/// discipline used in `ipc_handler`. See HEU-479. (Since `sanitize_fts5_query`
+/// makes user input valid FTS5, this path is not expected to fire from
+/// `search()`; it stays as defense-in-depth.)
+fn map_fts5_error(err: rusqlite::Error, query_len: usize) -> StorageError {
     let msg = err.to_string();
     if msg.contains("fts5: syntax error") {
-        log::debug!(
-            "invalid FTS5 query (q_len={}): {}",
-            query.chars().count(),
-            msg
-        );
+        log::debug!("rejected invalid FTS5 query (q_len={query_len})");
         StorageError::Other("invalid search query syntax".into())
     } else {
         StorageError::Database(err)
@@ -371,7 +371,29 @@ mod tests {
             .query_map(params![secret], |_| -> rusqlite::Result<()> { Ok(()) })
             .and_then(|rows| rows.collect::<rusqlite::Result<Vec<()>>>())
             .expect_err("raw punctuation must trigger an FTS5 syntax error");
-        let msg = map_fts5_error(err, secret).to_string();
+        let msg = map_fts5_error(err, secret.chars().count()).to_string();
         assert!(!msg.contains("leakyterm"), "must not leak the query: {msg}");
+    }
+
+    #[test]
+    fn search_with_punctuation_matches_audio() {
+        // The same sanitization must protect the audio FTS branch, not just screens.
+        let conn = setup_db();
+        insert_test_audio(&conn); // transcript: "discussing the kubernetes deployment strategy"
+
+        let results = search(&conn, "deployment)", &SearchFilter::All, 10, 0)
+            .expect("punctuation query must not be an FTS5 syntax error");
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].source, SearchSource::Audio(_)));
+    }
+
+    #[test]
+    fn search_whitespace_only_returns_empty() {
+        // No alphanumeric characters -> no search terms -> empty, not an error.
+        let conn = setup_db();
+        insert_test_screenshot(&conn);
+
+        let results = search(&conn, "   \t  ", &SearchFilter::All, 10, 0).unwrap();
+        assert!(results.is_empty());
     }
 }
