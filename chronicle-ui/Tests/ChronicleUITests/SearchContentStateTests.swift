@@ -59,4 +59,13 @@ struct SearchContentStateTests {
         )
         #expect(state == .results)
     }
+
+    @Test("an error takes precedence even when stale results are present")
+    func errorBeatsStaleResults() {
+        let state = SearchPopoverView.searchContent(
+            connected: true, queryEmpty: false, isLoading: false,
+            searchError: true, hasResults: true
+        )
+        #expect(state == .searchFailed)
+    }
 }

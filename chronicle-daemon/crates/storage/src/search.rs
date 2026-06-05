@@ -138,7 +138,9 @@ pub(crate) fn search(
 /// doubling, per FTS5 string rules. Non-alphanumeric tokens survive as quoted
 /// literals (e.g. `()` -> `"()"*`); `search()` short-circuits input with no
 /// alphanumeric characters before calling this, since FTS5 rejects an empty
-/// MATCH expression.
+/// MATCH expression. Punctuation *inside* a token (e.g. `foo.bar` -> `"foo.bar"*`)
+/// tokenizes to an adjacent-phrase prefix — it matches `foo` next to `bar`, not
+/// the two as independent AND terms.
 fn sanitize_fts5_query(query: &str) -> String {
     query
         .split_whitespace()
@@ -395,5 +397,19 @@ mod tests {
 
         let results = search(&conn, "   \t  ", &SearchFilter::All, 10, 0).unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_intra_token_punctuation_is_adjacent_phrase() {
+        // A token with internal punctuation sanitizes to a quoted phrase, so it
+        // matches the words ADJACENT (finds "kubernetes deployment" together)
+        // rather than as independent AND terms anywhere in the document.
+        let conn = setup_db();
+        insert_test_screenshot(&conn); // "deployment pipeline kubernetes cluster" (not adjacent)
+        insert_test_audio(&conn); // "...the kubernetes deployment strategy" (adjacent)
+
+        let results = search(&conn, "kubernetes.deployment", &SearchFilter::All, 10, 0).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].source, SearchSource::Audio(_)));
     }
 }
