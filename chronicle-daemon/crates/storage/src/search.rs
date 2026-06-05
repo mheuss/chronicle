@@ -149,24 +149,27 @@ fn sanitize_fts5_query(query: &str) -> String {
         .join(" ")
 }
 
-/// Map FTS5 syntax errors to a generic `StorageError`.
+/// Map an FTS5 `MATCH` query failure to a generic, PII-safe `StorageError`.
 ///
-/// Takes the query *length*, not the query, so it cannot leak user content. The
-/// returned message flows to the UI as `Response::Error`, and the underlying
-/// SQLite message can itself echo a query token (e.g. "no such column:
-/// <token>") — so neither the query nor `msg` is included anywhere that
-/// escapes, only the length at debug. This keeps the "log lengths only" PII
-/// discipline used in `ipc_handler`. See HEU-479. (Since `sanitize_fts5_query`
-/// makes user input valid FTS5, this path is not expected to fire from
-/// `search()`; it stays as defense-in-depth.)
+/// Takes the query *length*, not the query, so it cannot leak user content. FTS5
+/// MATCH parse failures — syntax errors, `"no such column: <token>"` from a
+/// `tok:` / `-1` column-filter form, unterminated strings — all surface as
+/// SQLite's generic error code (`ErrorCode::Unknown` == SQLITE_ERROR), and their
+/// messages can echo the user's query token. Any such error is scrubbed to a
+/// fixed message, because the returned text flows to the UI as `Response::Error`
+/// and `StorageError::Database`'s `Display` would otherwise carry that token.
+/// Genuine infrastructure failures (I/O, corruption, locking — distinct codes)
+/// pass through unchanged. Only the length is logged. See HEU-479. (After
+/// `sanitize_fts5_query`, user input is valid FTS5, so this is defense-in-depth.)
 fn map_fts5_error(err: rusqlite::Error, query_len: usize) -> StorageError {
-    let msg = err.to_string();
-    if msg.contains("fts5: syntax error") {
+    if matches!(
+        &err,
+        rusqlite::Error::SqliteFailure(e, _) if e.code == rusqlite::ErrorCode::Unknown
+    ) {
         log::debug!("rejected invalid FTS5 query (q_len={query_len})");
-        StorageError::Other("invalid search query syntax".into())
-    } else {
-        StorageError::Database(err)
+        return StorageError::Other("invalid search query syntax".into());
     }
+    StorageError::Database(err)
 }
 
 #[cfg(test)]
@@ -375,6 +378,31 @@ mod tests {
             .expect_err("raw punctuation must trigger an FTS5 syntax error");
         let msg = map_fts5_error(err, secret.chars().count()).to_string();
         assert!(!msg.contains("leakyterm"), "must not leak the query: {msg}");
+    }
+
+    #[test]
+    fn map_fts5_error_scrubs_non_syntax_parse_errors() {
+        // A column-filter form ("tok:") yields "no such column: <tok>", which is
+        // NOT "fts5: syntax error" but still echoes the user's token, so it must
+        // be scrubbed too. Regression for the PR #27 review (HEU-479).
+        let conn = setup_db();
+        let secret = "topsecret:x";
+        let mut stmt = conn
+            .prepare("SELECT rowid FROM screenshots_fts WHERE screenshots_fts MATCH ?1")
+            .unwrap();
+        let err = stmt
+            .query_map(params![secret], |_| -> rusqlite::Result<()> { Ok(()) })
+            .and_then(|rows| rows.collect::<rusqlite::Result<Vec<()>>>())
+            .expect_err("column-filter query should be an FTS5 parse error");
+        assert!(
+            err.to_string().contains("no such column"),
+            "test premise: expected a non-syntax FTS5 parse error, got: {err}"
+        );
+        let msg = map_fts5_error(err, secret.chars().count()).to_string();
+        assert!(
+            !msg.contains("topsecret"),
+            "must not leak the query token: {msg}"
+        );
     }
 
     #[test]
