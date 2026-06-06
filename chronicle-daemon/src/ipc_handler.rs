@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
@@ -11,6 +11,21 @@ use chronicle_ipc::{
 use tokio::sync::mpsc;
 
 use crate::pipeline::counters::PipelineCounters;
+
+/// Sample rate for the INFO search-latency log: 1 in N successful searches.
+/// DEBUG carries every search but is off by default; this sampled INFO line
+/// keeps NFR-1 (search p95 < 200ms) observable in production without flooding
+/// the logs. See HEU-484.
+const SEARCH_SAMPLE_RATE: u64 = 20;
+
+/// Monotonic counter of successful searches, used only to sample the INFO log.
+static SEARCH_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the `n`th (0-based) successful search should emit the sampled INFO
+/// latency line. Factored out so the cadence is unit-testable.
+fn should_sample_search(n: u64) -> bool {
+    n.is_multiple_of(SEARCH_SAMPLE_RATE)
+}
 
 /// In-process control message: a mic toggle request plus its reply channel.
 pub(crate) struct MicCommand {
@@ -269,17 +284,34 @@ impl RequestHandler for DaemonHandler {
                 });
                 match result {
                     Ok(rows) => {
+                        let elapsed = started.elapsed();
+                        let q_len = query.chars().count();
+                        let hits = rows.len();
                         // [Security] Log the query LENGTH, not the query content.
                         // The query is whatever the user typed and may contain PII
                         // or other sensitive context they were searching for.
                         log::debug!(
-                            "search q_len={} limit={} offset={} -> {} hits in {:?}",
-                            query.chars().count(),
-                            limit,
-                            offset,
-                            rows.len(),
-                            started.elapsed(),
+                            "search q_len={q_len} limit={limit} offset={offset} -> {hits} hits in {elapsed:?}"
                         );
+                        // HEU-484: DEBUG is off by default, so NFR-1 (search p95 <
+                        // 200ms) isn't observable in production. Emit a sampled INFO
+                        // line (1 in SEARCH_SAMPLE_RATE) — light enough for INFO,
+                        // dense enough to compute p95 offline. Same PII-safe fields,
+                        // plus an integer `latency_us` (microseconds, not Duration's
+                        // unit-variable `{:?}`) so the percentile is trivial to compute
+                        // offline; µs avoids truncating sub-millisecond searches to 0.
+                        // The counter sits in this Ok arm by design: failed searches
+                        // (rare, not meaningfully timeable) are intentionally excluded
+                        // from the sample population. `Relaxed` is sufficient — the
+                        // counter is a standalone tally with no happens-before tie to
+                        // other state, and `fetch_add` is atomic so no count is lost.
+                        let n = SEARCH_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+                        if should_sample_search(n) {
+                            let latency_us = elapsed.as_micros();
+                            log::info!(
+                                "search latency sample: q_len={q_len} hits={hits} latency_us={latency_us}"
+                            );
+                        }
                         Response::Search {
                             ok: true,
                             hits: rows.into_iter().map(search_hit_from_storage).collect(),
@@ -428,6 +460,17 @@ mod tests {
     use crate::permissions::MicrophoneStatus;
     use chronicle_audio::MicToggleOutcome;
     use chronicle_ipc::{MicState, Request, RequestHandler, Response};
+
+    #[test]
+    fn search_sampling_fires_every_nth_from_first() {
+        // 1-in-SEARCH_SAMPLE_RATE, with the very first search (n=0) sampled.
+        assert!(should_sample_search(0));
+        assert!(should_sample_search(SEARCH_SAMPLE_RATE));
+        assert!(should_sample_search(SEARCH_SAMPLE_RATE * 3));
+        assert!(!should_sample_search(1));
+        assert!(!should_sample_search(SEARCH_SAMPLE_RATE - 1));
+        assert!(!should_sample_search(SEARCH_SAMPLE_RATE + 1));
+    }
 
     #[test]
     fn storage_status_snapshot_default_has_zeroes() {
