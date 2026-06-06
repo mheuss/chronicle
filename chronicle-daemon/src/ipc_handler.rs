@@ -285,13 +285,16 @@ impl RequestHandler for DaemonHandler {
                 match result {
                     Ok(rows) => {
                         let elapsed = started.elapsed();
-                        let q_len = query.chars().count();
                         let hits = rows.len();
                         // [Security] Log the query LENGTH, not the query content.
                         // The query is whatever the user typed and may contain PII
-                        // or other sensitive context they were searching for.
+                        // or other sensitive context they were searching for. The
+                        // length is computed inside the log calls (not hoisted) so the
+                        // O(n) char count is skipped on the common path — DEBUG off and
+                        // no sample this round.
                         log::debug!(
-                            "search q_len={q_len} limit={limit} offset={offset} -> {hits} hits in {elapsed:?}"
+                            "search q_len={} limit={limit} offset={offset} -> {hits} hits in {elapsed:?}",
+                            query.chars().count()
                         );
                         // HEU-484: DEBUG is off by default, so NFR-1 (search p95 <
                         // 200ms) isn't observable in production. Emit a sampled INFO
@@ -309,7 +312,8 @@ impl RequestHandler for DaemonHandler {
                         if should_sample_search(n) {
                             let latency_us = elapsed.as_micros();
                             log::info!(
-                                "search latency sample: q_len={q_len} hits={hits} latency_us={latency_us}"
+                                "search latency sample: q_len={} hits={hits} latency_us={latency_us}",
+                                query.chars().count()
                             );
                         }
                         Response::Search {
