@@ -209,14 +209,44 @@ pub fn bridge_audio_segments(
 pub async fn audio_store_loop(
     storage: Arc<Storage>,
     mut segment_rx: mpsc::Receiver<CompletedSegment>,
+    transcription: Arc<dyn crate::pipeline::sinks::TranscriptionSink>,
     counters: Arc<crate::pipeline::counters::PipelineCounters>,
 ) {
+    use crate::pipeline::sinks::{TranscriptionEnqueueResult, TranscriptionJob};
+    use std::sync::atomic::Ordering;
+
     while let Some(segment) = segment_rx.recv().await {
         match process_audio_segment(&storage, &segment).await {
-            Ok(()) => {
+            Ok((row_id, dest_path)) => {
                 counters
                     .audio_segments_persisted
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    .fetch_add(1, Ordering::Relaxed);
+                match transcription.try_enqueue(TranscriptionJob {
+                    row_id,
+                    audio_path: dest_path,
+                }) {
+                    TranscriptionEnqueueResult::Enqueued => {
+                        counters
+                            .transcription_enqueued
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    TranscriptionEnqueueResult::ChannelFull => {
+                        let n = counters
+                            .transcription_dropped
+                            .fetch_add(1, Ordering::Relaxed)
+                            + 1;
+                        if n.is_multiple_of(100) {
+                            log::warn!("transcription channel full; shedding (total drops: {n})");
+                        }
+                    }
+                    TranscriptionEnqueueResult::ChannelClosed => {
+                        counters
+                            .transcription_dropped
+                            .fetch_add(1, Ordering::Relaxed);
+                        log::warn!("transcription channel closed; enqueue dropped");
+                    }
+                    TranscriptionEnqueueResult::Disabled => {} // no model — idle, not a drop
+                }
             }
             Err(e) => {
                 log::error!(
@@ -233,7 +263,7 @@ pub async fn audio_store_loop(
 async fn process_audio_segment(
     storage: &Storage,
     segment: &CompletedSegment,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(i64, PathBuf)> {
     // 1. Allocate permanent path via storage (sanitizes source identifier)
     let dest_path = storage
         .allocate_audio_path(segment.start_timestamp, segment.source.as_str())
@@ -265,7 +295,7 @@ async fn process_audio_segment(
                 segment.source.as_str(),
                 segment.start_timestamp
             );
-            Ok(())
+            Ok((row_id, dest_path))
         }
         Err(e) => {
             let _ = storage.media_manager().delete_file(&dest_path);
@@ -451,7 +481,13 @@ mod tests {
         tx.send(segment).await.unwrap();
         drop(tx);
 
-        audio_store_loop(storage.clone(), rx, PipelineCounters::new()).await;
+        audio_store_loop(
+            storage.clone(),
+            rx,
+            Arc::new(crate::pipeline::sinks::NoopTranscriptionSink),
+            PipelineCounters::new(),
+        )
+        .await;
 
         assert!(
             !staging_file.exists(),
@@ -467,6 +503,60 @@ mod tests {
         let perm_path = std::path::Path::new(&audio.audio_path);
         assert!(perm_path.exists(), "permanent audio file should exist");
         assert_eq!(std::fs::read(perm_path).unwrap(), b"fake opus data");
+    }
+
+    #[derive(Default)]
+    struct RecordingTranscriptionSink {
+        jobs: std::sync::Mutex<Vec<crate::pipeline::sinks::TranscriptionJob>>,
+    }
+    impl crate::pipeline::sinks::TranscriptionSink for RecordingTranscriptionSink {
+        fn try_enqueue(
+            &self,
+            job: crate::pipeline::sinks::TranscriptionJob,
+        ) -> crate::pipeline::sinks::TranscriptionEnqueueResult {
+            self.jobs.lock().unwrap().push(job);
+            crate::pipeline::sinks::TranscriptionEnqueueResult::Enqueued
+        }
+    }
+
+    #[tokio::test]
+    async fn audio_store_loop_enqueues_permanent_path() {
+        use crate::pipeline::counters::PipelineCounters;
+        use chronicle_audio::{AudioSource, CompletedSegment};
+        use std::sync::atomic::Ordering;
+
+        let (storage, dir) = temp_storage().await;
+        let staging_dir = dir.path().join("audio-staging");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        let staging_file = staging_dir.join("enqueue_test.opus");
+        std::fs::write(&staging_file, b"fake opus data").unwrap();
+
+        let segment = CompletedSegment {
+            source: AudioSource::Microphone,
+            path: staging_file,
+            start_timestamp: 1_700_000_000_000,
+            end_timestamp: 1_700_000_030_000,
+        };
+
+        let counters = PipelineCounters::new();
+        let sink = Arc::new(RecordingTranscriptionSink::default());
+        let (tx, rx) = mpsc::channel(4);
+        tx.send(segment).await.unwrap();
+        drop(tx);
+        audio_store_loop(storage.clone(), rx, sink.clone(), Arc::clone(&counters)).await;
+
+        // Copy out of the guard before awaiting so we don't hold the lock
+        // across the DB call (clippy::await_holding_lock).
+        let (job_count, enqueued_row_id, enqueued_path) = {
+            let jobs = sink.jobs.lock().unwrap();
+            (jobs.len(), jobs[0].row_id, jobs[0].audio_path.clone())
+        };
+        assert_eq!(job_count, 1);
+        // The enqueued path is the persisted (permanent) path, and it exists.
+        let seg = storage.get_audio_segment(enqueued_row_id).await.unwrap();
+        assert_eq!(enqueued_path.to_string_lossy(), seg.audio_path);
+        assert!(enqueued_path.exists());
+        assert_eq!(counters.transcription_enqueued.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
@@ -499,7 +589,13 @@ mod tests {
         tx.send(good_segment).await.unwrap();
         drop(tx);
 
-        audio_store_loop(storage.clone(), rx, PipelineCounters::new()).await;
+        audio_store_loop(
+            storage.clone(),
+            rx,
+            Arc::new(crate::pipeline::sinks::NoopTranscriptionSink),
+            PipelineCounters::new(),
+        )
+        .await;
 
         let audio = storage.get_audio_segment(1).await.unwrap();
         assert_eq!(audio.source, "mic");
@@ -514,7 +610,13 @@ mod tests {
         let (storage, _dir) = temp_storage().await;
         let (_tx, rx) = mpsc::channel::<CompletedSegment>(16);
         drop(_tx);
-        audio_store_loop(storage, rx, PipelineCounters::new()).await;
+        audio_store_loop(
+            storage,
+            rx,
+            Arc::new(crate::pipeline::sinks::NoopTranscriptionSink),
+            PipelineCounters::new(),
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -540,7 +642,13 @@ mod tests {
         drop(tx);
 
         let counters = PipelineCounters::new();
-        audio_store_loop(storage.clone(), rx, Arc::clone(&counters)).await;
+        audio_store_loop(
+            storage.clone(),
+            rx,
+            Arc::new(crate::pipeline::sinks::NoopTranscriptionSink),
+            Arc::clone(&counters),
+        )
+        .await;
 
         assert_eq!(counters.snapshot().audio_segments_persisted, 1);
     }
@@ -571,7 +679,13 @@ mod tests {
         tx.send(segment).await.unwrap();
         drop(tx);
 
-        audio_store_loop(storage.clone(), rx, PipelineCounters::new()).await;
+        audio_store_loop(
+            storage.clone(),
+            rx,
+            Arc::new(crate::pipeline::sinks::NoopTranscriptionSink),
+            PipelineCounters::new(),
+        )
+        .await;
 
         let audio = storage.get_audio_segment(1).await.unwrap();
         let perm_path = std::path::Path::new(&audio.audio_path);
