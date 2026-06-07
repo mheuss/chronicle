@@ -27,7 +27,7 @@ chronicle-ocr = { path = "crates/ocr" }
 chronicle-audio = { path = "crates/audio" }
 chronicle-storage = { path = "crates/storage" }
 chronicle-ipc = { path = "crates/ipc" }
-chronicle-transcription = { path = "crates/transcription" }
+chronicle-transcription = { path = "crates/transcription", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 env_logger = "0.11"
 log = "0.4"
@@ -37,6 +37,11 @@ objc2-foundation = { version = "0.3", features = ["NSString"] }
 thiserror = "2"
 arc-swap = "1"
 async-trait = "0.1"
+
+[features]
+default = ["transcription-metal"]
+transcription-metal = ["chronicle-transcription/metal"]
+transcription-cpu = ["chronicle-transcription/cpu"]
 
 [dev-dependencies]
 tempfile = "3"

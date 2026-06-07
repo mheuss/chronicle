@@ -3,8 +3,20 @@ name = "chronicle-transcription"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
-description = "Audio transcription placeholder — speech-to-text engine TBD"
+description = "Whisper.cpp transcription engine + Opus decode for captured audio"
 license = "MIT"
+
+[dependencies]
+whisper-rs = { version = "0.14", default-features = false }
+opus = "0.3"
+ogg = "0.9"
+thiserror = "2"
+
+[features]
+default = ["metal"]
+metal = ["whisper-rs/metal"]
+cpu = []
 
 [dev-dependencies]
 tempfile = "3"
+chronicle-audio = { path = "../audio" }
