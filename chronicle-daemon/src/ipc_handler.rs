@@ -236,6 +236,8 @@ impl RequestHandler for DaemonHandler {
                         },
                         audio: AudioStats {
                             segments_persisted: c.audio_segments_persisted,
+                            transcription_enqueued: c.transcription_enqueued,
+                            transcription_dropped: c.transcription_dropped,
                             mic_state: MicState::from_u8(self.mic_state.load(Ordering::Acquire)),
                         },
                         storage: StorageStats {

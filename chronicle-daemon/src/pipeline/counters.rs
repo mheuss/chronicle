@@ -17,6 +17,8 @@ pub struct PipelineCounters {
     pub ocr_enqueued: AtomicU64,
     pub ocr_dropped: AtomicU64,
     pub audio_segments_persisted: AtomicU64,
+    pub transcription_enqueued: AtomicU64,
+    pub transcription_dropped: AtomicU64,
 }
 
 impl PipelineCounters {
@@ -31,6 +33,8 @@ impl PipelineCounters {
             ocr_enqueued: self.ocr_enqueued.load(Ordering::Relaxed),
             ocr_dropped: self.ocr_dropped.load(Ordering::Relaxed),
             audio_segments_persisted: self.audio_segments_persisted.load(Ordering::Relaxed),
+            transcription_enqueued: self.transcription_enqueued.load(Ordering::Relaxed),
+            transcription_dropped: self.transcription_dropped.load(Ordering::Relaxed),
         }
     }
 }
@@ -43,4 +47,6 @@ pub struct CountersSnapshot {
     pub ocr_enqueued: u64,
     pub ocr_dropped: u64,
     pub audio_segments_persisted: u64,
+    pub transcription_enqueued: u64,
+    pub transcription_dropped: u64,
 }
