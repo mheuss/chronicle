@@ -176,6 +176,74 @@ pub async fn ocr_loop(storage: Arc<Storage>, mut ocr_rx: mpsc::Receiver<(i64, Pa
     log::info!("OCR loop exiting (channel closed)");
 }
 
+/// Transcribe persisted audio segments off the tokio runtime and store the text.
+///
+/// Heavy work (Opus decode + whisper) runs inside `spawn_blocking` so it never
+/// starves tokio workers (cf. HEU-480). Each pulled job is processed to
+/// completion before the next `select!`, so at most one whisper call is in flight
+/// (sequential). On `cancel` the loop stops pulling **new** jobs, finishes the
+/// in-flight one, and exits — queued jobs are dropped (rows stay NULL for a
+/// future backfill). Empty results are skipped so blank rows never reach
+/// `audio_fts`. Also exits when the channel closes.
+// Spawned in main.rs in Task 10 (HEU-472); unused until then.
+#[allow(dead_code)]
+pub async fn transcribe_loop(
+    engine: Arc<dyn chronicle_transcription::Transcriber>,
+    storage: Arc<Storage>,
+    mut rx: mpsc::Receiver<crate::pipeline::sinks::TranscriptionJob>,
+    cancel: chronicle_ipc::CancellationToken,
+) {
+    loop {
+        let job = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            maybe = rx.recv() => match maybe {
+                Some(job) => job,
+                None => break,
+            },
+        };
+
+        // Clone a separate Arc for the blocking closure; the outer `engine` stays
+        // owned so `engine.variant()` is usable after the await.
+        let engine_for_blocking = Arc::clone(&engine);
+        let path = job.audio_path.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let pcm = chronicle_transcription::decode_opus_16k_mono(&path)?;
+            engine_for_blocking.transcribe(&pcm)
+        })
+        .await;
+
+        match result {
+            Ok(Ok(transcript)) => {
+                if transcript.text.is_empty() {
+                    log::debug!(
+                        "transcription skipped (no usable speech) for segment {}",
+                        job.row_id
+                    );
+                    continue;
+                }
+                if let Err(e) = storage
+                    .update_transcript_full(
+                        job.row_id,
+                        transcript.text,
+                        engine.variant().to_string(),
+                        transcript.language,
+                    )
+                    .await
+                {
+                    log::error!("failed to store transcript for segment {}: {e}", job.row_id);
+                }
+            }
+            Ok(Err(e)) => log::warn!("transcription failed for segment {}: {e}", job.row_id),
+            Err(e) => log::error!(
+                "transcription task panicked for segment {}: {e}",
+                job.row_id
+            ),
+        }
+    }
+    log::info!("Transcribe loop exiting");
+}
+
 /// Bridge std::sync::mpsc to tokio::mpsc for audio segments.
 ///
 /// Runs on a dedicated OS thread. Reads from the sync receiver and
@@ -1023,5 +1091,157 @@ mod tests {
         .unwrap();
         let s = counters.snapshot();
         assert_eq!(s.ocr_dropped, 1);
+    }
+
+    // --- `transcribe_loop` tests (Task 9) ---
+
+    struct FakeTranscriber {
+        text: String,
+    }
+    impl chronicle_transcription::Transcriber for FakeTranscriber {
+        fn transcribe(
+            &self,
+            _pcm: &[f32],
+        ) -> Result<chronicle_transcription::Transcript, chronicle_transcription::TranscriptionError>
+        {
+            Ok(chronicle_transcription::Transcript {
+                text: self.text.clone(),
+                language: Some("en".into()),
+            })
+        }
+        fn variant(&self) -> &str {
+            "base"
+        }
+    }
+
+    // Persist a row whose audio_path points at a real .opus file. Returns the
+    // TempDir so the caller keeps it (and the file) alive for the test's duration.
+    async fn persist_segment_with_opus()
+    -> (Arc<Storage>, i64, std::path::PathBuf, tempfile::TempDir) {
+        use chronicle_audio::OggOpusEncoder;
+        let (storage, dir) = temp_storage().await;
+        let path = dir.path().join("seg.opus");
+        let samples: Vec<f32> = (0..48_000)
+            .map(|i| (i as f32 * 220.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.2)
+            .collect();
+        OggOpusEncoder::new(1, 24_000, opus::Application::Voip)
+            .encode_to_file(&samples, &path)
+            .unwrap();
+        let row_id = storage
+            .insert_audio_segment(chronicle_storage::AudioSegmentMetadata {
+                start_timestamp: 1_700_000_000_000,
+                end_timestamp: 1_700_000_030_000,
+                source: "mic".into(),
+                audio_path: path.to_string_lossy().into_owned(),
+                transcript: None,
+                whisper_model: None,
+                language: None,
+            })
+            .await
+            .unwrap();
+        (storage, row_id, path, dir)
+    }
+
+    #[tokio::test]
+    async fn transcribe_loop_writes_transcript() {
+        let (storage, row_id, opus_path, _dir) = persist_segment_with_opus().await;
+        let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(FakeTranscriber {
+            text: "the quick brown fox".into(),
+        });
+        let (tx, rx) = mpsc::channel(4);
+        tx.send(crate::pipeline::sinks::TranscriptionJob {
+            row_id,
+            audio_path: opus_path,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        transcribe_loop(
+            engine,
+            storage.clone(),
+            rx,
+            chronicle_ipc::CancellationToken::new(),
+        )
+        .await;
+
+        let seg = storage.get_audio_segment(row_id).await.unwrap();
+        assert_eq!(seg.transcript.as_deref(), Some("the quick brown fox"));
+        assert_eq!(seg.whisper_model.as_deref(), Some("base"));
+        assert_eq!(seg.language.as_deref(), Some("en"));
+    }
+
+    #[tokio::test]
+    async fn transcribe_loop_skips_empty_transcript() {
+        let (storage, row_id, opus_path, _dir) = persist_segment_with_opus().await;
+        let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(FakeTranscriber {
+            text: String::new(),
+        });
+        let (tx, rx) = mpsc::channel(4);
+        tx.send(crate::pipeline::sinks::TranscriptionJob {
+            row_id,
+            audio_path: opus_path,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        transcribe_loop(
+            engine,
+            storage.clone(),
+            rx,
+            chronicle_ipc::CancellationToken::new(),
+        )
+        .await;
+
+        let seg = storage.get_audio_segment(row_id).await.unwrap();
+        assert!(seg.transcript.is_none());
+    }
+
+    #[tokio::test]
+    async fn transcribe_loop_continues_on_missing_file() {
+        let (storage, row_id, _opus_path, _dir) = persist_segment_with_opus().await;
+        let engine: Arc<dyn chronicle_transcription::Transcriber> =
+            Arc::new(FakeTranscriber { text: "x".into() });
+        let (tx, rx) = mpsc::channel(4);
+        tx.send(crate::pipeline::sinks::TranscriptionJob {
+            row_id,
+            audio_path: "/no/such.opus".into(),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        transcribe_loop(
+            engine,
+            storage.clone(),
+            rx,
+            chronicle_ipc::CancellationToken::new(),
+        )
+        .await;
+        let seg = storage.get_audio_segment(row_id).await.unwrap();
+        assert!(seg.transcript.is_none());
+    }
+
+    #[tokio::test]
+    async fn transcribe_loop_cancel_drops_queued() {
+        let (storage, row_id, opus_path, _dir) = persist_segment_with_opus().await;
+        let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(FakeTranscriber {
+            text: "should not be written".into(),
+        });
+        let (tx, rx) = mpsc::channel(4);
+        tx.send(crate::pipeline::sinks::TranscriptionJob {
+            row_id,
+            audio_path: opus_path,
+        })
+        .await
+        .unwrap();
+        // Pre-cancelled token: the biased select breaks before pulling the job.
+        let cancel = chronicle_ipc::CancellationToken::new();
+        cancel.cancel();
+        transcribe_loop(engine, storage.clone(), rx, cancel).await;
+
+        let seg = storage.get_audio_segment(row_id).await.unwrap();
+        assert!(
+            seg.transcript.is_none(),
+            "queued job must be dropped on cancel"
+        );
     }
 }

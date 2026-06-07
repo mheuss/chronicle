@@ -260,6 +260,7 @@ dependencies = [
  "log",
  "objc2",
  "objc2-foundation",
+ "opus",
  "serde_json",
  "tempfile",
  "thiserror",
