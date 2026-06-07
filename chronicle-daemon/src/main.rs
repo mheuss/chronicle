@@ -237,11 +237,15 @@ async fn main() -> Result<()> {
         Arc<dyn pipeline::sinks::TranscriptionSink>,
         Option<tokio::task::JoinHandle<()>>,
     ) = if chronicle_transcription::model_present(storage.base_dir(), whisper_variant) {
-        match chronicle_transcription::TranscriptionEngine::load(
-            storage.base_dir(),
-            whisper_variant,
-        ) {
-            Ok(engine) => {
+        // Load the ggml model off the runtime — it's heavy blocking work
+        // (seconds for a large variant) and must not stall tokio workers (HEU-480).
+        let base_dir = storage.base_dir().to_path_buf();
+        let load_result = tokio::task::spawn_blocking(move || {
+            chronicle_transcription::TranscriptionEngine::load(&base_dir, whisper_variant)
+        })
+        .await;
+        match load_result {
+            Ok(Ok(engine)) => {
                 let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(engine);
                 // Bounded channel (64), matching the audio bridge: drop-on-full.
                 let (tx, rx) = tokio::sync::mpsc::channel(64);
@@ -265,15 +269,22 @@ async fn main() -> Result<()> {
                     Some(handle),
                 )
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 log::error!(
                     "transcription engine load failed ({whisper_variant}): {e} — staying idle"
                 );
                 (Arc::new(pipeline::sinks::NoopTranscriptionSink), None)
             }
+            Err(e) => {
+                log::error!(
+                    "transcription engine load task panicked ({whisper_variant}): {e} — staying idle"
+                );
+                (Arc::new(pipeline::sinks::NoopTranscriptionSink), None)
+            }
         }
     } else {
-        // model_present already logged the "model missing → idle" warning above.
+        // The startup model-presence check (line ~120) already logged the
+        // "model missing → idle" warning.
         (Arc::new(pipeline::sinks::NoopTranscriptionSink), None)
     };
     let audio_store_handle = tokio::spawn(pipeline::audio_store_loop(
@@ -551,7 +562,7 @@ async fn main() -> Result<()> {
         log::error!("Audio store task failed: {e}");
     }
 
-    // `cancel` fired at shutdown start (main.rs:454), so transcribe_loop has
+    // `cancel` fired at shutdown start, so transcribe_loop has
     // stopped taking new jobs, finished its in-flight one, and is exiting. Await
     // it. Queued-but-unstarted jobs were dropped (rows keep transcript = NULL for
     // a future backfill).
