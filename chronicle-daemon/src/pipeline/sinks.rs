@@ -58,6 +58,50 @@ impl OcrSink for TokioOcrSink {
     }
 }
 
+/// Forwards transcription jobs downstream. Implementations must not block.
+pub trait TranscriptionSink: Send + Sync {
+    fn try_enqueue(&self, job: TranscriptionJob) -> TranscriptionEnqueueResult;
+}
+
+/// A persisted audio segment ready for transcription. Carries the **permanent**
+/// path (post-move), never the staging path.
+pub struct TranscriptionJob {
+    pub row_id: i64,
+    pub audio_path: PathBuf,
+}
+
+/// Result of attempting to enqueue a transcription job.
+pub enum TranscriptionEnqueueResult {
+    Enqueued,
+    ChannelFull,
+    ChannelClosed,
+    /// No model loaded — transcription is idle; not a drop.
+    Disabled,
+}
+
+/// `tokio::mpsc`-backed `TranscriptionSink` (used when a model is loaded).
+pub struct TokioTranscriptionSink(pub mpsc::Sender<TranscriptionJob>);
+
+impl TranscriptionSink for TokioTranscriptionSink {
+    fn try_enqueue(&self, job: TranscriptionJob) -> TranscriptionEnqueueResult {
+        match self.0.try_send(job) {
+            Ok(()) => TranscriptionEnqueueResult::Enqueued,
+            Err(mpsc::error::TrySendError::Full(_)) => TranscriptionEnqueueResult::ChannelFull,
+            Err(mpsc::error::TrySendError::Closed(_)) => TranscriptionEnqueueResult::ChannelClosed,
+        }
+    }
+}
+
+/// No-op sink used when no model is present — enqueues are silently dropped as
+/// `Disabled` (not counted, since transcription is idle, not failing).
+pub struct NoopTranscriptionSink;
+
+impl TranscriptionSink for NoopTranscriptionSink {
+    fn try_enqueue(&self, _job: TranscriptionJob) -> TranscriptionEnqueueResult {
+        TranscriptionEnqueueResult::Disabled
+    }
+}
+
 #[async_trait]
 impl ScreenshotSink for Storage {
     async fn insert(&self, meta: ScreenshotMetadata) -> anyhow::Result<i64> {
@@ -68,5 +112,48 @@ impl ScreenshotSink for Storage {
         if let Err(e) = self.media_manager().delete_file(path) {
             log::warn!("failed to delete staged screenshot {}: {e}", path.display());
         }
+    }
+}
+
+#[cfg(test)]
+mod transcription_sink_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn tokio_sink_reports_full_then_closed() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let sink = TokioTranscriptionSink(tx);
+        let job = || TranscriptionJob {
+            row_id: 1,
+            audio_path: PathBuf::from("/tmp/a.opus"),
+        };
+
+        assert!(matches!(
+            sink.try_enqueue(job()),
+            TranscriptionEnqueueResult::Enqueued
+        ));
+        assert!(matches!(
+            sink.try_enqueue(job()),
+            TranscriptionEnqueueResult::ChannelFull
+        ));
+        drop(rx);
+        assert!(matches!(
+            sink.try_enqueue(job()),
+            TranscriptionEnqueueResult::ChannelClosed
+        ));
+    }
+
+    #[test]
+    fn noop_sink_reports_disabled() {
+        let sink = NoopTranscriptionSink;
+        let job = TranscriptionJob {
+            row_id: 1,
+            audio_path: PathBuf::from("/tmp/a.opus"),
+        };
+        assert!(matches!(
+            sink.try_enqueue(job),
+            TranscriptionEnqueueResult::Disabled
+        ));
     }
 }
