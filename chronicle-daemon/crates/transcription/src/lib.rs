@@ -73,6 +73,37 @@ pub fn model_present(base_dir: &Path, variant: ModelVariant) -> bool {
     model_path(base_dir, variant).is_file()
 }
 
+/// A finished transcription.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transcript {
+    pub text: String,
+    pub language: Option<String>,
+}
+
+/// Errors from model loading, Opus decoding, or the whisper call.
+#[derive(Debug, thiserror::Error)]
+pub enum TranscriptionError {
+    #[error("model load failed: {0}")]
+    ModelLoad(String),
+    #[error("opus decode failed: {0}")]
+    Decode(String),
+    #[error("whisper failed: {0}")]
+    Whisper(String),
+}
+
+/// Concatenate whisper sub-segment texts and trim. An empty result means "no
+/// usable speech" and the caller must skip the DB write so blank rows never reach
+/// `audio_fts`. whisper-rs 0.14.4 exposes no per-segment `no_speech_prob`, so
+/// probability filtering of music/noise is deferred (see the design §4); the
+/// `suppress_blank` whisper param plus this empty check is the 472 guard.
+pub fn concat_segment_text<'a>(segments: impl IntoIterator<Item = &'a str>) -> String {
+    let mut out = String::new();
+    for text in segments {
+        out.push_str(text);
+    }
+    out.trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +178,23 @@ mod tests {
         assert!(model_present(dir.path(), variant("base")));
         // Different variant at the same location is still missing.
         assert!(!model_present(dir.path(), variant("small")));
+    }
+
+    #[test]
+    fn concat_segment_text_joins_and_trims() {
+        let segs = ["  hello ", "world  "];
+        assert_eq!(concat_segment_text(segs.iter().copied()), "hello world");
+    }
+
+    #[test]
+    fn concat_segment_text_empty_for_no_segments() {
+        let segs: [&str; 0] = [];
+        assert_eq!(concat_segment_text(segs.iter().copied()), "");
+    }
+
+    #[test]
+    fn concat_segment_text_empty_for_whitespace_only() {
+        let segs = ["   ", "\n\t"];
+        assert_eq!(concat_segment_text(segs.iter().copied()), "");
     }
 }
