@@ -58,6 +58,26 @@ pub(crate) fn update_transcript(conn: &Connection, id: i64, transcript: &str) ->
     Ok(())
 }
 
+pub(crate) fn update_transcript_full(
+    conn: &Connection,
+    id: i64,
+    transcript: &str,
+    whisper_model: &str,
+    language: Option<&str>,
+) -> Result<()> {
+    let rows_affected = conn.execute(
+        "UPDATE audio_segments SET transcript = ?1, whisper_model = ?2, language = ?3 WHERE id = ?4",
+        params![transcript, whisper_model, language, id],
+    )?;
+    if rows_affected == 0 {
+        return Err(crate::error::StorageError::Other(format!(
+            "not found: id {}",
+            id
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +205,42 @@ mod tests {
             )
             .unwrap();
         assert_eq!(new_count, 1);
+    }
+
+    #[test]
+    fn update_transcript_full_sets_all_columns_and_reindexes() {
+        let conn = setup_db();
+        let id = insert(&conn, &sample_meta()).unwrap();
+
+        update_transcript_full(&conn, id, "quarterly budget review", "base", Some("en")).unwrap();
+
+        let seg = get(&conn, id).unwrap();
+        assert_eq!(seg.transcript.as_deref(), Some("quarterly budget review"));
+        assert_eq!(seg.whisper_model.as_deref(), Some("base"));
+        assert_eq!(seg.language.as_deref(), Some("en"));
+
+        // FTS reindex fired (audio_au trigger): old term gone, new term present.
+        let old: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM audio_fts WHERE audio_fts MATCH 'timeline'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old, 0);
+        let new: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM audio_fts WHERE audio_fts MATCH 'budget'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(new, 1);
+    }
+
+    #[test]
+    fn update_transcript_full_nonexistent_id_errors() {
+        let conn = setup_db();
+        assert!(update_transcript_full(&conn, 999, "x", "base", None).is_err());
     }
 }

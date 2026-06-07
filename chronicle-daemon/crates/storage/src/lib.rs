@@ -217,6 +217,30 @@ impl Storage {
         .await?
     }
 
+    /// Attach transcript + model variant + detected language in one update.
+    /// Reuses the `audio_fts` reindex trigger that fires on any audio_segments
+    /// update, so writing the transcript indexes it for search.
+    pub async fn update_transcript_full(
+        &self,
+        id: i64,
+        transcript: String,
+        whisper_model: String,
+        language: Option<String>,
+    ) -> Result<()> {
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            audio::update_transcript_full(
+                &conn,
+                id,
+                &transcript,
+                &whisper_model,
+                language.as_deref(),
+            )
+        })
+        .await?
+    }
+
     // --- Config operations ---
 
     /// Read a configuration value by key. Returns `None` if the key doesn't exist.
