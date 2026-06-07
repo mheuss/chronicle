@@ -185,8 +185,6 @@ pub async fn ocr_loop(storage: Arc<Storage>, mut ocr_rx: mpsc::Receiver<(i64, Pa
 /// in-flight one, and exits — queued jobs are dropped (rows stay NULL for a
 /// future backfill). Empty results are skipped so blank rows never reach
 /// `audio_fts`. Also exits when the channel closes.
-// Spawned in main.rs in Task 10 (HEU-472); unused until then.
-#[allow(dead_code)]
 pub async fn transcribe_loop(
     engine: Arc<dyn chronicle_transcription::Transcriber>,
     storage: Arc<Storage>,

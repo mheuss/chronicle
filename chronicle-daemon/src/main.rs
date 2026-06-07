@@ -231,9 +231,55 @@ async fn main() -> Result<()> {
 
     let audio_storage = Arc::clone(&storage);
     let audio_counters = Arc::clone(&counters);
+    // Transcription: load the model once if present; otherwise stay idle with a
+    // no-op sink (graceful degradation — capture/OCR/IPC unaffected).
+    let (transcription_sink, transcribe_handle): (
+        Arc<dyn pipeline::sinks::TranscriptionSink>,
+        Option<tokio::task::JoinHandle<()>>,
+    ) = if chronicle_transcription::model_present(storage.base_dir(), whisper_variant) {
+        match chronicle_transcription::TranscriptionEngine::load(
+            storage.base_dir(),
+            whisper_variant,
+        ) {
+            Ok(engine) => {
+                let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(engine);
+                // Bounded channel (64), matching the audio bridge: drop-on-full.
+                let (tx, rx) = tokio::sync::mpsc::channel(64);
+                let handle = tokio::spawn(pipeline::transcribe_loop(
+                    engine,
+                    Arc::clone(&storage),
+                    rx,
+                    cancel.clone(),
+                ));
+                log::info!(
+                    "transcription engine loaded (variant={}, backend={})",
+                    whisper_variant,
+                    if cfg!(feature = "transcription-metal") {
+                        "metal"
+                    } else {
+                        "cpu"
+                    }
+                );
+                (
+                    Arc::new(pipeline::sinks::TokioTranscriptionSink(tx)),
+                    Some(handle),
+                )
+            }
+            Err(e) => {
+                log::error!(
+                    "transcription engine load failed ({whisper_variant}): {e} — staying idle"
+                );
+                (Arc::new(pipeline::sinks::NoopTranscriptionSink), None)
+            }
+        }
+    } else {
+        // model_present already logged the "model missing → idle" warning above.
+        (Arc::new(pipeline::sinks::NoopTranscriptionSink), None)
+    };
     let audio_store_handle = tokio::spawn(pipeline::audio_store_loop(
         audio_storage,
         audio_rx,
+        Arc::clone(&transcription_sink),
         audio_counters,
     ));
 
@@ -503,6 +549,16 @@ async fn main() -> Result<()> {
     // joined by `CaptureRuntime::stop()` above).
     if let Err(e) = audio_store_handle.await {
         log::error!("Audio store task failed: {e}");
+    }
+
+    // `cancel` fired at shutdown start (main.rs:454), so transcribe_loop has
+    // stopped taking new jobs, finished its in-flight one, and is exiting. Await
+    // it. Queued-but-unstarted jobs were dropped (rows keep transcript = NULL for
+    // a future backfill).
+    if let Some(handle) = transcribe_handle
+        && let Err(e) = handle.await
+    {
+        log::error!("transcribe loop task failed: {e}");
     }
 
     log::info!("chronicle-daemon stopped");
