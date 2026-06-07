@@ -117,9 +117,9 @@ const MAX_SAMPLES_PER_PACKET: usize = 1_920;
 /// libopus resamples 48 kHz → 16 kHz and downmixes to mono internally, so no
 /// separate resampler is needed. The first two Ogg packets are the OpusHead
 /// and OpusTags headers (RFC 7845); the rest are audio. The encoder's pre-skip
-/// (lookahead priming) and the padded final frame are trimmed using the
-/// OpusHead pre_skip and the final granule position so the decoded duration
-/// matches the captured segment.
+/// (lookahead priming) is dropped using the OpusHead pre_skip, and the final
+/// granule position drives a defensive end clamp (see below) so the decoded
+/// duration matches the captured segment.
 pub fn decode_opus_16k_mono(path: &Path) -> Result<Vec<f32>, TranscriptionError> {
     let file = std::fs::File::open(path)
         .map_err(|e| TranscriptionError::Decode(format!("open {}: {e}", path.display())))?;
@@ -155,6 +155,16 @@ pub fn decode_opus_16k_mono(path: &Path) -> Result<Vec<f32>, TranscriptionError>
         let n = decoder
             .decode_float(&packet.data, &mut buf, false)
             .map_err(|e| TranscriptionError::Decode(format!("decode: {e}")))?;
+        // The opus 0.3.1 binding casts libopus's return straight to usize, so a
+        // negative error code (e.g. OPUS_INVALID_PACKET on a corrupt packet)
+        // becomes a huge value rather than an Err. Reject anything past the
+        // buffer instead of panicking on the out-of-bounds slice below.
+        if n > buf.len() {
+            return Err(TranscriptionError::Decode(format!(
+                "decode returned {n} samples (buffer holds {})",
+                buf.len()
+            )));
+        }
         pcm.extend_from_slice(&buf[..n]);
         last_granule = packet.absgp_page(); // public method; the field is private
     }
@@ -167,7 +177,14 @@ pub fn decode_opus_16k_mono(path: &Path) -> Result<Vec<f32>, TranscriptionError>
         pcm.drain(..skip16);
     }
 
-    // Clamp to the granule-reported length (also 48 kHz, minus pre_skip), scaled.
+    // Defensive clamp to the granule-reported length: take the final granule
+    // (48 kHz), subtract pre_skip, and scale to 16 kHz. Our encoder writes the
+    // *padded* final-frame length into the granule (not an RFC 7845 end-trimmed
+    // value), so for our own segments total16 equals the decoded length and the
+    // truncate never fires — up to ~one 20 ms frame of trailing near-silence is
+    // left in by design (whisper tolerates it; over-trimming would be worse).
+    // The clamp still protects against a future producer that writes a true
+    // end-trimmed granule position.
     let total16 = (last_granule as usize).saturating_sub(pre_skip) * DECODE_RATE / ENCODE_RATE;
     if total16 > 0 && pcm.len() > total16 {
         pcm.truncate(total16);
@@ -302,6 +319,23 @@ mod tests {
             decode_opus_16k_mono(&path),
             Err(TranscriptionError::Decode(_))
         ));
+    }
+
+    #[test]
+    fn decode_empty_audio_returns_empty_pcm() {
+        use chronicle_audio::OggOpusEncoder;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("empty.opus");
+        // Zero samples → a headers-only stream (OpusHead + OpusTags, no audio).
+        OggOpusEncoder::new(1, 24_000, opus::Application::Voip)
+            .encode_to_file(&[], &path)
+            .unwrap();
+        let pcm = decode_opus_16k_mono(&path).unwrap();
+        assert!(
+            pcm.is_empty(),
+            "expected empty PCM, got {} samples",
+            pcm.len()
+        );
     }
 
     #[test]
