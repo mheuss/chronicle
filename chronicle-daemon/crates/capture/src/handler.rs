@@ -20,15 +20,23 @@ use tokio::sync::mpsc;
 use crate::pixel_buffer;
 use crate::{CapturedFrame, SendableSampleBuffer};
 
+/// Warn on the first null-image-buffer frame per display, then every Nth, so a
+/// genuinely stuck display keeps surfacing without spamming the log at boot.
+const NULL_BUFFER_WARN_EVERY: u64 = 150; // ~5 min/display at ~0.5 fps
+
+fn should_warn(null_frame_count: u64) -> bool {
+    null_frame_count == 1 || null_frame_count.is_multiple_of(NULL_BUFFER_WARN_EVERY)
+}
+
 /// Ivars for the `CaptureOutputHandler` ObjC class.
 pub(crate) struct CaptureOutputHandlerIvars {
     sender: mpsc::Sender<CapturedFrame>,
     display_id: u32,
     scale_factor: f64,
-    width: u32,
-    height: u32,
     frames_captured: Arc<AtomicU64>,
     frames_dropped: Arc<AtomicU64>,
+    /// Per-display count of frames skipped for having no image buffer (HEU-493).
+    null_buffer_frames: AtomicU64,
 }
 
 define_class!(
@@ -57,16 +65,24 @@ define_class!(
 
             let ivars = self.ivars();
 
-            // Extract dimensions from the pixel buffer metadata (no lock needed).
-            // Fall back to the values stored at construction time.
-            let (width, height) = pixel_buffer::get_image_buffer(sample_buffer)
-                .map(|px_buf| {
-                    (
-                        pixel_buffer::width(px_buf) as u32,
-                        pixel_buffer::height(px_buf) as u32,
-                    )
-                })
-                .unwrap_or((ivars.width, ivars.height));
+            // ScreenCaptureKit delivers frames with no image buffer during cold
+            // display init (boot/wake) — there are no pixels to encode. Skip them
+            // here so they never reach the pipeline, which would otherwise log an
+            // error and bump frames_failed (HEU-493).
+            let Some(px_buf) = pixel_buffer::get_image_buffer(sample_buffer) else {
+                let n = ivars.null_buffer_frames.fetch_add(1, Ordering::Relaxed) + 1;
+                if should_warn(n) {
+                    log::warn!(
+                        "display {}: SCK frame had no image buffer (count={n}); \
+                         skipping. Expected briefly at boot/wake; a persistent \
+                         count means the display isn't producing frames.",
+                        ivars.display_id
+                    );
+                }
+                return;
+            };
+            let width = pixel_buffer::width(px_buf) as u32;
+            let height = pixel_buffer::height(px_buf) as u32;
 
             // Retain the sample buffer so it lives beyond this callback.
             let retained: Retained<CMSampleBuffer> = sample_buffer.retain();
@@ -115,16 +131,12 @@ impl CaptureOutputHandler {
     /// * `sender`          -- bounded channel sender for delivering frames
     /// * `display_id`      -- macOS CGDirectDisplayID
     /// * `scale_factor`    -- retina scale (1.0 or 2.0)
-    /// * `width`           -- configured capture width in pixels
-    /// * `height`          -- configured capture height in pixels
     /// * `frames_captured` -- shared counter incremented on each successful send
     /// * `frames_dropped`  -- shared counter incremented when the channel is full
     pub(crate) fn new(
         sender: mpsc::Sender<CapturedFrame>,
         display_id: u32,
         scale_factor: f64,
-        width: u32,
-        height: u32,
         frames_captured: Arc<AtomicU64>,
         frames_dropped: Arc<AtomicU64>,
     ) -> Retained<Self> {
@@ -132,10 +144,9 @@ impl CaptureOutputHandler {
             sender,
             display_id,
             scale_factor,
-            width,
-            height,
             frames_captured,
             frames_dropped,
+            null_buffer_frames: AtomicU64::new(0),
         });
         unsafe { objc2::msg_send![super(this), init] }
     }
@@ -160,16 +171,24 @@ mod tests {
 
         let handler = CaptureOutputHandler::new(
             tx,
-            1,    // display_id
-            2.0,  // scale_factor
-            1920, // width
-            1080, // height
+            1,   // display_id
+            2.0, // scale_factor
             frames_captured,
             frames_dropped,
         );
 
         // The handler should be usable as an SCStreamOutput protocol object.
         let _protocol_obj = handler.as_protocol_object();
+    }
+
+    #[test]
+    fn should_warn_fires_first_then_every_nth() {
+        assert!(should_warn(1));
+        assert!(!should_warn(2));
+        assert!(!should_warn(149));
+        assert!(should_warn(150));
+        assert!(!should_warn(151));
+        assert!(should_warn(300));
     }
 
     #[test]
@@ -182,8 +201,6 @@ mod tests {
             tx,
             42,
             2.0,
-            2560,
-            1440,
             Arc::clone(&frames_captured),
             Arc::clone(&frames_dropped),
         );
@@ -191,7 +208,5 @@ mod tests {
         let ivars = handler.ivars();
         assert_eq!(ivars.display_id, 42);
         assert!((ivars.scale_factor - 2.0).abs() < f64::EPSILON);
-        assert_eq!(ivars.width, 2560);
-        assert_eq!(ivars.height, 1440);
     }
 }
