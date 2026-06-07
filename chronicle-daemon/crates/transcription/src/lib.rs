@@ -255,9 +255,12 @@ impl Transcriber for TranscriptionEngine {
             .map_err(|e| TranscriptionError::Whisper(e.to_string()))?;
         let mut texts: Vec<String> = Vec::with_capacity(n as usize);
         for i in 0..n {
+            // Lossy decode: a multibyte codepoint split across a segment boundary
+            // degrades to U+FFFD rather than failing the whole transcript (this
+            // feature auto-detects language, so non-Latin scripts are expected).
             texts.push(
                 state
-                    .full_get_segment_text(i)
+                    .full_get_segment_text_lossy(i)
                     .map_err(|e| TranscriptionError::Whisper(e.to_string()))?,
             );
         }
