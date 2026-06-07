@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use ogg::reading::PacketReader;
 use opus::{Channels, Decoder};
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 /// Subdirectory under the Chronicle base dir where ggml model files live.
 pub const MODELS_SUBDIR: &str = "models";
@@ -193,6 +194,90 @@ pub fn decode_opus_16k_mono(path: &Path) -> Result<Vec<f32>, TranscriptionError>
     Ok(pcm)
 }
 
+/// A type that can turn 16 kHz mono PCM into a [`Transcript`]. The trait makes
+/// the transcribe loop testable with a fake — the real impl needs a model file.
+pub trait Transcriber: Send + Sync {
+    fn transcribe(&self, pcm_16k_mono: &[f32]) -> Result<Transcript, TranscriptionError>;
+    /// The resolved model variant, written to the transcript row.
+    fn variant(&self) -> &str;
+}
+
+/// whisper.cpp engine. The `WhisperContext` (the loaded model) is created once
+/// and shared via `Arc`; each `transcribe` call creates its own `WhisperState`.
+pub struct TranscriptionEngine {
+    ctx: WhisperContext,
+    variant: String,
+}
+
+impl TranscriptionEngine {
+    /// Load the ggml model for `variant` with the Metal backend. Fallible — the
+    /// caller logs and stays idle on `Err` (graceful degradation, BR-5).
+    pub fn load(base_dir: &Path, variant: ModelVariant) -> Result<Self, TranscriptionError> {
+        let path = model_path(base_dir, variant);
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| TranscriptionError::ModelLoad("model path is not UTF-8".into()))?;
+
+        // GPU (Metal) when the `metal` feature is on; CPU otherwise — makes
+        // `--no-default-features --features cpu` an honest CPU build.
+        let mut params = WhisperContextParameters::default();
+        params.use_gpu(cfg!(feature = "metal"));
+
+        let ctx = WhisperContext::new_with_params(path_str, params)
+            .map_err(|e| TranscriptionError::ModelLoad(e.to_string()))?;
+
+        Ok(Self {
+            ctx,
+            variant: variant.as_str().to_string(),
+        })
+    }
+}
+
+impl Transcriber for TranscriptionEngine {
+    fn transcribe(&self, pcm_16k_mono: &[f32]) -> Result<Transcript, TranscriptionError> {
+        let mut state = self
+            .ctx
+            .create_state()
+            .map_err(|e| TranscriptionError::Whisper(e.to_string()))?;
+
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_translate(false);
+        params.set_detect_language(true); // auto-detect
+        params.set_suppress_blank(true);
+        params.set_n_threads(4); // Metal does the work; keep CPU threads modest
+
+        state
+            .full(params, pcm_16k_mono)
+            .map_err(|e| TranscriptionError::Whisper(e.to_string()))?;
+
+        let n = state
+            .full_n_segments()
+            .map_err(|e| TranscriptionError::Whisper(e.to_string()))?;
+        let mut texts: Vec<String> = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            texts.push(
+                state
+                    .full_get_segment_text(i)
+                    .map_err(|e| TranscriptionError::Whisper(e.to_string()))?,
+            );
+        }
+
+        // Empty-text guard (whisper-rs 0.14.4 has no per-segment no_speech_prob).
+        let text = concat_segment_text(texts.iter().map(String::as_str));
+        let language = state
+            .full_lang_id_from_state()
+            .ok()
+            .and_then(whisper_rs::get_lang_str)
+            .map(|s| s.to_string());
+
+        Ok(Transcript { text, language })
+    }
+
+    fn variant(&self) -> &str {
+        &self.variant
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,6 +421,22 @@ mod tests {
             "expected empty PCM, got {} samples",
             pcm.len()
         );
+    }
+
+    #[test]
+    fn engine_load_fails_on_garbage_model() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(MODELS_SUBDIR)).unwrap();
+        std::fs::write(
+            dir.path().join(MODELS_SUBDIR).join("ggml-base.bin"),
+            b"not a real ggml model",
+        )
+        .unwrap();
+        let v = parse_variant("base").unwrap();
+        assert!(matches!(
+            TranscriptionEngine::load(dir.path(), v),
+            Err(TranscriptionError::ModelLoad(_))
+        ));
     }
 
     #[test]
