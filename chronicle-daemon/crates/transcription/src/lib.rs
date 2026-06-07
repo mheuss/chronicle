@@ -242,7 +242,9 @@ impl Transcriber for TranscriptionEngine {
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_translate(false);
-        params.set_detect_language(true); // auto-detect
+        // language = None means "auto-detect AND transcribe". (set_detect_language(true)
+        // is detect-ONLY — it returns 0 segments and no text. HEU-472 T11.)
+        params.set_language(None);
         params.set_suppress_blank(true);
         params.set_n_threads(4); // Metal does the work; keep CPU threads modest
 
@@ -440,6 +442,72 @@ mod tests {
             TranscriptionEngine::load(dir.path(), v),
             Err(TranscriptionError::ModelLoad(_))
         ));
+    }
+
+    #[test]
+    #[ignore = "needs a provisioned whisper model + macOS `say`; run manually"]
+    fn engine_transcribes_real_speech() {
+        use chronicle_audio::OggOpusEncoder;
+
+        // Model dir: env override, else the local Chronicle data dir. Skip if
+        // absent (CI has neither a model nor `say`).
+        let base = std::env::var("CHRONICLE_TEST_MODEL_DIR").unwrap_or_else(|_| {
+            format!(
+                "{}/Library/Application Support/Chronicle",
+                std::env::var("HOME").unwrap()
+            )
+        });
+        let base = PathBuf::from(base);
+        if !model_present(&base, DEFAULT_VARIANT) {
+            eprintln!("skipping: no model at {}", base.display());
+            return;
+        }
+
+        // 1) Generate speech with macOS `say` as 48 kHz mono f32 WAV.
+        let dir = tempdir().unwrap();
+        let wav = dir.path().join("tts.wav");
+        let phrase = "the quick brown fox jumps over the lazy dog";
+        let ok = std::process::Command::new("say")
+            .args([
+                "-o",
+                wav.to_str().unwrap(),
+                "--data-format=LEF32@48000",
+                phrase,
+            ])
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "say failed");
+
+        // 2) Read the WAV's f32 samples (find the `data` chunk; rest is f32le).
+        let bytes = std::fs::read(&wav).unwrap();
+        let data_pos = bytes.windows(4).position(|w| w == b"data").unwrap() + 8; // skip "data" + size
+        let samples: Vec<f32> = bytes[data_pos..]
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+
+        // 3) Encode to Ogg/Opus with the production encoder, then decode like
+        //    the pipeline does.
+        let opus = dir.path().join("tts.opus");
+        OggOpusEncoder::new(1, 24_000, opus::Application::Voip)
+            .encode_to_file(&samples, &opus)
+            .unwrap();
+        let pcm = decode_opus_16k_mono(&opus).unwrap();
+
+        // 4) Transcribe with the real engine and assert it produced text.
+        let engine = TranscriptionEngine::load(&base, DEFAULT_VARIANT).unwrap();
+        let t = engine.transcribe(&pcm).unwrap();
+        assert!(
+            !t.text.is_empty(),
+            "expected non-empty transcript, got empty (the detect_language bug)"
+        );
+        let lower = t.text.to_lowercase();
+        assert!(
+            lower.contains("fox") || lower.contains("quick") || lower.contains("brown"),
+            "transcript should contain a spoken word, got: {:?}",
+            t.text
+        );
     }
 
     #[test]
