@@ -204,8 +204,6 @@ impl<'a> CaptureEngine<'a> {
                 sender.clone(),
                 display_id,
                 scale_factor,
-                width,
-                height,
                 Arc::clone(&frames_captured),
                 Arc::clone(&frames_dropped),
             );
