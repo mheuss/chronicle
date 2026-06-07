@@ -8,6 +8,9 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use ogg::reading::PacketReader;
+use opus::{Channels, Decoder};
+
 /// Subdirectory under the Chronicle base dir where ggml model files live.
 pub const MODELS_SUBDIR: &str = "models";
 
@@ -104,6 +107,75 @@ pub fn concat_segment_text<'a>(segments: impl IntoIterator<Item = &'a str>) -> S
     out.trim().to_string()
 }
 
+const DECODE_RATE: usize = 16_000;
+const ENCODE_RATE: usize = 48_000;
+/// Max samples libopus can return for one packet at 16 kHz mono (120 ms).
+const MAX_SAMPLES_PER_PACKET: usize = 1_920;
+
+/// Decode an Ogg/Opus segment to 16 kHz mono f32 PCM.
+///
+/// libopus resamples 48 kHz → 16 kHz and downmixes to mono internally, so no
+/// separate resampler is needed. The first two Ogg packets are the OpusHead
+/// and OpusTags headers (RFC 7845); the rest are audio. The encoder's pre-skip
+/// (lookahead priming) and the padded final frame are trimmed using the
+/// OpusHead pre_skip and the final granule position so the decoded duration
+/// matches the captured segment.
+pub fn decode_opus_16k_mono(path: &Path) -> Result<Vec<f32>, TranscriptionError> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| TranscriptionError::Decode(format!("open {}: {e}", path.display())))?;
+    let mut reader = PacketReader::new(std::io::BufReader::new(file));
+
+    // Packet 1: OpusHead. pre_skip is a u16 LE at byte offset 10 (48 kHz domain).
+    let head = reader
+        .read_packet()
+        .map_err(|e| TranscriptionError::Decode(format!("read OpusHead: {e}")))?
+        .ok_or_else(|| TranscriptionError::Decode("empty stream".into()))?;
+    if head.data.len() < 12 || &head.data[0..8] != b"OpusHead" {
+        return Err(TranscriptionError::Decode("missing OpusHead".into()));
+    }
+    let pre_skip = u16::from_le_bytes([head.data[10], head.data[11]]) as usize;
+
+    // Packet 2: OpusTags — skip.
+    reader
+        .read_packet()
+        .map_err(|e| TranscriptionError::Decode(format!("read OpusTags: {e}")))?
+        .ok_or_else(|| TranscriptionError::Decode("missing OpusTags".into()))?;
+
+    let mut decoder = Decoder::new(DECODE_RATE as u32, Channels::Mono)
+        .map_err(|e| TranscriptionError::Decode(format!("decoder create: {e}")))?;
+
+    let mut pcm: Vec<f32> = Vec::new();
+    let mut buf = vec![0f32; MAX_SAMPLES_PER_PACKET];
+    let mut last_granule: u64 = 0;
+    // PacketReader::read_packet returns Result<Option<Packet>, ogg::OggReadError>.
+    while let Some(packet) = reader
+        .read_packet()
+        .map_err(|e| TranscriptionError::Decode(format!("read packet: {e}")))?
+    {
+        let n = decoder
+            .decode_float(&packet.data, &mut buf, false)
+            .map_err(|e| TranscriptionError::Decode(format!("decode: {e}")))?;
+        pcm.extend_from_slice(&buf[..n]);
+        last_granule = packet.absgp_page(); // public method; the field is private
+    }
+
+    // Drop encoder pre-skip (scale 48 kHz → 16 kHz).
+    let skip16 = pre_skip * DECODE_RATE / ENCODE_RATE;
+    if skip16 >= pcm.len() {
+        pcm.clear();
+    } else {
+        pcm.drain(..skip16);
+    }
+
+    // Clamp to the granule-reported length (also 48 kHz, minus pre_skip), scaled.
+    let total16 = (last_granule as usize).saturating_sub(pre_skip) * DECODE_RATE / ENCODE_RATE;
+    if total16 > 0 && pcm.len() > total16 {
+        pcm.truncate(total16);
+    }
+
+    Ok(pcm)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +268,60 @@ mod tests {
     fn concat_segment_text_empty_for_whitespace_only() {
         let segs = ["   ", "\n\t"];
         assert_eq!(concat_segment_text(segs.iter().copied()), "");
+    }
+
+    #[test]
+    fn decode_round_trips_to_16k_mono() {
+        use chronicle_audio::OggOpusEncoder;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("seg.opus");
+
+        // 1 second of 48 kHz mono (a quiet 220 Hz tone).
+        let samples: Vec<f32> = (0..48_000)
+            .map(|i| (i as f32 * 220.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.2)
+            .collect();
+        OggOpusEncoder::new(1, 24_000, opus::Application::Voip)
+            .encode_to_file(&samples, &path)
+            .unwrap();
+
+        let pcm = decode_opus_16k_mono(&path).unwrap();
+        // ~16 000 samples (1 s @ 16 kHz), within one 20 ms frame of slack.
+        assert!(
+            (15_600..=16_400).contains(&pcm.len()),
+            "expected ~16000 samples, got {}",
+            pcm.len()
+        );
+    }
+
+    #[test]
+    fn decode_rejects_non_opus_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("garbage.opus");
+        std::fs::write(&path, b"not an ogg opus file at all").unwrap();
+        assert!(matches!(
+            decode_opus_16k_mono(&path),
+            Err(TranscriptionError::Decode(_))
+        ));
+    }
+
+    #[test]
+    fn decode_handles_partial_final_frame() {
+        use chronicle_audio::OggOpusEncoder;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("partial.opus");
+        // Not a whole-frame multiple → exercises the padded final frame + granule trim.
+        let samples: Vec<f32> = (0..24_137)
+            .map(|i| (i as f32 * 200.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.2)
+            .collect();
+        OggOpusEncoder::new(1, 24_000, opus::Application::Voip)
+            .encode_to_file(&samples, &path)
+            .unwrap();
+        let pcm = decode_opus_16k_mono(&path).unwrap();
+        // ~24137/3 ≈ 8046 samples @ 16 kHz, within one 20 ms frame (320) of slack.
+        assert!(
+            (7_700..=8_400).contains(&pcm.len()),
+            "expected ~8046 samples, got {}",
+            pcm.len()
+        );
     }
 }
