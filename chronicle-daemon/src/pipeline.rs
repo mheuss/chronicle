@@ -184,22 +184,30 @@ pub async fn ocr_loop(storage: Arc<Storage>, mut ocr_rx: mpsc::Receiver<(i64, Pa
 /// (sequential). Empty results are skipped so blank rows never reach `audio_fts`.
 ///
 /// **Shutdown contract — this loop must outlive `audio_store_loop`.** It exits
-/// only when the channel closes, i.e. once every `TranscriptionSink` clone has
-/// dropped. It deliberately does *not* watch the global cancellation token:
+/// when the channel closes (every `TranscriptionSink` clone dropped) or when
+/// `stop_after_current` is set, and in the latter case only *after* finishing
+/// and persisting the segment already in flight.
+///
+/// It deliberately does *not* watch the global cancellation token.
 /// `audio_pipeline.stop()` flushes the session's final partial segments, and
 /// those get persisted and enqueued *after* cancel fires. A loop that broke on
 /// cancel would drop that tail un-transcribed, log a spurious "channel closed",
 /// and inflate `transcription_dropped` on every clean exit.
 ///
-/// `main` bounds the drain with a timeout rather than a token, because an
-/// in-flight `spawn_blocking` whisper call cannot be aborted — the bound has to
-/// live at the process level. Do not reintroduce a cancel branch here without
-/// also changing that shutdown ordering in `main`.
+/// `stop_after_current` is checked at the bottom of the body, never the top, and
+/// it exists so `main` never has to drop our `JoinHandle` to stop waiting.
+/// Dropping it would detach this task, and runtime drop destroys a detached
+/// future without polling it — discarding a transcript whose whisper call the
+/// blocking pool is still, separately, being waited on. Do not swap this flag
+/// for the global token, and do not let `main`'s timeout consume the handle.
 pub async fn transcribe_loop(
     engine: Arc<dyn chronicle_transcription::Transcriber>,
     storage: Arc<Storage>,
     mut rx: mpsc::Receiver<crate::pipeline::sinks::TranscriptionJob>,
+    stop_after_current: Arc<std::sync::atomic::AtomicBool>,
 ) {
+    use std::sync::atomic::Ordering;
+
     while let Some(job) = rx.recv().await {
         // Clone a separate Arc for the blocking closure; the outer `engine` stays
         // owned so `engine.variant()` is usable after the await.
@@ -219,24 +227,26 @@ pub async fn transcribe_loop(
                 // write, so a future impl returning "  hi  " can neither slip a
                 // whitespace-only row nor a padded one into `audio_fts` (BR-4).
                 let text = transcript.text.trim();
+                // if/else rather than `continue`: the stop check at the bottom of the
+                // loop must run on every iteration, including skipped segments.
                 if text.is_empty() {
                     log::debug!(
                         "transcription skipped (no usable speech) for segment {}",
                         job.row_id
                     );
-                    continue;
-                }
-                let text = text.to_string();
-                if let Err(e) = storage
-                    .update_transcript_full(
-                        job.row_id,
-                        text,
-                        engine.variant().to_string(),
-                        transcript.language,
-                    )
-                    .await
-                {
-                    log::error!("failed to store transcript for segment {}: {e}", job.row_id);
+                } else {
+                    let text = text.to_string();
+                    if let Err(e) = storage
+                        .update_transcript_full(
+                            job.row_id,
+                            text,
+                            engine.variant().to_string(),
+                            transcript.language,
+                        )
+                        .await
+                    {
+                        log::error!("failed to store transcript for segment {}: {e}", job.row_id);
+                    }
                 }
             }
             Ok(Err(e)) => log::warn!("transcription failed for segment {}: {e}", job.row_id),
@@ -244,6 +254,20 @@ pub async fn transcribe_loop(
                 "transcription task panicked for segment {}: {e}",
                 job.row_id
             ),
+        }
+
+        // Checked *after* the write, never before it: `main` sets this when the
+        // shutdown grace expires, and the whole point is that the segment already
+        // in flight still gets persisted. Breaking here (rather than `main`
+        // dropping our JoinHandle) is what keeps that write from being discarded.
+        if stop_after_current.load(Ordering::Relaxed) {
+            let abandoned = rx.len();
+            log::warn!(
+                "shutdown grace expired; stopping after the current segment — \
+                 {abandoned} queued segment(s) left untranscribed \
+                 (transcript = NULL, recoverable by backfill)"
+            );
+            break;
         }
     }
     log::info!("Transcribe loop exiting");
@@ -288,6 +312,10 @@ pub async fn audio_store_loop(
     use crate::pipeline::sinks::{TranscriptionEnqueueResult, TranscriptionJob};
     use std::sync::atomic::Ordering;
 
+    // Latches the "worker is gone" ERROR — the condition is permanent once it
+    // happens, so it is worth exactly one line, not one per segment.
+    let mut worker_gone_reported = false;
+
     while let Some(segment) = segment_rx.recv().await {
         match process_audio_segment(&storage, &segment).await {
             Ok((row_id, dest_path)) => {
@@ -319,11 +347,17 @@ pub async fn audio_store_loop(
                         // `main` holds the only other sink handle and drops it last
                         // during shutdown, so a closed channel here means
                         // `transcribe_loop` itself died. Nothing gets transcribed for
-                        // the rest of the process lifetime — not a benign race.
-                        log::error!(
-                            "transcription worker is gone; segment {row_id} and every \
-                             later segment will go untranscribed"
-                        );
+                        // the rest of the process lifetime — not a benign race. That
+                        // also makes the condition permanent, so latch the log: at
+                        // ~4 segments/min this would otherwise emit thousands of
+                        // identical ERROR lines a day.
+                        if !worker_gone_reported {
+                            worker_gone_reported = true;
+                            log::error!(
+                                "transcription worker is gone; segment {row_id} and every \
+                                 later segment will go untranscribed (logged once)"
+                            );
+                        }
                     }
                     TranscriptionEnqueueResult::Disabled => {} // no model — idle, not a drop
                 }
@@ -1107,6 +1141,12 @@ mod tests {
 
     // --- `transcribe_loop` tests (Task 9) ---
 
+    /// A `stop_after_current` flag that is never set — the normal case for tests
+    /// that only care about draining to channel close.
+    fn never_stop() -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::new(std::sync::atomic::AtomicBool::new(false))
+    }
+
     struct FakeTranscriber {
         text: String,
     }
@@ -1168,7 +1208,7 @@ mod tests {
         .await
         .unwrap();
         drop(tx);
-        transcribe_loop(engine, storage.clone(), rx).await;
+        transcribe_loop(engine, storage.clone(), rx, never_stop()).await;
 
         let seg = storage.get_audio_segment(row_id).await.unwrap();
         assert_eq!(seg.transcript.as_deref(), Some("the quick brown fox"));
@@ -1190,7 +1230,7 @@ mod tests {
         .await
         .unwrap();
         drop(tx);
-        transcribe_loop(engine, storage.clone(), rx).await;
+        transcribe_loop(engine, storage.clone(), rx, never_stop()).await;
 
         let seg = storage.get_audio_segment(row_id).await.unwrap();
         assert!(seg.transcript.is_none());
@@ -1209,16 +1249,20 @@ mod tests {
         .await
         .unwrap();
         drop(tx);
-        transcribe_loop(engine, storage.clone(), rx).await;
+        transcribe_loop(engine, storage.clone(), rx, never_stop()).await;
         let seg = storage.get_audio_segment(row_id).await.unwrap();
         assert!(seg.transcript.is_none());
     }
 
     /// `audio_pipeline.stop()` flushes the session's final partial segments, so they
-    /// are enqueued *after* shutdown has begun — i.e. after the point where the old
-    /// code's cancel token had already fired. Jobs handed to a running loop must
-    /// therefore all be transcribed, with only the channel close ending it.
-    /// Regression test for the shutdown ordering in `main`.
+    /// are enqueued *after* shutdown has begun. Jobs handed to an already-running
+    /// loop must therefore all be transcribed, with only the channel close ending it.
+    ///
+    /// Scope, stated honestly: this pins the loop-side contract only. The `main`-side
+    /// ordering it exists to protect — sink Arc dropped after `audio_store_handle`
+    /// resolves — is not exercised here and is carried by `transcribe_loop`'s doc
+    /// comment plus `docs/use-cases/pipeline.md`. Reintroducing an early-break would
+    /// change this signature and break compilation, which is the real backstop.
     #[tokio::test]
     async fn transcribe_loop_drains_all_queued_before_exit() {
         let (storage, row_id, opus_path, _dir) = persist_segment_with_opus().await;
@@ -1240,10 +1284,13 @@ mod tests {
             text: "drained".into(),
         });
         let (tx, rx) = mpsc::channel(4);
-        // Start the loop with an EMPTY channel, then enqueue. Pre-filling and closing
-        // the channel before the call would only prove that tokio yields buffered
-        // items after close, and would pass under the old cancel-token code too.
-        let loop_handle = tokio::spawn(transcribe_loop(engine, storage.clone(), rx));
+        let loop_handle = tokio::spawn(transcribe_loop(engine, storage.clone(), rx, never_stop()));
+        // `tokio::spawn` only queues the task, and a `send` into a channel with free
+        // capacity completes without yielding — so without this the loop would never
+        // be polled before the sends land, and the test would silently degrade into
+        // "tokio buffers items across close". Yielding hands the current-thread
+        // scheduler to the loop so it is genuinely parked on `recv` first.
+        tokio::task::yield_now().await;
         for id in [row_id, tail_id] {
             tx.send(crate::pipeline::sinks::TranscriptionJob {
                 row_id: id,
@@ -1251,6 +1298,9 @@ mod tests {
             })
             .await
             .unwrap();
+            // Let the loop pick the job up, so the next one is enqueued into a loop
+            // that is already mid-drain.
+            tokio::task::yield_now().await;
         }
         // Closing the channel is what ends the loop — mirrors `main` dropping its
         // sink Arc once `audio_store_handle` has finished.
@@ -1265,5 +1315,57 @@ mod tests {
                 "every queued job must be transcribed before the loop exits (segment {id})"
             );
         }
+    }
+
+    /// When the shutdown grace expires, `main` sets `stop_after_current` instead of
+    /// dropping our `JoinHandle`. The segment already in flight must still be
+    /// **persisted** — discarding a transcript the process already waited for is the
+    /// bug this flag exists to prevent — and the loop must then exit rather than
+    /// drain the rest.
+    #[tokio::test]
+    async fn transcribe_loop_persists_current_job_then_stops() {
+        let (storage, row_id, opus_path, _dir) = persist_segment_with_opus().await;
+        let abandoned_id = storage
+            .insert_audio_segment(chronicle_storage::AudioSegmentMetadata {
+                start_timestamp: 1_700_000_030_000,
+                end_timestamp: 1_700_000_060_000,
+                source: "system".into(),
+                audio_path: opus_path.to_string_lossy().into_owned(),
+                transcript: None,
+                whisper_model: None,
+                language: None,
+            })
+            .await
+            .unwrap();
+        let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(FakeTranscriber {
+            text: "persisted".into(),
+        });
+        let (tx, rx) = mpsc::channel(4);
+        for id in [row_id, abandoned_id] {
+            tx.send(crate::pipeline::sinks::TranscriptionJob {
+                row_id: id,
+                audio_path: opus_path.clone(),
+            })
+            .await
+            .unwrap();
+        }
+        // Already set when the loop starts: it must still finish and write job one.
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        // Sender stays alive, so only the flag can end this loop. If the flag were
+        // checked before the write (or the loop broke on it immediately), the first
+        // assert fails; if it were ignored, the loop would hang here.
+        transcribe_loop(engine, storage.clone(), rx, stop).await;
+
+        let done = storage.get_audio_segment(row_id).await.unwrap();
+        assert_eq!(
+            done.transcript.as_deref(),
+            Some("persisted"),
+            "the in-flight segment must be persisted before stopping"
+        );
+        let skipped = storage.get_audio_segment(abandoned_id).await.unwrap();
+        assert!(
+            skipped.transcript.is_none(),
+            "queued segments past the stop point stay NULL for backfill"
+        );
     }
 }

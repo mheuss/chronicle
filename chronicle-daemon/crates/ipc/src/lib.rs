@@ -173,6 +173,9 @@ pub struct OcrStats {
 pub struct AudioStats {
     pub segments_persisted: u64,
     pub transcription_enqueued: u64,
+    /// Aggregate: channel full (backpressure — the worker is behind) plus channel
+    /// closed (the worker died). Treat it as a capacity signal only while the
+    /// worker is alive; the two causes are not distinguishable here.
     pub transcription_dropped: u64,
     /// Current microphone capture state.
     pub mic_state: MicState,

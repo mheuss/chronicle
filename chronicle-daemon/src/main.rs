@@ -233,6 +233,9 @@ async fn main() -> Result<()> {
     let audio_counters = Arc::clone(&counters);
     // Transcription: load the model once if present; otherwise stay idle with a
     // no-op sink (graceful degradation — capture/OCR/IPC unaffected).
+    // Set only when the shutdown drain grace expires; tells `transcribe_loop` to
+    // stop after the segment it is already working on.
+    let stop_transcription = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (transcription_sink, transcribe_handle): (
         Arc<dyn pipeline::sinks::TranscriptionSink>,
         Option<tokio::task::JoinHandle<()>>,
@@ -249,11 +252,16 @@ async fn main() -> Result<()> {
                 let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(engine);
                 // Bounded channel (64), matching the audio bridge: drop-on-full.
                 let (tx, rx) = tokio::sync::mpsc::channel(64);
-                // No cancellation token by design — the loop drains until the
-                // channel closes so the shutdown flush still gets transcribed.
-                // See `transcribe_loop`'s shutdown contract.
-                let handle =
-                    tokio::spawn(pipeline::transcribe_loop(engine, Arc::clone(&storage), rx));
+                // Not the global cancellation token, by design — the loop must
+                // outlive it so the shutdown flush still gets transcribed. This flag
+                // means "finish the segment you are on, then stop", and only the
+                // drain timeout below sets it. See `transcribe_loop`'s contract.
+                let handle = tokio::spawn(pipeline::transcribe_loop(
+                    engine,
+                    Arc::clone(&storage),
+                    rx,
+                    Arc::clone(&stop_transcription),
+                ));
                 log::info!(
                     "transcription engine loaded (variant={}, backend={})",
                     whisper_variant,
@@ -568,24 +576,30 @@ async fn main() -> Result<()> {
     // task released its clone by finishing — and that close is what tells
     // `transcribe_loop` to drain and exit.
     drop(transcription_sink);
-    if let Some(handle) = transcribe_handle {
-        // Bounds how long we wait for the queue to drain — NOT how long exit takes.
-        // Dropping the `JoinHandle` detaches rather than aborts, and `#[tokio::main]`'s
-        // runtime drop blocks until every blocking worker finishes its current task.
-        // So worst-case exit is DRAIN_GRACE *plus* one in-flight whisper call, spent
-        // after the "stopped" line below; the same delay applies before the `exit(3)`
-        // poison handoff. Kept short deliberately, to leave headroom inside launchd's
-        // 20s default ExitTimeOut. Undrained rows keep transcript = NULL for a future
-        // backfill, same as before.
+    if let Some(mut handle) = transcribe_handle {
+        // Bounds how long we let the queue drain — NOT how long exit takes. Runtime
+        // drop blocks until every blocking worker finishes its current task, so
+        // worst-case exit is DRAIN_GRACE plus the in-flight whisper call either way;
+        // the same delay precedes the `exit(3)` poison handoff. Kept short to leave
+        // headroom inside launchd's 20s default ExitTimeOut.
         const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
-        match tokio::time::timeout(DRAIN_GRACE, handle).await {
+        // Borrow the handle — do NOT let `timeout` consume it. Dropping a JoinHandle
+        // detaches the task, and runtime drop then destroys its future *without
+        // polling it*, while the blocking pool separately waits out the whisper call
+        // whose result now has nowhere to go. That discards a transcript we already
+        // paid for. Borrowing lets us stop the drain and still await the write, which
+        // costs no extra wall-clock because that wait was happening regardless.
+        match tokio::time::timeout(DRAIN_GRACE, &mut handle).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => log::error!("transcribe loop task failed: {e}"),
-            Err(_) => log::warn!(
-                "transcribe queue still draining after {}s — stopping the wait; any \
-                 in-flight segment finishes during runtime teardown",
-                DRAIN_GRACE.as_secs()
-            ),
+            Err(_) => {
+                // Unbounded await, bounded in practice: the loop breaks after the one
+                // segment it is already running, and reports how many it abandoned.
+                stop_transcription.store(true, std::sync::atomic::Ordering::Relaxed);
+                if let Err(e) = handle.await {
+                    log::error!("transcribe loop task failed: {e}");
+                }
+            }
         }
     }
 
