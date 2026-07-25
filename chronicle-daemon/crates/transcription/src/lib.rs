@@ -1,9 +1,17 @@
 //! Transcription pipeline for Chronicle.
 //!
-//! The whisper.cpp engine wiring lives in HEU-472. This crate currently
-//! owns the model-path convention and the allow-list of supported
-//! variants so HEU-472 (and the daemon startup check) agree on what is
-//! valid and where to look.
+//! This crate turns a persisted Ogg/Opus audio segment into text. It owns:
+//!
+//! - [`Transcriber`] — the trait the daemon depends on, so the pipeline can be
+//!   tested against a fake without a model on disk.
+//! - [`TranscriptionEngine`] — the whisper.cpp implementation (Metal by default,
+//!   `transcription-cpu` to opt out). Loads a ggml model once and shares it.
+//! - [`decode_opus_16k_mono`] — Opus → 16 kHz mono f32, the format whisper wants.
+//! - The model-path convention and the [`ModelVariant`] allow-list, so the daemon's
+//!   startup presence check and the loader agree on what is valid and where to look.
+//!
+//! The daemon drives all of this from `pipeline::transcribe_loop`; nothing here
+//! spawns tasks or touches the database.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -186,7 +194,11 @@ pub fn decode_opus_16k_mono(path: &Path) -> Result<Vec<f32>, TranscriptionError>
     // left in by design (whisper tolerates it; over-trimming would be worse).
     // The clamp still protects against a future producer that writes a true
     // end-trimmed granule position.
-    let total16 = (last_granule as usize).saturating_sub(pre_skip) * DECODE_RATE / ENCODE_RATE;
+    // Scale in u64 before narrowing: `last_granule` comes off disk, and a corrupt
+    // value above ~1.15e15 would overflow the `* 16_000` if done in usize first
+    // (same class as the `n > buf.len()` decode guard above).
+    let total16 = (last_granule.saturating_sub(pre_skip as u64) * DECODE_RATE as u64
+        / ENCODE_RATE as u64) as usize;
     if total16 > 0 && pcm.len() > total16 {
         pcm.truncate(total16);
     }

@@ -207,7 +207,13 @@ impl Storage {
         .await?
     }
 
-    /// Attach or replace the transcript for an audio segment.
+    /// Attach or replace **only** the transcript column for an audio segment.
+    ///
+    /// Prefer [`Storage::update_transcript_full`] — that is what the transcription
+    /// pipeline uses, and it also records the model variant and detected language.
+    /// This narrower setter is retained for the transcript-only case (e.g. a
+    /// future backfill that has no model metadata to record) and currently has no
+    /// production caller.
     pub async fn update_transcript(&self, id: i64, transcript: String) -> Result<()> {
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {

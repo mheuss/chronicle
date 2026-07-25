@@ -249,12 +249,11 @@ async fn main() -> Result<()> {
                 let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(engine);
                 // Bounded channel (64), matching the audio bridge: drop-on-full.
                 let (tx, rx) = tokio::sync::mpsc::channel(64);
-                let handle = tokio::spawn(pipeline::transcribe_loop(
-                    engine,
-                    Arc::clone(&storage),
-                    rx,
-                    cancel.clone(),
-                ));
+                // No cancellation token by design — the loop drains until the
+                // channel closes so the shutdown flush still gets transcribed.
+                // See `transcribe_loop`'s shutdown contract.
+                let handle =
+                    tokio::spawn(pipeline::transcribe_loop(engine, Arc::clone(&storage), rx));
                 log::info!(
                     "transcription engine loaded (variant={}, backend={})",
                     whisper_variant,
@@ -562,14 +561,27 @@ async fn main() -> Result<()> {
         log::error!("Audio store task failed: {e}");
     }
 
-    // `cancel` fired at shutdown start, so transcribe_loop has
-    // stopped taking new jobs, finished its in-flight one, and is exiting. Await
-    // it. Queued-but-unstarted jobs were dropped (rows keep transcript = NULL for
-    // a future backfill).
-    if let Some(handle) = transcribe_handle
-        && let Err(e) = handle.await
-    {
-        log::error!("transcribe loop task failed: {e}");
+    // Transcription drains LAST, and that ordering is load-bearing.
+    // `audio_pipeline.stop()` above flushed the session's final partial segments
+    // and `audio_store_handle` just persisted and enqueued them, so the queue is
+    // only now complete. Dropping our sink Arc closes the channel — the store
+    // task released its clone by finishing — and that close is what tells
+    // `transcribe_loop` to drain and exit.
+    drop(transcription_sink);
+    if let Some(handle) = transcribe_handle {
+        // Bound the drain. An in-flight `spawn_blocking` whisper call cannot be
+        // aborted, so on timeout we abandon the thread and exit; the process
+        // teardown reaps it. Abandoned rows keep transcript = NULL for a future
+        // backfill, same as before.
+        const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+        match tokio::time::timeout(DRAIN_GRACE, handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => log::error!("transcribe loop task failed: {e}"),
+            Err(_) => log::warn!(
+                "transcribe loop still draining after {}s — abandoning it to exit",
+                DRAIN_GRACE.as_secs()
+            ),
+        }
     }
 
     log::info!("chronicle-daemon stopped");

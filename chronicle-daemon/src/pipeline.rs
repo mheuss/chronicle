@@ -180,27 +180,27 @@ pub async fn ocr_loop(storage: Arc<Storage>, mut ocr_rx: mpsc::Receiver<(i64, Pa
 ///
 /// Heavy work (Opus decode + whisper) runs inside `spawn_blocking` so it never
 /// starves tokio workers (cf. HEU-480). Each pulled job is processed to
-/// completion before the next `select!`, so at most one whisper call is in flight
-/// (sequential). On `cancel` the loop stops pulling **new** jobs, finishes the
-/// in-flight one, and exits — queued jobs are dropped (rows stay NULL for a
-/// future backfill). Empty results are skipped so blank rows never reach
-/// `audio_fts`. Also exits when the channel closes.
+/// completion before the next `recv`, so at most one whisper call is in flight
+/// (sequential). Empty results are skipped so blank rows never reach `audio_fts`.
+///
+/// **Shutdown contract — this loop must outlive `audio_store_loop`.** It exits
+/// only when the channel closes, i.e. once every `TranscriptionSink` clone has
+/// dropped. It deliberately does *not* watch the global cancellation token:
+/// `audio_pipeline.stop()` flushes the session's final partial segments, and
+/// those get persisted and enqueued *after* cancel fires. A loop that broke on
+/// cancel would drop that tail un-transcribed, log a spurious "channel closed",
+/// and inflate `transcription_dropped` on every clean exit.
+///
+/// `main` bounds the drain with a timeout rather than a token, because an
+/// in-flight `spawn_blocking` whisper call cannot be aborted — the bound has to
+/// live at the process level. Do not reintroduce a cancel branch here without
+/// also changing that shutdown ordering in `main`.
 pub async fn transcribe_loop(
     engine: Arc<dyn chronicle_transcription::Transcriber>,
     storage: Arc<Storage>,
     mut rx: mpsc::Receiver<crate::pipeline::sinks::TranscriptionJob>,
-    cancel: chronicle_ipc::CancellationToken,
 ) {
-    loop {
-        let job = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => break,
-            maybe = rx.recv() => match maybe {
-                Some(job) => job,
-                None => break,
-            },
-        };
-
+    while let Some(job) = rx.recv().await {
         // Clone a separate Arc for the blocking closure; the outer `engine` stays
         // owned so `engine.variant()` is usable after the await.
         let engine_for_blocking = Arc::clone(&engine);
@@ -213,7 +213,11 @@ pub async fn transcribe_loop(
 
         match result {
             Ok(Ok(transcript)) => {
-                if transcript.text.is_empty() {
+                // `trim()` guards the seam, not this impl: `TranscriptionEngine`
+                // already trims via `concat_segment_text`, but the `Transcriber`
+                // trait promises nothing, so a future impl returning " " would
+                // otherwise write a whitespace row into `audio_fts` (BR-4).
+                if transcript.text.trim().is_empty() {
                     log::debug!(
                         "transcription skipped (no usable speech) for segment {}",
                         job.row_id
@@ -1154,13 +1158,7 @@ mod tests {
         .await
         .unwrap();
         drop(tx);
-        transcribe_loop(
-            engine,
-            storage.clone(),
-            rx,
-            chronicle_ipc::CancellationToken::new(),
-        )
-        .await;
+        transcribe_loop(engine, storage.clone(), rx).await;
 
         let seg = storage.get_audio_segment(row_id).await.unwrap();
         assert_eq!(seg.transcript.as_deref(), Some("the quick brown fox"));
@@ -1182,13 +1180,7 @@ mod tests {
         .await
         .unwrap();
         drop(tx);
-        transcribe_loop(
-            engine,
-            storage.clone(),
-            rx,
-            chronicle_ipc::CancellationToken::new(),
-        )
-        .await;
+        transcribe_loop(engine, storage.clone(), rx).await;
 
         let seg = storage.get_audio_segment(row_id).await.unwrap();
         assert!(seg.transcript.is_none());
@@ -1207,39 +1199,56 @@ mod tests {
         .await
         .unwrap();
         drop(tx);
-        transcribe_loop(
-            engine,
-            storage.clone(),
-            rx,
-            chronicle_ipc::CancellationToken::new(),
-        )
-        .await;
+        transcribe_loop(engine, storage.clone(), rx).await;
         let seg = storage.get_audio_segment(row_id).await.unwrap();
         assert!(seg.transcript.is_none());
     }
 
+    /// `audio_pipeline.stop()` flushes the session's final partial segments, so
+    /// they are enqueued *after* shutdown has begun. The loop must therefore
+    /// drain everything queued before exiting rather than bailing on a signal.
+    /// Regression test for the shutdown ordering in `main`.
     #[tokio::test]
-    async fn transcribe_loop_cancel_drops_queued() {
+    async fn transcribe_loop_drains_all_queued_before_exit() {
         let (storage, row_id, opus_path, _dir) = persist_segment_with_opus().await;
+        // A second row over the same audio file stands in for the tail segment
+        // that the shutdown flush persists last.
+        let tail_id = storage
+            .insert_audio_segment(chronicle_storage::AudioSegmentMetadata {
+                start_timestamp: 1_700_000_030_000,
+                end_timestamp: 1_700_000_060_000,
+                source: "system".into(),
+                audio_path: opus_path.to_string_lossy().into_owned(),
+                transcript: None,
+                whisper_model: None,
+                language: None,
+            })
+            .await
+            .unwrap();
         let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(FakeTranscriber {
-            text: "should not be written".into(),
+            text: "drained".into(),
         });
         let (tx, rx) = mpsc::channel(4);
-        tx.send(crate::pipeline::sinks::TranscriptionJob {
-            row_id,
-            audio_path: opus_path,
-        })
-        .await
-        .unwrap();
-        // Pre-cancelled token: the biased select breaks before pulling the job.
-        let cancel = chronicle_ipc::CancellationToken::new();
-        cancel.cancel();
-        transcribe_loop(engine, storage.clone(), rx, cancel).await;
+        for id in [row_id, tail_id] {
+            tx.send(crate::pipeline::sinks::TranscriptionJob {
+                row_id: id,
+                audio_path: opus_path.clone(),
+            })
+            .await
+            .unwrap();
+        }
+        // Closing the channel is what ends the loop — mirrors `main` dropping its
+        // sink Arc once `audio_store_handle` has finished.
+        drop(tx);
+        transcribe_loop(engine, storage.clone(), rx).await;
 
-        let seg = storage.get_audio_segment(row_id).await.unwrap();
-        assert!(
-            seg.transcript.is_none(),
-            "queued job must be dropped on cancel"
-        );
+        for id in [row_id, tail_id] {
+            let seg = storage.get_audio_segment(id).await.unwrap();
+            assert_eq!(
+                seg.transcript.as_deref(),
+                Some("drained"),
+                "every queued job must be transcribed before the loop exits (segment {id})"
+            );
+        }
     }
 }
