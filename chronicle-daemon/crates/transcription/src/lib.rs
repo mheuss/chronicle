@@ -449,19 +449,23 @@ mod tests {
     fn engine_transcribes_real_speech() {
         use chronicle_audio::OggOpusEncoder;
 
-        // Model dir: env override, else the local Chronicle data dir. Skip if
-        // absent (CI has neither a model nor `say`).
-        let base = std::env::var("CHRONICLE_TEST_MODEL_DIR").unwrap_or_else(|_| {
+        // Chronicle *base* dir — the one holding `models/` — overridable for a
+        // non-default data dir. `#[ignore]` already keeps this off CI, so anyone
+        // reaching this line asked for the test on purpose: a missing model is a
+        // failure, not a skip. Reporting `ok` without running whisper is exactly
+        // how the bug this test guards went unnoticed.
+        let base = std::env::var("CHRONICLE_TEST_BASE_DIR").unwrap_or_else(|_| {
             format!(
                 "{}/Library/Application Support/Chronicle",
-                std::env::var("HOME").unwrap()
+                std::env::var("HOME").expect("HOME environment variable must be set")
             )
         });
         let base = PathBuf::from(base);
-        if !model_present(&base, DEFAULT_VARIANT) {
-            eprintln!("skipping: no model at {}", base.display());
-            return;
-        }
+        assert!(
+            model_present(&base, DEFAULT_VARIANT),
+            "no whisper model at {} — provision one or set CHRONICLE_TEST_BASE_DIR",
+            base.display()
+        );
 
         // 1) Generate speech with macOS `say` as 48 kHz mono f32 WAV.
         let dir = tempdir().unwrap();
@@ -475,25 +479,39 @@ mod tests {
                 phrase,
             ])
             .status()
-            .unwrap()
+            .expect("failed to spawn `say` — is it on PATH?")
             .success();
         assert!(ok, "say failed");
 
         // 2) Read the WAV's f32 samples (find the `data` chunk; rest is f32le).
-        let bytes = std::fs::read(&wav).unwrap();
-        let data_pos = bytes.windows(4).position(|w| w == b"data").unwrap() + 8; // skip "data" + size
+        let bytes = std::fs::read(&wav).expect("failed to read `say` output");
+        let data_pos = bytes
+            .windows(4)
+            .position(|w| w == b"data")
+            .expect("no `data` chunk in `say` output")
+            + 8; // skip the "data" tag + size
         let samples: Vec<f32> = bytes[data_pos..]
             .chunks_exact(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
 
-        // 3) Encode to Ogg/Opus with the production encoder, then decode like
-        //    the pipeline does.
+        // 3) Encode to Ogg/Opus with the production encoder at the production
+        //    bitrate (AudioConfig::default().bitrate), then decode like the
+        //    pipeline does.
         let opus = dir.path().join("tts.opus");
-        OggOpusEncoder::new(1, 24_000, opus::Application::Voip)
+        OggOpusEncoder::new(1, 64_000, opus::Application::Voip)
             .encode_to_file(&samples, &opus)
             .unwrap();
         let pcm = decode_opus_16k_mono(&opus).unwrap();
+
+        // Guard the transcript assert below: if `say` or the WAV parse yielded no
+        // audio, an empty transcript would be blamed on the detect_language bug
+        // and send the next maintainer after an already-correct parameter.
+        assert!(
+            pcm.len() > DECODE_RATE,
+            "TTS produced under 1s of audio ({} samples) — fix the fixture, not the engine",
+            pcm.len()
+        );
 
         // 4) Transcribe with the real engine and assert it produced text.
         let engine = TranscriptionEngine::load(&base, DEFAULT_VARIANT).unwrap();
@@ -507,6 +525,13 @@ mod tests {
             lower.contains("fox") || lower.contains("quick") || lower.contains("brown"),
             "transcript should contain a spoken word, got: {:?}",
             t.text
+        );
+        // `set_language(None)` must auto-detect *as well as* transcribe — the
+        // plan expects a non-NULL language on the persisted row.
+        assert_eq!(
+            t.language.as_deref(),
+            Some("en"),
+            "expected auto-detected language `en`"
         );
     }
 
