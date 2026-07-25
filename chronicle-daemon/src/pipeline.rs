@@ -1353,8 +1353,14 @@ mod tests {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(true));
         // Sender stays alive, so only the flag can end this loop. If the flag were
         // checked before the write (or the loop broke on it immediately), the first
-        // assert fails; if it were ignored, the loop would hang here.
-        transcribe_loop(engine, storage.clone(), rx, stop).await;
+        // assert fails; if it were ignored the loop never returns — the timeout turns
+        // that regression into a clean failure instead of a wedged test suite.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            transcribe_loop(engine, storage.clone(), rx, stop),
+        )
+        .await
+        .expect("loop ignored stop_after_current");
 
         let done = storage.get_audio_segment(row_id).await.unwrap();
         assert_eq!(
@@ -1367,5 +1373,56 @@ mod tests {
             skipped.transcript.is_none(),
             "queued segments past the stop point stay NULL for backfill"
         );
+    }
+
+    /// An empty transcript must not bypass the stop check. This is why the skip path
+    /// is `if/else` rather than `continue`: end-of-session tails are frequently
+    /// silent, so a realistic shutdown yields a *run* of empty results, and a
+    /// `continue` would jump straight back to `recv` past the flag — defeating the
+    /// grace bound in precisely the case it exists for.
+    #[tokio::test]
+    async fn transcribe_loop_stops_after_empty_transcript() {
+        let (storage, row_id, opus_path, _dir) = persist_segment_with_opus().await;
+        let queued_id = storage
+            .insert_audio_segment(chronicle_storage::AudioSegmentMetadata {
+                start_timestamp: 1_700_000_030_000,
+                end_timestamp: 1_700_000_060_000,
+                source: "system".into(),
+                audio_path: opus_path.to_string_lossy().into_owned(),
+                transcript: None,
+                whisper_model: None,
+                language: None,
+            })
+            .await
+            .unwrap();
+        // Whitespace only — trims to empty, so every job takes the skip path.
+        let engine: Arc<dyn chronicle_transcription::Transcriber> =
+            Arc::new(FakeTranscriber { text: "   ".into() });
+        let (tx, rx) = mpsc::channel(4);
+        for id in [row_id, queued_id] {
+            tx.send(crate::pipeline::sinks::TranscriptionJob {
+                row_id: id,
+                audio_path: opus_path.clone(),
+            })
+            .await
+            .unwrap();
+        }
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        // Sender stays alive, so the flag is the only way out. Restore `continue` on
+        // the empty path and this times out.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            transcribe_loop(engine, storage.clone(), rx, stop),
+        )
+        .await
+        .expect("empty transcript must not bypass stop_after_current");
+
+        for id in [row_id, queued_id] {
+            let seg = storage.get_audio_segment(id).await.unwrap();
+            assert!(
+                seg.transcript.is_none(),
+                "empty transcripts are never written (segment {id})"
+            );
+        }
     }
 }

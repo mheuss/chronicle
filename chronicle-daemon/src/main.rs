@@ -559,9 +559,13 @@ async fn main() -> Result<()> {
     log::info!("Audio pipeline stopped");
 
     // Wait for bridge thread to finish
-    bridge_handle
-        .join()
-        .map_err(|_| anyhow::anyhow!("audio bridge thread panicked"))?;
+    // Deliberately not `?`. An early return here would skip `drop(transcription_sink)`
+    // and the drain block below, detaching the transcription task and discarding an
+    // in-flight transcript — the exact failure the drain path exists to prevent. This
+    // is the last place that invariant could still be violated.
+    if bridge_handle.join().is_err() {
+        log::error!("audio bridge thread panicked; continuing shutdown");
+    }
 
     // Wait for the audio store task (the capture/OCR tasks are owned and
     // joined by `CaptureRuntime::stop()` above).
