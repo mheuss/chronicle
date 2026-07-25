@@ -213,21 +213,24 @@ pub async fn transcribe_loop(
 
         match result {
             Ok(Ok(transcript)) => {
-                // `trim()` guards the seam, not this impl: `TranscriptionEngine`
-                // already trims via `concat_segment_text`, but the `Transcriber`
-                // trait promises nothing, so a future impl returning " " would
-                // otherwise write a whitespace row into `audio_fts` (BR-4).
-                if transcript.text.trim().is_empty() {
+                // Trim guards the seam, not this impl: `TranscriptionEngine` already
+                // trims via `concat_segment_text`, but the `Transcriber` trait
+                // promises nothing. Trim once and use it for both the check and the
+                // write, so a future impl returning "  hi  " can neither slip a
+                // whitespace-only row nor a padded one into `audio_fts` (BR-4).
+                let text = transcript.text.trim();
+                if text.is_empty() {
                     log::debug!(
                         "transcription skipped (no usable speech) for segment {}",
                         job.row_id
                     );
                     continue;
                 }
+                let text = text.to_string();
                 if let Err(e) = storage
                     .update_transcript_full(
                         job.row_id,
-                        transcript.text,
+                        text,
                         engine.variant().to_string(),
                         transcript.language,
                     )
@@ -313,7 +316,14 @@ pub async fn audio_store_loop(
                         counters
                             .transcription_dropped
                             .fetch_add(1, Ordering::Relaxed);
-                        log::warn!("transcription channel closed; enqueue dropped");
+                        // `main` holds the only other sink handle and drops it last
+                        // during shutdown, so a closed channel here means
+                        // `transcribe_loop` itself died. Nothing gets transcribed for
+                        // the rest of the process lifetime — not a benign race.
+                        log::error!(
+                            "transcription worker is gone; segment {row_id} and every \
+                             later segment will go untranscribed"
+                        );
                     }
                     TranscriptionEnqueueResult::Disabled => {} // no model — idle, not a drop
                 }
@@ -1204,9 +1214,10 @@ mod tests {
         assert!(seg.transcript.is_none());
     }
 
-    /// `audio_pipeline.stop()` flushes the session's final partial segments, so
-    /// they are enqueued *after* shutdown has begun. The loop must therefore
-    /// drain everything queued before exiting rather than bailing on a signal.
+    /// `audio_pipeline.stop()` flushes the session's final partial segments, so they
+    /// are enqueued *after* shutdown has begun — i.e. after the point where the old
+    /// code's cancel token had already fired. Jobs handed to a running loop must
+    /// therefore all be transcribed, with only the channel close ending it.
     /// Regression test for the shutdown ordering in `main`.
     #[tokio::test]
     async fn transcribe_loop_drains_all_queued_before_exit() {
@@ -1229,6 +1240,10 @@ mod tests {
             text: "drained".into(),
         });
         let (tx, rx) = mpsc::channel(4);
+        // Start the loop with an EMPTY channel, then enqueue. Pre-filling and closing
+        // the channel before the call would only prove that tokio yields buffered
+        // items after close, and would pass under the old cancel-token code too.
+        let loop_handle = tokio::spawn(transcribe_loop(engine, storage.clone(), rx));
         for id in [row_id, tail_id] {
             tx.send(crate::pipeline::sinks::TranscriptionJob {
                 row_id: id,
@@ -1240,7 +1255,7 @@ mod tests {
         // Closing the channel is what ends the loop — mirrors `main` dropping its
         // sink Arc once `audio_store_handle` has finished.
         drop(tx);
-        transcribe_loop(engine, storage.clone(), rx).await;
+        loop_handle.await.unwrap();
 
         for id in [row_id, tail_id] {
             let seg = storage.get_audio_segment(id).await.unwrap();

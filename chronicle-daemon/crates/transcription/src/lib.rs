@@ -194,11 +194,15 @@ pub fn decode_opus_16k_mono(path: &Path) -> Result<Vec<f32>, TranscriptionError>
     // left in by design (whisper tolerates it; over-trimming would be worse).
     // The clamp still protects against a future producer that writes a true
     // end-trimmed granule position.
-    // Scale in u64 before narrowing: `last_granule` comes off disk, and a corrupt
-    // value above ~1.15e15 would overflow the `* 16_000` if done in usize first
-    // (same class as the `n > buf.len()` decode guard above).
-    let total16 = (last_granule.saturating_sub(pre_skip as u64) * DECODE_RATE as u64
-        / ENCODE_RATE as u64) as usize;
+    // Divide, never multiply. `ENCODE_RATE` is an exact multiple of `DECODE_RATE`
+    // (48k/16k = 3), so this is bit-identical to `* DECODE_RATE / ENCODE_RATE` while
+    // being unable to overflow at all — scaling by multiply first would overflow at
+    // ~1.15e15 in u64 just as it does in usize, since usize is 64-bit here.
+    // That threshold is reachable: `last_granule` is a raw u64 off the Ogg page
+    // header, and a page on which no packet completes carries granulepos -1,
+    // i.e. `u64::MAX`.
+    let total16 = (last_granule.saturating_sub(pre_skip as u64)
+        / (ENCODE_RATE / DECODE_RATE) as u64) as usize;
     if total16 > 0 && pcm.len() > total16 {
         pcm.truncate(total16);
     }

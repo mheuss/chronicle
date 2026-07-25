@@ -569,16 +569,21 @@ async fn main() -> Result<()> {
     // `transcribe_loop` to drain and exit.
     drop(transcription_sink);
     if let Some(handle) = transcribe_handle {
-        // Bound the drain. An in-flight `spawn_blocking` whisper call cannot be
-        // aborted, so on timeout we abandon the thread and exit; the process
-        // teardown reaps it. Abandoned rows keep transcript = NULL for a future
+        // Bounds how long we wait for the queue to drain — NOT how long exit takes.
+        // Dropping the `JoinHandle` detaches rather than aborts, and `#[tokio::main]`'s
+        // runtime drop blocks until every blocking worker finishes its current task.
+        // So worst-case exit is DRAIN_GRACE *plus* one in-flight whisper call, spent
+        // after the "stopped" line below; the same delay applies before the `exit(3)`
+        // poison handoff. Kept short deliberately, to leave headroom inside launchd's
+        // 20s default ExitTimeOut. Undrained rows keep transcript = NULL for a future
         // backfill, same as before.
-        const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+        const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
         match tokio::time::timeout(DRAIN_GRACE, handle).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => log::error!("transcribe loop task failed: {e}"),
             Err(_) => log::warn!(
-                "transcribe loop still draining after {}s — abandoning it to exit",
+                "transcribe queue still draining after {}s — stopping the wait; any \
+                 in-flight segment finishes during runtime teardown",
                 DRAIN_GRACE.as_secs()
             ),
         }
