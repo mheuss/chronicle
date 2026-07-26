@@ -527,6 +527,10 @@ async fn main() -> Result<()> {
     // can close. If no runtime is active (paused at shutdown), this is a
     // no-op.
     let mut poisoned = false;
+    // Set when an owned task/thread panicked during shutdown. Those panics are
+    // deliberately swallowed mid-sequence so the transcription drain still runs;
+    // this flag surfaces them in the exit code once the drain is done.
+    let mut shutdown_failed = false;
     if let Some(rt) = capture_runtime.take() {
         match rt.stop().await {
             Ok(()) => log::info!("Capture runtime stopped cleanly"),
@@ -563,13 +567,16 @@ async fn main() -> Result<()> {
     // and the drain block below, detaching the transcription task and discarding an
     // in-flight transcript — the exact failure the drain path exists to prevent. This
     // is the last place that invariant could still be violated.
+    // `shutdown_failed` still surfaces the panic in the exit code afterwards.
     if bridge_handle.join().is_err() {
+        shutdown_failed = true;
         log::error!("audio bridge thread panicked; continuing shutdown");
     }
 
     // Wait for the audio store task (the capture/OCR tasks are owned and
     // joined by `CaptureRuntime::stop()` above).
     if let Err(e) = audio_store_handle.await {
+        shutdown_failed = true;
         log::error!("Audio store task failed: {e}");
     }
 
@@ -595,12 +602,16 @@ async fn main() -> Result<()> {
         // costs no extra wall-clock because that wait was happening regardless.
         match tokio::time::timeout(DRAIN_GRACE, &mut handle).await {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => log::error!("transcribe loop task failed: {e}"),
+            Ok(Err(e)) => {
+                shutdown_failed = true;
+                log::error!("transcribe loop task failed: {e}");
+            }
             Err(_) => {
                 // Unbounded await, bounded in practice: the loop breaks after the one
                 // segment it is already running, and reports how many it abandoned.
                 stop_transcription.store(true, std::sync::atomic::Ordering::Relaxed);
                 if let Err(e) = handle.await {
+                    shutdown_failed = true;
                     log::error!("transcribe loop task failed: {e}");
                 }
             }
@@ -611,6 +622,9 @@ async fn main() -> Result<()> {
     if poisoned {
         log::error!("daemon exiting with code 3 (engine poisoned)");
         std::process::exit(3);
+    }
+    if shutdown_failed {
+        anyhow::bail!("shutdown completed with task failures (see log)");
     }
     Ok(())
 }
