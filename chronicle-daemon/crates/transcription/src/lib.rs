@@ -4,8 +4,10 @@
 //!
 //! - [`Transcriber`] — the trait the daemon depends on, so the pipeline can be
 //!   tested against a fake without a model on disk.
-//! - [`TranscriptionEngine`] — the whisper.cpp implementation (Metal by default,
-//!   `transcription-cpu` to opt out). Loads a ggml model once and shares it.
+//! - [`TranscriptionEngine`] — the whisper.cpp implementation (Metal by default;
+//!   build with `--no-default-features --features cpu` for CPU-only — the daemon
+//!   forwards this as its `transcription-cpu` feature). Loads a ggml model once
+//!   and shares it.
 //! - [`decode_opus_16k_mono`] — Opus → 16 kHz mono f32, the format whisper wants.
 //! - The model-path convention and the [`ModelVariant`] allow-list, so the daemon's
 //!   startup presence check and the loader agree on what is valid and where to look.
@@ -226,8 +228,9 @@ pub struct TranscriptionEngine {
 }
 
 impl TranscriptionEngine {
-    /// Load the ggml model for `variant` with the Metal backend. Fallible — the
-    /// caller logs and stays idle on `Err` (graceful degradation, BR-5).
+    /// Load the ggml model for `variant` — Metal when the `metal` feature is on,
+    /// CPU otherwise. Fallible — the caller logs and stays idle on `Err`
+    /// (graceful degradation, BR-5).
     pub fn load(base_dir: &Path, variant: ModelVariant) -> Result<Self, TranscriptionError> {
         let path = model_path(base_dir, variant);
         let path_str = path
