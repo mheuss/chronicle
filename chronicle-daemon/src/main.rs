@@ -284,7 +284,7 @@ async fn main() -> Result<()> {
             }
             Err(e) => {
                 log::error!(
-                    "transcription engine load task panicked ({whisper_variant}): {e} — staying idle"
+                    "transcription engine load task failed ({whisper_variant}): {e} — staying idle"
                 );
                 (Arc::new(pipeline::sinks::NoopTranscriptionSink), None)
             }

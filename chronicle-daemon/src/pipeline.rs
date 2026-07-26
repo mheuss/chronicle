@@ -250,10 +250,10 @@ pub async fn transcribe_loop(
                 }
             }
             Ok(Err(e)) => log::warn!("transcription failed for segment {}: {e}", job.row_id),
-            Err(e) => log::error!(
-                "transcription task panicked for segment {}: {e}",
-                job.row_id
-            ),
+            // Neutral "failed": `JoinError`'s Display names the cause ("panicked
+            // with message …" / "was cancelled"), and the shutdown contract above
+            // means a cancellation is never observed here — no branch to log it.
+            Err(e) => log::error!("transcription task failed for segment {}: {e}", job.row_id),
         }
 
         // Checked *after* the write, never before it: `main` sets this when the
