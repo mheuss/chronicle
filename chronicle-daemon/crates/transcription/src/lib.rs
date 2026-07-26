@@ -125,8 +125,11 @@ const MAX_SAMPLES_PER_PACKET: usize = 1_920;
 
 /// Decode an Ogg/Opus segment to 16 kHz mono f32 PCM.
 ///
-/// libopus resamples 48 kHz → 16 kHz and downmixes to mono internally, so no
-/// separate resampler is needed. The first two Ogg packets are the OpusHead
+/// The decoder is created for 16 kHz mono output, and libopus resamples and
+/// downmixes to that format internally — a mono-initialized decoder downmixes
+/// stereo packets per the Opus API — so no separate resampler is needed and
+/// the OpusHead channel count needs no checking (Chronicle encodes mono
+/// anyway). The first two Ogg packets are the OpusHead
 /// and OpusTags headers (RFC 7845); the rest are audio. The encoder's pre-skip
 /// (lookahead priming) is dropped using the OpusHead pre_skip, and the final
 /// granule position drives a defensive end clamp (see below) so the decoded
