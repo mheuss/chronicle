@@ -172,6 +172,11 @@ pub struct OcrStats {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioStats {
     pub segments_persisted: u64,
+    pub transcription_enqueued: u64,
+    /// Aggregate: channel full (backpressure — the worker is behind) plus channel
+    /// closed (the worker died). Treat it as a capacity signal only while the
+    /// worker is alive; the two causes are not distinguishable here.
+    pub transcription_dropped: u64,
     /// Current microphone capture state.
     pub mic_state: MicState,
 }
@@ -611,6 +616,8 @@ mod tests {
                 ocr: OcrStats::default(),
                 audio: AudioStats {
                     segments_persisted: 7,
+                    transcription_enqueued: 0,
+                    transcription_dropped: 0,
                     mic_state: MicState::Off,
                 },
                 storage: StorageStats::default(),
@@ -620,5 +627,18 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["data"]["audio"]["segments_persisted"], 7);
         assert_eq!(value["data"]["audio"]["mic_state"], "off");
+    }
+
+    #[test]
+    fn audio_stats_serializes_transcription_counters() {
+        let a = AudioStats {
+            segments_persisted: 3,
+            transcription_enqueued: 2,
+            transcription_dropped: 1,
+            mic_state: MicState::default(),
+        };
+        let json = serde_json::to_string(&a).unwrap();
+        assert!(json.contains("transcription_enqueued"));
+        assert!(json.contains("transcription_dropped"));
     }
 }
