@@ -16,7 +16,7 @@ use chronicle_audio::{AudioConfig, AudioPipeline};
 use chronicle_ipc::{CancellationToken, IpcServer};
 use chronicle_storage::{Storage, StorageConfig};
 
-use crate::capture_supervisor::{CaptureSupervisor, ReconcileOutcome};
+use crate::capture_supervisor::{CaptureSupervisor, ReconcileOutcome, StartRetry};
 
 /// Parse a `retention_days` setting from the config table. An unset key uses
 /// the 30-day default; an unparseable value also falls back to 30 with a warn.
@@ -31,6 +31,45 @@ fn parse_retention_days(s: Option<String>) -> u32 {
             30
         }),
         None => 30,
+    }
+}
+
+/// Detached one-shot: after `delay`, nudge the event loop to re-run
+/// reconcile. Not cancelled on recovery — a stale nudge hits an idempotent
+/// reconcile and is discarded.
+fn spawn_start_retry(tx: tokio::sync::mpsc::Sender<()>, delay: std::time::Duration) {
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let _ = tx.send(()).await;
+    });
+}
+
+/// Arm or clear the start-retry budget from a reconcile outcome (HEU-575):
+/// `StartFailed` arms the next backoff step (or reports an exhausted
+/// budget); every other outcome ends the incident and restores the budget.
+fn note_reconcile_outcome(
+    outcome: &ReconcileOutcome,
+    start_retry: &mut StartRetry,
+    retry_tx: &tokio::sync::mpsc::Sender<()>,
+) {
+    match outcome {
+        ReconcileOutcome::StartFailed { .. } => {
+            if let Some(delay) = start_retry.arm() {
+                log::warn!(
+                    "capture start failed; retrying in {}s (attempt {}/{})",
+                    delay.as_secs(),
+                    start_retry.attempt(),
+                    StartRetry::MAX_ATTEMPTS,
+                );
+                spawn_start_retry(retry_tx.clone(), delay);
+            } else {
+                log::error!(
+                    "capture start failed; retry budget exhausted — capture stays \
+                     down until the next power or IPC event"
+                );
+            }
+        }
+        _ => start_retry.reset(),
     }
 }
 
@@ -128,6 +167,13 @@ async fn main() -> Result<()> {
              capture continues normally"
         ),
     }
+    // Start-retry channel (HEU-575). When a wake/resume reconcile fails to
+    // start capture — typically racing display re-registration right after
+    // wake — a detached sleeper sends one unit event here to re-run
+    // reconcile. Stale nudges after recovery are harmless: reconcile is
+    // idempotent.
+    let (retry_tx, mut retry_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let mut start_retry = StartRetry::new();
     // Whisper model presence check (HEU-421). Logs a startup warning if
     // the configured variant's ggml file isn't on disk; transcription
     // stays idle but the rest of the daemon runs normally.
@@ -410,26 +456,38 @@ async fn main() -> Result<()> {
                 let _ = cmd.reply.send(state);
             }
             Some(cmd) = capture_rx.recv() => {
-                let paused = match cmd.action {
+                let (paused, outcome) = match cmd.action {
                     ipc_handler::CaptureAction::Pause => {
-                        supervisor.set_user_paused(true, &audio_pipeline).await;
-                        true
+                        (true, supervisor.set_user_paused(true, &audio_pipeline).await)
                     }
                     ipc_handler::CaptureAction::Resume => {
-                        supervisor.set_user_paused(false, &audio_pipeline).await;
-                        false
+                        (false, supervisor.set_user_paused(false, &audio_pipeline).await)
                     }
                 };
+                note_reconcile_outcome(&outcome, &mut start_retry, &retry_tx);
                 let _ = cmd.reply.send(paused);
             }
             Some(evt) = power_rx.recv() => {
                 log::info!("power event: {evt:?}");
-                match evt {
+                let outcome = match evt {
                     power::PowerEvent::SystemSleep =>
                         supervisor.set_system_asleep(true, &audio_pipeline).await,
                     power::PowerEvent::SystemWake =>
                         supervisor.set_system_awake(&audio_pipeline).await,
+                };
+                note_reconcile_outcome(&outcome, &mut start_retry, &retry_tx);
+            }
+            Some(()) = retry_rx.recv() => {
+                log::info!(
+                    "start retry firing (attempt {}/{})",
+                    start_retry.attempt(),
+                    StartRetry::MAX_ATTEMPTS,
+                );
+                let outcome = supervisor.reconcile(&audio_pipeline).await;
+                if outcome == ReconcileOutcome::Started {
+                    log::info!("capture recovered on retry");
                 }
+                note_reconcile_outcome(&outcome, &mut start_retry, &retry_tx);
             }
         }
     }
@@ -451,6 +509,10 @@ async fn main() -> Result<()> {
     // it via CFRunLoopRun().
     power_rx.close();
     while power_rx.try_recv().is_ok() {}
+    // Same for pending start-retry nudges; their detached sleepers die with
+    // the runtime.
+    retry_rx.close();
+    while retry_rx.try_recv().is_ok() {}
     cancel.cancel();
 
     // Stop the IPC server before the capture engine: stop accepting
