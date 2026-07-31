@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use chronicle_audio::{AudioPipeline, CHANNEL_COUNT, SAMPLE_RATE};
 use chronicle_capture::{CaptureConfig, CaptureError, EngineStatusProbe};
@@ -48,6 +49,49 @@ pub enum ReconcileOutcome {
     Stopped,
     NoChange,
     StartFailed { partial_teardown: bool },
+}
+
+/// Retry budget for failed capture starts after a wake or resume.
+///
+/// A start that fails at wake+~2 s usually races display re-registration —
+/// SCK enumerates a transient, non-startable display (Task 20 runs 1–2 saw
+/// transient IDs 146–151 and 4/4 wake-start failures at realistic cadence).
+/// Boot and settled-state starts succeed, so a short-delay retry recovers.
+/// Schedule: 5, 10, 20, 30, 30 s — at most `MAX_ATTEMPTS` armed retries per
+/// incident. Any non-StartFailed reconcile outcome ends the incident; the
+/// caller resets the budget.
+#[derive(Default)]
+pub struct StartRetry {
+    attempts: u32,
+}
+
+impl StartRetry {
+    pub const MAX_ATTEMPTS: u32 = 5;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Consume one attempt and return the delay before the next retry, or
+    /// `None` when the budget is exhausted.
+    pub fn arm(&mut self) -> Option<Duration> {
+        if self.attempts >= Self::MAX_ATTEMPTS {
+            return None;
+        }
+        self.attempts += 1;
+        let secs = (5u64 << (self.attempts - 1)).min(30);
+        Some(Duration::from_secs(secs))
+    }
+
+    /// Attempts armed so far in this incident (for log lines).
+    pub fn attempt(&self) -> u32 {
+        self.attempts
+    }
+
+    /// End the incident: restore the full budget.
+    pub fn reset(&mut self) {
+        self.attempts = 0;
+    }
 }
 
 /// Drives the capture runtime against two independent stop reasons: user
@@ -196,26 +240,40 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     /// Flip `user_paused`, persist it, and reconcile. This is the only setter
     /// that writes to disk — the sleep setters are transient. The persistence
     /// path writes a single boolean (`capture_paused`), nothing more.
-    pub async fn set_user_paused(&mut self, paused: bool, audio: &'a AudioPipeline) {
+    ///
+    /// Returns the reconcile outcome so the event loop can arm a retry when
+    /// a resume's Start fails (HEU-575).
+    pub async fn set_user_paused(
+        &mut self,
+        paused: bool,
+        audio: &'a AudioPipeline,
+    ) -> ReconcileOutcome {
         self.user_paused = paused;
         self.capture_paused.store(paused, Ordering::Release);
         settings::write_capture_paused(&self.base_dir, paused);
         log::info!("set_user_paused: paused={paused}");
-        self.reconcile(audio).await;
+        self.reconcile(audio).await
     }
 
     /// Flip `system_asleep` and reconcile. Transient — never persisted.
-    pub async fn set_system_asleep(&mut self, asleep: bool, audio: &'a AudioPipeline) {
+    pub async fn set_system_asleep(
+        &mut self,
+        asleep: bool,
+        audio: &'a AudioPipeline,
+    ) -> ReconcileOutcome {
         self.system_asleep = asleep;
         log::info!("set_system_asleep: asleep={asleep}");
-        self.reconcile(audio).await;
+        self.reconcile(audio).await
     }
 
     /// Clear `system_asleep` and reconcile. Transient — never persisted.
-    pub async fn set_system_awake(&mut self, audio: &'a AudioPipeline) {
+    ///
+    /// Returns the reconcile outcome so the event loop can arm a retry when
+    /// the wake's Start fails (HEU-575).
+    pub async fn set_system_awake(&mut self, audio: &'a AudioPipeline) -> ReconcileOutcome {
         self.system_asleep = false;
         log::info!("set_system_awake: cleared system_asleep");
-        self.reconcile(audio).await;
+        self.reconcile(audio).await
     }
 
     /// Stop the runtime deterministically for daemon shutdown. Consumes
@@ -296,6 +354,28 @@ mod tests {
 
     use crate::pipeline::counters::PipelineCounters;
     use crate::pipeline::metadata::CachingAppMetadataProvider;
+
+    #[test]
+    fn start_retry_backoff_schedule_caps_at_five() {
+        let mut r = StartRetry::new();
+        let delays: Vec<u64> = std::iter::from_fn(|| r.arm().map(|d| d.as_secs())).collect();
+        assert_eq!(delays, vec![5, 10, 20, 30, 30]);
+        assert_eq!(r.arm(), None, "budget exhausted after MAX_ATTEMPTS");
+    }
+
+    #[test]
+    fn start_retry_reset_restores_budget() {
+        let mut r = StartRetry::new();
+        assert_eq!(r.arm().unwrap().as_secs(), 5);
+        assert_eq!(r.arm().unwrap().as_secs(), 10);
+        r.reset();
+        assert_eq!(r.attempt(), 0);
+        assert_eq!(
+            r.arm().unwrap().as_secs(),
+            5,
+            "reset must restore the schedule"
+        );
+    }
 
     #[test]
     fn decide_truth_table() {
@@ -499,8 +579,13 @@ mod tests {
         );
         assert!(!settings::read_capture_paused(dir.path()));
 
-        supervisor.set_system_asleep(true, &audio).await;
+        let outcome = supervisor.set_system_asleep(true, &audio).await;
 
+        assert_eq!(
+            outcome,
+            ReconcileOutcome::NoChange,
+            "sleeping with nothing running must reconcile to NoChange"
+        );
         assert!(
             !supervisor.should_run(),
             "should_run() must be false while system_asleep is set"
