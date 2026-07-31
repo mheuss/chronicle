@@ -32,6 +32,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "syn
 env_logger = "0.11"
 log = "0.4"
 anyhow = "1"
+# objc2 + NSString for the AVCaptureDevice permission check in permissions.rs.
+# NSWorkspace / CFRunLoop / block2 were dropped when the power observer
+# switched from NSWorkspace to raw IOKit FFI (power.rs).
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString"] }
 thiserror = "2"
@@ -47,3 +50,5 @@ transcription-cpu = ["chronicle-transcription/cpu"]
 tempfile = "3"
 serde_json = "1"
 opus = "0.3"
+# test-util unlocks tokio::time::pause/advance for the StartRetry policy tests.
+tokio = { version = "1", features = ["test-util"] }

@@ -1,7 +1,9 @@
 mod capture_runtime;
+mod capture_supervisor;
 mod ipc_handler;
 mod permissions;
 mod pipeline;
+mod power;
 mod settings;
 
 use std::sync::Arc;
@@ -10,10 +12,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
-use chronicle_audio::{AudioConfig, AudioPipeline, CHANNEL_COUNT, SAMPLE_RATE};
-use chronicle_capture::{CaptureConfig, CaptureError};
+use chronicle_audio::{AudioConfig, AudioPipeline};
 use chronicle_ipc::{CancellationToken, IpcServer};
 use chronicle_storage::{Storage, StorageConfig};
+
+use crate::capture_supervisor::{CaptureSupervisor, ReconcileOutcome, StartRetry};
 
 /// Parse a `retention_days` setting from the config table. An unset key uses
 /// the 30-day default; an unparseable value also falls back to 30 with a warn.
@@ -28,6 +31,45 @@ fn parse_retention_days(s: Option<String>) -> u32 {
             30
         }),
         None => 30,
+    }
+}
+
+/// Detached one-shot: after `delay`, nudge the event loop to re-run
+/// reconcile. Not cancelled on recovery — a stale nudge hits an idempotent
+/// reconcile and is discarded.
+fn spawn_start_retry(tx: tokio::sync::mpsc::Sender<()>, delay: std::time::Duration) {
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let _ = tx.send(()).await;
+    });
+}
+
+/// Arm or clear the start-retry budget from a reconcile outcome (HEU-575):
+/// `StartFailed` arms the next backoff step (or reports an exhausted
+/// budget); every other outcome ends the incident and restores the budget.
+fn note_reconcile_outcome(
+    outcome: &ReconcileOutcome,
+    start_retry: &mut StartRetry,
+    retry_tx: &tokio::sync::mpsc::Sender<()>,
+) {
+    match outcome {
+        ReconcileOutcome::StartFailed { .. } => {
+            if let Some(delay) = start_retry.arm() {
+                log::warn!(
+                    "capture start failed; retrying in {}s (attempt {}/{})",
+                    delay.as_secs(),
+                    start_retry.attempt(),
+                    StartRetry::MAX_ATTEMPTS,
+                );
+                spawn_start_retry(retry_tx.clone(), delay);
+            } else {
+                log::error!(
+                    "capture start failed; retry budget exhausted — capture stays \
+                     down until the next power or IPC event"
+                );
+            }
+        }
+        _ => start_retry.reset(),
     }
 }
 
@@ -110,9 +152,28 @@ async fn main() -> Result<()> {
     // Capture pause/resume control channel. The handler forwards Pause/Resume
     // requests here; the event loop below drains them.
     let (capture_tx, mut capture_rx) = tokio::sync::mpsc::channel::<ipc_handler::CaptureCommand>(8);
-    let capture_paused = Arc::new(AtomicBool::new(settings::read_capture_paused(
-        storage.base_dir(),
-    )));
+    let initial_capture_paused = settings::read_capture_paused(storage.base_dir());
+    let capture_paused = Arc::new(AtomicBool::new(initial_capture_paused));
+    // Power observer (HEU-284). Sleep/wake transitions arrive on `power_rx`
+    // and drive the supervisor's sleep flags. The observer thread is not
+    // joined (design §4); dropping the handle is fine — process exit reaps
+    // the thread. If registration fails, capture continues normally without
+    // sleep/wake handling.
+    let (power_tx, mut power_rx) = tokio::sync::mpsc::channel::<power::PowerEvent>(8);
+    match power::spawn_power_observer(power_tx) {
+        Ok(_handle) => log::info!("power observer started"),
+        Err(e) => log::warn!(
+            "power observer failed to start: {e} — sleep/wake handling disabled, \
+             capture continues normally"
+        ),
+    }
+    // Start-retry channel (HEU-575). When a wake/resume reconcile fails to
+    // start capture — typically racing display re-registration right after
+    // wake — a detached sleeper sends one unit event here to re-run
+    // reconcile. Stale nudges after recovery are harmless: reconcile is
+    // idempotent.
+    let (retry_tx, mut retry_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let mut start_retry = StartRetry::new();
     // Whisper model presence check (HEU-421). Logs a startup warning if
     // the configured variant's ggml file isn't on disk; transcription
     // stays idle but the rest of the daemon runs normally.
@@ -164,61 +225,44 @@ async fn main() -> Result<()> {
     // `set_microphone_enabled(&self)` only takes a shared borrow, so the
     // event loop below can still toggle the mic while the runtime runs;
     // the pipeline is still stopped at shutdown.
-    let mut capture_runtime: Option<
-        crate::capture_runtime::CaptureRuntime<
-            '_,
-            crate::pipeline::metadata::CachingAppMetadataProvider<_, _>,
-        >,
-    > = None;
     let capture_probe_holder: Arc<std::sync::Mutex<Option<chronicle_capture::EngineStatusProbe>>> =
         Arc::new(std::sync::Mutex::new(None));
 
-    if !capture_paused.load(Ordering::Acquire) {
-        let capture_config = CaptureConfig {
-            audio: audio_pipeline.token(SAMPLE_RATE, CHANNEL_COUNT),
-            ..Default::default()
-        };
-        match crate::capture_runtime::CaptureRuntime::start(
-            capture_config,
-            Arc::clone(&storage),
-            Arc::clone(&metadata_provider),
-            Arc::clone(&counters),
-            1024, // OCR channel capacity
-        ) {
-            Ok(rt) => {
-                *capture_probe_holder.lock().unwrap() = Some(rt.status_probe());
-                capture_runtime = Some(rt);
-                log::info!("Capture runtime started (audio on primary display)");
-            }
-            Err(crate::capture_runtime::CaptureRuntimeError::Engine(
-                CaptureError::PartialTeardown {
-                    survivors,
-                    stop_errors,
-                    original,
-                },
-            )) => {
-                log::error!(
-                    "capture startup rollback failed; exiting. survivors={survivors:?} \
-                     stop_errors={stop_errors:?} original={original}"
-                );
-                std::process::exit(3);
-            }
-            Err(e) => return Err(anyhow::anyhow!("capture startup failed: {e}")),
-        }
-    } else {
+    let mut supervisor: CaptureSupervisor<
+        '_,
+        crate::pipeline::metadata::CachingAppMetadataProvider<_, _>,
+    > = CaptureSupervisor::new(
+        initial_capture_paused,
+        Arc::clone(&storage),
+        Arc::clone(&metadata_provider),
+        Arc::clone(&counters),
+        1024, // OCR channel capacity
+        Arc::clone(&capture_probe_holder),
+        Arc::clone(&capture_paused),
+        Arc::clone(&mic_state_atom),
+        storage.base_dir().to_path_buf(),
+    );
+
+    if initial_capture_paused {
         log::info!("Capture is paused (persisted setting); skipping runtime start");
     }
 
-    // Restore the persisted microphone setting only if capture is not paused.
-    // A paused daemon must not light up the OS mic indicator at boot — the
-    // persisted mic preference is preserved untouched and re-applied on Resume.
-    if !capture_paused.load(Ordering::Acquire) && settings::read_mic_setting(storage.base_dir()) {
-        let outcome = audio_pipeline.set_microphone_enabled(true);
-        let state = ipc_handler::map_outcome(outcome, permissions::check_microphone());
-        log::info!("restored persisted mic setting: result={state:?}");
-        // A failed restore updates the runtime atom but deliberately leaves the
-        // persisted setting untouched so the next daemon start retries it.
-        mic_state_atom.store(state as u8, std::sync::atomic::Ordering::Release);
+    match supervisor.reconcile(&audio_pipeline).await {
+        ReconcileOutcome::StartFailed {
+            partial_teardown: true,
+        } => {
+            log::error!("capture startup rollback failed; exiting");
+            std::process::exit(3);
+        }
+        ReconcileOutcome::StartFailed {
+            partial_teardown: false,
+        } => {
+            return Err(anyhow::anyhow!(
+                "capture boot aborted (underlying engine error logged by \
+                 CaptureSupervisor::start)"
+            ));
+        }
+        _ => {}
     }
 
     // Bounded channel (64) with blocking_send — backpressure over data loss
@@ -372,9 +416,9 @@ async fn main() -> Result<()> {
     // --- Event loop: serve mic toggles until a shutdown signal arrives ---
     // Toggles are handled inline, one per iteration. This loop is the only
     // caller of write_mic_setting, which writes a fixed temp path — the
-    // one-at-a-time processing here is what keeps that path safe. (The startup
-    // restore block above also toggles the mic, but deliberately does not
-    // persist, so it never races this loop's write.)
+    // one-at-a-time processing here is what keeps that path safe. (The
+    // supervisor's `start()` reads but never writes the mic setting when
+    // restoring it on boot/resume/wake, so it can't race this loop's write.)
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     // Open the readiness gates: from here the loop drains `mic_rx` and
     // `capture_rx`, so the IPC handler can forward toggles instead of
@@ -393,112 +437,60 @@ async fn main() -> Result<()> {
                 break;
             }
             Some(cmd) = mic_rx.recv() => {
-                let outcome = audio_pipeline.set_microphone_enabled(cmd.enabled);
-                let state = ipc_handler::map_outcome(outcome, permissions::check_microphone());
-                // NFR-5: every toggle logs the requested state and the result.
-                log::info!("mic toggle: requested enabled={}, result={state:?}", cmd.enabled);
-                if matches!(state, chronicle_ipc::MicState::On | chronicle_ipc::MicState::Off) {
-                    settings::write_mic_setting(
-                        storage.base_dir(),
-                        state == chronicle_ipc::MicState::On,
+                // Always persist the user's intent so the supervisor's next Start
+                // restores it.
+                settings::write_mic_setting(storage.base_dir(), cmd.enabled);
+                let state = if supervisor.should_run() {
+                    let outcome = audio_pipeline.set_microphone_enabled(cmd.enabled);
+                    let s = ipc_handler::map_outcome(outcome, permissions::check_microphone());
+                    log::info!("mic toggle: requested enabled={}, result={s:?}", cmd.enabled);
+                    s
+                } else {
+                    // Capture is stopped (pause or sleep) — record the preference but do
+                    // not engage the device. The mic genuinely is not running.
+                    log::info!(
+                        "mic toggle: requested enabled={} while capture stopped — \
+                         preference saved, device left off",
+                        cmd.enabled,
                     );
-                }
-                // The atom always mirrors the latest result so Status is honest.
+                    chronicle_ipc::MicState::Off
+                };
                 mic_state_atom.store(state as u8, std::sync::atomic::Ordering::Release);
-                let _ = cmd.reply.send(state); // ignore if the handler already timed out
+                let _ = cmd.reply.send(state);
             }
             Some(cmd) = capture_rx.recv() => {
-                let new_paused = match cmd.action {
+                let (paused, outcome) = match cmd.action {
                     ipc_handler::CaptureAction::Pause => {
-                        if let Some(rt) = capture_runtime.take()
-                            && let Err(e) = rt.stop().await
-                        {
-                            log::error!("CaptureRuntime stop on pause failed: {e}");
-                        }
-                        *capture_probe_holder.lock().unwrap() = None;
-                        // ADR-010: SCStream stop alone doesn't release the OS
-                        // mic indicator; explicit set_microphone_enabled(false)
-                        // is what releases it. Persisted `mic_enabled` is NOT
-                        // overwritten — pause is transient and Resume must
-                        // restore the user's intent.
-                        let outcome = audio_pipeline.set_microphone_enabled(false);
-                        let state =
-                            ipc_handler::map_outcome(outcome, permissions::check_microphone());
-                        // Mirror the result into the runtime atom so `Status`
-                        // reports the real mic state during pause (Off on
-                        // success; Error/PermissionDenied if the disable
-                        // failed). NFR-5 honesty — persisted preference is
-                        // untouched, only the runtime view is updated.
-                        mic_state_atom
-                            .store(state as u8, std::sync::atomic::Ordering::Release);
-                        log::info!("pause: disabled mic, result={state:?}");
-                        capture_paused.store(true, Ordering::Release);
-                        settings::write_capture_paused(storage.base_dir(), true);
-                        true
+                        (true, supervisor.set_user_paused(true, &audio_pipeline).await)
                     }
                     ipc_handler::CaptureAction::Resume => {
-                        if capture_runtime.is_none() {
-                            let capture_config = CaptureConfig {
-                                audio: audio_pipeline.token(SAMPLE_RATE, CHANNEL_COUNT),
-                                ..Default::default()
-                            };
-                            match crate::capture_runtime::CaptureRuntime::start(
-                                capture_config,
-                                Arc::clone(&storage),
-                                Arc::clone(&metadata_provider),
-                                Arc::clone(&counters),
-                                1024,
-                            ) {
-                                Ok(rt) => {
-                                    *capture_probe_holder.lock().unwrap() =
-                                        Some(rt.status_probe());
-                                    capture_runtime = Some(rt);
-                                    log::info!("resume: CaptureRuntime started");
-                                }
-                                Err(e) => {
-                                    match e {
-                                        crate::capture_runtime::CaptureRuntimeError::Engine(
-                                            CaptureError::PartialTeardown {
-                                                survivors,
-                                                stop_errors,
-                                                original,
-                                            },
-                                        ) => {
-                                            log::error!(
-                                                "resume: PartialTeardown — daemon may have orphan streams. \
-                                                 survivors={survivors:?} stop_errors={stop_errors:?} original={original}"
-                                            );
-                                        }
-                                        other => {
-                                            log::error!(
-                                                "resume: CaptureRuntime start failed: {other}"
-                                            );
-                                        }
-                                    }
-                                    // Reply with the current paused state and bail.
-                                    let _ = cmd.reply.send(true);
-                                    continue;
-                                }
-                            }
-                        }
-                        // Restore mic to persisted preference. The atom mirrors
-                        // the result so `Status` reflects reality even when the
-                        // restore fails (e.g. permission lost mid-session).
-                        let wanted_mic = settings::read_mic_setting(storage.base_dir());
-                        let outcome = audio_pipeline.set_microphone_enabled(wanted_mic);
-                        let state =
-                            ipc_handler::map_outcome(outcome, permissions::check_microphone());
-                        mic_state_atom
-                            .store(state as u8, std::sync::atomic::Ordering::Release);
-                        log::info!(
-                            "resume: restored mic to {wanted_mic}, result={state:?}"
-                        );
-                        capture_paused.store(false, Ordering::Release);
-                        settings::write_capture_paused(storage.base_dir(), false);
-                        false
+                        (false, supervisor.set_user_paused(false, &audio_pipeline).await)
                     }
                 };
-                let _ = cmd.reply.send(new_paused);
+                note_reconcile_outcome(&outcome, &mut start_retry, &retry_tx);
+                let _ = cmd.reply.send(paused);
+            }
+            Some(evt) = power_rx.recv() => {
+                log::info!("power event: {evt:?}");
+                let outcome = match evt {
+                    power::PowerEvent::SystemSleep =>
+                        supervisor.set_system_asleep(true, &audio_pipeline).await,
+                    power::PowerEvent::SystemWake =>
+                        supervisor.set_system_awake(&audio_pipeline).await,
+                };
+                note_reconcile_outcome(&outcome, &mut start_retry, &retry_tx);
+            }
+            Some(()) = retry_rx.recv() => {
+                log::info!(
+                    "start retry firing (attempt {}/{})",
+                    start_retry.attempt(),
+                    StartRetry::MAX_ATTEMPTS,
+                );
+                let outcome = supervisor.reconcile(&audio_pipeline).await;
+                if outcome == ReconcileOutcome::Started {
+                    log::info!("capture recovered on retry");
+                }
+                note_reconcile_outcome(&outcome, &mut start_retry, &retry_tx);
             }
         }
     }
@@ -515,6 +507,15 @@ async fn main() -> Result<()> {
     while let Ok(cmd) = capture_rx.try_recv() {
         drop(cmd.reply);
     }
+    // Discard any power events that raced shutdown — no reply channel to
+    // satisfy. The observer thread itself is not joined; process exit reaps
+    // it via CFRunLoopRun().
+    power_rx.close();
+    while power_rx.try_recv().is_ok() {}
+    // Same for pending start-retry nudges; their detached sleepers die with
+    // the runtime.
+    retry_rx.close();
+    while retry_rx.try_recv().is_ok() {}
     cancel.cancel();
 
     // Stop the IPC server before the capture engine: stop accepting
@@ -526,35 +527,16 @@ async fn main() -> Result<()> {
     // so the handler Retained ref is released and the audio buffer channel
     // can close. If no runtime is active (paused at shutdown), this is a
     // no-op.
-    let mut poisoned = false;
+    //
+    // shutdown() returns true only when the engine is poisoned
+    // (PartialTeardown) — escalates to exit(3) below. Consumes the
+    // supervisor, which releases the &audio_pipeline borrow so
+    // audio_pipeline.stop() (which needs &mut self) can run next.
+    let poisoned = supervisor.shutdown().await;
     // Set when an owned task/thread panicked during shutdown. Those panics are
     // deliberately swallowed mid-sequence so the transcription drain still runs;
     // this flag surfaces them in the exit code once the drain is done.
     let mut shutdown_failed = false;
-    if let Some(rt) = capture_runtime.take() {
-        match rt.stop().await {
-            Ok(()) => log::info!("Capture runtime stopped cleanly"),
-            Err(crate::capture_runtime::CaptureRuntimeError::Engine(
-                CaptureError::PartialTeardown {
-                    survivors,
-                    stop_errors,
-                    ..
-                },
-            )) => {
-                poisoned = true;
-                log::error!(
-                    "runtime stop failed; entering Poisoned. survivors={survivors:?} \
-                     stop_errors={stop_errors:?}"
-                );
-            }
-            Err(e) => log::error!("runtime stop failed: {e}"),
-        }
-    }
-    // The `Option<CaptureRuntime>` binding itself still carries the audio
-    // token lifetime in its type. Drop it explicitly so `audio_pipeline`'s
-    // immutable borrow is released before we call `stop()` (mutable). The
-    // Option is None after `take()`, so this is otherwise a no-op.
-    drop(capture_runtime);
 
     // Stop audio pipeline — encoding thread sees EOF, flushes segments.
     if let Err(e) = audio_pipeline.stop() {
@@ -627,4 +609,87 @@ async fn main() -> Result<()> {
         anyhow::bail!("shutdown completed with task failures (see log)");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn failed() -> ReconcileOutcome {
+        ReconcileOutcome::StartFailed {
+            partial_teardown: false,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn start_failed_arms_a_retry_nudge() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(4);
+        let mut retry = StartRetry::new();
+
+        note_reconcile_outcome(&failed(), &mut retry, &tx);
+
+        assert_eq!(retry.attempt(), 1, "StartFailed must consume one attempt");
+        // Paused-clock sleeps auto-advance to the earliest deadline, so these
+        // bracket the 5 s backoff deterministically — and a never-spawned
+        // sleeper fails the second assert instead of hanging a recv().await.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "nudge must not fire before the 5s backoff"
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            rx.try_recv().is_ok(),
+            "nudge must fire once the backoff elapses"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exhausted_budget_arms_nothing() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(4);
+        let mut retry = StartRetry::new();
+        while retry.arm().is_some() {}
+        assert_eq!(retry.attempt(), StartRetry::MAX_ATTEMPTS);
+
+        note_reconcile_outcome(&failed(), &mut retry, &tx);
+
+        assert_eq!(
+            retry.attempt(),
+            StartRetry::MAX_ATTEMPTS,
+            "an exhausted budget must not grow"
+        );
+        // sleep(), not advance(): going idle auto-advances to the EARLIEST
+        // deadline first, so a wrongly-spawned 5 s sleeper delivers its nudge
+        // before this 120 s sleep completes and try_recv catches it. advance()
+        // would bump the clock before the sleeper is first polled, hiding it.
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "no sleeper may be spawned once the budget is exhausted"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn non_failure_outcomes_reset_the_budget() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<()>(4);
+
+        for outcome in [
+            ReconcileOutcome::Started,
+            ReconcileOutcome::Stopped,
+            ReconcileOutcome::NoChange,
+        ] {
+            let mut retry = StartRetry::new();
+            let _ = retry.arm();
+            let _ = retry.arm();
+            assert_eq!(retry.attempt(), 2);
+
+            note_reconcile_outcome(&outcome, &mut retry, &tx);
+
+            assert_eq!(
+                retry.attempt(),
+                0,
+                "{outcome:?} must end the incident and restore the budget"
+            );
+        }
+    }
 }

@@ -11,10 +11,10 @@ use dispatch2::DispatchQueue;
 use objc2::AnyThread;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2_core_media::CMTime;
-use objc2_foundation::{NSArray, NSError};
+use objc2_foundation::{NSArray, NSError, NSInteger};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration,
-    SCStreamOutputType,
+    SCStreamErrorCode, SCStreamErrorDomain, SCStreamOutputType,
 };
 use tokio::sync::mpsc;
 
@@ -516,6 +516,21 @@ pub(crate) fn start_stream(stream: &SCStream) -> std::result::Result<(), String>
     }
 }
 
+/// True when a stop-completion error means the stream was already stopped —
+/// the goal state, reached before we asked. macOS tears down secondary-display
+/// streams on system sleep faster than our reconcile Stop runs, so this is a
+/// routine race, not a teardown failure. Treating it as one would count the
+/// stream as a PartialTeardown survivor and falsely poison the engine.
+///
+/// Safety of the success mapping rests on every `stop_stream` call site
+/// running only after `start_stream` completed for that stream — true at all
+/// three today (`stop()`, start-rollback, `Drop`). A future call site that
+/// could stop a mid-start stream must not inherit this mapping blindly:
+/// -3808 from a never-started stream is not success.
+fn is_benign_stop_error(is_stream_domain: bool, code: NSInteger) -> bool {
+    is_stream_domain && code == SCStreamErrorCode::AttemptToStopStreamState.0
+}
+
 /// Stop the SCStream capture, blocking until the completion handler fires.
 ///
 /// Times out after 5 seconds. This is shorter than start because stop runs
@@ -525,6 +540,15 @@ pub(crate) fn stop_stream(stream: &SCStream) -> std::result::Result<(), String> 
 
     let block = RcBlock::new(move |error: *mut NSError| {
         if error.is_null() {
+            let _ = tx.send(None);
+            return;
+        }
+        // SAFETY: SCK passes a valid NSError when non-null; read-only access
+        // inside the completion callback.
+        let (is_stream_domain, code) =
+            unsafe { (&*(*error).domain() == SCStreamErrorDomain, (*error).code()) };
+        if is_benign_stop_error(is_stream_domain, code) {
+            log::info!("stop_stream: stream already stopped; treating as stopped");
             let _ = tx.send(None);
         } else {
             let desc = unsafe { (*error).localizedDescription() };
@@ -577,6 +601,28 @@ mod tests {
         let timescale = { time.timescale };
         assert_eq!(value, 500);
         assert_eq!(timescale, 1000);
+    }
+
+    #[test]
+    fn already_stopped_error_is_benign() {
+        assert!(is_benign_stop_error(
+            true,
+            SCStreamErrorCode::AttemptToStopStreamState.0
+        ));
+    }
+
+    #[test]
+    fn other_stop_errors_are_not_benign() {
+        // Same domain, different code — a real stop failure.
+        assert!(!is_benign_stop_error(
+            true,
+            SCStreamErrorCode::InternalError.0
+        ));
+        // Right code, wrong domain — not SCK's already-stopped signal.
+        assert!(!is_benign_stop_error(
+            false,
+            SCStreamErrorCode::AttemptToStopStreamState.0
+        ));
     }
 
     #[test]

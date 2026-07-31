@@ -200,6 +200,24 @@ impl AudioPipeline {
         }
     }
 
+    /// Finalize the system accumulator's partial segment now. Sent when capture
+    /// stops (system sleep or IPC pause; display sleep is HEU-496) so a
+    /// later restart does not
+    /// produce one segment spanning the off-period. Symmetric with the `FlushMic`
+    /// send inside `set_microphone_enabled`.
+    ///
+    /// Blocking send — `FlushSystem` is a control message that must not be
+    /// dropped under backpressure. A send error means the encoding channel is
+    /// closed, which is a genuine failure. `Ok` no-op after `stop()`.
+    pub fn flush_system_segment(&self) -> Result<()> {
+        if let Some(tx) = &self.flush_tx {
+            tx.send(AudioMessage::FlushSystem).map_err(|e| {
+                AudioError::ScreenCaptureKit(format!("failed to flush system segment: {e}"))
+            })?;
+        }
+        Ok(())
+    }
+
     /// Stop the encoding pipeline.
     ///
     /// Stops the microphone first so the OS releases it synchronously, then
@@ -301,6 +319,11 @@ fn run_encoding_loop(
             AudioMessage::FlushMic => {
                 if let Err(e) = mic_acc.flush() {
                     log::error!("failed to flush mic accumulator on request: {e}");
+                }
+            }
+            AudioMessage::FlushSystem => {
+                if let Err(e) = sys_acc.flush() {
+                    log::error!("failed to flush system accumulator on request: {e}");
                 }
             }
         }
@@ -502,6 +525,60 @@ mod tests {
     }
 
     #[test]
+    fn flush_request_finalizes_partial_system_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = AudioConfig {
+            segment_duration_secs: 30,
+            bitrate: 64_000,
+            output_dir: dir.path().to_path_buf(),
+        };
+
+        let (segment_tx, segment_rx) = mpsc::channel::<CompletedSegment>();
+        let (buffer_tx, buffer_rx) = mpsc::sync_channel::<AudioMessage>(64);
+
+        let config_clone = config.clone();
+        let handle = thread::spawn(move || {
+            run_encoding_loop(buffer_rx, segment_tx, &config_clone);
+        });
+
+        let timestamp = 1_700_000_000_000_i64;
+
+        // Send half a second of system samples — well below the 30s boundary.
+        let partial_samples = vec![0.0_f32; 24_000];
+        buffer_tx
+            .send(AudioMessage::Buffer(AudioBuffer {
+                samples: partial_samples,
+                timestamp_ms: timestamp,
+                source: AudioSource::System,
+            }))
+            .unwrap();
+
+        // Request a system flush. This must finalize the partial segment now,
+        // ordered after the buffer above.
+        buffer_tx.send(AudioMessage::FlushSystem).unwrap();
+
+        // Assert the segment arrives while the sender is still alive, so a
+        // channel-close shutdown flush cannot be the cause.
+        let segment = segment_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("FlushSystem should finalize the partial system segment");
+        assert_eq!(segment.source, AudioSource::System);
+        assert_eq!(segment.start_timestamp, timestamp);
+        assert_eq!(segment.end_timestamp, timestamp + 500);
+        assert!(segment.path.exists(), "flushed system file should exist");
+
+        // Now drop the sender and join the encoding thread.
+        drop(buffer_tx);
+        handle.join().unwrap();
+
+        // No further segments — the buffer was fully drained by FlushSystem.
+        assert!(
+            segment_rx.try_recv().is_err(),
+            "no extra segment expected from shutdown flush"
+        );
+    }
+
+    #[test]
     fn encoding_loop_exits_cleanly_with_no_buffers() {
         let dir = tempfile::tempdir().unwrap();
         let config = AudioConfig {
@@ -610,6 +687,31 @@ mod tests {
             MicToggleOutcome::Disabled
         );
         pipeline.stop().expect("pipeline should stop cleanly");
+    }
+
+    #[test]
+    fn flush_system_segment_succeeds_before_and_after_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = AudioConfig {
+            segment_duration_secs: 30,
+            bitrate: 64_000,
+            output_dir: dir.path().to_path_buf(),
+        };
+        let (mut pipeline, _segment_rx) = AudioPipeline::create(config).unwrap();
+
+        // Before stop: flush_tx is Some — should succeed.
+        assert!(
+            pipeline.flush_system_segment().is_ok(),
+            "flush_system_segment should return Ok before stop"
+        );
+
+        pipeline.stop().unwrap();
+
+        // After stop: flush_tx is None — must be a graceful Ok no-op.
+        assert!(
+            pipeline.flush_system_segment().is_ok(),
+            "flush_system_segment should return Ok after stop"
+        );
     }
 
     /// Exercises the real start/stop/idempotency paths on a live

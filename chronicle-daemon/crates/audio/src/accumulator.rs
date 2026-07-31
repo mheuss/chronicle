@@ -6,6 +6,13 @@ use std::sync::mpsc;
 use crate::encoder::OggOpusEncoder;
 use crate::{AudioSource, CompletedSegment, Result, segment_path};
 
+/// A forward wall-clock jump larger than this between consecutive pushes means
+/// capture was interrupted (sleep, display nap, restart). Comfortably above
+/// normal inter-buffer jitter (tens of ms), below the shortest sleep we care
+/// about. Backward jumps (clock skew, NTP correction) are ignored — the current
+/// segment continues, which preserves audio rather than discarding it.
+const GAP_THRESHOLD_MS: i64 = 2000;
+
 /// Buffers incoming PCM samples for a single audio source and encodes them
 /// to Opus/Ogg files when a segment boundary is reached.
 pub struct SegmentAccumulator {
@@ -56,6 +63,19 @@ impl SegmentAccumulator {
     /// If a single push contains more than one segment worth of data, multiple
     /// segments are flushed.
     pub fn push(&mut self, samples: &[f32], timestamp_ms: i64) -> Result<()> {
+        // Sleep-gap detection: a forward wall-clock jump past the threshold
+        // means capture was interrupted. Close the current partial and start
+        // fresh so no segment spans the gap.
+        if let Some(start) = self.segment_start_ms {
+            let buffered_ms = self.samples_to_ms(self.buffer.len());
+            let expected_ms = start + buffered_ms;
+            if timestamp_ms > expected_ms + GAP_THRESHOLD_MS {
+                // flush() resets segment_start_ms in both branches (empty or
+                // not), so the block below starts the post-gap segment fresh.
+                self.flush()?;
+            }
+        }
+
         if self.segment_start_ms.is_none() {
             self.segment_start_ms = Some(timestamp_ms);
         }
@@ -66,8 +86,7 @@ impl SegmentAccumulator {
             let segment_samples: Vec<f32> = self.buffer.drain(..self.samples_per_segment).collect();
             self.flush_segment(&segment_samples)?;
             // Next segment starts right after the previous one ended.
-            let duration_ms =
-                (self.samples_per_segment as f64 / self.sample_rate as f64 * 1000.0) as i64;
+            let duration_ms = self.samples_to_ms(self.samples_per_segment);
             self.segment_start_ms = Some(self.segment_start_ms.unwrap() + duration_ms);
         }
 
@@ -76,9 +95,14 @@ impl SegmentAccumulator {
 
     /// Flush remaining buffered samples as a partial segment.
     ///
-    /// Call this when audio capture stops. No-op if the buffer is empty.
+    /// Call this when audio capture stops. Emits nothing when the buffer is
+    /// empty, but ALWAYS resets the segment start: a stale start surviving a
+    /// stop-flush would stamp the next segment with a time earlier than its
+    /// first sample (a sub-threshold pause/resume right after a segment
+    /// boundary is the concrete case — gap detection can't catch it).
     pub fn flush(&mut self) -> Result<()> {
         if self.buffer.is_empty() {
+            self.segment_start_ms = None;
             return Ok(());
         }
 
@@ -88,10 +112,16 @@ impl SegmentAccumulator {
         Ok(())
     }
 
+    /// Convert a sample count into a millisecond duration at the accumulator's
+    /// sample rate. Single source of truth for buffer-length → wall-clock math.
+    fn samples_to_ms(&self, n: usize) -> i64 {
+        (n as f64 / self.sample_rate as f64 * 1000.0) as i64
+    }
+
     /// Encode samples to a file and send a CompletedSegment over the channel.
     fn flush_segment(&mut self, samples: &[f32]) -> Result<()> {
         let start_ms = self.segment_start_ms.unwrap_or(0);
-        let duration_ms = (samples.len() as f64 / self.sample_rate as f64 * 1000.0) as i64;
+        let duration_ms = self.samples_to_ms(samples.len());
         let end_ms = start_ms + duration_ms;
 
         let path = segment_path(&self.output_dir, start_ms, self.source);
@@ -192,6 +222,131 @@ mod tests {
         let expected_end = timestamp_ms + 500; // 0.5 seconds = 500ms
         assert_eq!(segment.end_timestamp, expected_end);
         assert!(segment.path.exists(), "encoded file should exist on disk");
+    }
+
+    #[test]
+    fn gap_in_timestamps_starts_a_new_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let mut acc = make_accumulator(dir.path(), tx);
+
+        let t = 1_700_000_000_000_i64;
+        let half_segment = make_silence(SAMPLES_PER_SEGMENT / 2); // 0.5 s
+
+        // First push at T.
+        acc.push(&half_segment, t).unwrap();
+
+        // Second push 10 s later — a forward jump far beyond the threshold.
+        acc.push(&half_segment, t + 10_000).unwrap();
+
+        // Flush whatever remains in the post-gap segment.
+        acc.flush().unwrap();
+
+        let seg1 = rx.try_recv().expect("first segment should be auto-flushed");
+        assert_eq!(seg1.start_timestamp, t);
+        assert_eq!(seg1.end_timestamp, t + 500);
+
+        let seg2 = rx
+            .try_recv()
+            .expect("second segment should be flushed after gap");
+        assert_eq!(seg2.start_timestamp, t + 10_000);
+
+        assert!(
+            rx.try_recv().is_err(),
+            "no further segments expected after the gap"
+        );
+    }
+
+    #[test]
+    fn small_timestamp_advance_does_not_split() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let mut acc = make_accumulator(dir.path(), tx);
+
+        let t = 1_700_000_000_000_i64;
+        let half_segment = make_silence(SAMPLES_PER_SEGMENT / 2); // 0.5 s
+        let quarter_segment = make_silence(SAMPLES_PER_SEGMENT / 4); // 0.25 s
+
+        // First push at T.
+        acc.push(&half_segment, t).unwrap();
+
+        // Second push 1 s later — below the 2 s gap threshold.
+        acc.push(&quarter_segment, t + 1_000).unwrap();
+
+        // Flush should produce a single partial segment that started at T.
+        acc.flush().unwrap();
+
+        let seg = rx
+            .try_recv()
+            .expect("flush should produce one merged partial segment");
+        assert_eq!(seg.start_timestamp, t);
+
+        assert!(
+            rx.try_recv().is_err(),
+            "small advance must not split into two segments"
+        );
+    }
+
+    #[test]
+    fn gapped_segment_end_timestamp_reflects_buffered_duration() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let mut acc = make_accumulator(dir.path(), tx);
+
+        let t = 1_700_000_000_000_i64;
+        let half_segment = make_silence(SAMPLES_PER_SEGMENT / 2); // 0.5 s
+
+        // First push at T.
+        acc.push(&half_segment, t).unwrap();
+
+        // 60 s jump — must auto-flush the first partial.
+        acc.push(&half_segment, t + 60_000).unwrap();
+
+        let seg1 = rx
+            .try_recv()
+            .expect("first partial should be auto-flushed on gap");
+        assert_eq!(seg1.start_timestamp, t);
+        // End timestamp must come from the buffered duration (0.5 s), not
+        // anything derived from the post-gap push timestamp.
+        assert_eq!(seg1.end_timestamp, t + 500);
+    }
+
+    #[test]
+    fn explicit_flush_on_empty_buffer_clears_segment_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let mut acc = make_accumulator(dir.path(), tx);
+
+        let t = 1_700_000_000_000_i64;
+
+        // Exactly one full segment: the boundary auto-flush empties the buffer
+        // but leaves segment_start_ms pointing at T+1000.
+        acc.push(&make_silence(SAMPLES_PER_SEGMENT), t).unwrap();
+        let seg1 = rx.try_recv().expect("boundary segment");
+        assert_eq!(seg1.end_timestamp, t + 1000);
+
+        // Explicit stop-flush on the now-empty buffer — no segment, but the
+        // stale start must not survive.
+        acc.flush().unwrap();
+        assert!(rx.try_recv().is_err(), "empty flush must emit nothing");
+
+        // Resume 1.5 s after the boundary — inside the 2 s gap threshold, so
+        // gap detection cannot save us. Without the flush-side reset this
+        // segment would inherit start T+1000, predating its first sample.
+        acc.push(&make_silence(SAMPLES_PER_SEGMENT / 4), t + 2_500)
+            .unwrap();
+        acc.flush().unwrap();
+
+        let seg2 = rx.try_recv().expect("post-resume partial");
+        assert_eq!(
+            seg2.start_timestamp,
+            t + 2_500,
+            "segment start must match its first sample, not a stale pre-flush start"
+        );
+        // A stale start would also skew the end timestamp and the on-disk
+        // filename (segment_path derives from start_ms) — pin the full shape.
+        assert_eq!(seg2.end_timestamp, t + 2_750, "0.25 s after the true start");
+        assert!(rx.try_recv().is_err(), "no further segments expected");
     }
 
     #[test]
