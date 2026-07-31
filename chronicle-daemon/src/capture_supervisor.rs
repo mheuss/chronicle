@@ -573,6 +573,10 @@ mod tests {
             dir.path().to_path_buf(),
         );
         assert!(!settings::read_capture_paused(dir.path()));
+        // Positive coverage of the run predicate: both flags clear must mean
+        // run. This is the assertion that catches an inverted flag when
+        // HEU-496 extends should_run() with display_asleep.
+        assert!(supervisor.should_run(), "both flags clear must mean run");
 
         let outcome = supervisor.set_system_asleep(true, &audio).await;
 

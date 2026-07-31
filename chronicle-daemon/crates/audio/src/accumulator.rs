@@ -343,6 +343,10 @@ mod tests {
             t + 2_500,
             "segment start must match its first sample, not a stale pre-flush start"
         );
+        // A stale start would also skew the end timestamp and the on-disk
+        // filename (segment_path derives from start_ms) — pin the full shape.
+        assert_eq!(seg2.end_timestamp, t + 2_750, "0.25 s after the true start");
+        assert!(rx.try_recv().is_err(), "no further segments expected");
     }
 
     #[test]

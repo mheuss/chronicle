@@ -258,8 +258,8 @@ async fn main() -> Result<()> {
             partial_teardown: false,
         } => {
             return Err(anyhow::anyhow!(
-                "capture startup failed — see the `capture startup failed:` log line \
-                 for the underlying engine error"
+                "capture boot aborted (underlying engine error logged by \
+                 CaptureSupervisor::start)"
             ));
         }
         _ => {}
@@ -614,7 +614,6 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     fn failed() -> ReconcileOutcome {
         ReconcileOutcome::StartFailed {
@@ -630,10 +629,18 @@ mod tests {
         note_reconcile_outcome(&failed(), &mut retry, &tx);
 
         assert_eq!(retry.attempt(), 1, "StartFailed must consume one attempt");
-        tokio::time::advance(Duration::from_secs(5)).await;
+        // Paused-clock sleeps auto-advance to the earliest deadline, so these
+        // bracket the 5 s backoff deterministically — and a never-spawned
+        // sleeper fails the second assert instead of hanging a recv().await.
+        tokio::time::sleep(Duration::from_secs(4)).await;
         assert!(
-            rx.recv().await.is_some(),
-            "armed retry must deliver a nudge after the backoff delay"
+            rx.try_recv().is_err(),
+            "nudge must not fire before the 5s backoff"
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            rx.try_recv().is_ok(),
+            "nudge must fire once the backoff elapses"
         );
     }
 
@@ -651,7 +658,11 @@ mod tests {
             StartRetry::MAX_ATTEMPTS,
             "an exhausted budget must not grow"
         );
-        tokio::time::advance(Duration::from_secs(120)).await;
+        // sleep(), not advance(): going idle auto-advances to the EARLIEST
+        // deadline first, so a wrongly-spawned 5 s sleeper delivers its nudge
+        // before this 120 s sleep completes and try_recv catches it. advance()
+        // would bump the clock before the sleeper is first polled, hiding it.
+        tokio::time::sleep(Duration::from_secs(120)).await;
         assert!(
             rx.try_recv().is_err(),
             "no sleeper may be spawned once the budget is exhausted"
