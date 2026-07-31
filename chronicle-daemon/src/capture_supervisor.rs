@@ -31,9 +31,11 @@ enum ReconcileAction {
     None,
 }
 
-/// Pure decision: capture should run only when neither stop flag is set.
-fn decide(user_paused: bool, system_asleep: bool, running: bool) -> ReconcileAction {
-    let should_run = !user_paused && !system_asleep;
+/// Pure decision over the run predicate and the current run state. The
+/// predicate itself is defined once — `CaptureSupervisor::should_run` — so a
+/// future flag (e.g. HEU-496's `display_asleep`) is added in exactly one
+/// place.
+fn decide(should_run: bool, running: bool) -> ReconcileAction {
     match (should_run, running) {
         (true, false) => ReconcileAction::Start,
         (false, true) => ReconcileAction::Stop,
@@ -43,6 +45,11 @@ fn decide(user_paused: bool, system_asleep: bool, running: bool) -> ReconcileAct
 
 /// The result of a `reconcile()` call. The boot caller escalates
 /// `StartFailed { partial_teardown: true }` to `exit(3)`; other callers log.
+///
+/// `must_use`: discarding an outcome silently skips the StartRetry arm/reset
+/// bookkeeping (`note_reconcile_outcome`) — exactly the bug class HEU-575
+/// exists to prevent. Tests that genuinely don't care use `let _ =`.
+#[must_use]
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReconcileOutcome {
     Started,
@@ -169,7 +176,7 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     /// Log lines carry only state booleans and the action name — never PII
     /// or captured content.
     pub async fn reconcile(&mut self, audio: &'a AudioPipeline) -> ReconcileOutcome {
-        let action = decide(self.user_paused, self.system_asleep, self.runtime.is_some());
+        let action = decide(self.should_run(), self.runtime.is_some());
         log::info!(
             "reconcile: user_paused={} system_asleep={} -> {:?}",
             self.user_paused,
@@ -379,29 +386,17 @@ mod tests {
 
     #[test]
     fn decide_truth_table() {
-        // Both flags false + not running → should start
-        assert_eq!(decide(false, false, false), ReconcileAction::Start);
+        // Should run + not running → start
+        assert_eq!(decide(true, false), ReconcileAction::Start);
 
-        // Both flags false + already running → no change
-        assert_eq!(decide(false, false, true), ReconcileAction::None);
+        // Should run + already running → no change
+        assert_eq!(decide(true, true), ReconcileAction::None);
 
-        // user_paused alone: running → stop
-        assert_eq!(decide(true, false, true), ReconcileAction::Stop);
+        // Should not run + running → stop
+        assert_eq!(decide(false, true), ReconcileAction::Stop);
 
-        // user_paused alone: not running → no change
-        assert_eq!(decide(true, false, false), ReconcileAction::None);
-
-        // system_asleep alone: running → stop
-        assert_eq!(decide(false, true, true), ReconcileAction::Stop);
-
-        // system_asleep alone: not running → no change
-        assert_eq!(decide(false, true, false), ReconcileAction::None);
-
-        // Both flags set + running → stop
-        assert_eq!(decide(true, true, true), ReconcileAction::Stop);
-
-        // Both flags set + not running → no change
-        assert_eq!(decide(true, true, false), ReconcileAction::None);
+        // Should not run + not running → no change
+        assert_eq!(decide(false, false), ReconcileAction::None);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -534,11 +529,11 @@ mod tests {
             mic_atom,
             dir.path().to_path_buf(),
         );
-        supervisor.set_system_asleep(true, &audio).await;
+        let _ = supervisor.set_system_asleep(true, &audio).await;
         // Sanity: persisted paused starts false (missing file => false).
         assert!(!settings::read_capture_paused(dir.path()));
 
-        supervisor.set_user_paused(true, &audio).await;
+        let _ = supervisor.set_user_paused(true, &audio).await;
         assert!(
             settings::read_capture_paused(dir.path()),
             "set_user_paused(true) must persist"
@@ -548,7 +543,7 @@ mod tests {
             "capture_paused atom must mirror user_paused=true"
         );
 
-        supervisor.set_user_paused(false, &audio).await;
+        let _ = supervisor.set_user_paused(false, &audio).await;
         assert!(
             !settings::read_capture_paused(dir.path()),
             "set_user_paused(false) must persist"
@@ -613,13 +608,13 @@ mod tests {
             mic_atom,
             dir.path().to_path_buf(),
         );
-        supervisor.set_system_asleep(true, &audio).await;
+        let _ = supervisor.set_system_asleep(true, &audio).await;
 
         // Sanity: both flags set.
         let (u, s) = supervisor.flags_for_test();
         assert!(u && s, "expected both flags set before wake");
 
-        supervisor.set_system_awake(&audio).await;
+        let _ = supervisor.set_system_awake(&audio).await;
 
         let (u, s) = supervisor.flags_for_test();
         assert!(u, "user_paused must be untouched by set_system_awake");

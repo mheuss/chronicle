@@ -257,7 +257,10 @@ async fn main() -> Result<()> {
         ReconcileOutcome::StartFailed {
             partial_teardown: false,
         } => {
-            return Err(anyhow::anyhow!("capture startup failed"));
+            return Err(anyhow::anyhow!(
+                "capture startup failed — see the `capture startup failed:` log line \
+                 for the underlying engine error"
+            ));
         }
         _ => {}
     }
@@ -606,4 +609,76 @@ async fn main() -> Result<()> {
         anyhow::bail!("shutdown completed with task failures (see log)");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn failed() -> ReconcileOutcome {
+        ReconcileOutcome::StartFailed {
+            partial_teardown: false,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn start_failed_arms_a_retry_nudge() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(4);
+        let mut retry = StartRetry::new();
+
+        note_reconcile_outcome(&failed(), &mut retry, &tx);
+
+        assert_eq!(retry.attempt(), 1, "StartFailed must consume one attempt");
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(
+            rx.recv().await.is_some(),
+            "armed retry must deliver a nudge after the backoff delay"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exhausted_budget_arms_nothing() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(4);
+        let mut retry = StartRetry::new();
+        while retry.arm().is_some() {}
+        assert_eq!(retry.attempt(), StartRetry::MAX_ATTEMPTS);
+
+        note_reconcile_outcome(&failed(), &mut retry, &tx);
+
+        assert_eq!(
+            retry.attempt(),
+            StartRetry::MAX_ATTEMPTS,
+            "an exhausted budget must not grow"
+        );
+        tokio::time::advance(Duration::from_secs(120)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "no sleeper may be spawned once the budget is exhausted"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn non_failure_outcomes_reset_the_budget() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<()>(4);
+
+        for outcome in [
+            ReconcileOutcome::Started,
+            ReconcileOutcome::Stopped,
+            ReconcileOutcome::NoChange,
+        ] {
+            let mut retry = StartRetry::new();
+            let _ = retry.arm();
+            let _ = retry.arm();
+            assert_eq!(retry.attempt(), 2);
+
+            note_reconcile_outcome(&outcome, &mut retry, &tx);
+
+            assert_eq!(
+                retry.attempt(),
+                0,
+                "{outcome:?} must end the incident and restore the budget"
+            );
+        }
+    }
 }

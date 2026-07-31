@@ -37,7 +37,7 @@ pub enum AudioMessage {
     /// Finalize the current mic segment now — sent when the mic is disabled.
     FlushMic,
     /// Finalize the current system-audio segment now — sent when capture is
-    /// stopped (sleep, display sleep, or IPC pause).
+    /// stopped (system sleep or IPC pause; display sleep is HEU-496).
     FlushSystem,
 }
 

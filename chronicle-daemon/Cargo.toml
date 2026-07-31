@@ -50,3 +50,5 @@ transcription-cpu = ["chronicle-transcription/cpu"]
 tempfile = "3"
 serde_json = "1"
 opus = "0.3"
+# test-util unlocks tokio::time::pause/advance for the StartRetry policy tests.
+tokio = { version = "1", features = ["test-util"] }

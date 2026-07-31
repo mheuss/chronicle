@@ -70,11 +70,9 @@ impl SegmentAccumulator {
             let buffered_ms = self.samples_to_ms(self.buffer.len());
             let expected_ms = start + buffered_ms;
             if timestamp_ms > expected_ms + GAP_THRESHOLD_MS {
+                // flush() resets segment_start_ms in both branches (empty or
+                // not), so the block below starts the post-gap segment fresh.
                 self.flush()?;
-                // flush() is a no-op (and does NOT reset segment_start_ms)
-                // when the buffer is empty, so reset explicitly to guarantee a
-                // fresh start.
-                self.segment_start_ms = None;
             }
         }
 
@@ -97,9 +95,14 @@ impl SegmentAccumulator {
 
     /// Flush remaining buffered samples as a partial segment.
     ///
-    /// Call this when audio capture stops. No-op if the buffer is empty.
+    /// Call this when audio capture stops. Emits nothing when the buffer is
+    /// empty, but ALWAYS resets the segment start: a stale start surviving a
+    /// stop-flush would stamp the next segment with a time earlier than its
+    /// first sample (a sub-threshold pause/resume right after a segment
+    /// boundary is the concrete case — gap detection can't catch it).
     pub fn flush(&mut self) -> Result<()> {
         if self.buffer.is_empty() {
+            self.segment_start_ms = None;
             return Ok(());
         }
 
@@ -306,6 +309,40 @@ mod tests {
         // End timestamp must come from the buffered duration (0.5 s), not
         // anything derived from the post-gap push timestamp.
         assert_eq!(seg1.end_timestamp, t + 500);
+    }
+
+    #[test]
+    fn explicit_flush_on_empty_buffer_clears_segment_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let mut acc = make_accumulator(dir.path(), tx);
+
+        let t = 1_700_000_000_000_i64;
+
+        // Exactly one full segment: the boundary auto-flush empties the buffer
+        // but leaves segment_start_ms pointing at T+1000.
+        acc.push(&make_silence(SAMPLES_PER_SEGMENT), t).unwrap();
+        let seg1 = rx.try_recv().expect("boundary segment");
+        assert_eq!(seg1.end_timestamp, t + 1000);
+
+        // Explicit stop-flush on the now-empty buffer — no segment, but the
+        // stale start must not survive.
+        acc.flush().unwrap();
+        assert!(rx.try_recv().is_err(), "empty flush must emit nothing");
+
+        // Resume 1.5 s after the boundary — inside the 2 s gap threshold, so
+        // gap detection cannot save us. Without the flush-side reset this
+        // segment would inherit start T+1000, predating its first sample.
+        acc.push(&make_silence(SAMPLES_PER_SEGMENT / 4), t + 2_500)
+            .unwrap();
+        acc.flush().unwrap();
+
+        let seg2 = rx.try_recv().expect("post-resume partial");
+        assert_eq!(
+            seg2.start_timestamp,
+            t + 2_500,
+            "segment start must match its first sample, not a stale pre-flush start"
+        );
     }
 
     #[test]

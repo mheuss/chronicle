@@ -201,7 +201,7 @@ impl AudioPipeline {
     }
 
     /// Finalize the system accumulator's partial segment now. Sent when capture
-    /// stops (sleep, display sleep, or IPC pause) so a later restart does not
+    /// stops (system sleep or IPC pause; display sleep is HEU-496) so a later restart does not
     /// produce one segment spanning the off-period. Symmetric with the `FlushMic`
     /// send inside `set_microphone_enabled`.
     ///

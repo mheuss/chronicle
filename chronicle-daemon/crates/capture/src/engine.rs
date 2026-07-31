@@ -521,6 +521,12 @@ pub(crate) fn start_stream(stream: &SCStream) -> std::result::Result<(), String>
 /// streams on system sleep faster than our reconcile Stop runs, so this is a
 /// routine race, not a teardown failure. Treating it as one would count the
 /// stream as a PartialTeardown survivor and falsely poison the engine.
+///
+/// Safety of the success mapping rests on every `stop_stream` call site
+/// running only after `start_stream` completed for that stream — true at all
+/// three today (`stop()`, start-rollback, `Drop`). A future call site that
+/// could stop a mid-start stream must not inherit this mapping blindly:
+/// -3808 from a never-started stream is not success.
 fn is_benign_stop_error(is_stream_domain: bool, code: NSInteger) -> bool {
     is_stream_domain && code == SCStreamErrorCode::AttemptToStopStreamState.0
 }
