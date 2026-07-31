@@ -12,6 +12,7 @@ objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSError"] }
 objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication"] }
 objc2-screen-capture-kit = { version = "0.3", features = [
+    "SCError",
     "SCStream",
     "SCShareableContent",
     "objc2-core-media",
