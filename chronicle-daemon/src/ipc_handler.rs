@@ -590,7 +590,8 @@ mod tests {
     async fn status_includes_transcription_block() {
         let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, cell, _dir) =
             handler_with_full_channels(8, true).await;
-        // Fresh temp base_dir: no model on disk.
+        // Cell starts Missing unconditionally; the fresh temp base_dir means
+        // no variant reports downloaded.
         match handler.handle(Request::Status) {
             Response::Status { data, .. } => {
                 assert_eq!(
