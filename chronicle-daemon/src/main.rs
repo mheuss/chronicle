@@ -175,17 +175,15 @@ async fn main() -> Result<()> {
     // idempotent.
     let (retry_tx, mut retry_rx) = tokio::sync::mpsc::channel::<()>(4);
     let mut start_retry = StartRetry::new();
-    // Whisper model presence check (HEU-421). Logs a startup warning if
-    // the configured variant's ggml file isn't on disk; transcription
-    // stays idle but the rest of the daemon runs normally.
+    // Whisper model status cell (HEU-475). Boot primes it; the IPC Status
+    // handler reads it. Missing model → transcription stays idle, the rest
+    // of the daemon runs normally, and the UI shows why.
     let whisper_variant = settings::read_whisper_model(storage.base_dir());
+    let transcription_status = crate::provisioning::TranscriptionStatusCell::new(whisper_variant);
     if !chronicle_transcription::model_present(storage.base_dir(), whisper_variant) {
-        let path = chronicle_transcription::model_path(storage.base_dir(), whisper_variant);
         log::warn!(
-            "whisper model missing at {} — transcription will stay idle. \
-             Run chronicle-daemon/scripts/fetch-whisper-model.sh {} from the repo root to provision.",
-            path.display(),
-            whisper_variant,
+            "whisper model missing — transcription is off until you enable it \
+             from the Chronicle menu bar app"
         );
     }
     let capture_ready = Arc::new(AtomicBool::new(false));
@@ -200,6 +198,7 @@ async fn main() -> Result<()> {
         capture_tx,
         Arc::clone(&capture_paused),
         Arc::clone(&capture_ready),
+        Arc::clone(&transcription_status),
     );
     let ipc_server = IpcServer::start(&socket_path, handler, cancel.clone()).await?;
     log::info!("IPC server started");
@@ -287,6 +286,10 @@ async fn main() -> Result<()> {
     ) = if chronicle_transcription::model_present(storage.base_dir(), whisper_variant) {
         // Load the ggml model off the runtime — it's heavy blocking work
         // (seconds for a large variant) and must not stall tokio workers (HEU-480).
+        // IPC is already serving Status, so enter Loading BEFORE the load —
+        // otherwise the cell reports Missing for the whole load and the UI
+        // banner flashes on every boot (design §2.1: boot, file present).
+        transcription_status.set_loading(whisper_variant);
         let base_dir = storage.base_dir().to_path_buf();
         let load_result = tokio::task::spawn_blocking(move || {
             chronicle_transcription::TranscriptionEngine::load(&base_dir, whisper_variant)
@@ -294,6 +297,7 @@ async fn main() -> Result<()> {
         .await;
         match load_result {
             Ok(Ok(engine)) => {
+                transcription_status.set_ready(whisper_variant);
                 let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(engine);
                 // Bounded channel (64), matching the audio bridge: drop-on-full.
                 let (tx, rx) = tokio::sync::mpsc::channel(64);
@@ -325,12 +329,14 @@ async fn main() -> Result<()> {
                 log::error!(
                     "transcription engine load failed ({whisper_variant}): {e} — staying idle"
                 );
+                transcription_status.set_error(&format!("model load failed: {e}"));
                 (Arc::new(pipeline::sinks::NoopTranscriptionSink), None)
             }
             Err(e) => {
                 log::error!(
                     "transcription engine load task failed ({whisper_variant}): {e} — staying idle"
                 );
+                transcription_status.set_error(&format!("model load failed: {e}"));
                 (Arc::new(pipeline::sinks::NoopTranscriptionSink), None)
             }
         }

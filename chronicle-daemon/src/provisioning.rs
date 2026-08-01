@@ -4,11 +4,6 @@
 //! per-variant on-disk report. The download state machine, `EngineHandle`,
 //! and `SetWhisperModel` wiring land in Phase 2.
 
-// Phase 1 consumes only new/stats/set_loading/set_ready/set_error; the
-// other setters and progress accessors are wired in Phase 2 (Tasks 12/13).
-// Task 4 narrows this to per-item allows on the still-unconsumed items.
-#![allow(dead_code)]
-
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -71,10 +66,12 @@ impl TranscriptionStatusCell {
         }
     }
 
+    #[allow(dead_code)] // consumed by the downloader in Phase 2 (Task 12)
     pub fn progress_bytes(&self) -> &AtomicU64 {
         &self.download_bytes
     }
 
+    #[allow(dead_code)] // consumed by the downloader in Phase 2 (Task 12)
     pub fn progress_total(&self) -> &AtomicU64 {
         &self.download_total
     }
@@ -87,6 +84,7 @@ impl TranscriptionStatusCell {
         self.snapshot.rcu(|s| f(s.as_ref()));
     }
 
+    #[allow(dead_code)] // consumed by the provisioner in Phase 2 (Task 13)
     pub fn set_missing(&self) {
         self.update(|s| Snapshot {
             state: TranscriptionState::Missing,
@@ -97,6 +95,7 @@ impl TranscriptionStatusCell {
 
     /// Takes `ModelVariant`, not `&str` — every caller already holds one,
     /// and the allow-list guarantee lives in the type (no panic path here).
+    #[allow(dead_code)] // consumed by the provisioner in Phase 2 (Task 13)
     pub fn set_downloading(&self, variant: ModelVariant) {
         self.download_bytes.store(0, Ordering::Relaxed);
         self.download_total.store(0, Ordering::Relaxed);
@@ -108,6 +107,7 @@ impl TranscriptionStatusCell {
         });
     }
 
+    #[allow(dead_code)] // consumed by the provisioner in Phase 2 (Task 13)
     pub fn set_verifying(&self) {
         self.update(|s| Snapshot {
             state: TranscriptionState::Verifying,

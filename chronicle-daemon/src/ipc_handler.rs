@@ -111,6 +111,9 @@ pub struct DaemonHandler {
     /// Gate that opens once the main loop starts draining `capture_tx`.
     capture_ready: Arc<AtomicBool>,
     capture_reply_timeout: Duration,
+    /// Transcription status cell (HEU-475): boot/provisioner write it, the
+    /// `Status` arm reads it.
+    transcription_status: Arc<crate::provisioning::TranscriptionStatusCell>,
 }
 
 impl DaemonHandler {
@@ -176,6 +179,7 @@ impl DaemonHandler {
         capture_tx: mpsc::Sender<CaptureCommand>,
         capture_paused: Arc<AtomicBool>,
         capture_ready: Arc<AtomicBool>,
+        transcription_status: Arc<crate::provisioning::TranscriptionStatusCell>,
     ) -> Self {
         Self {
             started_at: Instant::now(),
@@ -191,6 +195,7 @@ impl DaemonHandler {
             capture_paused,
             capture_ready,
             capture_reply_timeout: Duration::from_secs(20),
+            transcription_status,
         }
     }
 }
@@ -248,8 +253,7 @@ impl RequestHandler for DaemonHandler {
                             oldest_entry_ms: storage.oldest_entry_ms,
                             retention_days: storage.retention_days,
                         },
-                        // placeholder — real cell wired in Task 4
-                        transcription: chronicle_ipc::TranscriptionStats::default(),
+                        transcription: self.transcription_status.stats(self.storage.base_dir()),
                     },
                 }
             }
@@ -582,6 +586,24 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn status_includes_transcription_block() {
+        let (handler, _mic_rx, _atom, _dir) = handler_with_mic_channel(8, true).await;
+        let resp = handler.handle(Request::Status);
+        match resp {
+            Response::Status { data, .. } => {
+                // Fresh temp base_dir: no model on disk.
+                assert_eq!(
+                    data.transcription.state,
+                    chronicle_ipc::TranscriptionState::Missing
+                );
+                assert_eq!(data.transcription.variant, "base");
+                assert_eq!(data.transcription.models.len(), 3);
+            }
+            other => panic!("expected Status response, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn integration_status_round_trip_through_server() {
         use chronicle_ipc::{CancellationToken, IpcServer};
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -614,6 +636,7 @@ mod tests {
         assert!(value["data"]["ocr"].is_object());
         assert!(value["data"]["audio"].is_object());
         assert!(value["data"]["storage"].is_object());
+        assert!(value["data"]["transcription"].is_object());
 
         cancel.cancel();
     }
@@ -934,6 +957,9 @@ mod tests {
             capture_tx,
             Arc::clone(&capture_paused),
             capture_ready_atom,
+            crate::provisioning::TranscriptionStatusCell::new(
+                chronicle_transcription::DEFAULT_VARIANT,
+            ),
         );
         (
             handler,
