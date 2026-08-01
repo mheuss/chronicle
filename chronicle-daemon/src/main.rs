@@ -4,6 +4,7 @@ mod ipc_handler;
 mod permissions;
 mod pipeline;
 mod power;
+mod provisioning;
 mod settings;
 
 use std::sync::Arc;
