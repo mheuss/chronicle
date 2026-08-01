@@ -175,12 +175,18 @@ async fn main() -> Result<()> {
     // idempotent.
     let (retry_tx, mut retry_rx) = tokio::sync::mpsc::channel::<()>(4);
     let mut start_retry = StartRetry::new();
-    // Whisper model status cell (HEU-475). Boot primes it; the IPC Status
-    // handler reads it. Missing model → transcription stays idle, the rest
-    // of the daemon runs normally, and the UI shows why.
+    // Whisper model status cell (HEU-475). Created — and, when the model is
+    // on disk, put into Loading — BEFORE the IPC server below serves its
+    // first Status, so the UI never sees Missing for a model that exists
+    // (design §2.1: boot, file present → Loading). The engine-load block
+    // finishes the story with ready/error. Missing model → transcription
+    // stays idle, the rest of the daemon runs normally, and the UI shows why.
     let whisper_variant = settings::read_whisper_model(storage.base_dir());
+    let model_present = chronicle_transcription::model_present(storage.base_dir(), whisper_variant);
     let transcription_status = crate::provisioning::TranscriptionStatusCell::new(whisper_variant);
-    if !chronicle_transcription::model_present(storage.base_dir(), whisper_variant) {
+    if model_present {
+        transcription_status.set_loading(whisper_variant);
+    } else {
         log::warn!(
             "whisper model missing — transcription is off until you enable it \
              from the Chronicle menu bar app"
@@ -283,13 +289,11 @@ async fn main() -> Result<()> {
     let (transcription_sink, transcribe_handle): (
         Arc<dyn pipeline::sinks::TranscriptionSink>,
         Option<tokio::task::JoinHandle<()>>,
-    ) = if chronicle_transcription::model_present(storage.base_dir(), whisper_variant) {
+    ) = if model_present {
         // Load the ggml model off the runtime — it's heavy blocking work
-        // (seconds for a large variant) and must not stall tokio workers (HEU-480).
-        // IPC is already serving Status, so enter Loading BEFORE the load —
-        // otherwise the cell reports Missing for the whole load and the UI
-        // banner flashes on every boot (design §2.1: boot, file present).
-        transcription_status.set_loading(whisper_variant);
+        // (seconds for a large variant) and must not stall tokio workers
+        // (HEU-480). The cell is already in Loading (set at creation, before
+        // the IPC server started).
         let base_dir = storage.base_dir().to_path_buf();
         let load_result = tokio::task::spawn_blocking(move || {
             chronicle_transcription::TranscriptionEngine::load(&base_dir, whisper_variant)
@@ -329,19 +333,23 @@ async fn main() -> Result<()> {
                 log::error!(
                     "transcription engine load failed ({whisper_variant}): {e} — staying idle"
                 );
-                transcription_status.set_error(&format!("model load failed: {e}"));
+                // TranscriptionError::Display already carries the
+                // "model load failed:" prefix — don't double it on the wire.
+                transcription_status.set_error(&e.to_string());
                 (Arc::new(pipeline::sinks::NoopTranscriptionSink), None)
             }
             Err(e) => {
                 log::error!(
                     "transcription engine load task failed ({whisper_variant}): {e} — staying idle"
                 );
-                transcription_status.set_error(&format!("model load failed: {e}"));
+                // JoinError::Display forwards arbitrary panic payloads —
+                // keep the wire string fixed; the log line above has {e}.
+                transcription_status.set_error("model load failed");
                 (Arc::new(pipeline::sinks::NoopTranscriptionSink), None)
             }
         }
     } else {
-        // The startup model-presence check (line ~120) already logged the
+        // The startup model-presence check above already logged the
         // "model missing → idle" warning.
         (Arc::new(pipeline::sinks::NoopTranscriptionSink), None)
     };
