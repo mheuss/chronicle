@@ -56,6 +56,48 @@ impl fmt::Display for ModelVariant {
 /// Default variant used when settings is missing, empty, or invalid.
 pub const DEFAULT_VARIANT: ModelVariant = ModelVariant("base");
 
+/// Pinned download source for one model variant. URLs 302-redirect to the
+/// Hugging Face CDN; SHA1s are upstream's published digests (integrity —
+/// TLS provides authenticity). `size_bytes` is the advertised size, used
+/// for the disk precheck and UI labels before a file exists locally.
+/// Keep in lockstep with scripts/fetch-whisper-model.sh (AD-2).
+pub struct ModelInfo {
+    pub variant: ModelVariant,
+    pub url: &'static str,
+    pub sha1: &'static str,
+    pub size_bytes: u64,
+}
+
+const MANIFEST: [ModelInfo; 3] = [
+    ModelInfo {
+        variant: ModelVariant("base"),
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+        sha1: "465707469ff3a37a2b9b8d8f89f2f99de7299dac",
+        size_bytes: 148_000_000,
+    },
+    ModelInfo {
+        variant: ModelVariant("small"),
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+        sha1: "55356645c2b361a969dfd0ef2c5a50d530afd8d5",
+        size_bytes: 466_000_000,
+    },
+    ModelInfo {
+        variant: ModelVariant("medium"),
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
+        sha1: "fd9727b6e1217c2f614f9b698455c4ffd82463b4",
+        size_bytes: 1_530_000_000,
+    },
+];
+
+/// Pinned manifest entry for a variant. Total (`ModelVariant` is
+/// allow-list-only and the manifest covers the allow-list, enforced by test).
+pub fn model_info(variant: ModelVariant) -> &'static ModelInfo {
+    MANIFEST
+        .iter()
+        .find(|m| m.variant == variant)
+        .expect("manifest covers every allow-listed variant")
+}
+
 /// Parse a raw string into one of the supported variants.
 ///
 /// Returns a [`ModelVariant`] only when `s` exactly matches an entry in
@@ -575,6 +617,36 @@ mod tests {
             (7_700..=8_400).contains(&pcm.len()),
             "expected ~8046 samples, got {}",
             pcm.len()
+        );
+    }
+
+    #[test]
+    fn manifest_covers_every_supported_variant() {
+        for v in SUPPORTED_VARIANTS {
+            let variant = parse_variant(v).unwrap();
+            let info = model_info(variant);
+            assert_eq!(info.variant, variant);
+            assert!(info.url.starts_with("https://huggingface.co/"));
+            assert_eq!(info.sha1.len(), 40, "sha1 must be 40 hex chars");
+            assert!(info.sha1.chars().all(|c| c.is_ascii_hexdigit()));
+            assert!(info.size_bytes > 100_000_000, "all variants exceed 100 MB");
+        }
+    }
+
+    #[test]
+    fn manifest_pins_match_fetch_script_values() {
+        // Duplicated knowingly with scripts/fetch-whisper-model.sh (AD-2).
+        assert_eq!(
+            model_info(parse_variant("base").unwrap()).sha1,
+            "465707469ff3a37a2b9b8d8f89f2f99de7299dac"
+        );
+        assert_eq!(
+            model_info(parse_variant("small").unwrap()).sha1,
+            "55356645c2b361a969dfd0ef2c5a50d530afd8d5"
+        );
+        assert_eq!(
+            model_info(parse_variant("medium").unwrap()).sha1,
+            "fd9727b6e1217c2f614f9b698455c4ffd82463b4"
         );
     }
 }
