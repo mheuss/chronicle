@@ -248,6 +248,8 @@ impl RequestHandler for DaemonHandler {
                             oldest_entry_ms: storage.oldest_entry_ms,
                             retention_days: storage.retention_days,
                         },
+                        // placeholder — real cell wired in Task 4
+                        transcription: chronicle_ipc::TranscriptionStats::default(),
                     },
                 }
             }

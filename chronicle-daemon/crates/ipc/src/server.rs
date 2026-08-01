@@ -273,7 +273,7 @@ mod tests {
     use super::*;
     use crate::{
         AudioStats, CaptureStats, MicState, OcrStats, Request, RequestHandler, Response,
-        StatusData, StorageStats,
+        StatusData, StorageStats, TranscriptionStats,
     };
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
@@ -293,6 +293,7 @@ mod tests {
                         ocr: OcrStats::default(),
                         audio: AudioStats::default(),
                         storage: StorageStats::default(),
+                        transcription: TranscriptionStats::default(),
                     },
                 },
                 Request::SetMicEnabled { .. } => Response::SetMicEnabled {
