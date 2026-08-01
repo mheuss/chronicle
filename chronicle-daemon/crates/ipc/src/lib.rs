@@ -723,6 +723,9 @@ mod tests {
         // changes serialize and deserialize symmetrically, so the round-trip
         // test still passes while the wire breaks — pin every key, matching
         // the audio_stats_serializes_transcription_counters convention.
+        // The fixture is deliberately over-populated (Error + progress
+        // fields together) to force every Option onto the wire; that combo
+        // is NOT a reachable state — see the field invariants on the struct.
         let stats = TranscriptionStats {
             state: TranscriptionState::Error,
             variant: "small".into(),
@@ -739,22 +742,28 @@ mod tests {
         let json = serde_json::to_string(&stats).unwrap();
         for key in [
             "\"state\"",
-            "\"variant\"",
             "\"loaded_variant\"",
             "\"error\"",
             "\"download_bytes\"",
             "\"download_total_bytes\"",
             "\"models\"",
-            "\"downloaded\"",
-            "\"size_bytes\"",
         ] {
             assert!(json.contains(key), "missing wire key {key} in {json}");
         }
+        // `variant` appears in both structs — a substring check can't tell
+        // which one got renamed. Index the parsed value to pin each one.
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["variant"], "small");
+        assert_eq!(value["models"][0]["variant"], "base");
+        assert_eq!(value["models"][0]["downloaded"], true);
+        assert_eq!(value["models"][0]["size_bytes"], 148_000_000u64);
         // Absent Options serialize as explicit null, not omitted — a later
         // skip_serializing_if would change the wire shape silently.
         let defaulted = serde_json::to_string(&TranscriptionStats::default()).unwrap();
         assert!(defaulted.contains("\"loaded_variant\":null"));
+        assert!(defaulted.contains("\"error\":null"));
         assert!(defaulted.contains("\"download_bytes\":null"));
+        assert!(defaulted.contains("\"download_total_bytes\":null"));
     }
 
     #[test]
