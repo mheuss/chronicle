@@ -197,7 +197,10 @@ pub enum TranscriptionState {
     #[default]
     Missing,
     Downloading,
+    /// Checksum verification of a finished download (design §2.1) — a
+    /// distinct UI-visible step, not part of `Downloading`.
     Verifying,
+    /// ggml load into whisper — heavy blocking work, seconds for `medium`.
     Loading,
     Ready,
     Error,
@@ -219,10 +222,18 @@ pub struct ModelEntry {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscriptionStats {
     pub state: TranscriptionState,
+    /// The configured (settings) variant.
     pub variant: String,
+    /// The engine actually serving, if any. In `Error` state the UI
+    /// branches its copy on this (design §2.2): `None` = initial
+    /// provisioning failed, transcription is off; `Some` = a switch
+    /// failed and this engine is still serving.
     pub loaded_variant: Option<String>,
+    /// Set when and only when `state == Error`.
     pub error: Option<String>,
+    /// Download progress; set only while `state == Downloading`.
     pub download_bytes: Option<u64>,
+    /// Total from Content-Length; set only while `state == Downloading`.
     pub download_total_bytes: Option<u64>,
     pub models: Vec<ModelEntry>,
 }
@@ -701,7 +712,49 @@ mod tests {
             (TranscriptionState::Error, "\"error\""),
         ] {
             assert_eq!(serde_json::to_string(&state).unwrap(), wire);
+            let back: TranscriptionState = serde_json::from_str(wire).unwrap();
+            assert_eq!(back, state);
         }
+    }
+
+    #[test]
+    fn transcription_wire_keys_are_pinned() {
+        // The UI decodes these exact keys (Task 5). A Rust field rename
+        // changes serialize and deserialize symmetrically, so the round-trip
+        // test still passes while the wire breaks — pin every key, matching
+        // the audio_stats_serializes_transcription_counters convention.
+        let stats = TranscriptionStats {
+            state: TranscriptionState::Error,
+            variant: "small".into(),
+            loaded_variant: Some("base".into()),
+            error: Some("boom".into()),
+            download_bytes: Some(1),
+            download_total_bytes: Some(2),
+            models: vec![ModelEntry {
+                variant: "base".into(),
+                downloaded: true,
+                size_bytes: 148_000_000,
+            }],
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        for key in [
+            "\"state\"",
+            "\"variant\"",
+            "\"loaded_variant\"",
+            "\"error\"",
+            "\"download_bytes\"",
+            "\"download_total_bytes\"",
+            "\"models\"",
+            "\"downloaded\"",
+            "\"size_bytes\"",
+        ] {
+            assert!(json.contains(key), "missing wire key {key} in {json}");
+        }
+        // Absent Options serialize as explicit null, not omitted — a later
+        // skip_serializing_if would change the wire shape silently.
+        let defaulted = serde_json::to_string(&TranscriptionStats::default()).unwrap();
+        assert!(defaulted.contains("\"loaded_variant\":null"));
+        assert!(defaulted.contains("\"download_bytes\":null"));
     }
 
     #[test]
