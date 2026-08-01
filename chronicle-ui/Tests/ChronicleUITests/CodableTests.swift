@@ -268,4 +268,92 @@ struct CodableTests {
         #expect(storage.retentionDays == 14)
         #expect(storage.oldestEntryMs == 1_700_000_000_000)
     }
+
+    @Test("StatusData decodes the transcription block")
+    func statusDataDecodesTranscriptionBlock() throws {
+        let json = """
+        {"type":"status","ok":true,"data":{"uptime_secs":5,"version":"0.1.0",
+         "transcription":{"state":"downloading","variant":"small",
+         "loaded_variant":"base","error":null,
+         "download_bytes":1024,"download_total_bytes":466000000,
+         "models":[{"variant":"base","downloaded":true,"size_bytes":148000000},
+                   {"variant":"small","downloaded":false,"size_bytes":466000000},
+                   {"variant":"medium","downloaded":false,"size_bytes":1530000000}]}}}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(StatusResponse.self, from: Data(json.utf8))
+        let t = try #require(resp.data.transcription)
+        #expect(t.state == .downloading)
+        #expect(t.variant == "small")
+        #expect(t.loadedVariant == "base")
+        #expect(t.downloadBytes == 1024)
+        #expect(t.models.count == 3)
+        #expect(t.models[0].downloaded == true)
+    }
+
+    @Test("StatusData tolerates a daemon without the block")
+    func statusDataToleratesMissingTranscription() throws {
+        let json = """
+        {"type":"status","ok":true,"data":{"uptime_secs":5,"version":"0.1.0"}}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(StatusResponse.self, from: Data(json.utf8))
+        #expect(resp.data.transcription == nil, "old daemon → nil, no crash")
+    }
+
+    @Test("Old UI schema ignores the transcription block")
+    func oldUISchemaIgnoresTranscriptionBlock() throws {
+        // NFR-7, reverse direction: an old UI must ignore a new daemon's extra
+        // fields. Stub mirrors StatusData exactly as it exists BEFORE this task
+        // (no `transcription` property).
+        struct OldStatusData: Codable {
+            let uptimeSecs: UInt64
+            let version: String
+            let capture: CaptureStats?
+            let ocr: OcrStats?
+            let audio: AudioStats?
+            let storage: StorageStats?
+        }
+        struct OldStatusResponse: Codable {
+            let type: String
+            let ok: Bool
+            let data: OldStatusData
+        }
+        let json = """
+        {"type":"status","ok":true,"data":{"uptime_secs":5,"version":"0.1.0",
+         "transcription":{"state":"downloading","variant":"small",
+         "loaded_variant":"base","error":null,
+         "download_bytes":1024,"download_total_bytes":466000000,
+         "models":[{"variant":"base","downloaded":true,"size_bytes":148000000},
+                   {"variant":"small","downloaded":false,"size_bytes":466000000},
+                   {"variant":"medium","downloaded":false,"size_bytes":1530000000}]}}}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(OldStatusResponse.self, from: Data(json.utf8))
+        #expect(resp.data.version == "0.1.0",
+                "new transcription block ignored, not a decode failure")
+    }
+
+    @Test("Unknown transcription state degrades, not throws")
+    func unknownTranscriptionStateDegrades() throws {
+        // A future daemon may add a 7th state. A closed enum would throw and
+        // kill the WHOLE StatusResponse decode (status polling goes dark) —
+        // decode to .unknown instead. Recorded decision from the Task 2
+        // wire-type review; formal cross-version policy is HEU-456.
+        let json = """
+        {"type":"status","ok":true,"data":{"uptime_secs":5,"version":"0.1.0",
+         "transcription":{"state":"defragmenting","variant":"base",
+         "loaded_variant":null,"error":null,
+         "download_bytes":null,"download_total_bytes":null,"models":[]}}}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(StatusResponse.self, from: Data(json.utf8))
+        let t = try #require(resp.data.transcription)
+        #expect(t.state == .unknown)
+        #expect(resp.data.version == "0.1.0", "rest of the payload intact")
+    }
 }

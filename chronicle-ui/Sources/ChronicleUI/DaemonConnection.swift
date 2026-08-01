@@ -456,6 +456,9 @@ struct StatusData: Codable, Sendable {
     let ocr: OcrStats?
     let audio: AudioStats?
     let storage: StorageStats?
+    /// Optional so an old daemon (no transcription block) decodes to nil
+    /// instead of failing the whole status response (NFR-7).
+    let transcription: TranscriptionStats?
 }
 
 struct CaptureStats: Codable, Sendable {
@@ -485,6 +488,43 @@ struct StorageStats: Codable, Sendable {
     let audioSegmentCount: UInt64
     let oldestEntryMs: Int64?
     let retentionDays: UInt32
+}
+
+enum TranscriptionState: String, Codable, Sendable {
+    case missing, downloading, verifying, loading, ready, error
+    /// A state this UI doesn't know yet (newer daemon). Decoding to a
+    /// fallback keeps the whole StatusResponse alive — a closed enum would
+    /// throw and take status polling dark. Formal cross-version policy is
+    /// HEU-456; views treat .unknown like .ready (no banner, no row alarm).
+    case unknown
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = TranscriptionState(rawValue: raw) ?? .unknown
+    }
+}
+
+struct ModelEntry: Codable, Sendable, Hashable {
+    let variant: String
+    let downloaded: Bool
+    let sizeBytes: UInt64
+}
+
+struct TranscriptionStats: Codable, Sendable {
+    let state: TranscriptionState
+    /// The variant the daemon is acting on (settings value at boot, or the
+    /// requested variant during/after a switch attempt).
+    let variant: String
+    /// The engine actually serving, if any. In `.error` state: nil means
+    /// initial provisioning failed (transcription off); non-nil means a
+    /// switch failed and this engine still serves.
+    let loadedVariant: String?
+    let error: String?
+    /// Set only while downloading; total is nil until Content-Length is
+    /// known — render an indeterminate bar, never divide by a 0 total.
+    let downloadBytes: UInt64?
+    let downloadTotalBytes: UInt64?
+    let models: [ModelEntry]
 }
 
 struct ErrorResponse: Codable, Sendable {
