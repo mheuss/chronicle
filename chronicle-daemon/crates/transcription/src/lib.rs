@@ -61,6 +61,7 @@ pub const DEFAULT_VARIANT: ModelVariant = ModelVariant("base");
 /// TLS provides authenticity). `size_bytes` is the advertised size, used
 /// for the disk precheck and UI labels before a file exists locally.
 /// Keep in lockstep with scripts/fetch-whisper-model.sh (AD-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelInfo {
     pub variant: ModelVariant,
     pub url: &'static str,
@@ -68,7 +69,7 @@ pub struct ModelInfo {
     pub size_bytes: u64,
 }
 
-const MANIFEST: [ModelInfo; 3] = [
+static MANIFEST: [ModelInfo; 3] = [
     ModelInfo {
         variant: ModelVariant("base"),
         url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
@@ -79,7 +80,10 @@ const MANIFEST: [ModelInfo; 3] = [
         variant: ModelVariant("small"),
         url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
         sha1: "55356645c2b361a969dfd0ef2c5a50d530afd8d5",
-        size_bytes: 466_000_000,
+        // Actual upstream Content-Length is 487,601,967 — whisper.cpp's
+        // README says "466 MiB", which is 488 MB decimal. Advertised sizes
+        // here use decimal bytes like the other rows.
+        size_bytes: 488_000_000,
     },
     ModelInfo {
         variant: ModelVariant("medium"),
@@ -627,6 +631,10 @@ mod tests {
             let info = model_info(variant);
             assert_eq!(info.variant, variant);
             assert!(info.url.starts_with("https://huggingface.co/"));
+            assert!(
+                info.url.ends_with(&format!("ggml-{v}.bin")),
+                "{v}: url must point at its own variant's file"
+            );
             assert_eq!(info.sha1.len(), 40, "sha1 must be 40 hex chars");
             assert!(info.sha1.chars().all(|c| c.is_ascii_hexdigit()));
             assert!(info.size_bytes > 100_000_000, "all variants exceed 100 MB");
@@ -635,18 +643,36 @@ mod tests {
 
     #[test]
     fn manifest_pins_match_fetch_script_values() {
-        // Duplicated knowingly with scripts/fetch-whisper-model.sh (AD-2).
+        // Real cross-check against the other copy of these pins (AD-2):
+        // drift in either the manifest or the script fails here. Sizes have
+        // no in-repo counterpart, so exact pins catch accidental edits.
+        let script = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../scripts/fetch-whisper-model.sh"),
+        )
+        .expect("fetch script readable");
+        for v in SUPPORTED_VARIANTS {
+            let info = model_info(parse_variant(v).unwrap());
+            assert!(
+                script.contains(info.sha1),
+                "{v}: sha1 drifted from fetch script"
+            );
+            assert!(
+                script.contains(info.url),
+                "{v}: url drifted from fetch script"
+            );
+        }
         assert_eq!(
-            model_info(parse_variant("base").unwrap()).sha1,
-            "465707469ff3a37a2b9b8d8f89f2f99de7299dac"
+            model_info(parse_variant("base").unwrap()).size_bytes,
+            148_000_000
         );
         assert_eq!(
-            model_info(parse_variant("small").unwrap()).sha1,
-            "55356645c2b361a969dfd0ef2c5a50d530afd8d5"
+            model_info(parse_variant("small").unwrap()).size_bytes,
+            488_000_000
         );
         assert_eq!(
-            model_info(parse_variant("medium").unwrap()).sha1,
-            "fd9727b6e1217c2f614f9b698455c4ffd82463b4"
+            model_info(parse_variant("medium").unwrap()).size_bytes,
+            1_530_000_000
         );
     }
 }
