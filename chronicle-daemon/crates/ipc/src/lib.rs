@@ -222,7 +222,10 @@ pub struct ModelEntry {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscriptionStats {
     pub state: TranscriptionState,
-    /// The configured (settings) variant.
+    /// The variant the daemon is acting on: the settings value at boot, or
+    /// the requested variant during/after a switch attempt. After a failed
+    /// switch this differs from persisted settings until restart (persist
+    /// happens on success only, AD-10).
     pub variant: String,
     /// The engine actually serving, if any. In `Error` state the UI
     /// branches its copy on this (design §2.2): `None` = initial
@@ -233,7 +236,9 @@ pub struct TranscriptionStats {
     pub error: Option<String>,
     /// Download progress; set only while `state == Downloading`.
     pub download_bytes: Option<u64>,
-    /// Total from Content-Length; set only while `state == Downloading`.
+    /// Total from Content-Length; set only while `state == Downloading`
+    /// AND once actually known — never `Some(0)`. `None` while downloading
+    /// means the total is unknown (indeterminate progress bar).
     pub download_total_bytes: Option<u64>,
     pub models: Vec<ModelEntry>,
 }

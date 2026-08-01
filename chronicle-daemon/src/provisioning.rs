@@ -4,7 +4,10 @@
 //! per-variant on-disk report. The download state machine, `EngineHandle`,
 //! and `SetWhisperModel` wiring land in Phase 2.
 
-#![allow(dead_code)] // removed in Task 4 when main.rs + ipc_handler consume this
+// Phase 1 consumes only new/stats/set_loading/set_ready/set_error; the
+// other setters and progress accessors are wired in Phase 2 (Tasks 12/13).
+// Task 4 narrows this to per-item allows on the still-unconsumed items.
+#![allow(dead_code)]
 
 use std::path::Path;
 use std::sync::Arc;
@@ -53,13 +56,17 @@ impl TranscriptionStatusCell {
     pub fn stats(&self, base_dir: &Path) -> TranscriptionStats {
         let snap = self.snapshot.load();
         let downloading = snap.state == TranscriptionState::Downloading;
+        // Total is unknown (0) until the response headers arrive — publish
+        // None rather than Some(0) so the UI shows an indeterminate bar
+        // instead of dividing by zero (wire contract in chronicle-ipc).
+        let total = self.download_total.load(Ordering::Relaxed);
         TranscriptionStats {
             state: snap.state,
             variant: snap.variant.as_str().to_string(),
             loaded_variant: snap.loaded_variant.clone(),
             error: snap.error.clone(),
             download_bytes: downloading.then(|| self.download_bytes.load(Ordering::Relaxed)),
-            download_total_bytes: downloading.then(|| self.download_total.load(Ordering::Relaxed)),
+            download_total_bytes: (downloading && total > 0).then_some(total),
             models: models_report(base_dir),
         }
     }
@@ -72,9 +79,12 @@ impl TranscriptionStatusCell {
         &self.download_total
     }
 
-    fn update(&self, f: impl FnOnce(&Snapshot) -> Snapshot) {
-        let next = f(&self.snapshot.load());
-        self.snapshot.store(Arc::new(next));
+    fn update(&self, mut f: impl FnMut(&Snapshot) -> Snapshot) {
+        // rcu retries on a concurrent store, so no writer can be lost.
+        // Runtime writers are serialized today (boot completes before the
+        // event loop starts; provisions serialize on the in-flight CAS) —
+        // this is cheap insurance against a future writer breaking that.
+        self.snapshot.rcu(|s| f(s.as_ref()));
     }
 
     pub fn set_missing(&self) {
@@ -85,11 +95,12 @@ impl TranscriptionStatusCell {
         });
     }
 
-    pub fn set_downloading(&self, variant: &str) {
+    /// Takes `ModelVariant`, not `&str` — every caller already holds one,
+    /// and the allow-list guarantee lives in the type (no panic path here).
+    pub fn set_downloading(&self, variant: ModelVariant) {
         self.download_bytes.store(0, Ordering::Relaxed);
         self.download_total.store(0, Ordering::Relaxed);
-        let variant = parse_variant(variant).expect("caller passes allow-listed variant");
-        self.update(|s| Snapshot {
+        self.update(move |s| Snapshot {
             state: TranscriptionState::Downloading,
             variant,
             error: None,
@@ -114,12 +125,11 @@ impl TranscriptionStatusCell {
     }
 
     /// Ready: `loaded_variant` becomes the serving variant.
-    pub fn set_ready(&self, loaded: &str) {
-        let variant = parse_variant(loaded).expect("caller passes allow-listed variant");
-        self.update(|_| Snapshot {
+    pub fn set_ready(&self, loaded: ModelVariant) {
+        self.update(move |_| Snapshot {
             state: TranscriptionState::Ready,
-            variant,
-            loaded_variant: Some(loaded.to_string()),
+            variant: loaded,
+            loaded_variant: Some(loaded.as_str().to_string()),
             error: None,
         });
     }
@@ -142,17 +152,27 @@ pub fn models_report(base_dir: &Path) -> Vec<ModelEntry> {
         .iter()
         .map(|name| {
             let variant = parse_variant(name).expect("SUPPORTED_VARIANTS entries parse");
-            match std::fs::metadata(model_path(base_dir, variant)) {
+            let path = model_path(base_dir, variant);
+            match std::fs::metadata(&path) {
                 Ok(meta) if meta.is_file() => ModelEntry {
                     variant: (*name).to_string(),
                     downloaded: true,
                     size_bytes: meta.len(),
                 },
-                _ => ModelEntry {
-                    variant: (*name).to_string(),
-                    downloaded: false,
-                    size_bytes: model_info(variant).size_bytes,
-                },
+                res => {
+                    // EACCES/EIO on an existing file must not read like
+                    // "absent" with nothing in the log.
+                    if let Err(e) = res
+                        && e.kind() != std::io::ErrorKind::NotFound
+                    {
+                        log::debug!("models_report: stat {} failed: {e}", path.display());
+                    }
+                    ModelEntry {
+                        variant: (*name).to_string(),
+                        downloaded: false,
+                        size_bytes: model_info(variant).size_bytes,
+                    }
+                }
             }
         })
         .collect()
@@ -200,7 +220,7 @@ mod tests {
     #[test]
     fn set_ready_reports_loaded_variant() {
         let cell = TranscriptionStatusCell::new(parse_variant("base").unwrap());
-        cell.set_ready("base");
+        cell.set_ready(parse_variant("base").unwrap());
         let stats = cell.stats(std::path::Path::new("/nonexistent"));
         assert_eq!(stats.state, TranscriptionState::Ready);
         assert_eq!(stats.loaded_variant.as_deref(), Some("base"));
@@ -210,7 +230,7 @@ mod tests {
     #[test]
     fn set_error_keeps_previous_loaded_variant() {
         let cell = TranscriptionStatusCell::new(parse_variant("base").unwrap());
-        cell.set_ready("base");
+        cell.set_ready(parse_variant("base").unwrap());
         cell.set_error("boom");
         let stats = cell.stats(std::path::Path::new("/nonexistent"));
         assert_eq!(stats.state, TranscriptionState::Error);
@@ -239,7 +259,7 @@ mod tests {
     #[test]
     fn download_progress_appears_only_while_downloading() {
         let cell = TranscriptionStatusCell::new(parse_variant("base").unwrap());
-        cell.set_downloading("base");
+        cell.set_downloading(parse_variant("base").unwrap());
         cell.progress_bytes()
             .store(10, std::sync::atomic::Ordering::Relaxed);
         cell.progress_total()
@@ -249,8 +269,52 @@ mod tests {
         assert_eq!(stats.download_bytes, Some(10));
         assert_eq!(stats.download_total_bytes, Some(100));
 
-        cell.set_ready("base");
+        cell.set_ready(parse_variant("base").unwrap());
         let stats = cell.stats(std::path::Path::new("/nonexistent"));
         assert_eq!(stats.download_bytes, None);
+    }
+
+    #[test]
+    fn set_downloading_rezeroes_progress_and_hides_unknown_total() {
+        // Retry path (AD-11): a second begin must not show the failed
+        // attempt's stale bytes as instant progress.
+        let cell = TranscriptionStatusCell::new(parse_variant("base").unwrap());
+        cell.set_downloading(parse_variant("base").unwrap());
+        cell.progress_bytes()
+            .store(10, std::sync::atomic::Ordering::Relaxed);
+        cell.progress_total()
+            .store(100, std::sync::atomic::Ordering::Relaxed);
+        cell.set_downloading(parse_variant("base").unwrap());
+        let stats = cell.stats(std::path::Path::new("/nonexistent"));
+        assert_eq!(stats.download_bytes, Some(0));
+        assert_eq!(
+            stats.download_total_bytes, None,
+            "total is None until Content-Length arrives — never Some(0)"
+        );
+    }
+
+    #[test]
+    fn set_verifying_hides_progress() {
+        let cell = TranscriptionStatusCell::new(parse_variant("base").unwrap());
+        cell.set_downloading(parse_variant("base").unwrap());
+        cell.progress_bytes()
+            .store(10, std::sync::atomic::Ordering::Relaxed);
+        cell.progress_total()
+            .store(100, std::sync::atomic::Ordering::Relaxed);
+        cell.set_verifying();
+        let stats = cell.stats(std::path::Path::new("/nonexistent"));
+        assert_eq!(stats.state, TranscriptionState::Verifying);
+        assert_eq!(stats.download_bytes, None);
+        assert_eq!(stats.download_total_bytes, None);
+    }
+
+    #[test]
+    fn set_missing_clears_error() {
+        let cell = TranscriptionStatusCell::new(parse_variant("base").unwrap());
+        cell.set_error("boom");
+        cell.set_missing();
+        let stats = cell.stats(std::path::Path::new("/nonexistent"));
+        assert_eq!(stats.state, TranscriptionState::Missing);
+        assert_eq!(stats.error, None, "error is set iff state == Error");
     }
 }
