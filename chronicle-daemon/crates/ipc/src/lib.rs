@@ -216,8 +216,8 @@ pub struct ModelEntry {
     pub size_bytes: u64,
 }
 
-/// Transcription block of `StatusData`. `variant` is the configured
-/// (settings) variant; `loaded_variant` is the engine actually serving, if
+/// Transcription block of `StatusData`. `variant` is the variant the
+/// daemon is acting on; `loaded_variant` is the engine actually serving, if
 /// any — they differ after a failed switch ("small failed, still on base").
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscriptionStats {

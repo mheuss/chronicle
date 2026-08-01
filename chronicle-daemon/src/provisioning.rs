@@ -116,9 +116,13 @@ impl TranscriptionStatusCell {
         });
     }
 
-    pub fn set_loading(&self) {
-        self.update(|s| Snapshot {
+    /// Carries the variant being loaded so a switch to an already-on-disk
+    /// variant reports the ATTEMPTED variant — without it, a failed switch
+    /// would render "Switch to base failed — still using base" (§2.2 copy).
+    pub fn set_loading(&self, variant: ModelVariant) {
+        self.update(move |s| Snapshot {
             state: TranscriptionState::Loading,
+            variant,
             error: None,
             ..s.clone()
         });
@@ -249,9 +253,13 @@ mod tests {
         // serving Status. The state must be visible and carry no download
         // progress fields.
         let cell = TranscriptionStatusCell::new(parse_variant("base").unwrap());
-        cell.set_loading();
+        cell.set_loading(parse_variant("small").unwrap());
         let stats = cell.stats(std::path::Path::new("/nonexistent"));
         assert_eq!(stats.state, TranscriptionState::Loading);
+        assert_eq!(
+            stats.variant, "small",
+            "loading reports the ATTEMPTED variant"
+        );
         assert_eq!(stats.download_bytes, None);
         assert_eq!(stats.error, None);
     }
