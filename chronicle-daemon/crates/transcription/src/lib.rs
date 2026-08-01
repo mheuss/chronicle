@@ -80,16 +80,17 @@ static MANIFEST: [ModelInfo; 3] = [
         variant: ModelVariant("small"),
         url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
         sha1: "55356645c2b361a969dfd0ef2c5a50d530afd8d5",
-        // Actual upstream Content-Length is 487,601,967 — whisper.cpp's
-        // README says "466 MiB", which is 488 MB decimal. Advertised sizes
-        // here use decimal bytes like the other rows.
+        // Upstream Content-Length 487,601,967, rounded UP to decimal MB.
+        // Advertised sizes feed the disk precheck, so rounding down would
+        // fail in the unsafe direction (precheck passes, download ENOSPCs).
         size_bytes: 488_000_000,
     },
     ModelInfo {
         variant: ModelVariant("medium"),
         url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
         sha1: "fd9727b6e1217c2f614f9b698455c4ffd82463b4",
-        size_bytes: 1_530_000_000,
+        // Upstream Content-Length 1,533,763,059, rounded UP (see small).
+        size_bytes: 1_534_000_000,
     },
 ];
 
@@ -653,13 +654,23 @@ mod tests {
         .expect("fetch script readable");
         for v in SUPPORTED_VARIANTS {
             let info = model_info(parse_variant(v).unwrap());
+            // Anchor to the variant's own case branch, not the whole file —
+            // an unanchored contains() passes when two branches swap values.
+            let label = format!("{v})");
+            let start = script
+                .find(&label)
+                .unwrap_or_else(|| panic!("{v}: case branch missing from fetch script"));
+            let end = script[start..]
+                .find(";;")
+                .map_or(script.len(), |e| start + e);
+            let branch = &script[start..end];
             assert!(
-                script.contains(info.sha1),
-                "{v}: sha1 drifted from fetch script"
+                branch.contains(info.sha1),
+                "{v}: sha1 drifted from its fetch-script branch"
             );
             assert!(
-                script.contains(info.url),
-                "{v}: url drifted from fetch script"
+                branch.contains(info.url),
+                "{v}: url drifted from its fetch-script branch"
             );
         }
         assert_eq!(
@@ -672,7 +683,7 @@ mod tests {
         );
         assert_eq!(
             model_info(parse_variant("medium").unwrap()).size_bytes,
-            1_530_000_000
+            1_534_000_000
         );
     }
 }
