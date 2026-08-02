@@ -119,7 +119,12 @@ struct SettingsView: View {
             // Neutral framing: this state is also reached by a corrupt model at
             // boot, where nothing was ever downloaded (plan Decisions,
             // 2026-08-01 — Task 15 copy nuance).
+            //
+            // Wrap rather than truncate: the daemon's message is the only
+            // explanation the user gets in Phase 1, and the 120pt label column
+            // leaves roughly 45 characters on one line.
             Text(transcription.error ?? "Transcription is off")
+                .fixedSize(horizontal: false, vertical: true)
         case .downloading, .verifying, .loading:
             ProgressView().controlSize(.small)
             Text(transcription.state.rawValue.capitalized)

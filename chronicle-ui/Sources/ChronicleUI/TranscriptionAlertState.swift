@@ -32,8 +32,14 @@ final class TranscriptionAlertState {
         // nil = a daemon too old to send the block at all. Nothing is known to
         // be wrong, so it neither latches the banner nor dismisses it; Settings
         // carries the "Requires daemon update" wording instead.
+        //
+        // The `let state` on the first-snapshot arm is load-bearing: without it
+        // a nil block CONSUMES the latch (hasEvaluated flips, missing stays
+        // false), and a `.missing` arriving after a mid-session daemon upgrade
+        // could never raise the banner again. Reachable via popover reopen,
+        // where `.task` re-runs with `lastStatus` already populated.
         let state = status.data.transcription?.state
-        if !hasEvaluated {
+        if !hasEvaluated, let state {
             hasEvaluated = true
             missingOnFirstSnapshot = state == .missing
         } else if missingOnFirstSnapshot, let state, Self.isResolved(state) {

@@ -81,6 +81,17 @@ struct TranscriptionAlertStateTests {
         #expect(!alert.shouldShow)
     }
 
+    // A daemon upgraded mid-session starts sending the block. The nil snapshot
+    // must NOT have consumed the first-snapshot latch, or the banner could
+    // never appear afterwards. Reachable by reopening the popover, where
+    // `.task` re-runs with `lastStatus` already populated.
+    @Test func latchSurvivesASnapshotWithNoBlock() {
+        let alert = TranscriptionAlertState()
+        alert.evaluate(status: statusWithoutBlock())
+        alert.evaluate(status: status(.missing))
+        #expect(alert.shouldShow)
+    }
+
     // A still-unresolved state must NOT auto-dismiss — the banner has to
     // survive until transcription actually works.
     @Test func staysVisibleWhileStillUnresolved() {
