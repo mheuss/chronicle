@@ -20,6 +20,7 @@ struct SettingsView: View {
     private var generalTab: some View {
         VStack(alignment: .leading, spacing: 16) {
             row("Status") { statusBadge }
+            row("Transcription") { transcriptionBadge }
             row("Disk usage") { Text(diskUsageText) }
             row("Retention") { Text(retentionText) }
             row("Oldest record") { Text(oldestText) }
@@ -78,6 +79,50 @@ struct SettingsView: View {
                 Image(systemName: "record.circle.fill").foregroundStyle(.green)
                 Text("Active")
             }
+        }
+    }
+
+    /// Transcription state, straight from the daemon's status block. Phase 1
+    /// only reports; the variant picker and download button arrive in Phase 2.
+    private var transcriptionBadge: some View {
+        HStack(spacing: 6) {
+            if let transcription = connection.lastStatus?.data.transcription {
+                transcriptionBadgeBody(transcription)
+            } else {
+                // No block at all = a daemon older than this UI. Say so plainly
+                // rather than implying transcription is broken.
+                Text("Requires daemon update").foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// [A11y] Every branch pairs its icon and colour with words that carry the
+    /// state on their own (docs/standards/accessibility.md "Text and Color").
+    ///
+    /// Exhaustive, with no `default:` arm — a state added to
+    /// `TranscriptionState` later must fail to compile here and get classified
+    /// deliberately instead of inheriting whichever branch happened to catch it.
+    @ViewBuilder
+    private func transcriptionBadgeBody(_ transcription: TranscriptionStats) -> some View {
+        switch transcription.state {
+        case .ready, .unknown:
+            // `.unknown` rides with `.ready` by decision (plan Decisions,
+            // 2026-08-02) — a state this UI doesn't recognize is not surfaced
+            // as a problem.
+            Image(systemName: "waveform").foregroundStyle(.green)
+            Text(transcription.loadedVariant.map { "Active (\($0))" } ?? "Active")
+        case .missing:
+            Image(systemName: "waveform.slash").foregroundStyle(.secondary)
+            Text("Off — model not downloaded")
+        case .error:
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+            // Neutral framing: this state is also reached by a corrupt model at
+            // boot, where nothing was ever downloaded (plan Decisions,
+            // 2026-08-01 — Task 15 copy nuance).
+            Text(transcription.error ?? "Transcription is off")
+        case .downloading, .verifying, .loading:
+            ProgressView().controlSize(.small)
+            Text(transcription.state.rawValue.capitalized)
         }
     }
 
