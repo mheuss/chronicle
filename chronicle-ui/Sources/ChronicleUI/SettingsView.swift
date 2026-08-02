@@ -85,7 +85,11 @@ struct SettingsView: View {
     /// Transcription state, straight from the daemon's status block. Phase 1
     /// only reports; the variant picker and download button arrive in Phase 2.
     private var transcriptionBadge: some View {
-        HStack(spacing: 6) {
+        // .firstTextBaseline, unlike the other badges: the error branch is the
+        // only badge whose text can wrap, and under default centre alignment
+        // the icon floats to the middle of the paragraph while the row's
+        // "Transcription" label stays on line 1.
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
             if let transcription = connection.lastStatus?.data.transcription {
                 transcriptionBadgeBody(transcription)
             } else {
@@ -120,10 +124,16 @@ struct SettingsView: View {
             // boot, where nothing was ever downloaded (plan Decisions,
             // 2026-08-01 — Task 15 copy nuance).
             //
-            // Wrap rather than truncate: the daemon's message is the only
-            // explanation the user gets in Phase 1, and the 120pt label column
-            // leaves roughly 45 characters on one line.
+            // This is the only unbounded daemon string in Settings, and the
+            // Settings scene sizes to content ideal width — without the cap, a
+            // long model-load error opens the window far wider than the 480pt
+            // minimum (measured: ~1107pt ideal). The cap forces the wrap; the
+            // fixedSize then keeps the wrapped lines from being compressed
+            // away if this row ever lands in a height-constrained container.
+            // Text already wraps by default — neither modifier is undoing a
+            // truncation, so don't "restore" a lineLimit here.
             Text(transcription.error ?? "Transcription is off")
+                .frame(maxWidth: 300, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
         case .downloading, .verifying, .loading:
             ProgressView().controlSize(.small)

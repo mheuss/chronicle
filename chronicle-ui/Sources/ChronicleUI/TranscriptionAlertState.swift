@@ -3,13 +3,18 @@ import Observation
 
 /// Tracks the "we booted with no transcription model" condition that drives the
 /// transcription banner in the search popover. Mirrors `StartupAlertState`: a
-/// one-shot startup notification that appears only when the daemon's FIRST
-/// status snapshot reports `.missing`, and auto-dismisses once a later snapshot
-/// shows transcription is no longer in a state worth warning about.
+/// one-shot startup notification that appears only when the first status
+/// snapshot *carrying a transcription block* reports `.missing`, and
+/// auto-dismisses once a later snapshot shows transcription is no longer in a
+/// state worth warning about.
+///
+/// "First snapshot carrying a block" rather than "first snapshot": a daemon
+/// older than this UI sends none, and those snapshots must not consume the
+/// latch — see `evaluate(status:)`.
 ///
 /// `evaluate(status:)` is the single entry point. It's safe to call on every
-/// status push; the latch inside ignores everything after the first snapshot
-/// except resolve edges.
+/// status push; once latched, everything after it is ignored except resolve
+/// edges.
 ///
 /// Phase 1 has no call to action — the banner just tells the truth. The
 /// download button arrives with Phase 2 (Task 15).
@@ -19,9 +24,11 @@ final class TranscriptionAlertState {
     /// below). Once true, the banner stays hidden for the rest of the session.
     var dismissed: Bool = false
 
-    /// True iff the FIRST observed status snapshot reported `.missing`.
-    /// Latched on the very first call to `evaluate(status:)` and never
-    /// re-evaluated — a model deleted mid-session does not flip this back on.
+    /// True iff the first status snapshot that carried a transcription block
+    /// reported `.missing`. Latched on the first call to `evaluate(status:)`
+    /// whose status has a block — calls before that (an older daemon) leave it
+    /// unlatched — and never re-evaluated afterwards, so a model deleted
+    /// mid-session does not flip this back on.
     private(set) var missingOnFirstSnapshot: Bool = false
 
     private var hasEvaluated: Bool = false
