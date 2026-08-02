@@ -288,6 +288,10 @@ struct CodableTests {
         #expect(t.variant == "small")
         #expect(t.loadedVariant == "base")
         #expect(t.downloadBytes == 1024)
+        // Asserted explicitly: the property is UInt64?, so a snake_case
+        // mapping drift would degrade to nil and this test would still pass
+        // without it. The literal mirrors the fixture above, not the manifest.
+        #expect(t.downloadTotalBytes == 466_000_000)
         #expect(t.models.count == 3)
         #expect(t.models[0].downloaded == true)
     }
@@ -355,5 +359,29 @@ struct CodableTests {
         let t = try #require(resp.data.transcription)
         #expect(t.state == .unknown)
         #expect(resp.data.version == "0.1.0", "rest of the payload intact")
+    }
+
+    @Test("Failed switch keeps the previously loaded variant")
+    func failedSwitchRetainsLoadedVariant() throws {
+        // The error + non-nil loaded_variant branch design §4.2 keys its copy
+        // on ("Switch to {variant} failed — still using {loaded_variant}").
+        // `variant` is the attempted one; `loaded_variant` is what still runs.
+        let json = """
+        {"type":"status","ok":true,"data":{"uptime_secs":5,"version":"0.1.0",
+         "transcription":{"state":"error","variant":"small",
+         "loaded_variant":"base","error":"download failed: connection reset",
+         "download_bytes":null,"download_total_bytes":null,
+         "models":[{"variant":"base","downloaded":true,"size_bytes":148000000}]}}}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(StatusResponse.self, from: Data(json.utf8))
+        let t = try #require(resp.data.transcription)
+        #expect(t.state == .error)
+        #expect(t.variant == "small", "attempted variant")
+        #expect(t.loadedVariant == "base", "still-running variant")
+        #expect(t.error == "download failed: connection reset")
+        #expect(t.downloadBytes == nil)
+        #expect(t.downloadTotalBytes == nil)
     }
 }
