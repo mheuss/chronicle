@@ -388,4 +388,63 @@ struct CodableTests {
         #expect(t.downloadBytes == nil)
         #expect(t.downloadTotalBytes == nil)
     }
+
+    // MARK: - Forward compatibility on closed wire enums
+    //
+    // A closed String enum on a wire field throws on an unknown value, and the
+    // throw takes the WHOLE response decode with it — not just that field.
+    // TranscriptionState already degrades to .unknown for this reason. These
+    // two cover the enums that still had the bug.
+    //
+    // The fix must ship BEFORE the daemon emits the new value: it only
+    // protects UIs built after it. Fixing it alongside the daemon change
+    // protects nothing, because the UI that breaks is the one already
+    // installed. Formal negotiation is HEU-456; this is just the decoder
+    // being careful.
+
+    @Test("Unknown search hit source degrades, not throws")
+    func unknownSearchHitSourceDegrades() throws {
+        // Rust reserves SearchHitSource::Audio for HEU-470. `source` is
+        // non-optional, so a closed enum here takes the entire SearchResponse
+        // down and search goes dark — every hit lost, not just the audio one.
+        let json = """
+        {"type":"search","ok":true,"hits":[
+          {"id":1,"source":"screen","timestamp_ms":1700000000000,
+           "app_name":"Terminal","app_bundle_id":"com.apple.Terminal",
+           "window_title":"zsh","image_path":"/x.heif",
+           "snippet":"hello <b>world</b>","rank":-1.5},
+          {"id":2,"source":"audio","timestamp_ms":1700000000001,
+           "app_name":null,"app_bundle_id":null,
+           "window_title":null,"image_path":"","snippet":"spoken <b>words</b>",
+           "rank":-1.2}
+        ]}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(SearchResponse.self, from: Data(json.utf8))
+        #expect(resp.hits.count == 2, "the known hit survives the unknown one")
+        #expect(resp.hits[0].source == .screen)
+        #expect(resp.hits[1].source == .unknown)
+        #expect(resp.hits[1].snippet == "spoken <b>words</b>",
+                "rest of the unknown-source hit still decodes")
+    }
+
+    @Test("Unknown mic state degrades, not throws")
+    func unknownMicStateDegrades() throws {
+        // StatusData.audio is optional, but that does NOT save you: a present
+        // key whose value fails to decode throws rather than degrading to nil.
+        // Verified — an unknown mic_state killed the whole StatusData decode
+        // with DecodingError.dataCorrupted at path audio.micState.
+        let json = """
+        {"type":"status","ok":true,"data":{"uptime_secs":5,"version":"0.1.0",
+         "audio":{"segments_persisted":5,"mic_state":"muted"}}}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(StatusResponse.self, from: Data(json.utf8))
+        let audio = try #require(resp.data.audio, "status survives, audio intact")
+        #expect(audio.micState == .unknown)
+        #expect(audio.segmentsPersisted == 5, "sibling field still decodes")
+        #expect(resp.data.version == "0.1.0", "rest of the payload intact")
+    }
 }

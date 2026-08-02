@@ -430,6 +430,17 @@ enum MicState: String, Codable, Sendable {
     case off, on
     case permissionDenied = "permission_denied"
     case error
+    /// A mic state this UI doesn't know yet (newer daemon). `AudioStats` is
+    /// reached through an optional, but that is no protection — a present key
+    /// whose value fails to decode throws instead of degrading to nil, and the
+    /// throw kills the whole StatusResponse. Same reasoning as
+    /// `TranscriptionState.unknown`; formal policy is HEU-456.
+    case unknown
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = MicState(rawValue: raw) ?? .unknown
+    }
 }
 
 struct SetMicEnabledRequest: Codable, Sendable {
@@ -549,6 +560,18 @@ struct SearchHit: Codable, Sendable, Identifiable, Hashable {
 
 enum SearchHitSource: String, Codable, Sendable {
     case screen
+    /// A hit source this UI doesn't know yet. Rust reserves
+    /// `SearchHitSource::Audio` for HEU-470, and `SearchHit.source` is not
+    /// optional — a closed enum here would throw and take the entire
+    /// SearchResponse down, so one audio hit would blank out every screen hit
+    /// beside it and search would go dark. Degrade instead. Formal policy is
+    /// HEU-456; this only guards decoding.
+    case unknown
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = SearchHitSource(rawValue: raw) ?? .unknown
+    }
 }
 
 struct SearchResponse: Codable, Sendable {
