@@ -271,6 +271,9 @@ struct CodableTests {
 
     @Test("StatusData decodes the transcription block")
     func statusDataDecodesTranscriptionBlock() throws {
+        // The sizes below are deliberately arbitrary wire values, NOT manifest
+        // constants — small is really 488M. Leave them at 466; they exist to
+        // exercise the decoder, and "correcting" them buys nothing.
         let json = """
         {"type":"status","ok":true,"data":{"uptime_secs":5,"version":"0.1.0",
          "transcription":{"state":"downloading","variant":"small",
@@ -290,7 +293,8 @@ struct CodableTests {
         #expect(t.downloadBytes == 1024)
         // Asserted explicitly: the property is UInt64?, so a snake_case
         // mapping drift would degrade to nil and this test would still pass
-        // without it. The literal mirrors the fixture above, not the manifest.
+        // without it. Mirrors the fixture above — see the note there before
+        // changing either number.
         #expect(t.downloadTotalBytes == 466_000_000)
         #expect(t.models.count == 3)
         #expect(t.models[0].downloaded == true)
@@ -363,8 +367,8 @@ struct CodableTests {
 
     @Test("Failed switch keeps the previously loaded variant")
     func failedSwitchRetainsLoadedVariant() throws {
-        // The error + non-nil loaded_variant branch design §4.2 keys its copy
-        // on ("Switch to {variant} failed — still using {loaded_variant}").
+        // Design §4.2 keys the error banner copy on this branch:
+        // "Switch to {variant} failed — still using {loaded_variant}".
         // `variant` is the attempted one; `loaded_variant` is what still runs.
         let json = """
         {"type":"status","ok":true,"data":{"uptime_secs":5,"version":"0.1.0",
