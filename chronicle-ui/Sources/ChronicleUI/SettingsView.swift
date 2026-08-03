@@ -125,13 +125,17 @@ struct SettingsView: View {
             // 2026-08-01 — Task 15 copy nuance).
             //
             // This is the only unbounded daemon string in Settings, and the
-            // Settings scene sizes to content ideal width — without the cap, a
-            // long model-load error opens the window far wider than the 480pt
-            // minimum (measured: ~1107pt ideal). The cap forces the wrap; the
-            // fixedSize then keeps the wrapped lines from being compressed
-            // away if this row ever lands in a height-constrained container.
-            // Text already wraps by default — neither modifier is undoing a
-            // truncation, so don't "restore" a lineLimit here.
+            // Settings scene sizes to content ideal width. Uncapped, this row's
+            // ideal width just tracks the error length with no ceiling —
+            // measured 579pt at 70 characters, 1439pt at 210. Those are row
+            // widths; the window adds scene padding and tab chrome on top, so
+            // it opens far past the 480pt minimum at ChronicleApp.swift:23.
+            // The 300pt cap pins the row at 458pt flat no matter how long the
+            // error is, which puts the window at ~500pt — essentially on its
+            // floor. The fixedSize then keeps the wrapped lines from being
+            // compressed away if this row ever lands in a height-constrained
+            // container. Text already wraps by default — neither modifier is
+            // undoing a truncation, so don't "restore" a lineLimit here.
             Text(transcription.error ?? "Transcription is off")
                 .frame(maxWidth: 300, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
