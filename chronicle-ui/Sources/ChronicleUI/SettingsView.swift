@@ -109,12 +109,21 @@ struct SettingsView: View {
     @ViewBuilder
     private func transcriptionBadgeBody(_ transcription: TranscriptionStats) -> some View {
         switch transcription.state {
-        case .ready, .unknown:
-            // `.unknown` rides with `.ready` by decision (plan Decisions,
-            // 2026-08-02) — a state this UI doesn't recognize is not surfaced
-            // as a problem.
+        case .ready:
             Image(systemName: "waveform").foregroundStyle(.green)
             Text(transcription.loadedVariant.map { "Active (\($0))" } ?? "Active")
+        case .unknown:
+            // A state this UI can't classify, i.e. a daemon NEWER than the UI.
+            // The banner still stays quiet for it (plan Decisions, 2026-08-02
+            // — don't nag during version skew), but the row must not answer
+            // "is transcription serving?" with a green "Active" it cannot
+            // back: `.unknown` can arrive with `loadedVariant` nil, and the
+            // row would then claim Active while nothing is running.
+            //
+            // Same words as the no-block branch above, deliberately. Both are
+            // version skew — that one is a daemon too old to send the block,
+            // this one a daemon too new to be understood — so they read alike.
+            Text("Requires daemon update").foregroundStyle(.secondary)
         case .missing:
             Image(systemName: "waveform.slash").foregroundStyle(.secondary)
             Text("Off — model not downloaded")
