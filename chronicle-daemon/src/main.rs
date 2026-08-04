@@ -187,9 +187,15 @@ async fn main() -> Result<()> {
     if model_present {
         transcription_status.set_loading(whisper_variant);
     } else {
+        // Purely descriptive: name the variant so the log says which model is
+        // missing, and promise nothing. Phase 1 has no in-app remediation —
+        // the banner is deliberately CTA-less and the download button lands in
+        // Phase 2 — so "enable it from the menu bar app" would be false today.
+        // The fetch script stays out of user-facing strings (HEU-485).
         log::warn!(
-            "whisper model missing — transcription is off until you enable it \
-             from the Chronicle menu bar app"
+            "whisper model \"{}\" is not downloaded — transcription is off; \
+             the rest of Chronicle runs normally",
+            whisper_variant.as_str()
         );
     }
     let capture_ready = Arc::new(AtomicBool::new(false));
