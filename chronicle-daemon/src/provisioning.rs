@@ -164,12 +164,24 @@ pub fn models_report(base_dir: &Path) -> Vec<ModelEntry> {
                     size_bytes: meta.len(),
                 },
                 res => {
-                    // EACCES/EIO on an existing file must not read like
-                    // "absent" with nothing in the log.
-                    if let Err(e) = res
-                        && e.kind() != std::io::ErrorKind::NotFound
-                    {
-                        log::debug!("models_report: stat {} failed: {e}", path.display());
+                    // A path we can't use must not read like "absent" with
+                    // nothing in the log. Two ways that happens: EACCES/EIO on
+                    // an existing file, and a path that exists but isn't a
+                    // regular file — a directory named ggml-<variant>.bin
+                    // returns Ok(meta) with is_file() false, so it would slip
+                    // past an Err-only check.
+                    //
+                    // debug!, not warn!: this runs on every Status request, so
+                    // a persistent bad path would repeat at the UI's poll rate.
+                    match res {
+                        Ok(_) => log::debug!(
+                            "models_report: {} exists but is not a regular file",
+                            path.display()
+                        ),
+                        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                            log::debug!("models_report: stat {} failed: {e}", path.display())
+                        }
+                        Err(_) => {}
                     }
                     ModelEntry {
                         variant: (*name).to_string(),
