@@ -11,6 +11,7 @@ use chronicle_ipc::{
 use tokio::sync::mpsc;
 
 use crate::pipeline::counters::PipelineCounters;
+use crate::provisioning::TranscriptionStatusCell;
 
 /// Sample rate for the INFO search-latency log: 1 in N successful searches.
 /// DEBUG carries every search but is off by default; this sampled INFO line
@@ -111,6 +112,9 @@ pub struct DaemonHandler {
     /// Gate that opens once the main loop starts draining `capture_tx`.
     capture_ready: Arc<AtomicBool>,
     capture_reply_timeout: Duration,
+    /// Transcription status cell (HEU-475): boot/provisioner write it, the
+    /// `Status` arm reads it.
+    transcription_status: Arc<TranscriptionStatusCell>,
 }
 
 impl DaemonHandler {
@@ -176,6 +180,7 @@ impl DaemonHandler {
         capture_tx: mpsc::Sender<CaptureCommand>,
         capture_paused: Arc<AtomicBool>,
         capture_ready: Arc<AtomicBool>,
+        transcription_status: Arc<TranscriptionStatusCell>,
     ) -> Self {
         Self {
             started_at: Instant::now(),
@@ -191,6 +196,7 @@ impl DaemonHandler {
             capture_paused,
             capture_ready,
             capture_reply_timeout: Duration::from_secs(20),
+            transcription_status,
         }
     }
 }
@@ -248,6 +254,7 @@ impl RequestHandler for DaemonHandler {
                             oldest_entry_ms: storage.oldest_entry_ms,
                             retention_days: storage.retention_days,
                         },
+                        transcription: self.transcription_status.stats(self.storage.base_dir()),
                     },
                 }
             }
@@ -580,6 +587,38 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn status_includes_transcription_block() {
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, cell, _dir) =
+            handler_with_full_channels(8, true).await;
+        // Cell starts Missing unconditionally; the fresh temp base_dir means
+        // no variant reports downloaded.
+        match handler.handle(Request::Status) {
+            Response::Status { data, .. } => {
+                assert_eq!(
+                    data.transcription.state,
+                    chronicle_ipc::TranscriptionState::Missing
+                );
+                assert_eq!(data.transcription.variant, "base");
+                assert_eq!(data.transcription.models.len(), 3);
+            }
+            other => panic!("expected Status response, got: {other:?}"),
+        }
+        // The handler must read the SHARED cell, not a private copy — a
+        // regression to an inline cell would pin Status on Missing forever.
+        cell.set_ready(chronicle_transcription::parse_variant("base").unwrap());
+        match handler.handle(Request::Status) {
+            Response::Status { data, .. } => {
+                assert_eq!(
+                    data.transcription.state,
+                    chronicle_ipc::TranscriptionState::Ready
+                );
+                assert_eq!(data.transcription.loaded_variant.as_deref(), Some("base"));
+            }
+            other => panic!("expected Status response, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn integration_status_round_trip_through_server() {
         use chronicle_ipc::{CancellationToken, IpcServer};
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -612,6 +651,7 @@ mod tests {
         assert!(value["data"]["ocr"].is_object());
         assert!(value["data"]["audio"].is_object());
         assert!(value["data"]["storage"].is_object());
+        assert!(value["data"]["transcription"].is_object());
 
         cancel.cancel();
     }
@@ -634,8 +674,16 @@ mod tests {
         Arc<std::sync::atomic::AtomicU8>,
         tempfile::TempDir,
     ) {
-        let (handler, mic_rx, mic_state, _capture_rx, _capture_paused, _storage_status, dir) =
-            handler_with_full_channels(capacity, ready).await;
+        let (
+            handler,
+            mic_rx,
+            mic_state,
+            _capture_rx,
+            _capture_paused,
+            _storage_status,
+            _transcription_status,
+            dir,
+        ) = handler_with_full_channels(capacity, ready).await;
         (handler, mic_rx, mic_state, dir)
     }
 
@@ -785,6 +833,7 @@ mod tests {
         tokio::sync::mpsc::Receiver<CaptureCommand>,
         Arc<AtomicBool>,
         Arc<ArcSwap<StorageStatusSnapshot>>,
+        Arc<TranscriptionStatusCell>,
         tempfile::TempDir,
     ) {
         handler_with_full_channels_and_capture_ready(capacity, mic_ready, true).await
@@ -792,7 +841,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn search_empty_query_returns_empty_hits_not_error() {
-        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _dir) =
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
             handler_with_full_channels(8, true).await;
         let resp = handler.handle(Request::Search {
             query: "   ".into(),
@@ -810,7 +859,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn search_with_no_data_returns_empty_hits() {
-        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _dir) =
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
             handler_with_full_channels(8, true).await;
         let resp = handler.handle(Request::Search {
             query: "nothing".into(),
@@ -828,7 +877,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn search_limit_is_clamped_to_max() {
-        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _dir) =
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
             handler_with_full_channels(8, true).await;
         let resp = handler.handle(Request::Search {
             query: "any".into(),
@@ -840,7 +889,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn get_screenshot_unknown_id_returns_hit_none() {
-        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _dir) =
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
             handler_with_full_channels(8, true).await;
         let resp = handler.handle(Request::GetScreenshot { id: 999_999 });
         match resp {
@@ -854,7 +903,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn get_screenshot_existing_id_returns_full_hit() {
-        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _dir) =
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
             handler_with_full_channels(8, true).await;
         let storage = handler.storage_for_test();
 
@@ -901,6 +950,7 @@ mod tests {
         tokio::sync::mpsc::Receiver<CaptureCommand>,
         Arc<AtomicBool>,
         Arc<ArcSwap<StorageStatusSnapshot>>,
+        Arc<TranscriptionStatusCell>,
         tempfile::TempDir,
     ) {
         let counters = crate::pipeline::counters::PipelineCounters::new();
@@ -921,6 +971,8 @@ mod tests {
         let (capture_tx, capture_rx) = tokio::sync::mpsc::channel(capacity);
         let capture_paused = Arc::new(AtomicBool::new(false));
         let capture_ready_atom = Arc::new(AtomicBool::new(capture_ready));
+        let transcription_status =
+            TranscriptionStatusCell::new(chronicle_transcription::DEFAULT_VARIANT);
         let handler = DaemonHandler::new(
             counters,
             cap_snapshot,
@@ -932,6 +984,7 @@ mod tests {
             capture_tx,
             Arc::clone(&capture_paused),
             capture_ready_atom,
+            Arc::clone(&transcription_status),
         );
         (
             handler,
@@ -940,6 +993,7 @@ mod tests {
             capture_rx,
             capture_paused,
             storage_status,
+            transcription_status,
             dir,
         )
     }
@@ -947,7 +1001,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn pause_capture_not_ready_returns_error_immediately() {
         // capture_ready = false: main loop hasn't started draining yet.
-        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _dir) =
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
             handler_with_full_channels_and_capture_ready(8, true, false).await;
         let resp = handler.handle(Request::PauseCapture);
         match resp {
@@ -961,7 +1015,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn pause_capture_round_trip_through_channel() {
-        let (mut handler, _mic_rx, _mic_atom, mut capture_rx, _capture_paused, _ss, _dir) =
+        let (mut handler, _mic_rx, _mic_atom, mut capture_rx, _capture_paused, _ss, _tcell, _dir) =
             handler_with_full_channels(8, true).await;
         handler.capture_reply_timeout = std::time::Duration::from_millis(500);
 
@@ -983,7 +1037,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn resume_capture_round_trip_through_channel() {
-        let (mut handler, _mic_rx, _mic_atom, mut capture_rx, _cap_paused, _ss, _dir) =
+        let (mut handler, _mic_rx, _mic_atom, mut capture_rx, _cap_paused, _ss, _tcell, _dir) =
             handler_with_full_channels(8, true).await;
         handler.capture_reply_timeout = std::time::Duration::from_millis(500);
 
@@ -1009,7 +1063,7 @@ mod tests {
         // The spawned task receives the CaptureCommand but never replies, forcing
         // recv_timeout into the Err branch. The handler should return ok:false
         // with the current capture_paused value.
-        let (mut handler, _mic_rx, _mic_atom, mut capture_rx, capture_paused, _ss, _dir) =
+        let (mut handler, _mic_rx, _mic_atom, mut capture_rx, capture_paused, _ss, _tcell, _dir) =
             handler_with_full_channels(8, true).await;
         handler.capture_reply_timeout = std::time::Duration::from_millis(50);
 
@@ -1037,7 +1091,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn status_includes_paused_field_and_storage_snapshot_fields() {
-        let (handler, _mic_rx, _atom, _capture_rx, capture_paused, storage_status, _dir) =
+        let (handler, _mic_rx, _atom, _capture_rx, capture_paused, storage_status, _tcell, _dir) =
             handler_with_full_channels(8, true).await;
 
         storage_status.store(Arc::new(StorageStatusSnapshot {

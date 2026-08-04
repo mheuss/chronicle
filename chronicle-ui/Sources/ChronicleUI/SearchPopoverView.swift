@@ -4,6 +4,7 @@ import SwiftUI
 struct SearchPopoverView: View {
     @Environment(DaemonConnection.self) private var connection
     @Environment(StartupAlertState.self) private var startupAlert
+    @Environment(TranscriptionAlertState.self) private var transcriptionAlert
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
 
@@ -45,6 +46,11 @@ struct SearchPopoverView: View {
                     onResume: resumeCapture,
                     onDismiss: { startupAlert.dismissed = true }
                 )
+                Divider()
+            }
+
+            if transcriptionAlert.shouldShow {
+                TranscriptionBanner(onDismiss: { transcriptionAlert.dismissed = true })
                 Divider()
             }
 
@@ -93,6 +99,15 @@ struct SearchPopoverView: View {
         .task(id: connection.lastStatus?.data.capture?.paused) {
             if let status = connection.lastStatus {
                 startupAlert.evaluate(status: status)
+            }
+        }
+        // Separate from the paused task rather than sharing one id: `task(id:)`
+        // takes a single Equatable, and Swift tuples aren't Equatable. Keying
+        // each alert on its own signal is also the correct behaviour — a
+        // transcription change must be observed even when `paused` never moves.
+        .task(id: connection.lastStatus?.data.transcription?.state) {
+            if let status = connection.lastStatus {
+                transcriptionAlert.evaluate(status: status)
             }
         }
     }
@@ -229,5 +244,31 @@ private struct PausedBanner: View {
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(Color.orange.opacity(0.12))
+    }
+}
+
+/// Phase 1 has no call to action — there is no download path yet, so offering
+/// a button would be a dead end. Task 15 adds the CTA and progress.
+private struct TranscriptionBanner: View {
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            // [A11y] The sentence carries the state on its own; the icon and
+            // the tinted background only reinforce it.
+            Label(
+                "Audio transcription is off — no model downloaded.",
+                systemImage: "waveform.slash"
+            )
+            .font(.callout)
+            Spacer()
+            Button(action: onDismiss) {
+                Image(systemName: "xmark").foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss transcription notice")
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(Color.secondary.opacity(0.12))
     }
 }

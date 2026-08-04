@@ -125,6 +125,13 @@ pub enum Response {
         ok: bool,
         paused: bool,
     },
+    /// Result of `SetWhisperModel`. `ok: false` = unknown variant, an
+    /// operation already in flight, or the daemon isn't ready. `status` is
+    /// the transcription state after the accept/reject decision.
+    SetWhisperModel {
+        ok: bool,
+        status: TranscriptionStats,
+    },
     Error {
         ok: bool,
         code: ErrorCode,
@@ -141,6 +148,7 @@ pub struct StatusData {
     pub ocr: OcrStats,
     pub audio: AudioStats,
     pub storage: StorageStats,
+    pub transcription: TranscriptionStats,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +187,60 @@ pub struct AudioStats {
     pub transcription_dropped: u64,
     /// Current microphone capture state.
     pub mic_state: MicState,
+}
+
+/// Provisioning lifecycle for the whisper model (HEU-475, design §2.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptionState {
+    /// No model file for the configured variant; transcription idle.
+    #[default]
+    Missing,
+    Downloading,
+    /// Checksum verification of a finished download (design §2.1) — a
+    /// distinct UI-visible step, not part of `Downloading`.
+    Verifying,
+    /// ggml load into whisper — heavy blocking work, seconds for `medium`.
+    Loading,
+    Ready,
+    Error,
+}
+
+/// One allow-listed variant's on-disk situation. `size_bytes` is the actual
+/// file size when `downloaded`, the manifest's advertised size otherwise —
+/// the UI never hardcodes model sizes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelEntry {
+    pub variant: String,
+    pub downloaded: bool,
+    pub size_bytes: u64,
+}
+
+/// Transcription block of `StatusData`. `variant` is the variant the
+/// daemon is acting on; `loaded_variant` is the engine actually serving, if
+/// any — they differ after a failed switch ("small failed, still on base").
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptionStats {
+    pub state: TranscriptionState,
+    /// The variant the daemon is acting on: the settings value at boot, or
+    /// the requested variant during/after a switch attempt. After a failed
+    /// switch this differs from persisted settings until restart (persist
+    /// happens on success only, AD-10).
+    pub variant: String,
+    /// The engine actually serving, if any. In `Error` state the UI
+    /// branches its copy on this (design §2.2): `None` = initial
+    /// provisioning failed, transcription is off; `Some` = a switch
+    /// failed and this engine is still serving.
+    pub loaded_variant: Option<String>,
+    /// Set when and only when `state == Error`.
+    pub error: Option<String>,
+    /// Download progress; set only while `state == Downloading`.
+    pub download_bytes: Option<u64>,
+    /// Total from Content-Length; set only while `state == Downloading`
+    /// AND once actually known — never `Some(0)`. `None` while downloading
+    /// means the total is unknown (indeterminate progress bar).
+    pub download_total_bytes: Option<u64>,
+    pub models: Vec<ModelEntry>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,6 +330,7 @@ mod tests {
                 ocr: OcrStats::default(),
                 audio: AudioStats::default(),
                 storage: StorageStats::default(),
+                transcription: TranscriptionStats::default(),
             },
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -621,6 +684,7 @@ mod tests {
                     mic_state: MicState::Off,
                 },
                 storage: StorageStats::default(),
+                transcription: TranscriptionStats::default(),
             },
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -640,5 +704,123 @@ mod tests {
         let json = serde_json::to_string(&a).unwrap();
         assert!(json.contains("transcription_enqueued"));
         assert!(json.contains("transcription_dropped"));
+    }
+
+    #[test]
+    fn transcription_state_serializes_snake_case() {
+        for (state, wire) in [
+            (TranscriptionState::Missing, "\"missing\""),
+            (TranscriptionState::Downloading, "\"downloading\""),
+            (TranscriptionState::Verifying, "\"verifying\""),
+            (TranscriptionState::Loading, "\"loading\""),
+            (TranscriptionState::Ready, "\"ready\""),
+            (TranscriptionState::Error, "\"error\""),
+        ] {
+            assert_eq!(serde_json::to_string(&state).unwrap(), wire);
+            let back: TranscriptionState = serde_json::from_str(wire).unwrap();
+            assert_eq!(back, state);
+        }
+    }
+
+    #[test]
+    fn transcription_wire_keys_are_pinned() {
+        // The UI decodes these exact keys (Task 5). A Rust field rename
+        // changes serialize and deserialize symmetrically, so the round-trip
+        // test still passes while the wire breaks — pin every key, matching
+        // the audio_stats_serializes_transcription_counters convention.
+        // The fixture is deliberately over-populated (Error + progress
+        // fields together) to force every Option onto the wire; that combo
+        // is NOT a reachable state — see the field invariants on the struct.
+        let stats = TranscriptionStats {
+            state: TranscriptionState::Error,
+            variant: "small".into(),
+            loaded_variant: Some("base".into()),
+            error: Some("boom".into()),
+            download_bytes: Some(1),
+            download_total_bytes: Some(2),
+            models: vec![ModelEntry {
+                variant: "base".into(),
+                downloaded: true,
+                size_bytes: 148_000_000,
+            }],
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        for key in [
+            "\"state\"",
+            "\"loaded_variant\"",
+            "\"error\"",
+            "\"download_bytes\"",
+            "\"download_total_bytes\"",
+            "\"models\"",
+        ] {
+            assert!(json.contains(key), "missing wire key {key} in {json}");
+        }
+        // `variant` appears in both structs — a substring check can't tell
+        // which one got renamed. Index the parsed value to pin each one.
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["variant"], "small");
+        assert_eq!(value["models"][0]["variant"], "base");
+        assert_eq!(value["models"][0]["downloaded"], true);
+        assert_eq!(value["models"][0]["size_bytes"], 148_000_000u64);
+        // Absent Options serialize as explicit null, not omitted — a later
+        // skip_serializing_if would change the wire shape silently.
+        let defaulted = serde_json::to_string(&TranscriptionStats::default()).unwrap();
+        assert!(defaulted.contains("\"loaded_variant\":null"));
+        assert!(defaulted.contains("\"error\":null"));
+        assert!(defaulted.contains("\"download_bytes\":null"));
+        assert!(defaulted.contains("\"download_total_bytes\":null"));
+    }
+
+    #[test]
+    fn transcription_stats_round_trip() {
+        let stats = TranscriptionStats {
+            state: TranscriptionState::Downloading,
+            variant: "small".into(),
+            loaded_variant: Some("base".into()),
+            error: None,
+            download_bytes: Some(1024),
+            download_total_bytes: Some(466_000_000),
+            models: vec![ModelEntry {
+                variant: "base".into(),
+                downloaded: true,
+                size_bytes: 148_000_000,
+            }],
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let parsed: TranscriptionStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, stats);
+    }
+
+    #[test]
+    fn status_data_includes_transcription_block() {
+        let resp = Response::Status {
+            ok: true,
+            data: StatusData {
+                uptime_secs: 1,
+                version: "0.1.0".to_string(),
+                capture: CaptureStats::default(),
+                ocr: OcrStats::default(),
+                audio: AudioStats::default(),
+                storage: StorageStats::default(),
+                transcription: TranscriptionStats::default(),
+            },
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+        assert_eq!(value["data"]["transcription"]["state"], "missing");
+        assert!(value["data"]["transcription"]["models"].is_array());
+    }
+
+    #[test]
+    fn set_whisper_model_response_serializes() {
+        let resp = Response::SetWhisperModel {
+            ok: true,
+            status: TranscriptionStats::default(),
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+        assert_eq!(value["type"], "set_whisper_model");
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["status"]["state"], "missing");
     }
 }

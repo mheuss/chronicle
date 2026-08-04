@@ -268,4 +268,183 @@ struct CodableTests {
         #expect(storage.retentionDays == 14)
         #expect(storage.oldestEntryMs == 1_700_000_000_000)
     }
+
+    @Test("StatusData decodes the transcription block")
+    func statusDataDecodesTranscriptionBlock() throws {
+        // The sizes below are deliberately arbitrary wire values, NOT manifest
+        // constants — small is really 488M. Leave them at 466; they exist to
+        // exercise the decoder, and "correcting" them buys nothing.
+        let json = """
+        {"type":"status","ok":true,"data":{"uptime_secs":5,"version":"0.1.0",
+         "transcription":{"state":"downloading","variant":"small",
+         "loaded_variant":"base","error":null,
+         "download_bytes":1024,"download_total_bytes":466000000,
+         "models":[{"variant":"base","downloaded":true,"size_bytes":148000000},
+                   {"variant":"small","downloaded":false,"size_bytes":466000000},
+                   {"variant":"medium","downloaded":false,"size_bytes":1530000000}]}}}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(StatusResponse.self, from: Data(json.utf8))
+        let t = try #require(resp.data.transcription)
+        #expect(t.state == .downloading)
+        #expect(t.variant == "small")
+        #expect(t.loadedVariant == "base")
+        #expect(t.downloadBytes == 1024)
+        // Asserted explicitly: the property is UInt64?, so a snake_case
+        // mapping drift would degrade to nil and this test would still pass
+        // without it. Mirrors the fixture above — see the note there before
+        // changing either number.
+        #expect(t.downloadTotalBytes == 466_000_000)
+        #expect(t.models.count == 3)
+        #expect(t.models[0].downloaded == true)
+    }
+
+    @Test("StatusData tolerates a daemon without the block")
+    func statusDataToleratesMissingTranscription() throws {
+        let json = """
+        {"type":"status","ok":true,"data":{"uptime_secs":5,"version":"0.1.0"}}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(StatusResponse.self, from: Data(json.utf8))
+        #expect(resp.data.transcription == nil, "old daemon → nil, no crash")
+    }
+
+    @Test("Old UI schema ignores the transcription block")
+    func oldUISchemaIgnoresTranscriptionBlock() throws {
+        // NFR-7, reverse direction: an old UI must ignore a new daemon's extra
+        // fields. Stub mirrors StatusData exactly as it exists BEFORE this task
+        // (no `transcription` property).
+        struct OldStatusData: Codable {
+            let uptimeSecs: UInt64
+            let version: String
+            let capture: CaptureStats?
+            let ocr: OcrStats?
+            let audio: AudioStats?
+            let storage: StorageStats?
+        }
+        struct OldStatusResponse: Codable {
+            let type: String
+            let ok: Bool
+            let data: OldStatusData
+        }
+        let json = """
+        {"type":"status","ok":true,"data":{"uptime_secs":5,"version":"0.1.0",
+         "transcription":{"state":"downloading","variant":"small",
+         "loaded_variant":"base","error":null,
+         "download_bytes":1024,"download_total_bytes":466000000,
+         "models":[{"variant":"base","downloaded":true,"size_bytes":148000000},
+                   {"variant":"small","downloaded":false,"size_bytes":466000000},
+                   {"variant":"medium","downloaded":false,"size_bytes":1530000000}]}}}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(OldStatusResponse.self, from: Data(json.utf8))
+        #expect(resp.data.version == "0.1.0",
+                "new transcription block ignored, not a decode failure")
+    }
+
+    @Test("Unknown transcription state degrades, not throws")
+    func unknownTranscriptionStateDegrades() throws {
+        // A future daemon may add a 7th state. A closed enum would throw and
+        // kill the WHOLE StatusResponse decode (status polling goes dark) —
+        // decode to .unknown instead. Recorded decision from the Task 2
+        // wire-type review; formal cross-version policy is HEU-456.
+        let json = """
+        {"type":"status","ok":true,"data":{"uptime_secs":5,"version":"0.1.0",
+         "transcription":{"state":"defragmenting","variant":"base",
+         "loaded_variant":null,"error":null,
+         "download_bytes":null,"download_total_bytes":null,"models":[]}}}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(StatusResponse.self, from: Data(json.utf8))
+        let t = try #require(resp.data.transcription)
+        #expect(t.state == .unknown)
+        #expect(resp.data.version == "0.1.0", "rest of the payload intact")
+    }
+
+    @Test("Failed switch keeps the previously loaded variant")
+    func failedSwitchRetainsLoadedVariant() throws {
+        // Design §4.2 keys the error banner copy on this branch:
+        // "Switch to {variant} failed — still using {loaded_variant}".
+        // `variant` is the attempted one; `loaded_variant` is what still runs.
+        let json = """
+        {"type":"status","ok":true,"data":{"uptime_secs":5,"version":"0.1.0",
+         "transcription":{"state":"error","variant":"small",
+         "loaded_variant":"base","error":"download failed: connection reset",
+         "download_bytes":null,"download_total_bytes":null,
+         "models":[{"variant":"base","downloaded":true,"size_bytes":148000000}]}}}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(StatusResponse.self, from: Data(json.utf8))
+        let t = try #require(resp.data.transcription)
+        #expect(t.state == .error)
+        #expect(t.variant == "small", "attempted variant")
+        #expect(t.loadedVariant == "base", "still-running variant")
+        #expect(t.error == "download failed: connection reset")
+        #expect(t.downloadBytes == nil)
+        #expect(t.downloadTotalBytes == nil)
+    }
+
+    // MARK: - Forward compatibility on closed wire enums
+    //
+    // A closed String enum on a wire field throws on an unknown value, and the
+    // throw takes the WHOLE response decode with it — not just that field.
+    // TranscriptionState already degrades to .unknown for this reason. These
+    // two cover the enums that still had the bug.
+    //
+    // The fix must ship BEFORE the daemon emits the new value: it only
+    // protects UIs built after it. Fixing it alongside the daemon change
+    // protects nothing, because the UI that breaks is the one already
+    // installed. Formal negotiation is HEU-456; this is just the decoder
+    // being careful.
+
+    @Test("Unknown search hit source degrades, not throws")
+    func unknownSearchHitSourceDegrades() throws {
+        // Rust reserves SearchHitSource::Audio for HEU-470. `source` is
+        // non-optional, so a closed enum here takes the entire SearchResponse
+        // down and search goes dark — every hit lost, not just the audio one.
+        let json = """
+        {"type":"search","ok":true,"hits":[
+          {"id":1,"source":"screen","timestamp_ms":1700000000000,
+           "app_name":"Terminal","app_bundle_id":"com.apple.Terminal",
+           "window_title":"zsh","image_path":"/x.heif",
+           "snippet":"hello <b>world</b>","rank":-1.5},
+          {"id":2,"source":"audio","timestamp_ms":1700000000001,
+           "app_name":null,"app_bundle_id":null,
+           "window_title":null,"image_path":"","snippet":"spoken <b>words</b>",
+           "rank":-1.2}
+        ]}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(SearchResponse.self, from: Data(json.utf8))
+        #expect(resp.hits.count == 2, "the known hit survives the unknown one")
+        #expect(resp.hits[0].source == .screen)
+        #expect(resp.hits[1].source == .unknown)
+        #expect(resp.hits[1].snippet == "spoken <b>words</b>",
+                "rest of the unknown-source hit still decodes")
+    }
+
+    @Test("Unknown mic state degrades, not throws")
+    func unknownMicStateDegrades() throws {
+        // StatusData.audio is optional, but that does NOT save you: a present
+        // key whose value fails to decode throws rather than degrading to nil.
+        // Verified — an unknown mic_state killed the whole StatusData decode
+        // with DecodingError.dataCorrupted at path audio.micState.
+        let json = """
+        {"type":"status","ok":true,"data":{"uptime_secs":5,"version":"0.1.0",
+         "audio":{"segments_persisted":5,"mic_state":"muted"}}}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(StatusResponse.self, from: Data(json.utf8))
+        let audio = try #require(resp.data.audio, "status survives, audio intact")
+        #expect(audio.micState == .unknown)
+        #expect(audio.segmentsPersisted == 5, "sibling field still decodes")
+        #expect(resp.data.version == "0.1.0", "rest of the payload intact")
+    }
 }

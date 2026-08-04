@@ -4,6 +4,7 @@ mod ipc_handler;
 mod permissions;
 mod pipeline;
 mod power;
+mod provisioning;
 mod settings;
 
 use std::sync::Arc;
@@ -174,17 +175,27 @@ async fn main() -> Result<()> {
     // idempotent.
     let (retry_tx, mut retry_rx) = tokio::sync::mpsc::channel::<()>(4);
     let mut start_retry = StartRetry::new();
-    // Whisper model presence check (HEU-421). Logs a startup warning if
-    // the configured variant's ggml file isn't on disk; transcription
-    // stays idle but the rest of the daemon runs normally.
+    // Whisper model status cell (HEU-475). Created — and, when the model is
+    // on disk, put into Loading — BEFORE the IPC server below serves its
+    // first Status, so the UI never sees Missing for a model that exists
+    // (design §2.1: boot, file present → Loading). The engine-load block
+    // finishes the story with ready/error. Missing model → transcription
+    // stays idle, the rest of the daemon runs normally, and the UI shows why.
     let whisper_variant = settings::read_whisper_model(storage.base_dir());
-    if !chronicle_transcription::model_present(storage.base_dir(), whisper_variant) {
-        let path = chronicle_transcription::model_path(storage.base_dir(), whisper_variant);
+    let model_present = chronicle_transcription::model_present(storage.base_dir(), whisper_variant);
+    let transcription_status = crate::provisioning::TranscriptionStatusCell::new(whisper_variant);
+    if model_present {
+        transcription_status.set_loading(whisper_variant);
+    } else {
+        // Purely descriptive: name the variant so the log says which model is
+        // missing, and promise nothing. Phase 1 has no in-app remediation —
+        // the banner is deliberately CTA-less and the download button lands in
+        // Phase 2 — so "enable it from the menu bar app" would be false today.
+        // The fetch script stays out of user-facing strings (HEU-485).
         log::warn!(
-            "whisper model missing at {} — transcription will stay idle. \
-             Run chronicle-daemon/scripts/fetch-whisper-model.sh {} from the repo root to provision.",
-            path.display(),
-            whisper_variant,
+            "whisper model \"{}\" is not downloaded — transcription is off; \
+             the rest of Chronicle runs normally",
+            whisper_variant.as_str()
         );
     }
     let capture_ready = Arc::new(AtomicBool::new(false));
@@ -199,6 +210,7 @@ async fn main() -> Result<()> {
         capture_tx,
         Arc::clone(&capture_paused),
         Arc::clone(&capture_ready),
+        Arc::clone(&transcription_status),
     );
     let ipc_server = IpcServer::start(&socket_path, handler, cancel.clone()).await?;
     log::info!("IPC server started");
@@ -283,9 +295,11 @@ async fn main() -> Result<()> {
     let (transcription_sink, transcribe_handle): (
         Arc<dyn pipeline::sinks::TranscriptionSink>,
         Option<tokio::task::JoinHandle<()>>,
-    ) = if chronicle_transcription::model_present(storage.base_dir(), whisper_variant) {
+    ) = if model_present {
         // Load the ggml model off the runtime — it's heavy blocking work
-        // (seconds for a large variant) and must not stall tokio workers (HEU-480).
+        // (seconds for a large variant) and must not stall tokio workers
+        // (HEU-480). The cell is already in Loading (set at creation, before
+        // the IPC server started).
         let base_dir = storage.base_dir().to_path_buf();
         let load_result = tokio::task::spawn_blocking(move || {
             chronicle_transcription::TranscriptionEngine::load(&base_dir, whisper_variant)
@@ -293,6 +307,7 @@ async fn main() -> Result<()> {
         .await;
         match load_result {
             Ok(Ok(engine)) => {
+                transcription_status.set_ready(whisper_variant);
                 let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(engine);
                 // Bounded channel (64), matching the audio bridge: drop-on-full.
                 let (tx, rx) = tokio::sync::mpsc::channel(64);
@@ -324,17 +339,23 @@ async fn main() -> Result<()> {
                 log::error!(
                     "transcription engine load failed ({whisper_variant}): {e} — staying idle"
                 );
+                // TranscriptionError::Display already carries the
+                // "model load failed:" prefix — don't double it on the wire.
+                transcription_status.set_error(&e.to_string());
                 (Arc::new(pipeline::sinks::NoopTranscriptionSink), None)
             }
             Err(e) => {
                 log::error!(
                     "transcription engine load task failed ({whisper_variant}): {e} — staying idle"
                 );
+                // JoinError::Display forwards arbitrary panic payloads —
+                // keep the wire string fixed; the log line above has {e}.
+                transcription_status.set_error("model load failed");
                 (Arc::new(pipeline::sinks::NoopTranscriptionSink), None)
             }
         }
     } else {
-        // The startup model-presence check (line ~120) already logged the
+        // The startup model-presence check above already logged the
         // "model missing → idle" warning.
         (Arc::new(pipeline::sinks::NoopTranscriptionSink), None)
     };

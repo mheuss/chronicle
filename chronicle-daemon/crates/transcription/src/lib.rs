@@ -56,6 +56,53 @@ impl fmt::Display for ModelVariant {
 /// Default variant used when settings is missing, empty, or invalid.
 pub const DEFAULT_VARIANT: ModelVariant = ModelVariant("base");
 
+/// Pinned download source for one model variant. URLs 302-redirect to the
+/// Hugging Face CDN; SHA1s are upstream's published digests (integrity —
+/// TLS provides authenticity). `size_bytes` is the advertised size, used
+/// for the disk precheck and UI labels before a file exists locally.
+/// Keep in lockstep with scripts/fetch-whisper-model.sh (AD-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelInfo {
+    pub variant: ModelVariant,
+    pub url: &'static str,
+    pub sha1: &'static str,
+    pub size_bytes: u64,
+}
+
+static MANIFEST: [ModelInfo; 3] = [
+    ModelInfo {
+        variant: ModelVariant("base"),
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+        sha1: "465707469ff3a37a2b9b8d8f89f2f99de7299dac",
+        size_bytes: 148_000_000,
+    },
+    ModelInfo {
+        variant: ModelVariant("small"),
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+        sha1: "55356645c2b361a969dfd0ef2c5a50d530afd8d5",
+        // Upstream Content-Length 487,601,967, rounded UP to decimal MB.
+        // Advertised sizes feed the disk precheck, so rounding down would
+        // fail in the unsafe direction (precheck passes, download ENOSPCs).
+        size_bytes: 488_000_000,
+    },
+    ModelInfo {
+        variant: ModelVariant("medium"),
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
+        sha1: "fd9727b6e1217c2f614f9b698455c4ffd82463b4",
+        // Upstream Content-Length 1,533,763,059, rounded UP (see small).
+        size_bytes: 1_534_000_000,
+    },
+];
+
+/// Pinned manifest entry for a variant. Total (`ModelVariant` is
+/// allow-list-only and the manifest covers the allow-list, enforced by test).
+pub fn model_info(variant: ModelVariant) -> &'static ModelInfo {
+    MANIFEST
+        .iter()
+        .find(|m| m.variant == variant)
+        .expect("manifest covers every allow-listed variant")
+}
+
 /// Parse a raw string into one of the supported variants.
 ///
 /// Returns a [`ModelVariant`] only when `s` exactly matches an entry in
@@ -575,6 +622,68 @@ mod tests {
             (7_700..=8_400).contains(&pcm.len()),
             "expected ~8046 samples, got {}",
             pcm.len()
+        );
+    }
+
+    #[test]
+    fn manifest_covers_every_supported_variant() {
+        for v in SUPPORTED_VARIANTS {
+            let variant = parse_variant(v).unwrap();
+            let info = model_info(variant);
+            assert_eq!(info.variant, variant);
+            assert!(info.url.starts_with("https://huggingface.co/"));
+            assert!(
+                info.url.ends_with(&format!("ggml-{v}.bin")),
+                "{v}: url must point at its own variant's file"
+            );
+            assert_eq!(info.sha1.len(), 40, "sha1 must be 40 hex chars");
+            assert!(info.sha1.chars().all(|c| c.is_ascii_hexdigit()));
+            assert!(info.size_bytes > 100_000_000, "all variants exceed 100 MB");
+        }
+    }
+
+    #[test]
+    fn manifest_pins_match_fetch_script_values() {
+        // Real cross-check against the other copy of these pins (AD-2):
+        // drift in either the manifest or the script fails here. Sizes have
+        // no in-repo counterpart, so exact pins catch accidental edits.
+        let script = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../scripts/fetch-whisper-model.sh"),
+        )
+        .expect("fetch script readable");
+        for v in SUPPORTED_VARIANTS {
+            let info = model_info(parse_variant(v).unwrap());
+            // Anchor to the variant's own case branch, not the whole file —
+            // an unanchored contains() passes when two branches swap values.
+            let label = format!("{v})");
+            let start = script
+                .find(&label)
+                .unwrap_or_else(|| panic!("{v}: case branch missing from fetch script"));
+            let end = script[start..]
+                .find(";;")
+                .map_or(script.len(), |e| start + e);
+            let branch = &script[start..end];
+            assert!(
+                branch.contains(info.sha1),
+                "{v}: sha1 drifted from its fetch-script branch"
+            );
+            assert!(
+                branch.contains(info.url),
+                "{v}: url drifted from its fetch-script branch"
+            );
+        }
+        assert_eq!(
+            model_info(parse_variant("base").unwrap()).size_bytes,
+            148_000_000
+        );
+        assert_eq!(
+            model_info(parse_variant("small").unwrap()).size_bytes,
+            488_000_000
+        );
+        assert_eq!(
+            model_info(parse_variant("medium").unwrap()).size_bytes,
+            1_534_000_000
         );
     }
 }

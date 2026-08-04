@@ -283,8 +283,21 @@ struct DaemonConnectionGateTests {
 
         #expect(sawEarly == false,
                 "FIFO broken: request 2 bytes arrived at server before response 1 was sent")
-        #expect(got1.data.uptimeSecs == 1)
-        #expect(got2.data.uptimeSecs == 2)
+
+        // Deliberately order-agnostic. `async let` starts child tasks but does
+        // NOT order them, so which caller reaches the send path first is a
+        // scheduling detail — asserting got1 is response 1 was a race that
+        // failed under host load (green in isolation, red in the full suite).
+        // The property that actually matters is that both replies arrive,
+        // exactly once each, each internally consistent. Pairing uptime with
+        // version also makes this stricter than the old assertion, which never
+        // checked version and so could not have caught field-level cross-talk.
+        let delivered = Set([
+            "\(got1.data.uptimeSecs):\(got1.data.version)",
+            "\(got2.data.uptimeSecs):\(got2.data.version)",
+        ])
+        #expect(delivered == ["1:0.0.1", "2:0.0.2"],
+                "both responses delivered intact, no duplication or cross-talk")
     }
 
     @Test("queued request after disconnect throws notConnected")

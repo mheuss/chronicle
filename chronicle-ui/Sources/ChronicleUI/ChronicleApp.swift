@@ -4,12 +4,14 @@ import SwiftUI
 struct ChronicleApp: App {
     @State private var connection = DaemonConnection()
     @State private var startupAlert = StartupAlertState()
+    @State private var transcriptionAlert = TranscriptionAlertState()
 
     var body: some Scene {
         MenuBarExtra {
             SearchPopoverView()
                 .environment(connection)
                 .environment(startupAlert)
+                .environment(transcriptionAlert)
         } label: {
             MenuBarIcon(connection: connection)
         }
