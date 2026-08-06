@@ -138,6 +138,66 @@ mod tests {
         assert!(index_names(&conn).contains(&"idx_screenshots_image_path".to_string()));
     }
 
+    /// The same upgrade, but on a real file-backed WAL database — the path that
+    /// actually ships to every existing install.
+    ///
+    /// `migration_upgrades_from_v1` runs in memory, where there is no WAL, no
+    /// journal, and no reopen. The on-disk case was verified once by hand against
+    /// a 128 MB production database, but that evidence does not live in the repo
+    /// and would not protect migration 003. This does.
+    #[test]
+    fn migration_upgrades_from_v1_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("chronicle.db");
+
+        // Build a v1 database and close it, so the upgrade runs against a file
+        // this process is opening fresh rather than a connection it already holds.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            setup_connection(&conn).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.pragma_update(None, "user_version", 1u32).unwrap();
+        }
+
+        let conn = Connection::open(&db_path).unwrap();
+        setup_connection(&conn).unwrap();
+        let before: u32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(before, 1, "fixture must start at v1 or this proves nothing");
+
+        migrate(&conn).unwrap();
+
+        let after: u32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(after, MIGRATIONS.len() as u32);
+
+        let indexes = index_names(&conn);
+        assert!(
+            indexes.contains(&"idx_screenshots_image_path".to_string()),
+            "missing screenshots path index after on-disk upgrade, got: {indexes:?}"
+        );
+        assert!(
+            indexes.contains(&"idx_audio_segments_audio_path".to_string()),
+            "missing audio path index after on-disk upgrade, got: {indexes:?}"
+        );
+
+        // The v1 data must still be there — an upgrade that drops user captures
+        // would be catastrophic and is exactly what a file-backed test can catch.
+        let retention: String = conn
+            .query_row(
+                "SELECT value FROM config WHERE key = 'retention_days'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            retention, "30",
+            "migration 002 must not disturb seeded config"
+        );
+    }
+
     #[test]
     fn path_indexes_cover_the_sweep_query() {
         let conn = Connection::open_in_memory().unwrap();
