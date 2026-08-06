@@ -181,14 +181,32 @@ fn sweep_media_orphans(
     //
     // `sweep_walks_before_reading_tracked_set` pins the ordering.
     //
-    // The age guard below is what keeps the remaining window from costing data.
-    // A genuine orphan is left behind by a crash or an interrupted cleanup, so
-    // it is always older than the sweep that finds it. A file being written
-    // right now is not. Refusing to delete anything modified at or after the
-    // sweep started means a capture caught mid-write survives to the next
-    // sweep, which will see a settled file and a committed row. It costs one
-    // extra sweep to reclaim a true orphan created in that same instant —
-    // a trade worth making, since the other direction deletes real captures.
+    // The age guard below NARROWS that window. It does not close it, and
+    // HEU-591 stays open. A genuine orphan is left behind by a crash, so it
+    // predates the sweep that finds it; a capture still being written does not.
+    //
+    // With the guard, deletion requires BOTH: the file's last write predates
+    // `sweep_start`, AND its row has not committed by the SELECT. Since
+    // `sweep_start` is taken before the walk, everything written during the walk
+    // is now safe — on a 20k-file directory the walk dominates the sweep, so
+    // that is most of the old window. What remains at risk is a file written
+    // before the sweep began whose row commits after the SELECT: the writer's
+    // file-then-row gap has to span the entire walk. That gap is normally an
+    // encode plus an insert, but nothing bounds it tightly — `busy_timeout` is
+    // 5000 ms, so a contended insert can block for seconds.
+    //
+    // Two caveats on what the mtime actually measures. Audio is encoded in a
+    // staging directory and `rename`d into place (main.rs:219, media.rs:108),
+    // and rename preserves mtime — so for audio this is the staging-encode time,
+    // milliseconds before the file appeared at the swept path, not the moment it
+    // landed there. And `SystemTime::now()` is wall-clock: a backward step only
+    // spares files, but a forward step (an NTP correction at boot, which is
+    // exactly when this runs) can make an in-flight file look older than it is.
+    // Both only bite under the cross-process case above.
+    //
+    // Reclaiming a true orphan created in that same instant is deferred to the
+    // next sweep — which, with no periodic sweep, means the next daemon start.
+    // Worth it: the other direction deletes real captures.
     let sweep_start = std::time::SystemTime::now();
 
     let files = media_mgr.walk_files(media.subdir);
@@ -265,8 +283,10 @@ mod tests {
     ///
     /// `std::sync::Mutex` is NOT reentrant, so taking it twice on one thread
     /// hangs with no timeout — far worse to diagnose than a failure. Helpers that
-    /// need it therefore take `&HookGuard` rather than locking internally, which
-    /// makes double-taking impossible to write instead of merely discouraged.
+    /// need it therefore take `&HookGuard` rather than locking internally, so a
+    /// helper can no longer re-lock behind its caller's back. That is a
+    /// convention, not a capability token — nothing stops a test body from
+    /// calling `lock_hooks()` twice itself.
     ///
     /// Poisoning is ignored: a panicking test has already failed, and letting it
     /// cascade into unrelated failures only obscures which test broke.
@@ -305,6 +325,14 @@ mod tests {
             // media table's SELECT re-create a file the first table's sweep had
             // correctly deleted, which silently defeats the assertion below.
             let _ = std::fs::write(&path, b"late capture");
+            // Backdate past the age guard. A file created here is newer than
+            // `sweep_start` either way, so without this the guard spares it
+            // regardless of ordering and `sweep_walks_before_reading_tracked_set`
+            // stops discriminating — verified: with the guard and a live mtime,
+            // the select-first mutant passes every test.
+            if let Ok(f) = std::fs::File::options().write(true).open(&path) {
+                let _ = f.set_modified(std::time::UNIX_EPOCH);
+            }
         }
     }
 
@@ -801,6 +829,16 @@ mod tests {
         assert!(
             modified_since(&dir.path().join("does_not_exist"), past),
             "unreadable metadata must fail CLOSED (report newer, so the caller keeps the file)"
+        );
+
+        // Equality must count as "newer", or a filesystem whose mtime resolution
+        // lands a just-written file exactly on the cutoff would let the sweep
+        // delete it. This is the whole reason the comparison is `>=`, and a `>`
+        // mutant passes every other test in the suite.
+        let own_mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+        assert!(
+            modified_since(&file, own_mtime),
+            "a file whose mtime equals the cutoff must be treated as newer"
         );
     }
 
