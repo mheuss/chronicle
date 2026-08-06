@@ -153,9 +153,9 @@ by phase 2).
 
 ### Phase 2: Sweep orphan files (`sweep_orphans`)
 
-Runs once per media table. For each, it walks that table's directory
-(`screenshots/` or `audio/`) recursively, then reads all tracked paths for the
-matching table in a single query into a `HashSet`. Any walked file whose
+`sweep_orphans` calls `sweep_media_orphans` once per media table. For each, it
+walks that table's directory (`screenshots/` or `audio/`) recursively, then reads
+all tracked paths for the matching table in a single query into a `HashSet`. Any walked file whose
 canonical path is not in that set gets deleted. This catches files left behind by
 crashes or interrupted cleanup. An empty walk returns early without querying.
 

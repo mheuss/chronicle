@@ -139,7 +139,7 @@ fn sweep_media_orphans(
 ) -> Result<u64> {
     // Walk BEFORE reading the tracked set, never after. Both media writers go
     // file-then-row — screenshots at pipeline.rs:76 then :121, audio at :391 then
-    // :394 — so "file on disk, row not yet committed" is a real transient state,
+    // :395 — so "file on disk, row not yet committed" is a real transient state,
     // and a file is deleted here iff it is in the walk list AND absent from the
     // set.
     //
@@ -154,14 +154,17 @@ fn sweep_media_orphans(
     // per-file COUNT(*) this replaced, where each row had until its own file's
     // turn in the loop — minutes, which was the HEU-547 bug.
     //
-    // Two assumptions — NOT guarantees — keep that tolerable:
-    //   1. In-process: the sole production caller is main.rs:89, awaited before
-    //      the capture runtime spawns, so this process writes no media while the
-    //      sweep runs. A periodic or IPC-triggered sweep would break this.
-    //   2. Cross-process: this one does NOT hold. The only single-instance guard
-    //      is the socket probe in IpcServer::start (main.rs:215), which runs long
-    //      after the sweep, so a second daemon sweeps the shared media directory
-    //      while the first is capturing. Tracked as HEU-591.
+    // Tolerability rests on two assumptions, and only the first holds today:
+    //   1. HOLDS, in-process: the sole production caller is main.rs:89, awaited
+    //      before the capture runtime spawns, so this process writes no media
+    //      while the sweep runs. A periodic or IPC-triggered sweep breaks this.
+    //   2. DOES NOT HOLD, cross-process: the only single-instance guard is the
+    //      socket probe in IpcServer::start (main.rs:215), which runs long after
+    //      the sweep, so a second daemon sweeps the shared media directory while
+    //      the first is capturing. Tracked as HEU-591. The symptom is worse than
+    //      a lost file — neither insert checks that the file still exists, so the
+    //      row still commits and leaves a row pointing at nothing, plus an OCR or
+    //      transcription job that can never succeed.
     //
     // `sweep_walks_before_reading_tracked_set` pins the ordering.
     let files = media_mgr.walk_files(media.subdir);
