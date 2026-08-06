@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use rusqlite::{Connection, params};
@@ -136,20 +137,30 @@ fn sweep_media_orphans(
     media: &MediaTable,
     media_mgr: &MediaManager,
 ) -> Result<u64> {
-    let file_list = media_mgr.walk_files(media.subdir);
+    // One query for every tracked path in this table. Covered by
+    // idx_<table>_<path_col> (migration 002), so this reads the index rather
+    // than scanning the table. Previously this function ran one
+    // `SELECT COUNT(*)` per file on disk, which is O(files x rows) — see
+    // HEU-547.
+    let tracked: HashSet<String> = {
+        let select_sql = format!("SELECT {} FROM {}", media.path_col, media.table);
+        let mut stmt = conn.prepare(&select_sql)?;
+        stmt.query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<HashSet<_>, _>>()?
+    };
+
     let mut bytes_freed: u64 = 0;
 
-    let count_sql = format!(
-        "SELECT COUNT(*) FROM {} WHERE {} = ?1",
-        media.table, media.path_col
-    );
-
-    for file_path in file_list {
+    for file_path in media_mgr.walk_files(media.subdir) {
+        // Canonicalize before comparing: the DB stores canonical paths (see
+        // MediaManager::allocate_path). Fall back to the walked path if
+        // canonicalize fails — the file may have been deleted between the walk
+        // and this call.
         let canonical = std::fs::canonicalize(&file_path).unwrap_or_else(|_| file_path.clone());
-        let path_str = canonical.to_string_lossy().to_string();
-        let count: i64 = conn.query_row(&count_sql, params![path_str], |row| row.get(0))?;
 
-        if count == 0 {
+        if !tracked.contains(canonical.to_string_lossy().as_ref()) {
+            // Pass the ORIGINAL walked path, not the canonical one —
+            // MediaManager::delete_file validates its argument against base_dir.
             match media_mgr.delete_file(&file_path) {
                 Ok(freed) => bytes_freed += freed,
                 Err(e) => {
@@ -172,7 +183,17 @@ mod tests {
     use crate::models::{AudioSegmentMetadata, ScreenshotMetadata};
     use crate::schema;
     use crate::{audio, screenshots};
+    use rusqlite::trace::{TraceEvent, TraceEventCodes};
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    static SWEEP_QUERY_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    fn count_stmt(evt: TraceEvent<'_>) {
+        if matches!(evt, TraceEvent::Stmt(..)) {
+            SWEEP_QUERY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+    }
 
     fn setup_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -529,6 +550,48 @@ mod tests {
         assert_eq!(
             bytes_freed, 60,
             "only the orphans' bytes should be counted as freed (4 + 8 + 16 + 32)"
+        );
+    }
+
+    /// The sweep must not scale its query count with the number of files on disk.
+    /// Classification tests cannot catch a regression to the per-file `COUNT(*)`
+    /// loop — that implementation passes all of them while taking minutes on a real
+    /// database. This is the guard that actually fails.
+    ///
+    /// Drives the full `sweep_orphans` so both `SCREENSHOT_TABLE` and `AUDIO_TABLE`
+    /// are exercised: they are separate descriptors, and a bad one would be
+    /// invisible to a screenshots-only test.
+    #[test]
+    fn sweep_issues_one_query_per_media_table() {
+        let conn = setup_db();
+        let dir = tempfile::tempdir().unwrap();
+
+        // Orphans in both media subdirectories. Under the old implementation each
+        // file costs its own query; under the new one the count is independent of
+        // how many files exist.
+        let screenshots_dir = dir.path().join("screenshots");
+        std::fs::create_dir_all(&screenshots_dir).unwrap();
+        for i in 0..5 {
+            std::fs::write(screenshots_dir.join(format!("orphan{i}.heif")), b"x").unwrap();
+        }
+        let audio_dir = dir.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        for i in 0..3 {
+            std::fs::write(audio_dir.join(format!("orphan{i}.opus")), b"x").unwrap();
+        }
+
+        let media_mgr = crate::media::MediaManager::new(dir.path().to_path_buf()).unwrap();
+
+        SWEEP_QUERY_COUNT.store(0, AtomicOrdering::Relaxed);
+        conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(count_stmt));
+        sweep_orphans(&conn, &media_mgr).unwrap();
+        conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+
+        assert_eq!(
+            SWEEP_QUERY_COUNT.load(AtomicOrdering::Relaxed),
+            2,
+            "sweep must issue exactly one SELECT per media table (2 total), \
+             regardless of how many files are on disk"
         );
     }
 
