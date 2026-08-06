@@ -137,15 +137,16 @@ fn sweep_media_orphans(
     media: &MediaTable,
     media_mgr: &MediaManager,
 ) -> Result<u64> {
-    // Walk BEFORE reading the tracked set, never after. The pipeline writes the
-    // media file first and inserts its row second (pipeline.rs:76 then :121), so
-    // "file on disk, row not yet committed" is a real transient state, and a
-    // file is deleted here iff it is in the walk list AND absent from the set.
+    // Walk BEFORE reading the tracked set, never after. Both media writers go
+    // file-then-row — screenshots at pipeline.rs:76 then :121, audio at :391 then
+    // :394 — so "file on disk, row not yet committed" is a real transient state,
+    // and a file is deleted here iff it is in the walk list AND absent from the
+    // set.
     //
-    // Reading the set first makes that a GUARANTEED loss for any capture whose
-    // file lands between the SELECT and the end of the walk: its row commits
-    // after its file by construction, so it can never be in the set. Walking
-    // first removes that window.
+    // Reading the set first loses any capture whose file lands between the SELECT
+    // and the walk reaching that file's directory: its row commits after its file
+    // by construction, so it can never be in the set. Walking first removes that
+    // window.
     //
     // It does NOT close the race. A residual window remains when a writer's
     // file-then-row gap spans the walk-to-SELECT interval: the file makes the
@@ -153,10 +154,15 @@ fn sweep_media_orphans(
     // per-file COUNT(*) this replaced, where each row had until its own file's
     // turn in the loop — minutes, which was the HEU-547 bug.
     //
-    // That residual window is tolerable only because of the call site: the sole
-    // production caller is main.rs:89, awaited before the capture runtime spawns,
-    // so nothing writes media while the sweep runs. If this ever becomes periodic
-    // or IPC-triggered, that assumption dies and the race needs real handling.
+    // Two assumptions — NOT guarantees — keep that tolerable:
+    //   1. In-process: the sole production caller is main.rs:89, awaited before
+    //      the capture runtime spawns, so this process writes no media while the
+    //      sweep runs. A periodic or IPC-triggered sweep would break this.
+    //   2. Cross-process: this one does NOT hold. The only single-instance guard
+    //      is the socket probe in IpcServer::start (main.rs:215), which runs long
+    //      after the sweep, so a second daemon sweeps the shared media directory
+    //      while the first is capturing. Tracked as HEU-591.
+    //
     // `sweep_walks_before_reading_tracked_set` pins the ordering.
     let files = media_mgr.walk_files(media.subdir);
     if files.is_empty() {

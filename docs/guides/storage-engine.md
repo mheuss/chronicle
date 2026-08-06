@@ -59,6 +59,7 @@ chronicle-daemon/crates/storage/src/
 ├── screenshots.rs     Insert, get, get_timeline, update_ocr_text
 ├── audio.rs           Insert, get, update_transcript
 ├── search.rs          Unified FTS5 search across screenshots and audio
+├── media.rs           Path allocation, canonicalization, recursive walk, delete
 ├── retention.rs       Batch cleanup, orphan file sweep
 └── migrations/
     ├── 001_initial_schema.sql
@@ -152,15 +153,19 @@ by phase 2).
 
 ### Phase 2: Sweep orphan files (`sweep_orphans`)
 
-Walks `screenshots/` and `audio/` directories recursively, then reads all tracked
-paths for that table in a single query into a `HashSet`. Any walked file whose
+Runs once per media table. For each, it walks that table's directory
+(`screenshots/` or `audio/`) recursively, then reads all tracked paths for the
+matching table in a single query into a `HashSet`. Any walked file whose
 canonical path is not in that set gets deleted. This catches files left behind by
-crashes or interrupted cleanup.
+crashes or interrupted cleanup. An empty walk returns early without querying.
 
 The walk runs before the query, not after — the pipeline writes a file before
-inserting its row, so reading the set first would delete any capture written in
-between. Covering indexes on the two path columns (migration 002) keep the query
-off the table itself. See `docs/use-cases/storage.md` for the full rationale.
+inserting its row, so reading the set first would delete a capture whose file
+landed before the walk reached its directory but whose row had not committed
+yet. Covering indexes on the two path columns (migration 002) keep the query off
+the table itself. This narrows the race but does not close it, and it is not safe
+across processes (HEU-591). See `docs/use-cases/storage.md` for the full
+rationale.
 
 ## How to run tests
 
