@@ -474,8 +474,12 @@ mod tests {
         std::fs::write(&tracked_audio, b"aa").unwrap();
         track_audio(&conn, &tracked_audio);
 
-        // Orphan payloads are distinct powers of two so bytes_freed decomposes
-        // uniquely — a wrong classification cannot land on the same total.
+        // Orphan payloads are distinct powers of two, so a short total names
+        // exactly which orphans were missed. This is a diagnostic aid, not a
+        // classification check on its own — the fixture also holds 501 one-byte
+        // tracked files, so other wrong classifications can still sum to 60.
+        // The per-file existence assertions below are what catch those, and
+        // they fire before the byte check.
         let orphan_shot_a = screenshots_dir.join("orphan_a.heif");
         std::fs::write(&orphan_shot_a, [b'x'; 4]).unwrap();
         let orphan_shot_b = screenshots_dir.join("orphan_b.heif");
@@ -506,10 +510,13 @@ mod tests {
             tracked_audio.exists(),
             "an audio segment with a matching DB row must survive the sweep"
         );
-        assert!(
-            !orphan_shot_a.exists() && !orphan_shot_b.exists(),
-            "a screenshot with no DB row must be deleted"
-        );
+        for orphan in [&orphan_shot_a, &orphan_shot_b] {
+            assert!(
+                !orphan.exists(),
+                "a screenshot with no DB row must be deleted: {}",
+                orphan.display()
+            );
+        }
         assert!(
             !orphan_audio.exists(),
             "an audio file with no DB row must be deleted"
