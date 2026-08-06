@@ -138,13 +138,26 @@ fn sweep_media_orphans(
     media_mgr: &MediaManager,
 ) -> Result<u64> {
     // Walk BEFORE reading the tracked set, never after. The pipeline writes the
-    // media file first and inserts its row second, so "file on disk, row not yet
-    // committed" is a real transient state. Walking first means a file only
-    // enters the list if it predates the walk, while its row is honored if it
-    // lands any time before the SELECT — so a capture written concurrently is
-    // either absent from the list or present in the set, never neither. Reading
-    // the set first inverts that: a file created between the SELECT and the walk
-    // is in the list, absent from the set, and gets deleted.
+    // media file first and inserts its row second (pipeline.rs:76 then :121), so
+    // "file on disk, row not yet committed" is a real transient state, and a
+    // file is deleted here iff it is in the walk list AND absent from the set.
+    //
+    // Reading the set first makes that a GUARANTEED loss for any capture whose
+    // file lands between the SELECT and the end of the walk: its row commits
+    // after its file by construction, so it can never be in the set. Walking
+    // first removes that window.
+    //
+    // It does NOT close the race. A residual window remains when a writer's
+    // file-then-row gap spans the walk-to-SELECT interval: the file makes the
+    // list and the row misses the set. Note this is also less forgiving than the
+    // per-file COUNT(*) this replaced, where each row had until its own file's
+    // turn in the loop — minutes, which was the HEU-547 bug.
+    //
+    // That residual window is tolerable only because of the call site: the sole
+    // production caller is main.rs:89, awaited before the capture runtime spawns,
+    // so nothing writes media while the sweep runs. If this ever becomes periodic
+    // or IPC-triggered, that assumption dies and the race needs real handling.
+    // `sweep_walks_before_reading_tracked_set` pins the ordering.
     let files = media_mgr.walk_files(media.subdir);
     if files.is_empty() {
         // Nothing to classify — skip the table read entirely. A fresh install or
@@ -200,18 +213,51 @@ mod tests {
     use crate::{audio, screenshots};
     use rusqlite::trace::{TraceEvent, TraceEventCodes};
     use std::path::PathBuf;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
-    /// Process-global, so only ONE test may register `count_stmt` at a time.
-    /// `trace_v2` binds per-connection, so today nothing else can reach this
-    /// counter — `sweep_issues_one_query_per_media_table` is the only registrant
-    /// in the workspace. Adding a second query-counting test without a lock
-    /// would make both flaky under the parallel harness, with no obvious cause.
+    /// Serializes every test that drives a `trace_v2` hook. The hooks below are
+    /// bare `fn` pointers (rusqlite cannot take a closure), so they must reach
+    /// their state through process-global statics. `trace_v2` binds
+    /// per-connection, so the hooks themselves never collide — but the statics
+    /// they read do, and two such tests running in parallel would both be flaky
+    /// with no obvious cause. Take this lock for the whole hook lifetime.
+    ///
+    /// Poisoning is ignored: a panicking test has already failed, and letting it
+    /// cascade into unrelated failures only obscures which test broke.
+    static HOOK_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_hooks() -> std::sync::MutexGuard<'static, ()> {
+        HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     static SWEEP_QUERY_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     fn count_stmt(evt: TraceEvent<'_>) {
         if matches!(evt, TraceEvent::Stmt(..)) {
             SWEEP_QUERY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+    }
+
+    /// Set while `create_file_on_stmt` is registered: the path it should create.
+    static LATE_WRITE_TARGET: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+    /// Stands in for a capture written concurrently with the sweep. Fires when a
+    /// statement executes — i.e. when the sweep reads its tracked set — and drops
+    /// a file on disk with no matching row, the transient state the pipeline
+    /// produces between writing a file and inserting its row.
+    fn create_file_on_stmt(evt: TraceEvent<'_>) {
+        if matches!(evt, TraceEvent::Stmt(..))
+            && let Some(path) = LATE_WRITE_TARGET
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+        {
+            // One-shot: `take()` clears the target so only the FIRST statement
+            // creates the file. Firing on every statement would let the second
+            // media table's SELECT re-create a file the first table's sweep had
+            // correctly deleted, which silently defeats the assertion below.
+            let _ = std::fs::write(&path, b"late capture");
         }
     }
 
@@ -235,11 +281,10 @@ mod tests {
 
         let media_mgr = crate::media::MediaManager::new(dir.path().to_path_buf()).unwrap();
 
+        let _hooks = lock_hooks();
         SWEEP_QUERY_COUNT.store(0, AtomicOrdering::Relaxed);
         conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(count_stmt));
         let swept = sweep_orphans(&conn, &media_mgr);
-        // Unregister before unwrapping, so a sweep failure cannot leave the hook
-        // installed on a connection that outlives this call.
         conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
         swept.unwrap();
 
@@ -629,6 +674,52 @@ mod tests {
             "sweep query count must not scale with the number of files on disk: \
              8 files issued {small} queries, 80 files issued {large}"
         );
+    }
+
+    /// The walk must run BEFORE the tracked-set SELECT. Moving it back below the
+    /// SELECT keeps the query count at 2 and leaves every other test in this file
+    /// green, so without this the ordering is protected by a comment alone — and
+    /// the ordering is the whole fix.
+    ///
+    /// Drives the race deterministically with the trace hook: when the sweep's
+    /// SELECT executes, create a file with no DB row. Walk-first, that file
+    /// postdates the walk, never enters the list, and survives. Select-first, it
+    /// predates the walk, lands in the list, is absent from the set, and is
+    /// deleted — which is exactly the concurrent-capture loss this ordering
+    /// exists to prevent.
+    #[test]
+    fn sweep_walks_before_reading_tracked_set() {
+        let conn = setup_db();
+        let dir = tempfile::tempdir().unwrap();
+        let screenshots_dir = dir.path().join("screenshots");
+        std::fs::create_dir_all(&screenshots_dir).unwrap();
+
+        // A tracked file, so the walk is non-empty and the SELECT actually runs.
+        let tracked = screenshots_dir.join("tracked.heif");
+        std::fs::write(&tracked, b"tracked").unwrap();
+        track_screenshot(&conn, &tracked);
+
+        let late_file = screenshots_dir.join("late_capture.heif");
+        let media_mgr = crate::media::MediaManager::new(dir.path().to_path_buf()).unwrap();
+
+        let _hooks = lock_hooks();
+        *LATE_WRITE_TARGET.lock().unwrap_or_else(|e| e.into_inner()) = Some(late_file.clone());
+        conn.trace_v2(
+            TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(create_file_on_stmt),
+        );
+        let swept = sweep_orphans(&conn, &media_mgr);
+        conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+        *LATE_WRITE_TARGET.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        swept.unwrap();
+
+        assert!(
+            late_file.exists(),
+            "a file created while the sweep was reading its tracked set must \
+             survive — it postdates the walk, so the sweep never classified it. \
+             Its deletion means the SELECT now runs before the walk."
+        );
+        assert!(tracked.exists(), "the tracked file must still survive");
     }
 
     #[test]
