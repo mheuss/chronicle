@@ -172,6 +172,7 @@ mod tests {
     use crate::models::{AudioSegmentMetadata, ScreenshotMetadata};
     use crate::schema;
     use crate::{audio, screenshots};
+    use std::path::PathBuf;
 
     fn setup_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -389,26 +390,19 @@ mod tests {
         assert!(!orphan_file.exists());
     }
 
-    #[test]
-    fn sweep_orphans_keeps_tracked_files_and_deletes_orphans() {
-        let conn = setup_db();
-        let dir = tempfile::tempdir().unwrap();
-        let screenshots_dir = dir.path().join("screenshots");
-        std::fs::create_dir_all(&screenshots_dir).unwrap();
-
-        let tracked_file = screenshots_dir.join("tracked.heif");
-        std::fs::write(&tracked_file, b"tracked data").unwrap();
-        let orphan_file = screenshots_dir.join("orphan.heif");
-        std::fs::write(&orphan_file, b"orphan data").unwrap();
-
-        // Store the CANONICAL path, mirroring MediaManager::allocate_path. This is
-        // load-bearing: on macOS a tempdir lives under /var, which is a symlink to
-        // /private/var. The sweep canonicalizes each walked file before comparing,
-        // so storing the non-canonical path here would make it treat a live file as
-        // an orphan and delete it. See docs/use-cases/storage.md.
-        let canonical = std::fs::canonicalize(&tracked_file).unwrap();
+    /// Insert a screenshots row pointing at `path`'s canonical form.
+    ///
+    /// Storing the CANONICAL path mirrors `MediaManager::allocate_path`, and it
+    /// is load-bearing: `walk_files` joins from the base_dir as passed
+    /// (`media.rs:176`), not the canonical one, so walked paths keep the
+    /// unresolved form while the DB holds the resolved one. The sweep
+    /// canonicalizes each walked file to bridge that. Storing the unresolved
+    /// path here would make the sweep treat every live file as an orphan and
+    /// delete it. See docs/use-cases/storage.md.
+    fn track_screenshot(conn: &Connection, path: &Path) {
+        let canonical = std::fs::canonicalize(path).unwrap();
         screenshots::insert(
-            &conn,
+            conn,
             &ScreenshotMetadata {
                 timestamp: now_millis(),
                 display_id: "d1".into(),
@@ -422,55 +416,112 @@ mod tests {
             },
         )
         .unwrap();
+    }
 
-        // Same fixture for audio. AUDIO_TABLE is a separate descriptor with its own
-        // table, path column, and subdirectory — a mistake in it would be invisible
-        // to a screenshots-only test.
-        let audio_dir = dir.path().join("audio");
-        std::fs::create_dir_all(&audio_dir).unwrap();
-        let tracked_audio = audio_dir.join("tracked.opus");
-        std::fs::write(&tracked_audio, b"tracked audio").unwrap();
-        let orphan_audio = audio_dir.join("orphan.opus");
-        std::fs::write(&orphan_audio, b"orphan audio").unwrap();
-
-        let canonical_audio = std::fs::canonicalize(&tracked_audio).unwrap();
+    fn track_audio(conn: &Connection, path: &Path) {
+        let canonical = std::fs::canonicalize(path).unwrap();
         audio::insert(
-            &conn,
+            conn,
             &AudioSegmentMetadata {
                 start_timestamp: now_millis(),
                 end_timestamp: now_millis() + 30_000,
                 source: "mic".into(),
-                audio_path: canonical_audio.to_string_lossy().into_owned(),
+                audio_path: canonical.to_string_lossy().into_owned(),
                 transcript: None,
                 whisper_model: None,
                 language: None,
             },
         )
         .unwrap();
+    }
 
-        let media_mgr = crate::media::MediaManager::new(dir.path().to_path_buf()).unwrap();
+    #[test]
+    fn sweep_orphans_keeps_tracked_files_and_deletes_orphans() {
+        let conn = setup_db();
+        let dir = tempfile::tempdir().unwrap();
+
+        // Reach the storage root through a symlink so the sweep's
+        // canonicalization is genuinely exercised no matter where TMPDIR points.
+        // Without this the test leans on macOS happening to put temp dirs under
+        // /var (a symlink to /private/var); on a non-symlinked TMPDIR
+        // canonicalize becomes a no-op and every canonicalization assertion
+        // below silently degrades to trivially true.
+        let real_root = dir.path().join("real_root");
+        std::fs::create_dir_all(&real_root).unwrap();
+        let root = dir.path().join("link_root");
+        std::os::unix::fs::symlink(&real_root, &root).unwrap();
+
+        let screenshots_dir = root.join("screenshots");
+        std::fs::create_dir_all(&screenshots_dir).unwrap();
+        let audio_dir = root.join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+
+        // More tracked rows than CLEANUP_BATCH_SIZE. A set-building SELECT that
+        // borrowed `LIMIT CLEANUP_BATCH_SIZE` from cleanup_media (40 lines above
+        // in this file, a natural pattern to mirror) would drop this fixture's
+        // tail from the tracked set and delete real captures. A single tracked
+        // row cannot see that class of bug at all.
+        let tracked_shots: Vec<PathBuf> = (0..=CLEANUP_BATCH_SIZE)
+            .map(|i| {
+                let path = screenshots_dir.join(format!("tracked_{i:04}.heif"));
+                std::fs::write(&path, b"s").unwrap();
+                track_screenshot(&conn, &path);
+                path
+            })
+            .collect();
+
+        let tracked_audio = audio_dir.join("tracked.opus");
+        std::fs::write(&tracked_audio, b"aa").unwrap();
+        track_audio(&conn, &tracked_audio);
+
+        // Orphan payloads are distinct powers of two so bytes_freed decomposes
+        // uniquely — a wrong classification cannot land on the same total.
+        let orphan_shot_a = screenshots_dir.join("orphan_a.heif");
+        std::fs::write(&orphan_shot_a, [b'x'; 4]).unwrap();
+        let orphan_shot_b = screenshots_dir.join("orphan_b.heif");
+        std::fs::write(&orphan_shot_b, [b'x'; 8]).unwrap();
+        let orphan_audio = audio_dir.join("orphan.opus");
+        std::fs::write(&orphan_audio, [b'x'; 16]).unwrap();
+
+        // A file under audio/ whose path is recorded in the SCREENSHOTS table.
+        // The audio sweep must still delete it: membership is per-table, and a
+        // single set merged across both tables would wrongly spare it. This is
+        // what proves SCREENSHOT_TABLE and AUDIO_TABLE stay separate descriptors
+        // for membership, not just for the directory walk.
+        let cross_table = audio_dir.join("cross_table.opus");
+        std::fs::write(&cross_table, [b'x'; 32]).unwrap();
+        track_screenshot(&conn, &cross_table);
+
+        let media_mgr = crate::media::MediaManager::new(root.clone()).unwrap();
         let bytes_freed = sweep_orphans(&conn, &media_mgr).unwrap();
 
-        assert!(
-            tracked_file.exists(),
-            "a screenshot with a matching DB row must survive the sweep"
-        );
-        assert!(
-            !orphan_file.exists(),
-            "a screenshot with no DB row must be deleted"
-        );
+        for path in &tracked_shots {
+            assert!(
+                path.exists(),
+                "a screenshot with a matching DB row must survive the sweep: {}",
+                path.display()
+            );
+        }
         assert!(
             tracked_audio.exists(),
             "an audio segment with a matching DB row must survive the sweep"
         );
         assert!(
+            !orphan_shot_a.exists() && !orphan_shot_b.exists(),
+            "a screenshot with no DB row must be deleted"
+        );
+        assert!(
             !orphan_audio.exists(),
             "an audio file with no DB row must be deleted"
         );
+        assert!(
+            !cross_table.exists(),
+            "an audio-dir file tracked only in the screenshots table is an \
+             orphan to the audio sweep and must be deleted"
+        );
         assert_eq!(
-            bytes_freed,
-            (b"orphan data".len() + b"orphan audio".len()) as u64,
-            "only the orphans' bytes should be counted as freed"
+            bytes_freed, 60,
+            "only the orphans' bytes should be counted as freed (4 + 8 + 16 + 32)"
         );
     }
 
