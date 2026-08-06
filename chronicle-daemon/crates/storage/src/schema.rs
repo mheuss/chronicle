@@ -23,8 +23,16 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
     for (i, migration) in MIGRATIONS.iter().enumerate() {
         let version = (i + 1) as u32;
         if version > current_version {
-            conn.execute_batch(migration)?;
-            conn.pragma_update(None, "user_version", version)?;
+            // The migration and its version stamp must land together. As two
+            // separate autocommit statements, a crash between them leaves the
+            // schema at version N stamped N-1, and the replay re-runs the whole
+            // migration. That is harmless today because 001 and 002 are entirely
+            // `IF NOT EXISTS` / `INSERT OR IGNORE`, but the next migration need
+            // not be — `ALTER TABLE ADD COLUMN` has no idempotent form.
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(migration)?;
+            tx.pragma_update(None, "user_version", version)?;
+            tx.commit()?;
         }
     }
 
@@ -128,6 +136,37 @@ mod tests {
             "migrate() must advance user_version to the latest migration"
         );
         assert!(index_names(&conn).contains(&"idx_screenshots_image_path".to_string()));
+    }
+
+    #[test]
+    fn path_indexes_cover_the_sweep_query() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_connection(&conn).unwrap();
+        migrate(&conn).unwrap();
+
+        // Asserting the index exists in sqlite_master proves nothing about
+        // whether the planner uses it, and "the planner uses it" is the entire
+        // point of migration 002. Without this, dropping the index or changing
+        // the sweep's query shape puts the daemon back to a multi-minute
+        // startup stall with every test still green. See HEU-547.
+        for (sql, index) in [
+            (
+                "SELECT image_path FROM screenshots",
+                "idx_screenshots_image_path",
+            ),
+            (
+                "SELECT audio_path FROM audio_segments",
+                "idx_audio_segments_audio_path",
+            ),
+        ] {
+            let plan: String = conn
+                .query_row(&format!("EXPLAIN QUERY PLAN {sql}"), [], |row| row.get(3))
+                .unwrap();
+            assert!(
+                plan.contains(index),
+                "planner ignored {index} for `{sql}`: {plan}"
+            );
+        }
     }
 
     #[test]
