@@ -390,6 +390,91 @@ mod tests {
     }
 
     #[test]
+    fn sweep_orphans_keeps_tracked_files_and_deletes_orphans() {
+        let conn = setup_db();
+        let dir = tempfile::tempdir().unwrap();
+        let screenshots_dir = dir.path().join("screenshots");
+        std::fs::create_dir_all(&screenshots_dir).unwrap();
+
+        let tracked_file = screenshots_dir.join("tracked.heif");
+        std::fs::write(&tracked_file, b"tracked data").unwrap();
+        let orphan_file = screenshots_dir.join("orphan.heif");
+        std::fs::write(&orphan_file, b"orphan data").unwrap();
+
+        // Store the CANONICAL path, mirroring MediaManager::allocate_path. This is
+        // load-bearing: on macOS a tempdir lives under /var, which is a symlink to
+        // /private/var. The sweep canonicalizes each walked file before comparing,
+        // so storing the non-canonical path here would make it treat a live file as
+        // an orphan and delete it. See docs/use-cases/storage.md.
+        let canonical = std::fs::canonicalize(&tracked_file).unwrap();
+        screenshots::insert(
+            &conn,
+            &ScreenshotMetadata {
+                timestamp: now_millis(),
+                display_id: "d1".into(),
+                app_name: None,
+                app_bundle_id: None,
+                window_title: None,
+                image_path: canonical.to_string_lossy().into_owned(),
+                ocr_text: None,
+                phash: None,
+                resolution: None,
+            },
+        )
+        .unwrap();
+
+        // Same fixture for audio. AUDIO_TABLE is a separate descriptor with its own
+        // table, path column, and subdirectory — a mistake in it would be invisible
+        // to a screenshots-only test.
+        let audio_dir = dir.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let tracked_audio = audio_dir.join("tracked.opus");
+        std::fs::write(&tracked_audio, b"tracked audio").unwrap();
+        let orphan_audio = audio_dir.join("orphan.opus");
+        std::fs::write(&orphan_audio, b"orphan audio").unwrap();
+
+        let canonical_audio = std::fs::canonicalize(&tracked_audio).unwrap();
+        audio::insert(
+            &conn,
+            &AudioSegmentMetadata {
+                start_timestamp: now_millis(),
+                end_timestamp: now_millis() + 30_000,
+                source: "mic".into(),
+                audio_path: canonical_audio.to_string_lossy().into_owned(),
+                transcript: None,
+                whisper_model: None,
+                language: None,
+            },
+        )
+        .unwrap();
+
+        let media_mgr = crate::media::MediaManager::new(dir.path().to_path_buf()).unwrap();
+        let bytes_freed = sweep_orphans(&conn, &media_mgr).unwrap();
+
+        assert!(
+            tracked_file.exists(),
+            "a screenshot with a matching DB row must survive the sweep"
+        );
+        assert!(
+            !orphan_file.exists(),
+            "a screenshot with no DB row must be deleted"
+        );
+        assert!(
+            tracked_audio.exists(),
+            "an audio segment with a matching DB row must survive the sweep"
+        );
+        assert!(
+            !orphan_audio.exists(),
+            "an audio file with no DB row must be deleted"
+        );
+        assert_eq!(
+            bytes_freed,
+            (b"orphan data".len() + b"orphan audio".len()) as u64,
+            "only the orphans' bytes should be counted as freed"
+        );
+    }
+
+    #[test]
     fn cleanup_unified_handles_both_tables() {
         let conn = setup_db();
         let now = now_millis();

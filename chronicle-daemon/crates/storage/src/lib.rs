@@ -632,6 +632,30 @@ mod tests {
         };
         let storage = Storage::open(config).await.unwrap();
 
+        // A tracked screenshot, allocated and inserted the way production does.
+        // Using allocate_screenshot_path (not a hand-built path) is the point:
+        // it stores whatever canonical form the real code stores, so this test
+        // fails if the sweep's canonicalization ever stops matching it.
+        let tracked_path = storage
+            .allocate_screenshot_path(1_700_000_000_000, "display1")
+            .await
+            .unwrap();
+        std::fs::write(&tracked_path, b"tracked data").unwrap();
+        storage
+            .insert_screenshot(ScreenshotMetadata {
+                timestamp: 1_700_000_000_000,
+                display_id: "display1".into(),
+                app_name: None,
+                app_bundle_id: None,
+                window_title: None,
+                image_path: tracked_path.to_string_lossy().into_owned(),
+                ocr_text: None,
+                phash: None,
+                resolution: None,
+            })
+            .await
+            .unwrap();
+
         // Simulate a crash: create an orphan file in the screenshots directory
         let orphan_dir = dir.path().join("screenshots/2026/03/21");
         std::fs::create_dir_all(&orphan_dir).unwrap();
@@ -643,6 +667,15 @@ mod tests {
         let stats = storage.sweep_orphans().await.unwrap();
         assert!(stats.bytes_freed > 0, "should have freed orphan bytes");
         assert!(!orphan_file.exists(), "orphan file should be deleted");
+        assert!(
+            tracked_path.exists(),
+            "a screenshot with a DB row must survive the sweep"
+        );
+        assert_eq!(
+            stats.bytes_freed,
+            b"orphan data".len() as u64,
+            "only the orphan's bytes should be freed, not the tracked file's"
+        );
     }
 
     #[tokio::test]
