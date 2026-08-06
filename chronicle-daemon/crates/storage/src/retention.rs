@@ -188,15 +188,15 @@ fn sweep_media_orphans(
     // With the guard, deletion requires BOTH: the file's last write predates
     // `sweep_start`, AND its row has not committed by the SELECT. Since
     // `sweep_start` is taken before the walk, everything written during the walk
-    // is now safe — on a 20k-file directory the walk dominates the sweep, so
-    // that is most of the old window. What remains at risk is a file written
+    // is now safe — the walk dominates the walk-to-SELECT window, so that is
+    // most of the old exposure. What remains at risk is a file written
     // before the sweep began whose row commits after the SELECT: the writer's
     // file-then-row gap has to span the entire walk. That gap is normally an
     // encode plus an insert, but nothing bounds it tightly — `busy_timeout` is
     // 5000 ms, so a contended insert can block for seconds.
     //
     // Two caveats on what the mtime actually measures. Audio is encoded in a
-    // staging directory and `rename`d into place (main.rs:219, media.rs:108),
+    // staging directory and `rename`d into place (main.rs:219, media.rs:107),
     // and rename preserves mtime — so for audio this is the staging-encode time,
     // milliseconds before the file appeared at the swept path, not the moment it
     // landed there. And `SystemTime::now()` is wall-clock: a backward step only
@@ -283,10 +283,10 @@ mod tests {
     ///
     /// `std::sync::Mutex` is NOT reentrant, so taking it twice on one thread
     /// hangs with no timeout — far worse to diagnose than a failure. Helpers that
-    /// need it therefore take `&HookGuard` rather than locking internally, so a
-    /// helper can no longer re-lock behind its caller's back. That is a
-    /// convention, not a capability token — nothing stops a test body from
-    /// calling `lock_hooks()` twice itself.
+    /// need it therefore take `&HookGuard` rather than locking internally, which
+    /// documents at the signature that the caller already holds it. That is a
+    /// convention, not a capability token — nothing stops a test body, or a
+    /// helper that takes `&HookGuard`, from calling `lock_hooks()` anyway.
     ///
     /// Poisoning is ignored: a panicking test has already failed, and letting it
     /// cascade into unrelated failures only obscures which test broke.
@@ -308,6 +308,12 @@ mod tests {
 
     /// Set while `create_file_on_stmt` is registered: the path it should create.
     static LATE_WRITE_TARGET: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+    /// How many times `create_file_on_stmt` actually created a file. The tests
+    /// assert on this because the hook cannot fail loudly — it runs inside an
+    /// `extern "C"` SQLite callback, where a panic aborts the process instead of
+    /// failing the test, so every error inside it must be swallowed.
+    static LATE_WRITE_FIRES: AtomicUsize = AtomicUsize::new(0);
 
     /// Stands in for a capture written concurrently with the sweep. Fires when a
     /// statement executes — i.e. when the sweep reads its tracked set — and drops
@@ -333,6 +339,7 @@ mod tests {
             if let Ok(f) = std::fs::File::options().write(true).open(&path) {
                 let _ = f.set_modified(std::time::UNIX_EPOCH);
             }
+            LATE_WRITE_FIRES.fetch_add(1, AtomicOrdering::Relaxed);
         }
     }
 
@@ -790,6 +797,7 @@ mod tests {
         let media_mgr = crate::media::MediaManager::new(dir.path().to_path_buf()).unwrap();
 
         let _hooks = lock_hooks();
+        LATE_WRITE_FIRES.store(0, AtomicOrdering::Relaxed);
         *LATE_WRITE_TARGET.lock().unwrap_or_else(|e| e.into_inner()) = Some(late_file.clone());
         conn.trace_v2(
             TraceEventCodes::SQLITE_TRACE_STMT,
@@ -799,6 +807,23 @@ mod tests {
         conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
         *LATE_WRITE_TARGET.lock().unwrap_or_else(|e| e.into_inner()) = None;
         swept.unwrap();
+
+        // Both preconditions, asserted rather than assumed. The hook cannot fail
+        // loudly — it runs inside an extern "C" callback where a panic aborts —
+        // so if either of these silently stopped holding, the assertion below
+        // would pass for the wrong reason and this test would go vacuous.
+        assert_eq!(
+            LATE_WRITE_FIRES.load(AtomicOrdering::Relaxed),
+            1,
+            "the hook must create the file exactly once; a second firing would \
+             re-create a file an earlier table's sweep had correctly deleted"
+        );
+        assert_eq!(
+            std::fs::metadata(&late_file).unwrap().modified().unwrap(),
+            std::time::UNIX_EPOCH,
+            "the hook must have backdated the file, or the age guard spares it \
+             regardless of ordering and this test proves nothing"
+        );
 
         assert!(
             late_file.exists(),
