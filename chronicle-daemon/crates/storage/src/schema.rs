@@ -2,7 +2,10 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 
-const MIGRATIONS: &[&str] = &[include_str!("migrations/001_initial_schema.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/001_initial_schema.sql"),
+    include_str!("migrations/002_path_indexes.sql"),
+];
 
 /// Configure connection-level PRAGMAs. Call on every new connection.
 pub(crate) fn setup_connection(conn: &Connection) -> Result<()> {
@@ -76,6 +79,55 @@ mod tests {
         setup_connection(&conn).unwrap();
         migrate(&conn).unwrap();
         migrate(&conn).unwrap(); // second run should not error
+    }
+
+    fn index_names(conn: &Connection) -> Vec<String> {
+        conn.prepare("SELECT name FROM sqlite_master WHERE type='index' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn migration_creates_path_indexes() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_connection(&conn).unwrap();
+        migrate(&conn).unwrap();
+
+        let indexes = index_names(&conn);
+        assert!(
+            indexes.contains(&"idx_screenshots_image_path".to_string()),
+            "missing screenshots path index, got: {indexes:?}"
+        );
+        assert!(
+            indexes.contains(&"idx_audio_segments_audio_path".to_string()),
+            "missing audio path index, got: {indexes:?}"
+        );
+    }
+
+    #[test]
+    fn migration_upgrades_from_v1() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_connection(&conn).unwrap();
+
+        // Simulate a database created before 002 existed: apply only migration 001
+        // and stamp user_version to match.
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.pragma_update(None, "user_version", 1u32).unwrap();
+
+        migrate(&conn).unwrap();
+
+        let version: u32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            version,
+            MIGRATIONS.len() as u32,
+            "migrate() must advance user_version to the latest migration"
+        );
+        assert!(index_names(&conn).contains(&"idx_screenshots_image_path".to_string()));
     }
 
     #[test]
