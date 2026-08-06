@@ -137,6 +137,21 @@ fn sweep_media_orphans(
     media: &MediaTable,
     media_mgr: &MediaManager,
 ) -> Result<u64> {
+    // Walk BEFORE reading the tracked set, never after. The pipeline writes the
+    // media file first and inserts its row second, so "file on disk, row not yet
+    // committed" is a real transient state. Walking first means a file only
+    // enters the list if it predates the walk, while its row is honored if it
+    // lands any time before the SELECT — so a capture written concurrently is
+    // either absent from the list or present in the set, never neither. Reading
+    // the set first inverts that: a file created between the SELECT and the walk
+    // is in the list, absent from the set, and gets deleted.
+    let files = media_mgr.walk_files(media.subdir);
+    if files.is_empty() {
+        // Nothing to classify — skip the table read entirely. A fresh install or
+        // a relocated media directory would otherwise pay a full scan for nothing.
+        return Ok(0);
+    }
+
     // One query for every tracked path in this table. Covered by
     // idx_<table>_<path_col> (migration 002), so this reads the index rather
     // than scanning the table. Previously this function ran one
@@ -151,7 +166,7 @@ fn sweep_media_orphans(
 
     let mut bytes_freed: u64 = 0;
 
-    for file_path in media_mgr.walk_files(media.subdir) {
+    for file_path in files {
         // Canonicalize before comparing: the DB stores canonical paths (see
         // MediaManager::allocate_path). Fall back to the walked path if
         // canonicalize fails — the file may have been deleted between the walk
@@ -187,12 +202,48 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
+    /// Process-global, so only ONE test may register `count_stmt` at a time.
+    /// `trace_v2` binds per-connection, so today nothing else can reach this
+    /// counter — `sweep_issues_one_query_per_media_table` is the only registrant
+    /// in the workspace. Adding a second query-counting test without a lock
+    /// would make both flaky under the parallel harness, with no obvious cause.
     static SWEEP_QUERY_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     fn count_stmt(evt: TraceEvent<'_>) {
         if matches!(evt, TraceEvent::Stmt(..)) {
             SWEEP_QUERY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
         }
+    }
+
+    /// Run a full `sweep_orphans` over a fixture of `shots` screenshot files and
+    /// `audio_files` audio files, all orphans, and return the number of SQL
+    /// statements it executed.
+    fn sweep_query_count(shots: usize, audio_files: usize) -> usize {
+        let conn = setup_db();
+        let dir = tempfile::tempdir().unwrap();
+
+        let screenshots_dir = dir.path().join("screenshots");
+        std::fs::create_dir_all(&screenshots_dir).unwrap();
+        for i in 0..shots {
+            std::fs::write(screenshots_dir.join(format!("orphan{i}.heif")), b"x").unwrap();
+        }
+        let audio_dir = dir.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        for i in 0..audio_files {
+            std::fs::write(audio_dir.join(format!("orphan{i}.opus")), b"x").unwrap();
+        }
+
+        let media_mgr = crate::media::MediaManager::new(dir.path().to_path_buf()).unwrap();
+
+        SWEEP_QUERY_COUNT.store(0, AtomicOrdering::Relaxed);
+        conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(count_stmt));
+        let swept = sweep_orphans(&conn, &media_mgr);
+        // Unregister before unwrapping, so a sweep failure cannot leave the hook
+        // installed on a connection that outlives this call.
+        conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+        swept.unwrap();
+
+        SWEEP_QUERY_COUNT.load(AtomicOrdering::Relaxed)
     }
 
     fn setup_db() -> Connection {
@@ -563,35 +614,20 @@ mod tests {
     /// invisible to a screenshots-only test.
     #[test]
     fn sweep_issues_one_query_per_media_table() {
-        let conn = setup_db();
-        let dir = tempfile::tempdir().unwrap();
-
-        // Orphans in both media subdirectories. Under the old implementation each
-        // file costs its own query; under the new one the count is independent of
-        // how many files exist.
-        let screenshots_dir = dir.path().join("screenshots");
-        std::fs::create_dir_all(&screenshots_dir).unwrap();
-        for i in 0..5 {
-            std::fs::write(screenshots_dir.join(format!("orphan{i}.heif")), b"x").unwrap();
-        }
-        let audio_dir = dir.path().join("audio");
-        std::fs::create_dir_all(&audio_dir).unwrap();
-        for i in 0..3 {
-            std::fs::write(audio_dir.join(format!("orphan{i}.opus")), b"x").unwrap();
-        }
-
-        let media_mgr = crate::media::MediaManager::new(dir.path().to_path_buf()).unwrap();
-
-        SWEEP_QUERY_COUNT.store(0, AtomicOrdering::Relaxed);
-        conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(count_stmt));
-        sweep_orphans(&conn, &media_mgr).unwrap();
-        conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+        // Two fixtures an order of magnitude apart. Asserting a constant against
+        // one fixture would not actually prove independence from file count —
+        // this compares the two, which is the property that matters.
+        let small = sweep_query_count(5, 3);
+        let large = sweep_query_count(50, 30);
 
         assert_eq!(
-            SWEEP_QUERY_COUNT.load(AtomicOrdering::Relaxed),
-            2,
-            "sweep must issue exactly one SELECT per media table (2 total), \
-             regardless of how many files are on disk"
+            small, 2,
+            "sweep must issue exactly one SELECT per media table (2 total)"
+        );
+        assert_eq!(
+            large, small,
+            "sweep query count must not scale with the number of files on disk: \
+             8 files issued {small} queries, 80 files issued {large}"
         );
     }
 
