@@ -134,9 +134,17 @@ pub fn model_present(base_dir: &Path, variant: ModelVariant) -> bool {
     model_path(base_dir, variant).is_file()
 }
 
-/// Stream-SHA1 a file and compare against `expected` (lowercase hex,
-/// case-insensitive compare). Used by the daemon's downloader (NFR-1) —
-/// digest guards integrity, TLS guards authenticity (AD-6).
+/// Stream-SHA1 a file and compare against `expected`. The digest is produced
+/// as lowercase hex; the comparison ignores case, so `expected` may be either.
+/// Used by the daemon's downloader (NFR-1) — digest guards integrity, TLS
+/// guards authenticity (AD-6).
+///
+/// **Blocking and CPU-bound — call it under `tokio::task::spawn_blocking`.**
+/// The `sha1` crate has no aarch64 hardware backend, so on Apple Silicon this
+/// is software SHA1: seconds of un-yielding work on the 1.5 GB `medium` model.
+/// Called directly from an async path it stalls a runtime worker and starves
+/// the 1 Hz IPC status poll — the same poll that renders the `Verifying` state
+/// to the user.
 ///
 /// Streams via [`std::io::copy`] rather than reading the file in, so a 1.5 GB
 /// model never lands in memory. Returns `Err` only for I/O failures; a file
@@ -400,6 +408,26 @@ mod tests {
     #[test]
     fn verify_sha1_errors_on_missing_file() {
         assert!(verify_sha1(std::path::Path::new("/no/such/file"), "00").is_err());
+    }
+
+    #[test]
+    fn verify_sha1_hashes_beyond_one_read_buffer() {
+        // `io::copy` reads in 8 KiB chunks, so the 11-byte fixtures above never
+        // drive a second iteration — an implementation that hashed only the
+        // first buffer would pass every other test here. 100 KB forces the loop
+        // and is what actually pins the streaming property.
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("big");
+        std::fs::write(&p, "a".repeat(100_000).as_bytes()).unwrap();
+        assert!(verify_sha1(&p, "c4d4b30851182fc4eb8675494d42fd7f17e29c93").unwrap());
+    }
+
+    #[test]
+    fn verify_sha1_compare_ignores_digest_case() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("f");
+        std::fs::write(&p, b"hello world").unwrap();
+        assert!(verify_sha1(&p, "2AAE6C35C94FCFB415DBE95F408B9CE91EE846ED").unwrap());
     }
 
     #[test]
