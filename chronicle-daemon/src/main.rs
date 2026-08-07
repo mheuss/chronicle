@@ -320,11 +320,17 @@ async fn main() -> Result<()> {
         .await;
         match load_result {
             Ok(Ok(engine)) => {
-                transcription_status.set_ready(whisper_variant);
                 let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(engine);
-                // Publish before the sink can be reached, so no enqueue sees a
-                // loaded engine with no loop behind it.
+                // Publish the engine BEFORE announcing Ready, in that order.
+                // IPC has been serving since `IpcServer::start`, and the Status
+                // handler reads the cell on its own task — announcing first
+                // opens a window where a client sees `ready` while
+                // `is_loaded()` is still false. Nothing can enqueue in that
+                // window today (`audio_store_loop` spawns further down), but
+                // Task 13 drives swaps while capture is already running, where
+                // the same ordering stops being harmless.
                 engine_handle.set(Arc::clone(&engine));
+                transcription_status.set_ready(whisper_variant);
                 // Not the global cancellation token, by design — the loop must
                 // outlive it so the shutdown flush still gets transcribed. This flag
                 // means "finish the segment you are on, then stop", and only the
