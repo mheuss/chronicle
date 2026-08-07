@@ -124,6 +124,18 @@ pub fn read_whisper_model(base_dir: &Path) -> ModelVariant {
     parse_variant(&raw).unwrap_or(DEFAULT_VARIANT)
 }
 
+/// Persist the whisper-model variant. Called by the main event loop ONLY on
+/// a successful provision (design AD-10) — the persisted value is always the
+/// last variant that actually reached Ready. Takes `ModelVariant` so an
+/// un-validated string cannot reach the settings file.
+/// `#[allow(dead_code)]`: removed in Task 14 when the event loop calls this.
+#[allow(dead_code)]
+pub fn write_whisper_model(base_dir: &Path, variant: ModelVariant) {
+    let mut map = read_all(base_dir);
+    map.insert(WHISPER_MODEL_KEY.into(), variant.as_str().to_string());
+    write_all(base_dir, &map);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,5 +326,21 @@ mod tests {
         assert!(read_mic_setting(dir.path()));
         assert_eq!(read_whisper_model(dir.path()).as_str(), "medium");
         assert!(!read_capture_paused(dir.path()));
+    }
+
+    #[test]
+    fn write_whisper_model_round_trips() {
+        let dir = tempdir().unwrap();
+        write_whisper_model(dir.path(), parse_variant("small").unwrap());
+        assert_eq!(read_whisper_model(dir.path()).as_str(), "small");
+    }
+
+    #[test]
+    fn write_whisper_model_preserves_other_keys() {
+        let dir = tempdir().unwrap();
+        write_mic_setting(dir.path(), true);
+        write_whisper_model(dir.path(), parse_variant("medium").unwrap());
+        assert!(read_mic_setting(dir.path()));
+        assert_eq!(read_whisper_model(dir.path()).as_str(), "medium");
     }
 }
