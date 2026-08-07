@@ -1,9 +1,9 @@
 //! Whisper-model provisioning (HEU-475 Phase 1, HEU-589 Phase 2).
 //!
 //! Holds the status cell the IPC `Status` handler reads, the per-variant
-//! on-disk report, and [`EngineHandle`] — the shared slot the sink gates on
-//! and `transcribe_loop` resolves per segment. The download state machine and
-//! `SetWhisperModel` wiring land later in Phase 2.
+//! on-disk report, and [`EngineHandle`] — the shared slot the sink gates on,
+//! and which `transcribe_loop` will resolve per segment (Task 11). The
+//! download state machine and `SetWhisperModel` wiring land later in Phase 2.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -212,8 +212,16 @@ impl EngineHandle {
         self.0.read().unwrap().clone()
     }
 
+    /// Install `engine`, returning nothing. The previous engine's destructor
+    /// runs AFTER the write guard is released: dropping the last `Arc` to a
+    /// real engine is `whisper_free` on up to 1.5 GB plus Metal teardown, and
+    /// `is_loaded()` is read from `try_enqueue` on a tokio worker — holding
+    /// the lock across that free would stall the worker for its duration.
+    /// The guard temporary dies at the end of the `replace` statement, so
+    /// `previous` drops with the lock free.
     pub fn set(&self, engine: Arc<dyn chronicle_transcription::Transcriber>) {
-        *self.0.write().unwrap() = Some(engine);
+        let previous = self.0.write().unwrap().replace(engine);
+        drop(previous);
     }
 
     pub fn is_loaded(&self) -> bool {
@@ -227,6 +235,101 @@ mod tests {
     use chronicle_ipc::TranscriptionState;
     use chronicle_transcription::{MODELS_SUBDIR, parse_variant};
     use tempfile::tempdir;
+
+    /// Stand-in engine, tagged so tests can tell two instances apart.
+    struct StubEngine(&'static str);
+
+    impl chronicle_transcription::Transcriber for StubEngine {
+        fn transcribe(
+            &self,
+            _pcm_16k_mono: &[f32],
+        ) -> Result<chronicle_transcription::Transcript, chronicle_transcription::TranscriptionError>
+        {
+            unreachable!("never called in EngineHandle tests")
+        }
+        fn variant(&self) -> &str {
+            self.0
+        }
+    }
+
+    #[test]
+    fn engine_handle_starts_empty() {
+        let handle = EngineHandle::new();
+        assert!(!handle.is_loaded());
+        assert!(handle.get().is_none());
+    }
+
+    #[test]
+    fn engine_handle_set_replaces_and_never_clears() {
+        // The slot is "only ever REPLACED, never cleared" (design §2.1
+        // invariant 1). Pins that a second `set` swaps the engine rather than
+        // being ignored, and that the handle stays loaded across the swap —
+        // the path Task 12/13 drive on every model switch.
+        let handle = EngineHandle::new();
+
+        handle.set(Arc::new(StubEngine("base")));
+        assert!(handle.is_loaded());
+        assert_eq!(handle.get().unwrap().variant(), "base");
+
+        handle.set(Arc::new(StubEngine("small")));
+        assert!(handle.is_loaded());
+        assert_eq!(handle.get().unwrap().variant(), "small");
+    }
+
+    #[test]
+    fn engine_handle_set_drops_previous_engine_outside_the_lock() {
+        // A replaced engine's destructor must NOT run under the write lock:
+        // dropping the last Arc to a real engine is whisper_free on up to
+        // 1.5 GB plus Metal teardown, and `is_loaded()` is read from
+        // `try_enqueue` on a tokio worker, so a blocking read there stalls
+        // that worker for the duration.
+        //
+        // The probe's Drop reports whether the lock was free when it ran.
+        // `try_read` rather than `read` on purpose — if the guard were still
+        // held, a blocking read would hang the test run instead of failing it.
+        use std::sync::atomic::AtomicBool;
+
+        struct LockProbe {
+            handle: Arc<EngineHandle>,
+            lock_was_free: Arc<AtomicBool>,
+        }
+        impl chronicle_transcription::Transcriber for LockProbe {
+            fn transcribe(
+                &self,
+                _pcm_16k_mono: &[f32],
+            ) -> Result<
+                chronicle_transcription::Transcript,
+                chronicle_transcription::TranscriptionError,
+            > {
+                unreachable!("never called")
+            }
+            fn variant(&self) -> &str {
+                "probe"
+            }
+        }
+        impl Drop for LockProbe {
+            fn drop(&mut self) {
+                self.lock_was_free
+                    .store(self.handle.0.try_read().is_ok(), Ordering::SeqCst);
+            }
+        }
+
+        let handle = Arc::new(EngineHandle::new());
+        let lock_was_free = Arc::new(AtomicBool::new(false));
+        handle.set(Arc::new(LockProbe {
+            handle: Arc::clone(&handle),
+            lock_was_free: Arc::clone(&lock_was_free),
+        }));
+
+        // Replacing drops the LockProbe, whose Drop probes the same lock.
+        handle.set(Arc::new(StubEngine("base")));
+
+        assert!(
+            lock_was_free.load(Ordering::SeqCst),
+            "previous engine's destructor ran while the write lock was held"
+        );
+        assert_eq!(handle.get().unwrap().variant(), "base");
+    }
 
     #[test]
     fn cell_defaults_to_missing_with_variant() {

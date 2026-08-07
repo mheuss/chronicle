@@ -287,17 +287,19 @@ async fn main() -> Result<()> {
 
     let audio_storage = Arc::clone(&storage);
     let audio_counters = Arc::clone(&counters);
-    // Transcription: load the model once if present; otherwise stay idle with a
-    // no-op sink (graceful degradation — capture/OCR/IPC unaffected).
+    // Transcription: load the model once if present; otherwise stay idle
+    // (graceful degradation — capture/OCR/IPC unaffected).
     // Set only when the shutdown drain grace expires; tells `transcribe_loop` to
     // stop after the segment it is already working on.
     let stop_transcription = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // One handle, one channel, one sink for every path below. The sink gates
     // on the handle, so while it is empty every enqueue short-circuits to
     // `Disabled` without touching the channel — identical to the old
-    // `NoopTranscriptionSink`, including when `rx` was dropped because no
-    // loop got spawned. Only the successful-load arm sets the handle and
-    // spawns the loop, exactly as before; Task 13 restructures this block.
+    // `NoopTranscriptionSink`. The receiver exists from the moment the channel
+    // is created and, on the paths that never spawn the loop, stays alive as an
+    // unmoved local until `main` returns, so the channel is never closed behind
+    // a live sender. Only the successful-load arm sets the handle and spawns
+    // the loop, exactly as before; Task 13 restructures this block.
     let engine_handle = Arc::new(provisioning::EngineHandle::new());
     // Bounded channel (64), matching the audio bridge: drop-on-full.
     let (transcription_tx, transcription_rx) = tokio::sync::mpsc::channel(64);
