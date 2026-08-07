@@ -79,26 +79,30 @@ pub enum TranscriptionEnqueueResult {
     Disabled,
 }
 
-/// `tokio::mpsc`-backed `TranscriptionSink` (used when a model is loaded).
-pub struct TokioTranscriptionSink(pub mpsc::Sender<TranscriptionJob>);
+/// `tokio::mpsc`-backed `TranscriptionSink`, gated on the engine handle:
+/// while no engine is loaded, enqueues report `Disabled` (idle, not a drop)
+/// — bit-for-bit the old `NoopTranscriptionSink` counter semantics.
+///
+/// The gate is checked BEFORE `try_send`, so an engine-less sink reports
+/// `Disabled` even when its channel is closed. That ordering is the
+/// [Catalog] contract: a daemon booting without a model must not count
+/// drops, and before this task it could not, because it held a sink with no
+/// channel at all.
+pub struct TokioTranscriptionSink {
+    pub tx: mpsc::Sender<TranscriptionJob>,
+    pub engine: std::sync::Arc<crate::provisioning::EngineHandle>,
+}
 
 impl TranscriptionSink for TokioTranscriptionSink {
     fn try_enqueue(&self, job: TranscriptionJob) -> TranscriptionEnqueueResult {
-        match self.0.try_send(job) {
+        if !self.engine.is_loaded() {
+            return TranscriptionEnqueueResult::Disabled;
+        }
+        match self.tx.try_send(job) {
             Ok(()) => TranscriptionEnqueueResult::Enqueued,
             Err(mpsc::error::TrySendError::Full(_)) => TranscriptionEnqueueResult::ChannelFull,
             Err(mpsc::error::TrySendError::Closed(_)) => TranscriptionEnqueueResult::ChannelClosed,
         }
-    }
-}
-
-/// No-op sink used when no model is present — enqueues are silently dropped as
-/// `Disabled` (not counted, since transcription is idle, not failing).
-pub struct NoopTranscriptionSink;
-
-impl TranscriptionSink for NoopTranscriptionSink {
-    fn try_enqueue(&self, _job: TranscriptionJob) -> TranscriptionEnqueueResult {
-        TranscriptionEnqueueResult::Disabled
     }
 }
 
@@ -120,10 +124,37 @@ mod transcription_sink_tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Stand-in engine. Only its presence in the handle matters here — the
+    /// sink gates on `is_loaded()` and never transcribes.
+    struct StubEngine;
+
+    impl chronicle_transcription::Transcriber for StubEngine {
+        fn transcribe(
+            &self,
+            _pcm_16k_mono: &[f32],
+        ) -> Result<chronicle_transcription::Transcript, chronicle_transcription::TranscriptionError>
+        {
+            unreachable!("never called in sink tests")
+        }
+        fn variant(&self) -> &str {
+            "base"
+        }
+    }
+
+    /// An `EngineHandle` with an engine already in it.
+    fn loaded_handle() -> std::sync::Arc<crate::provisioning::EngineHandle> {
+        let handle = std::sync::Arc::new(crate::provisioning::EngineHandle::new());
+        handle.set(std::sync::Arc::new(StubEngine));
+        handle
+    }
+
     #[test]
     fn tokio_sink_reports_full_then_closed() {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
-        let sink = TokioTranscriptionSink(tx);
+        let sink = TokioTranscriptionSink {
+            tx,
+            engine: loaded_handle(),
+        };
         let job = || TranscriptionJob {
             row_id: 1,
             audio_path: PathBuf::from("/tmp/a.opus"),
@@ -145,8 +176,53 @@ mod transcription_sink_tests {
     }
 
     #[test]
-    fn noop_sink_reports_disabled() {
-        let sink = NoopTranscriptionSink;
+    fn tokio_sink_disabled_while_handle_empty() {
+        let handle = crate::provisioning::EngineHandle::new();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let sink = TokioTranscriptionSink {
+            tx,
+            engine: std::sync::Arc::new(handle),
+        };
+        let job = TranscriptionJob {
+            row_id: 1,
+            audio_path: PathBuf::from("/tmp/a.opus"),
+        };
+        assert!(matches!(
+            sink.try_enqueue(job),
+            TranscriptionEnqueueResult::Disabled
+        ));
+    }
+
+    #[test]
+    fn tokio_sink_enqueues_once_engine_set() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let sink = TokioTranscriptionSink {
+            tx,
+            engine: loaded_handle(),
+        };
+        let job = TranscriptionJob {
+            row_id: 1,
+            audio_path: PathBuf::from("/tmp/a.opus"),
+        };
+        assert!(matches!(
+            sink.try_enqueue(job),
+            TranscriptionEnqueueResult::Enqueued
+        ));
+    }
+
+    #[test]
+    fn tokio_sink_disabled_takes_precedence_over_closed_channel() {
+        // [Catalog] pipeline.md: "Disabled means no model is loaded, so it is
+        // idle, not a drop, and is not counted." A closed channel on an
+        // engine-less sink must still report Disabled, not ChannelClosed —
+        // otherwise boot-without-a-model would start counting drops the old
+        // NoopTranscriptionSink never counted.
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+        let sink = TokioTranscriptionSink {
+            tx,
+            engine: std::sync::Arc::new(crate::provisioning::EngineHandle::new()),
+        };
         let job = TranscriptionJob {
             row_id: 1,
             audio_path: PathBuf::from("/tmp/a.opus"),

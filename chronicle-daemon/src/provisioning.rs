@@ -1,8 +1,9 @@
-//! Whisper-model provisioning (HEU-475).
+//! Whisper-model provisioning (HEU-475 Phase 1, HEU-589 Phase 2).
 //!
-//! Phase 1 scope: the status cell the IPC `Status` handler reads, and the
-//! per-variant on-disk report. The download state machine, `EngineHandle`,
-//! and `SetWhisperModel` wiring land in Phase 2.
+//! Holds the status cell the IPC `Status` handler reads, the per-variant
+//! on-disk report, and [`EngineHandle`] — the shared slot the sink gates on
+//! and `transcribe_loop` resolves per segment. The download state machine and
+//! `SetWhisperModel` wiring land later in Phase 2.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -192,6 +193,32 @@ pub fn models_report(base_dir: &Path) -> Vec<ModelEntry> {
             }
         })
         .collect()
+}
+
+/// Shared slot for the live engine. `None` until first provision; then only
+/// ever REPLACED, never cleared — a failed switch keeps the old engine
+/// (design §2.1 invariant 1). RwLock, not ArcSwap: ArcSwap cannot hold
+/// `Arc<dyn Trait>` without a sized wrapper, and at one read per ~30 s
+/// segment, lock cost is irrelevant (AD-3).
+pub struct EngineHandle(std::sync::RwLock<Option<Arc<dyn chronicle_transcription::Transcriber>>>);
+
+impl EngineHandle {
+    pub fn new() -> Self {
+        Self(std::sync::RwLock::new(None))
+    }
+
+    #[allow(dead_code)] // consumed by transcribe_loop in Phase 2 (Task 11)
+    pub fn get(&self) -> Option<Arc<dyn chronicle_transcription::Transcriber>> {
+        self.0.read().unwrap().clone()
+    }
+
+    pub fn set(&self, engine: Arc<dyn chronicle_transcription::Transcriber>) {
+        *self.0.write().unwrap() = Some(engine);
+    }
+
+    pub fn is_loaded(&self) -> bool {
+        self.0.read().unwrap().is_some()
+    }
 }
 
 #[cfg(test)]

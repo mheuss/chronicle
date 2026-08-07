@@ -292,10 +292,21 @@ async fn main() -> Result<()> {
     // Set only when the shutdown drain grace expires; tells `transcribe_loop` to
     // stop after the segment it is already working on.
     let stop_transcription = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let (transcription_sink, transcribe_handle): (
-        Arc<dyn pipeline::sinks::TranscriptionSink>,
-        Option<tokio::task::JoinHandle<()>>,
-    ) = if model_present {
+    // One handle, one channel, one sink for every path below. The sink gates
+    // on the handle, so while it is empty every enqueue short-circuits to
+    // `Disabled` without touching the channel — identical to the old
+    // `NoopTranscriptionSink`, including when `rx` was dropped because no
+    // loop got spawned. Only the successful-load arm sets the handle and
+    // spawns the loop, exactly as before; Task 13 restructures this block.
+    let engine_handle = Arc::new(provisioning::EngineHandle::new());
+    // Bounded channel (64), matching the audio bridge: drop-on-full.
+    let (transcription_tx, transcription_rx) = tokio::sync::mpsc::channel(64);
+    let transcription_sink: Arc<dyn pipeline::sinks::TranscriptionSink> =
+        Arc::new(pipeline::sinks::TokioTranscriptionSink {
+            tx: transcription_tx,
+            engine: Arc::clone(&engine_handle),
+        });
+    let transcribe_handle: Option<tokio::task::JoinHandle<()>> = if model_present {
         // Load the ggml model off the runtime — it's heavy blocking work
         // (seconds for a large variant) and must not stall tokio workers
         // (HEU-480). The cell is already in Loading (set at creation, before
@@ -309,8 +320,9 @@ async fn main() -> Result<()> {
             Ok(Ok(engine)) => {
                 transcription_status.set_ready(whisper_variant);
                 let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(engine);
-                // Bounded channel (64), matching the audio bridge: drop-on-full.
-                let (tx, rx) = tokio::sync::mpsc::channel(64);
+                // Publish before the sink can be reached, so no enqueue sees a
+                // loaded engine with no loop behind it.
+                engine_handle.set(Arc::clone(&engine));
                 // Not the global cancellation token, by design — the loop must
                 // outlive it so the shutdown flush still gets transcribed. This flag
                 // means "finish the segment you are on, then stop", and only the
@@ -318,7 +330,7 @@ async fn main() -> Result<()> {
                 let handle = tokio::spawn(pipeline::transcribe_loop(
                     engine,
                     Arc::clone(&storage),
-                    rx,
+                    transcription_rx,
                     Arc::clone(&stop_transcription),
                 ));
                 log::info!(
@@ -330,10 +342,7 @@ async fn main() -> Result<()> {
                         "cpu"
                     }
                 );
-                (
-                    Arc::new(pipeline::sinks::TokioTranscriptionSink(tx)),
-                    Some(handle),
-                )
+                Some(handle)
             }
             Ok(Err(e)) => {
                 log::error!(
@@ -342,7 +351,7 @@ async fn main() -> Result<()> {
                 // TranscriptionError::Display already carries the
                 // "model load failed:" prefix — don't double it on the wire.
                 transcription_status.set_error(&e.to_string());
-                (Arc::new(pipeline::sinks::NoopTranscriptionSink), None)
+                None
             }
             Err(e) => {
                 log::error!(
@@ -351,13 +360,13 @@ async fn main() -> Result<()> {
                 // JoinError::Display forwards arbitrary panic payloads —
                 // keep the wire string fixed; the log line above has {e}.
                 transcription_status.set_error("model load failed");
-                (Arc::new(pipeline::sinks::NoopTranscriptionSink), None)
+                None
             }
         }
     } else {
         // The startup model-presence check above already logged the
         // "model missing → idle" warning.
-        (Arc::new(pipeline::sinks::NoopTranscriptionSink), None)
+        None
     };
     let audio_store_handle = tokio::spawn(pipeline::audio_store_loop(
         audio_storage,

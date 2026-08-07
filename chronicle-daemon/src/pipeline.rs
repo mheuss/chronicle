@@ -425,6 +425,20 @@ mod tests {
     use std::time::Instant;
     use tempfile::tempdir;
 
+    /// A transcription sink that reports `Disabled` for every job, which is
+    /// what these tests want: they exercise the audio-store path, not
+    /// transcription. Replaces the old `NoopTranscriptionSink` — a gated
+    /// `TokioTranscriptionSink` over an empty `EngineHandle` has the same
+    /// behavior, because the gate short-circuits before the channel is
+    /// touched. The receiver is dropped immediately for the same reason.
+    fn disabled_sink() -> Arc<dyn sinks::TranscriptionSink> {
+        let (tx, _rx) = mpsc::channel(1);
+        Arc::new(sinks::TokioTranscriptionSink {
+            tx,
+            engine: Arc::new(crate::provisioning::EngineHandle::new()),
+        })
+    }
+
     // Shared helpers for the two metadata-cache tests below. Put these
     // at the top of the test module so both tests import from them.
     use std::sync::Mutex as StdMutex;
@@ -598,7 +612,7 @@ mod tests {
         audio_store_loop(
             storage.clone(),
             rx,
-            Arc::new(crate::pipeline::sinks::NoopTranscriptionSink),
+            disabled_sink(),
             PipelineCounters::new(),
         )
         .await;
@@ -706,7 +720,7 @@ mod tests {
         audio_store_loop(
             storage.clone(),
             rx,
-            Arc::new(crate::pipeline::sinks::NoopTranscriptionSink),
+            disabled_sink(),
             PipelineCounters::new(),
         )
         .await;
@@ -724,13 +738,7 @@ mod tests {
         let (storage, _dir) = temp_storage().await;
         let (_tx, rx) = mpsc::channel::<CompletedSegment>(16);
         drop(_tx);
-        audio_store_loop(
-            storage,
-            rx,
-            Arc::new(crate::pipeline::sinks::NoopTranscriptionSink),
-            PipelineCounters::new(),
-        )
-        .await;
+        audio_store_loop(storage, rx, disabled_sink(), PipelineCounters::new()).await;
     }
 
     #[tokio::test]
@@ -756,13 +764,7 @@ mod tests {
         drop(tx);
 
         let counters = PipelineCounters::new();
-        audio_store_loop(
-            storage.clone(),
-            rx,
-            Arc::new(crate::pipeline::sinks::NoopTranscriptionSink),
-            Arc::clone(&counters),
-        )
-        .await;
+        audio_store_loop(storage.clone(), rx, disabled_sink(), Arc::clone(&counters)).await;
 
         assert_eq!(counters.snapshot().audio_segments_persisted, 1);
     }
@@ -796,7 +798,7 @@ mod tests {
         audio_store_loop(
             storage.clone(),
             rx,
-            Arc::new(crate::pipeline::sinks::NoopTranscriptionSink),
+            disabled_sink(),
             PipelineCounters::new(),
         )
         .await;
