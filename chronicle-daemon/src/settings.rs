@@ -35,8 +35,14 @@ fn read_all(base_dir: &Path) -> BTreeMap<String, String> {
 /// Persist the full key=value map atomically. Removes any stale `.tmp` from a
 /// previous crash, creates a fresh `0600` temp file, then renames it over the
 /// destination — so the settings file is never group- or world-readable, even
-/// briefly. Best-effort: write failures are logged, not returned.
-fn write_all(base_dir: &Path, map: &BTreeMap<String, String>) {
+/// briefly.
+///
+/// Failures are logged here and also returned, so each caller picks its own
+/// policy: `write_mic_setting` and `write_capture_paused` ignore the error
+/// (their live state already took effect and stays correct for the session),
+/// while `write_whisper_model` propagates it — a lost model choice is invisible
+/// until the next restart, so it needs a signal the caller can act on.
+fn write_all(base_dir: &Path, map: &BTreeMap<String, String>) -> std::io::Result<()> {
     let path = base_dir.join(SETTINGS_FILE);
     let tmp = base_dir.join(format!("{SETTINGS_FILE}.tmp"));
 
@@ -64,13 +70,16 @@ fn write_all(base_dir: &Path, map: &BTreeMap<String, String>) {
     if let Err(e) = write_result {
         log::warn!("failed to write settings temp file: {e}");
         let _ = std::fs::remove_file(&tmp);
-        return;
+        return Err(e);
     }
 
     if let Err(e) = std::fs::rename(&tmp, &path) {
         log::warn!("failed to persist settings file: {e}");
         let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
+
+    Ok(())
 }
 
 /// Read the persisted microphone setting. A missing file, an unreadable file,
@@ -88,7 +97,7 @@ pub fn read_mic_setting(base_dir: &Path) -> bool {
 pub fn write_mic_setting(base_dir: &Path, on: bool) {
     let mut map = read_all(base_dir);
     map.insert(MIC_KEY.into(), on.to_string());
-    write_all(base_dir, &map);
+    let _ = write_all(base_dir, &map);
 }
 
 /// Read the persisted capture-paused setting. A missing file, an unreadable
@@ -106,7 +115,7 @@ pub fn read_capture_paused(base_dir: &Path) -> bool {
 pub fn write_capture_paused(base_dir: &Path, on: bool) {
     let mut map = read_all(base_dir);
     map.insert(PAUSED_KEY.into(), on.to_string());
-    write_all(base_dir, &map);
+    let _ = write_all(base_dir, &map);
 }
 
 /// Read the persisted whisper-model variant and validate it against the
@@ -128,12 +137,19 @@ pub fn read_whisper_model(base_dir: &Path) -> ModelVariant {
 /// a successful provision (design AD-10) — the persisted value is always the
 /// last variant that actually reached Ready. Takes `ModelVariant` so an
 /// un-validated string cannot reach the settings file.
-/// `#[allow(dead_code)]`: removed in Task 14 when the event loop calls this.
-#[allow(dead_code)]
-pub fn write_whisper_model(base_dir: &Path, variant: ModelVariant) {
+///
+/// Unlike the sibling writers this one is NOT best-effort: it returns the I/O
+/// error. Their live state is already correct for the session, so a failed
+/// persist costs nothing until restart. A failed model persist is different —
+/// the swap succeeded and the UI reports the new variant as active, but the
+/// daemon would silently fall back to the old one on next start. The caller
+/// has to be able to see that and tell the user, which is what AD-10 exists
+/// to guarantee.
+#[allow(dead_code)] // caller added in Task 14 (event loop, persist-on-success)
+pub fn write_whisper_model(base_dir: &Path, variant: ModelVariant) -> std::io::Result<()> {
     let mut map = read_all(base_dir);
     map.insert(WHISPER_MODEL_KEY.into(), variant.as_str().to_string());
-    write_all(base_dir, &map);
+    write_all(base_dir, &map)
 }
 
 #[cfg(test)]
@@ -331,7 +347,7 @@ mod tests {
     #[test]
     fn write_whisper_model_round_trips() {
         let dir = tempdir().unwrap();
-        write_whisper_model(dir.path(), parse_variant("small").unwrap());
+        write_whisper_model(dir.path(), parse_variant("small").unwrap()).unwrap();
         assert_eq!(read_whisper_model(dir.path()).as_str(), "small");
     }
 
@@ -339,8 +355,35 @@ mod tests {
     fn write_whisper_model_preserves_other_keys() {
         let dir = tempdir().unwrap();
         write_mic_setting(dir.path(), true);
-        write_whisper_model(dir.path(), parse_variant("medium").unwrap());
+        write_whisper_model(dir.path(), parse_variant("medium").unwrap()).unwrap();
         assert!(read_mic_setting(dir.path()));
         assert_eq!(read_whisper_model(dir.path()).as_str(), "medium");
+    }
+
+    #[test]
+    fn write_whisper_model_reports_write_failure() {
+        // A base_dir that does not exist makes the temp-file create fail. This
+        // is the failure the model-swap path has to be able to see: the swap
+        // itself succeeded, so only a returned error stops the daemon from
+        // claiming a choice that will not survive the next restart.
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("no-such-subdir");
+        let err = write_whisper_model(&missing, parse_variant("small").unwrap())
+            .expect_err("writing into a missing directory must fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn best_effort_writers_stay_silent_on_failure() {
+        // The mic and pause writers keep their `()` signature on purpose —
+        // their live state already took effect, so a failed persist is logged,
+        // not surfaced. Pinned here so making write_all fallible cannot leak
+        // an error or a panic into them.
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("no-such-subdir");
+        write_mic_setting(&missing, true);
+        write_capture_paused(&missing, true);
+        assert!(!read_mic_setting(&missing));
+        assert!(!read_capture_paused(&missing));
     }
 }
