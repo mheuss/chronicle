@@ -59,9 +59,11 @@ chronicle-daemon/crates/storage/src/
 ├── screenshots.rs     Insert, get, get_timeline, update_ocr_text
 ├── audio.rs           Insert, get, update_transcript
 ├── search.rs          Unified FTS5 search across screenshots and audio
+├── media.rs           Path allocation, canonicalization, recursive walk, delete
 ├── retention.rs       Batch cleanup, orphan file sweep
 └── migrations/
-    └── 001_initial_schema.sql
+    ├── 001_initial_schema.sql
+    └── 002_path_indexes.sql
 ```
 
 `lib.rs` is the public API surface. Every public method is `async` and uses
@@ -112,12 +114,15 @@ ellipsis for context trimming.
 Say you want to add `browser_url` to screenshots.
 
 1. **Create a new migration file.** Add
-   `migrations/002_add_browser_url.sql` with the `ALTER TABLE` statement. Do not
-   modify `001_initial_schema.sql` — existing databases have already run it.
-2. **Register the migration.** In `schema.rs`, add the new file to the
-   `MIGRATIONS` array: `include_str!("migrations/002_add_browser_url.sql")`.
-   The runner uses `PRAGMA user_version` to track which migrations have run. It
-   will run the new one automatically on next open.
+   `migrations/003_add_browser_url.sql` with the `ALTER TABLE` statement. Do not
+   modify a migration that already shipped — existing databases have run it.
+   Number it after the highest existing file; `002_path_indexes.sql` is taken.
+2. **Register the migration.** In `schema.rs`, append the new file to the
+   `MIGRATIONS` array: `include_str!("migrations/003_add_browser_url.sql")`.
+   Order matters — the runner uses the array index plus one as the version
+   number and tracks progress in `PRAGMA user_version`, so append, never insert.
+   It will run the new one automatically on next open, inside a transaction with
+   its version stamp.
 3. **Update the model structs.** Add the field to `ScreenshotMetadata` and
    `Screenshot` in `models.rs`.
 4. **Update queries.** Add the column to the INSERT in `screenshots::insert`,
@@ -148,9 +153,19 @@ by phase 2).
 
 ### Phase 2: Sweep orphan files (`sweep_orphans`)
 
-Walks `screenshots/` and `audio/` directories recursively. For each file, checks
-if a row in the corresponding table references that path. If not, deletes the
-file. This catches files left behind by crashes or interrupted cleanup.
+`sweep_orphans` calls `sweep_media_orphans` once per media table. For each, it
+walks that table's directory (`screenshots/` or `audio/`) recursively, then reads
+all tracked paths for the matching table in a single query into a `HashSet`. Any walked file whose
+canonical path is not in that set gets deleted. This catches files left behind by
+crashes or interrupted cleanup. An empty walk returns early without querying.
+
+The walk runs before the query, not after — the pipeline writes a file before
+inserting its row, so reading the set first would delete a capture whose file
+landed before the walk reached its directory but whose row had not committed
+yet. Covering indexes on the two path columns (migration 002) keep the query off
+the table itself. This narrows the race but does not close it, and it is not safe
+across processes (HEU-591). See `docs/use-cases/storage.md` for the full
+rationale.
 
 ## How to run tests
 

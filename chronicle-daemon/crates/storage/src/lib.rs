@@ -632,6 +632,39 @@ mod tests {
         };
         let storage = Storage::open(config).await.unwrap();
 
+        // Tracked screenshots, allocated and inserted the way production does.
+        // Using allocate_screenshot_path (not a hand-built path) is the point:
+        // it stores whatever canonical form the real code stores, so this test
+        // fails if the sweep's canonicalization ever stops matching it.
+        //
+        // Several rows, not one: a sweep that dropped rows while building its
+        // tracked set — an off-by-one, or a stray LIMIT — passes a single-row
+        // fixture while deleting live captures at scale.
+        let mut tracked_paths = Vec::new();
+        for i in 0..3 {
+            let timestamp = 1_700_000_000_000 + i;
+            let tracked_path = storage
+                .allocate_screenshot_path(timestamp, "display1")
+                .await
+                .unwrap();
+            std::fs::write(&tracked_path, b"tracked data").unwrap();
+            storage
+                .insert_screenshot(ScreenshotMetadata {
+                    timestamp,
+                    display_id: "display1".into(),
+                    app_name: None,
+                    app_bundle_id: None,
+                    window_title: None,
+                    image_path: tracked_path.to_string_lossy().into_owned(),
+                    ocr_text: None,
+                    phash: None,
+                    resolution: None,
+                })
+                .await
+                .unwrap();
+            tracked_paths.push(tracked_path);
+        }
+
         // Simulate a crash: create an orphan file in the screenshots directory
         let orphan_dir = dir.path().join("screenshots/2026/03/21");
         std::fs::create_dir_all(&orphan_dir).unwrap();
@@ -643,6 +676,18 @@ mod tests {
         let stats = storage.sweep_orphans().await.unwrap();
         assert!(stats.bytes_freed > 0, "should have freed orphan bytes");
         assert!(!orphan_file.exists(), "orphan file should be deleted");
+        for tracked_path in &tracked_paths {
+            assert!(
+                tracked_path.exists(),
+                "a screenshot with a DB row must survive the sweep: {}",
+                tracked_path.display()
+            );
+        }
+        assert_eq!(
+            stats.bytes_freed,
+            b"orphan data".len() as u64,
+            "only the orphan's bytes should be freed, not the tracked file's"
+        );
     }
 
     #[tokio::test]

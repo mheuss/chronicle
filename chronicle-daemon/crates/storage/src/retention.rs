@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use rusqlite::{Connection, params};
@@ -131,25 +132,121 @@ pub(crate) fn sweep_orphans(conn: &Connection, media_mgr: &MediaManager) -> Resu
     Ok(bytes_freed)
 }
 
+/// Was `path` modified at or after `cutoff`?
+///
+/// Fails CLOSED: if the metadata or the timestamp is unreadable, report `true`
+/// so the caller keeps the file. The cost of a wrong `true` is one retained
+/// orphan until the next sweep; the cost of a wrong `false` is a deleted
+/// capture.
+fn modified_since(path: &Path, cutoff: std::time::SystemTime) -> bool {
+    match std::fs::metadata(path).and_then(|m| m.modified()) {
+        Ok(modified) => modified >= cutoff,
+        Err(_) => true,
+    }
+}
+
 fn sweep_media_orphans(
     conn: &Connection,
     media: &MediaTable,
     media_mgr: &MediaManager,
 ) -> Result<u64> {
-    let file_list = media_mgr.walk_files(media.subdir);
+    // Walk BEFORE reading the tracked set, never after. Both media writers go
+    // file-then-row — screenshots at pipeline.rs:76 then :121, audio at :391 then
+    // :395 — so "file on disk, row not yet committed" is a real transient state,
+    // and a file is deleted here iff it is in the walk list AND absent from the
+    // set.
+    //
+    // Reading the set first loses any capture whose file lands between the SELECT
+    // and the walk reaching that file's directory: its row commits after its file
+    // by construction, so it can never be in the set. Walking first removes that
+    // window.
+    //
+    // It does NOT close the race. A residual window remains when a writer's
+    // file-then-row gap spans the walk-to-SELECT interval: the file makes the
+    // list and the row misses the set. Note this is also less forgiving than the
+    // per-file COUNT(*) this replaced, where each row had until its own file's
+    // turn in the loop — minutes, which was the HEU-547 bug.
+    //
+    // Tolerability rests on two assumptions, and only the first holds today:
+    //   1. HOLDS, in-process: the sole production caller is main.rs:89, awaited
+    //      before the capture runtime spawns, so this process writes no media
+    //      while the sweep runs. A periodic or IPC-triggered sweep breaks this.
+    //   2. DOES NOT HOLD, cross-process: the only single-instance guard is the
+    //      socket probe in IpcServer::start (main.rs:215), which runs long after
+    //      the sweep, so a second daemon sweeps the shared media directory while
+    //      the first is capturing. Tracked as HEU-591. The symptom is worse than
+    //      a lost file — neither insert checks that the file still exists, so the
+    //      row still commits and leaves a row pointing at nothing, plus an OCR or
+    //      transcription job that can never succeed.
+    //
+    // `sweep_walks_before_reading_tracked_set` pins the ordering.
+    //
+    // The age guard below NARROWS that window. It does not close it, and
+    // HEU-591 stays open. A genuine orphan is left behind by a crash, so it
+    // predates the sweep that finds it; a capture still being written does not.
+    //
+    // With the guard, deletion requires BOTH: the file's last write predates
+    // `sweep_start`, AND its row has not committed by the SELECT. Since
+    // `sweep_start` is taken before the walk, everything written during the walk
+    // is now safe — the walk dominates the walk-to-SELECT window, so that is
+    // most of the old exposure. What remains at risk is a file written
+    // before the sweep began whose row commits after the SELECT: the writer's
+    // file-then-row gap has to span the entire walk. That gap is normally an
+    // encode plus an insert, but nothing bounds it tightly — `busy_timeout` is
+    // 5000 ms, so a contended insert can block for seconds.
+    //
+    // Two caveats on what the mtime actually measures. Audio is encoded in a
+    // staging directory and `rename`d into place (main.rs:219, media.rs:107),
+    // and rename preserves mtime — so for audio this is the staging-encode time,
+    // milliseconds before the file appeared at the swept path, not the moment it
+    // landed there. And `SystemTime::now()` is wall-clock: a backward step only
+    // spares files, but a forward step (an NTP correction at boot, which is
+    // exactly when this runs) can make an in-flight file look older than it is.
+    // Both only bite under the cross-process case above.
+    //
+    // Reclaiming a true orphan created in that same instant is deferred to the
+    // next sweep — which, with no periodic sweep, means the next daemon start.
+    // Worth it: the other direction deletes real captures.
+    let sweep_start = std::time::SystemTime::now();
+
+    let files = media_mgr.walk_files(media.subdir);
+    if files.is_empty() {
+        // Nothing to classify — skip the table read entirely. A fresh install or
+        // a relocated media directory would otherwise pay a full scan for nothing.
+        return Ok(0);
+    }
+
+    // One query for every tracked path in this table. Covered by
+    // idx_<table>_<path_col> (migration 002), so this reads the index rather
+    // than scanning the table. Previously this function ran one
+    // `SELECT COUNT(*)` per file on disk, which is O(files x rows) — see
+    // HEU-547.
+    let tracked: HashSet<String> = {
+        let select_sql = format!("SELECT {} FROM {}", media.path_col, media.table);
+        let mut stmt = conn.prepare(&select_sql)?;
+        stmt.query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<HashSet<_>, _>>()?
+    };
+
     let mut bytes_freed: u64 = 0;
 
-    let count_sql = format!(
-        "SELECT COUNT(*) FROM {} WHERE {} = ?1",
-        media.table, media.path_col
-    );
-
-    for file_path in file_list {
+    for file_path in files {
+        // Canonicalize before comparing: the DB stores canonical paths (see
+        // MediaManager::allocate_path). Fall back to the walked path if
+        // canonicalize fails — the file may have been deleted between the walk
+        // and this call.
         let canonical = std::fs::canonicalize(&file_path).unwrap_or_else(|_| file_path.clone());
-        let path_str = canonical.to_string_lossy().to_string();
-        let count: i64 = conn.query_row(&count_sql, params![path_str], |row| row.get(0))?;
 
-        if count == 0 {
+        if !tracked.contains(canonical.to_string_lossy().as_ref()) {
+            if modified_since(&file_path, sweep_start) {
+                // Untracked but freshly written — treat as a capture in flight,
+                // not an orphan. See the age-guard note above.
+                continue;
+            }
+            // Pass the ORIGINAL walked path, not the canonical one. Either form
+            // validates (MediaManager::validate_path canonicalizes before
+            // comparing against base_dir), but the walked path is what the rest
+            // of this loop reports and what walk_files handed us.
             match media_mgr.delete_file(&file_path) {
                 Ok(freed) => bytes_freed += freed,
                 Err(e) => {
@@ -172,6 +269,120 @@ mod tests {
     use crate::models::{AudioSegmentMetadata, ScreenshotMetadata};
     use crate::schema;
     use crate::{audio, screenshots};
+    use rusqlite::trace::{TraceEvent, TraceEventCodes};
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    /// Serializes every test that drives a `trace_v2` hook. The hooks below are
+    /// bare `fn` pointers (rusqlite cannot take a closure), so they must reach
+    /// their state through process-global statics. `trace_v2` binds
+    /// per-connection, so the hooks themselves never collide — but the statics
+    /// they read do, and two such tests running in parallel would both be flaky
+    /// with no obvious cause. Take this lock for the whole hook lifetime.
+    ///
+    /// `std::sync::Mutex` is NOT reentrant, so taking it twice on one thread
+    /// hangs with no timeout — far worse to diagnose than a failure. Helpers that
+    /// need it therefore take `&HookGuard` rather than locking internally, which
+    /// documents at the signature that the caller already holds it. That is a
+    /// convention, not a capability token — nothing stops a test body, or a
+    /// helper that takes `&HookGuard`, from calling `lock_hooks()` anyway.
+    ///
+    /// Poisoning is ignored: a panicking test has already failed, and letting it
+    /// cascade into unrelated failures only obscures which test broke.
+    static HOOK_LOCK: Mutex<()> = Mutex::new(());
+
+    type HookGuard = std::sync::MutexGuard<'static, ()>;
+
+    fn lock_hooks() -> HookGuard {
+        HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    static SWEEP_QUERY_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    fn count_stmt(evt: TraceEvent<'_>) {
+        if matches!(evt, TraceEvent::Stmt(..)) {
+            SWEEP_QUERY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+    }
+
+    /// Set while `create_file_on_stmt` is registered: the path it should create.
+    static LATE_WRITE_TARGET: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+    /// How many times `create_file_on_stmt` actually created a file. The tests
+    /// assert on this because the hook cannot fail loudly — it runs inside an
+    /// `extern "C"` SQLite callback, where a panic aborts the process instead of
+    /// failing the test, so every error inside it must be swallowed.
+    static LATE_WRITE_FIRES: AtomicUsize = AtomicUsize::new(0);
+
+    /// Stands in for a capture written concurrently with the sweep. Fires when a
+    /// statement executes — i.e. when the sweep reads its tracked set — and drops
+    /// a file on disk with no matching row, the transient state the pipeline
+    /// produces between writing a file and inserting its row.
+    fn create_file_on_stmt(evt: TraceEvent<'_>) {
+        if matches!(evt, TraceEvent::Stmt(..))
+            && let Some(path) = LATE_WRITE_TARGET
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+        {
+            // One-shot: `take()` clears the target so only the FIRST statement
+            // creates the file. Firing on every statement would let the second
+            // media table's SELECT re-create a file the first table's sweep had
+            // correctly deleted, which silently defeats the assertion below.
+            let _ = std::fs::write(&path, b"late capture");
+            // Backdate past the age guard. A file created here is newer than
+            // `sweep_start` either way, so without this the guard spares it
+            // regardless of ordering and `sweep_walks_before_reading_tracked_set`
+            // stops discriminating — verified: with the guard and a live mtime,
+            // the select-first mutant passes every test.
+            if let Ok(f) = std::fs::File::options().write(true).open(&path) {
+                let _ = f.set_modified(std::time::UNIX_EPOCH);
+            }
+            LATE_WRITE_FIRES.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+    }
+
+    /// Run a full `sweep_orphans` over a fixture of `shots` screenshot files and
+    /// `audio_files` audio files, all orphans, and return the number of SQL
+    /// statements it executed.
+    ///
+    /// Takes `&HookGuard` rather than locking: the caller already holds
+    /// `HOOK_LOCK`, and re-taking a non-reentrant mutex would hang.
+    ///
+    /// Both counts must be **> 0**. An empty media directory short-circuits
+    /// before its `SELECT` (the early return in `sweep_media_orphans`), so a zero
+    /// here yields one statement, not two, and the caller's assertion fails with
+    /// a message about scaling that has nothing to do with the real cause.
+    fn sweep_query_count(_hooks: &HookGuard, shots: usize, audio_files: usize) -> usize {
+        assert!(
+            shots > 0 && audio_files > 0,
+            "fixture must be non-empty in both media dirs, got {shots} and {audio_files}"
+        );
+        let conn = setup_db();
+        let dir = tempfile::tempdir().unwrap();
+
+        let screenshots_dir = dir.path().join("screenshots");
+        std::fs::create_dir_all(&screenshots_dir).unwrap();
+        for i in 0..shots {
+            std::fs::write(screenshots_dir.join(format!("orphan{i}.heif")), b"x").unwrap();
+        }
+        let audio_dir = dir.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        for i in 0..audio_files {
+            std::fs::write(audio_dir.join(format!("orphan{i}.opus")), b"x").unwrap();
+        }
+
+        let media_mgr = crate::media::MediaManager::new(dir.path().to_path_buf()).unwrap();
+
+        SWEEP_QUERY_COUNT.store(0, AtomicOrdering::Relaxed);
+        conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(count_stmt));
+        let swept = sweep_orphans(&conn, &media_mgr);
+        conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+        swept.unwrap();
+
+        SWEEP_QUERY_COUNT.load(AtomicOrdering::Relaxed)
+    }
 
     fn setup_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -387,6 +598,326 @@ mod tests {
         let bytes_freed = sweep_orphans(&conn, &media_mgr).unwrap();
         assert!(bytes_freed > 0);
         assert!(!orphan_file.exists());
+    }
+
+    /// Insert a screenshots row pointing at `path`'s canonical form.
+    ///
+    /// Storing the CANONICAL path mirrors `MediaManager::allocate_path`, and it
+    /// is load-bearing: `walk_files` joins from the base_dir as passed
+    /// (`media.rs:176`), not the canonical one, so walked paths keep the
+    /// unresolved form while the DB holds the resolved one. The sweep
+    /// canonicalizes each walked file to bridge that. Storing the unresolved
+    /// path here would make the sweep treat every live file as an orphan and
+    /// delete it. See docs/use-cases/storage.md.
+    fn track_screenshot(conn: &Connection, path: &Path) {
+        let canonical = std::fs::canonicalize(path).unwrap();
+        screenshots::insert(
+            conn,
+            &ScreenshotMetadata {
+                timestamp: now_millis(),
+                display_id: "d1".into(),
+                app_name: None,
+                app_bundle_id: None,
+                window_title: None,
+                image_path: canonical.to_string_lossy().into_owned(),
+                ocr_text: None,
+                phash: None,
+                resolution: None,
+            },
+        )
+        .unwrap();
+    }
+
+    fn track_audio(conn: &Connection, path: &Path) {
+        let canonical = std::fs::canonicalize(path).unwrap();
+        audio::insert(
+            conn,
+            &AudioSegmentMetadata {
+                start_timestamp: now_millis(),
+                end_timestamp: now_millis() + 30_000,
+                source: "mic".into(),
+                audio_path: canonical.to_string_lossy().into_owned(),
+                transcript: None,
+                whisper_model: None,
+                language: None,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn sweep_orphans_keeps_tracked_files_and_deletes_orphans() {
+        let conn = setup_db();
+        let dir = tempfile::tempdir().unwrap();
+
+        // Reach the storage root through a symlink so the sweep's
+        // canonicalization is genuinely exercised no matter where TMPDIR points.
+        // Without this the test leans on macOS happening to put temp dirs under
+        // /var (a symlink to /private/var); on a non-symlinked TMPDIR
+        // canonicalize becomes a no-op and every canonicalization assertion
+        // below silently degrades to trivially true.
+        let real_root = dir.path().join("real_root");
+        std::fs::create_dir_all(&real_root).unwrap();
+        let root = dir.path().join("link_root");
+        std::os::unix::fs::symlink(&real_root, &root).unwrap();
+
+        let screenshots_dir = root.join("screenshots");
+        std::fs::create_dir_all(&screenshots_dir).unwrap();
+        let audio_dir = root.join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+
+        // More tracked rows than CLEANUP_BATCH_SIZE. A set-building SELECT that
+        // borrowed `LIMIT CLEANUP_BATCH_SIZE` from cleanup_media (40 lines above
+        // in this file, a natural pattern to mirror) would drop this fixture's
+        // tail from the tracked set and delete real captures. A single tracked
+        // row cannot see that class of bug at all.
+        let tracked_shots: Vec<PathBuf> = (0..=CLEANUP_BATCH_SIZE)
+            .map(|i| {
+                let path = screenshots_dir.join(format!("tracked_{i:04}.heif"));
+                std::fs::write(&path, b"s").unwrap();
+                track_screenshot(&conn, &path);
+                path
+            })
+            .collect();
+
+        let tracked_audio = audio_dir.join("tracked.opus");
+        std::fs::write(&tracked_audio, b"aa").unwrap();
+        track_audio(&conn, &tracked_audio);
+
+        // Orphan payloads are distinct powers of two, so a short total names
+        // exactly which orphans were missed. This is a diagnostic aid, not a
+        // classification check on its own — the fixture also holds 501 one-byte
+        // tracked files, so other wrong classifications can still sum to 60.
+        // The per-file existence assertions below are what catch those, and
+        // they fire before the byte check.
+        let orphan_shot_a = screenshots_dir.join("orphan_a.heif");
+        std::fs::write(&orphan_shot_a, [b'x'; 4]).unwrap();
+        let orphan_shot_b = screenshots_dir.join("orphan_b.heif");
+        std::fs::write(&orphan_shot_b, [b'x'; 8]).unwrap();
+        let orphan_audio = audio_dir.join("orphan.opus");
+        std::fs::write(&orphan_audio, [b'x'; 16]).unwrap();
+
+        // A file under audio/ whose path is recorded in the SCREENSHOTS table.
+        // The audio sweep must still delete it: membership is per-table, and a
+        // single set merged across both tables would wrongly spare it. This is
+        // what proves SCREENSHOT_TABLE and AUDIO_TABLE stay separate descriptors
+        // for membership, not just for the directory walk.
+        let cross_table = audio_dir.join("cross_table.opus");
+        std::fs::write(&cross_table, [b'x'; 32]).unwrap();
+        track_screenshot(&conn, &cross_table);
+
+        let media_mgr = crate::media::MediaManager::new(root.clone()).unwrap();
+        let bytes_freed = sweep_orphans(&conn, &media_mgr).unwrap();
+
+        for path in &tracked_shots {
+            assert!(
+                path.exists(),
+                "a screenshot with a matching DB row must survive the sweep: {}",
+                path.display()
+            );
+        }
+        assert!(
+            tracked_audio.exists(),
+            "an audio segment with a matching DB row must survive the sweep"
+        );
+        for orphan in [&orphan_shot_a, &orphan_shot_b] {
+            assert!(
+                !orphan.exists(),
+                "a screenshot with no DB row must be deleted: {}",
+                orphan.display()
+            );
+        }
+        assert!(
+            !orphan_audio.exists(),
+            "an audio file with no DB row must be deleted"
+        );
+        assert!(
+            !cross_table.exists(),
+            "an audio-dir file tracked only in the screenshots table is an \
+             orphan to the audio sweep and must be deleted"
+        );
+        assert_eq!(
+            bytes_freed, 60,
+            "only the orphans' bytes should be counted as freed (4 + 8 + 16 + 32)"
+        );
+    }
+
+    /// The sweep must not scale its query count with the number of files on disk.
+    /// Classification tests cannot catch a regression to the per-file `COUNT(*)`
+    /// loop — that implementation passes all of them while taking minutes on a real
+    /// database. This is the guard that actually fails.
+    ///
+    /// Drives the full `sweep_orphans` so both `SCREENSHOT_TABLE` and `AUDIO_TABLE`
+    /// are exercised: they are separate descriptors, and a bad one would be
+    /// invisible to a screenshots-only test.
+    #[test]
+    fn sweep_issues_one_query_per_media_table() {
+        // Two fixtures an order of magnitude apart. Asserting a constant against
+        // one fixture would not actually prove independence from file count —
+        // this compares the two, which is the property that matters.
+        let hooks = lock_hooks();
+        let small = sweep_query_count(&hooks, 5, 3);
+        let large = sweep_query_count(&hooks, 50, 30);
+
+        assert_eq!(
+            small, 2,
+            "sweep must issue exactly one SELECT per media table (2 total)"
+        );
+        assert_eq!(
+            large, small,
+            "sweep query count must not scale with the number of files on disk: \
+             8 files issued {small} queries, 80 files issued {large}"
+        );
+    }
+
+    /// The walk must run BEFORE the tracked-set SELECT. Moving it back below the
+    /// SELECT keeps the query count at 2 and leaves every other test in this file
+    /// green, so without this the ordering is protected by a comment alone — and
+    /// the ordering is the whole fix.
+    ///
+    /// Drives the race deterministically with the trace hook: when the sweep's
+    /// SELECT executes, create a file with no DB row. Walk-first, that file
+    /// postdates the walk, never enters the list, and survives. Select-first, it
+    /// predates the walk, lands in the list, is absent from the set, and is
+    /// deleted — which is exactly the concurrent-capture loss this ordering
+    /// exists to prevent.
+    #[test]
+    fn sweep_walks_before_reading_tracked_set() {
+        let conn = setup_db();
+        let dir = tempfile::tempdir().unwrap();
+        let screenshots_dir = dir.path().join("screenshots");
+        std::fs::create_dir_all(&screenshots_dir).unwrap();
+
+        // A tracked file, so the walk is non-empty and the SELECT actually runs.
+        let tracked = screenshots_dir.join("tracked.heif");
+        std::fs::write(&tracked, b"tracked").unwrap();
+        track_screenshot(&conn, &tracked);
+
+        let late_file = screenshots_dir.join("late_capture.heif");
+        let media_mgr = crate::media::MediaManager::new(dir.path().to_path_buf()).unwrap();
+
+        let _hooks = lock_hooks();
+        LATE_WRITE_FIRES.store(0, AtomicOrdering::Relaxed);
+        *LATE_WRITE_TARGET.lock().unwrap_or_else(|e| e.into_inner()) = Some(late_file.clone());
+        conn.trace_v2(
+            TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(create_file_on_stmt),
+        );
+        let swept = sweep_orphans(&conn, &media_mgr);
+        conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+        *LATE_WRITE_TARGET.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        swept.unwrap();
+
+        // Both preconditions, asserted rather than assumed. The hook cannot fail
+        // loudly — it runs inside an extern "C" callback where a panic aborts —
+        // so if either of these silently stopped holding, the assertion below
+        // would pass for the wrong reason and this test would go vacuous.
+        assert_eq!(
+            LATE_WRITE_FIRES.load(AtomicOrdering::Relaxed),
+            1,
+            "the hook must create the file exactly once; a second firing would \
+             re-create a file an earlier table's sweep had correctly deleted"
+        );
+        assert_eq!(
+            std::fs::metadata(&late_file).unwrap().modified().unwrap(),
+            std::time::UNIX_EPOCH,
+            "the hook must have backdated the file, or the age guard spares it \
+             regardless of ordering and this test proves nothing"
+        );
+
+        assert!(
+            late_file.exists(),
+            "a file created while the sweep was reading its tracked set must \
+             survive — it postdates the walk, so the sweep never classified it. \
+             Its deletion means the SELECT now runs before the walk."
+        );
+        assert!(tracked.exists(), "the tracked file must still survive");
+    }
+
+    #[test]
+    fn modified_since_reports_age_against_the_cutoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, b"x").unwrap();
+
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+
+        assert!(
+            !modified_since(&file, future),
+            "a file written before the cutoff is older than it"
+        );
+        assert!(
+            modified_since(&file, past),
+            "a file written after the cutoff is newer than it"
+        );
+        assert!(
+            modified_since(&dir.path().join("does_not_exist"), past),
+            "unreadable metadata must fail CLOSED (report newer, so the caller keeps the file)"
+        );
+
+        // Equality must count as "newer", or a filesystem whose mtime resolution
+        // lands a just-written file exactly on the cutoff would let the sweep
+        // delete it. This is the whole reason the comparison is `>=`, and a `>`
+        // mutant passes every other test in the suite.
+        let own_mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+        assert!(
+            modified_since(&file, own_mtime),
+            "a file whose mtime equals the cutoff must be treated as newer"
+        );
+    }
+
+    /// An untracked file that is newer than the sweep is a capture in flight, not
+    /// an orphan — the pipeline writes the file before committing its row, so
+    /// deleting it destroys a real capture. This guard is what keeps the sweep's
+    /// residual race (HEU-591) from costing data.
+    ///
+    /// The fixture stamps the file's mtime forward rather than racing the sweep.
+    /// That is deliberate: the file has to be present when the walk enumerates it
+    /// (or the ordering alone spares it and this proves nothing) while still
+    /// being newer than `sweep_start`. A file created by the trace hook is
+    /// created *after* the walk, so it exercises the ordering, not this guard.
+    #[test]
+    fn sweep_spares_untracked_files_newer_than_the_sweep() {
+        let conn = setup_db();
+        let dir = tempfile::tempdir().unwrap();
+        let screenshots_dir = dir.path().join("screenshots");
+        std::fs::create_dir_all(&screenshots_dir).unwrap();
+
+        // A settled orphan: untracked and older than the sweep. Must still be
+        // deleted, so the test cannot pass by the guard disabling the sweep.
+        let stale_orphan = screenshots_dir.join("stale_orphan.heif");
+        std::fs::write(&stale_orphan, b"stale").unwrap();
+
+        // A capture caught mid-write: on disk before the walk, mtime after the
+        // sweep starts, no row yet.
+        let in_flight = screenshots_dir.join("in_flight.heif");
+        std::fs::write(&in_flight, b"in flight").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&in_flight)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+            .unwrap();
+
+        let media_mgr = crate::media::MediaManager::new(dir.path().to_path_buf()).unwrap();
+        let bytes_freed = sweep_orphans(&conn, &media_mgr).unwrap();
+
+        assert!(
+            in_flight.exists(),
+            "an untracked file newer than the sweep must survive — it is a \
+             capture in flight, not an orphan"
+        );
+        assert!(
+            !stale_orphan.exists(),
+            "an orphan older than the sweep must still be deleted, or the age \
+             guard has disabled the sweep entirely"
+        );
+        assert_eq!(
+            bytes_freed,
+            b"stale".len() as u64,
+            "only the settled orphan's bytes should be freed"
+        );
     }
 
     #[test]
