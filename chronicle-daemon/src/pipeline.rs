@@ -1381,8 +1381,18 @@ mod tests {
         .unwrap();
 
         // Block until the job is parked inside `transcribe`, then swap.
-        entered_rx.await.expect("job never entered transcribe");
+        // Bounded on purpose: the oneshot sender lives in the gate, inside the
+        // engine Arc this test still holds, so nothing drops it if `transcribe`
+        // is never reached (a decode failure returns before it). A bare await
+        // would wedge the suite instead of reporting.
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered_rx)
+            .await
+            .expect("timed out waiting for the job to enter transcribe")
+            .expect("job never entered transcribe");
         handle.set(Arc::new(engine_variant("second", "small")));
+        // Self-contained: without this, a no-op `set` would leave the row
+        // reading "base" and the test would pass having proven nothing.
+        assert_eq!(handle.get().unwrap().variant(), "small");
         release_tx.send(()).expect("release channel closed");
 
         drop(tx);
