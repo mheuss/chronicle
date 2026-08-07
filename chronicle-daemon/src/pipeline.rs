@@ -201,7 +201,7 @@ pub async fn ocr_loop(storage: Arc<Storage>, mut ocr_rx: mpsc::Receiver<(i64, Pa
 /// blocking pool is still, separately, being waited on. Do not swap this flag
 /// for the global token, and do not let `main`'s timeout consume the handle.
 pub async fn transcribe_loop(
-    engine: Arc<dyn chronicle_transcription::Transcriber>,
+    engine: Arc<crate::provisioning::EngineHandle>,
     storage: Arc<Storage>,
     mut rx: mpsc::Receiver<crate::pipeline::sinks::TranscriptionJob>,
     stop_after_current: Arc<std::sync::atomic::AtomicBool>,
@@ -209,6 +209,22 @@ pub async fn transcribe_loop(
     use std::sync::atomic::Ordering;
 
     while let Some(job) = rx.recv().await {
+        // Resolve per job and hold for the whole job: the transcript is
+        // produced AND stamped by the engine that ran it — a swap mid-queue
+        // affects the next job, never the current one (design §3.3).
+        let Some(engine) = engine.get() else {
+            // Benign race with the sink's is_loaded gate: idle, not failing —
+            // same "Disabled" semantics, no counter. Bottom stop-check still
+            // runs via the shared code path below.
+            log::debug!(
+                "transcription skipped (no engine) for segment {}",
+                job.row_id
+            );
+            if stop_after_current.load(Ordering::Relaxed) {
+                break;
+            }
+            continue;
+        };
         // Clone a separate Arc for the blocking closure; the outer `engine` stays
         // owned so `engine.variant()` is usable after the await.
         let engine_for_blocking = Arc::clone(&engine);
@@ -1151,6 +1167,7 @@ mod tests {
 
     struct FakeTranscriber {
         text: String,
+        variant: String,
     }
     impl chronicle_transcription::Transcriber for FakeTranscriber {
         fn transcribe(
@@ -1164,7 +1181,23 @@ mod tests {
             })
         }
         fn variant(&self) -> &str {
-            "base"
+            &self.variant
+        }
+    }
+
+    /// A `FakeTranscriber` already installed in an `EngineHandle` — the shape
+    /// `transcribe_loop` takes now that it resolves per segment.
+    fn handle_with(engine: FakeTranscriber) -> Arc<crate::provisioning::EngineHandle> {
+        let handle = Arc::new(crate::provisioning::EngineHandle::new());
+        handle.set(Arc::new(engine));
+        handle
+    }
+
+    /// The common case: a fake engine reporting variant "base".
+    fn base_engine(text: &str) -> FakeTranscriber {
+        FakeTranscriber {
+            text: text.into(),
+            variant: "base".into(),
         }
     }
 
@@ -1196,12 +1229,102 @@ mod tests {
         (storage, row_id, path, dir)
     }
 
+    /// The point of resolving per segment: a swap mid-queue must affect the
+    /// NEXT job, never the one already in flight, and each transcript must be
+    /// stamped by the engine that actually produced it (design §3.3).
+    #[tokio::test]
+    async fn transcribe_loop_swap_mid_queue_stamps_each_engine() {
+        let (storage, row_a, opus_path, _dir) = persist_segment_with_opus().await;
+        let row_b = storage
+            .insert_audio_segment(chronicle_storage::AudioSegmentMetadata {
+                start_timestamp: 1_700_000_030_000,
+                end_timestamp: 1_700_000_060_000,
+                source: "mic".into(),
+                audio_path: opus_path.to_string_lossy().into_owned(),
+                transcript: None,
+                whisper_model: None,
+                language: None,
+            })
+            .await
+            .unwrap();
+
+        let handle = handle_with(FakeTranscriber {
+            text: "first".into(),
+            variant: "base".into(),
+        });
+        let (tx, rx) = mpsc::channel(4);
+        let loop_handle = tokio::spawn(transcribe_loop(
+            Arc::clone(&handle),
+            storage.clone(),
+            rx,
+            never_stop(),
+        ));
+        tokio::task::yield_now().await;
+
+        tx.send(crate::pipeline::sinks::TranscriptionJob {
+            row_id: row_a,
+            audio_path: opus_path.clone(),
+        })
+        .await
+        .unwrap();
+        // Wait until job A is persisted, then swap engines and send job B.
+        for _ in 0..200 {
+            if storage
+                .get_audio_segment(row_a)
+                .await
+                .unwrap()
+                .transcript
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        handle.set(Arc::new(FakeTranscriber {
+            text: "second".into(),
+            variant: "small".into(),
+        }));
+        tx.send(crate::pipeline::sinks::TranscriptionJob {
+            row_id: row_b,
+            audio_path: opus_path.clone(),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        loop_handle.await.unwrap();
+
+        let a = storage.get_audio_segment(row_a).await.unwrap();
+        let b = storage.get_audio_segment(row_b).await.unwrap();
+        assert_eq!(a.whisper_model.as_deref(), Some("base"));
+        assert_eq!(b.whisper_model.as_deref(), Some("small"));
+        assert_eq!(a.transcript.as_deref(), Some("first"));
+        assert_eq!(b.transcript.as_deref(), Some("second"));
+    }
+
+    /// Benign race with the sink's `is_loaded` gate: a job can reach the loop
+    /// with the handle empty. That is idle, not failing — skip it, do not
+    /// error and do not write a row.
+    #[tokio::test]
+    async fn transcribe_loop_skips_job_when_handle_empty() {
+        let (storage, row_id, opus_path, _dir) = persist_segment_with_opus().await;
+        let handle = Arc::new(crate::provisioning::EngineHandle::new());
+        let (tx, rx) = mpsc::channel(4);
+        tx.send(crate::pipeline::sinks::TranscriptionJob {
+            row_id,
+            audio_path: opus_path,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        transcribe_loop(handle, storage.clone(), rx, never_stop()).await;
+        let seg = storage.get_audio_segment(row_id).await.unwrap();
+        assert!(seg.transcript.is_none(), "no engine → skipped, not errored");
+    }
+
     #[tokio::test]
     async fn transcribe_loop_writes_transcript() {
         let (storage, row_id, opus_path, _dir) = persist_segment_with_opus().await;
-        let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(FakeTranscriber {
-            text: "the quick brown fox".into(),
-        });
+        let engine = handle_with(base_engine("the quick brown fox"));
         let (tx, rx) = mpsc::channel(4);
         tx.send(crate::pipeline::sinks::TranscriptionJob {
             row_id,
@@ -1221,9 +1344,7 @@ mod tests {
     #[tokio::test]
     async fn transcribe_loop_skips_empty_transcript() {
         let (storage, row_id, opus_path, _dir) = persist_segment_with_opus().await;
-        let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(FakeTranscriber {
-            text: String::new(),
-        });
+        let engine = handle_with(base_engine(""));
         let (tx, rx) = mpsc::channel(4);
         tx.send(crate::pipeline::sinks::TranscriptionJob {
             row_id,
@@ -1241,8 +1362,7 @@ mod tests {
     #[tokio::test]
     async fn transcribe_loop_continues_on_missing_file() {
         let (storage, row_id, _opus_path, _dir) = persist_segment_with_opus().await;
-        let engine: Arc<dyn chronicle_transcription::Transcriber> =
-            Arc::new(FakeTranscriber { text: "x".into() });
+        let engine = handle_with(base_engine("x"));
         let (tx, rx) = mpsc::channel(4);
         tx.send(crate::pipeline::sinks::TranscriptionJob {
             row_id,
@@ -1282,9 +1402,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(FakeTranscriber {
-            text: "drained".into(),
-        });
+        let engine = handle_with(base_engine("drained"));
         let (tx, rx) = mpsc::channel(4);
         let loop_handle = tokio::spawn(transcribe_loop(engine, storage.clone(), rx, never_stop()));
         // `tokio::spawn` only queues the task, and a `send` into a channel with free
@@ -1339,9 +1457,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(FakeTranscriber {
-            text: "persisted".into(),
-        });
+        let engine = handle_with(base_engine("persisted"));
         let (tx, rx) = mpsc::channel(4);
         for id in [row_id, abandoned_id] {
             tx.send(crate::pipeline::sinks::TranscriptionJob {
@@ -1398,8 +1514,7 @@ mod tests {
             .await
             .unwrap();
         // Whitespace only — trims to empty, so every job takes the skip path.
-        let engine: Arc<dyn chronicle_transcription::Transcriber> =
-            Arc::new(FakeTranscriber { text: "   ".into() });
+        let engine = handle_with(base_engine("   "));
         let (tx, rx) = mpsc::channel(4);
         for id in [row_id, queued_id] {
             tx.send(crate::pipeline::sinks::TranscriptionJob {

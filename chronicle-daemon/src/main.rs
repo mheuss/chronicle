@@ -329,14 +329,14 @@ async fn main() -> Result<()> {
                 // window today (`audio_store_loop` spawns further down), but
                 // Task 13 drives swaps while capture is already running, where
                 // the same ordering stops being harmless.
-                engine_handle.set(Arc::clone(&engine));
+                engine_handle.set(engine);
                 transcription_status.set_ready(whisper_variant);
                 // Not the global cancellation token, by design — the loop must
                 // outlive it so the shutdown flush still gets transcribed. This flag
                 // means "finish the segment you are on, then stop", and only the
                 // drain timeout below sets it. See `transcribe_loop`'s contract.
                 let handle = tokio::spawn(pipeline::transcribe_loop(
-                    engine,
+                    Arc::clone(&engine_handle),
                     Arc::clone(&storage),
                     transcription_rx,
                     Arc::clone(&stop_transcription),

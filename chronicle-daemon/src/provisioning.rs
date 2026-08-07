@@ -207,7 +207,6 @@ impl EngineHandle {
         Self(std::sync::RwLock::new(None))
     }
 
-    #[allow(dead_code)] // consumed by transcribe_loop in Phase 2 (Task 11)
     pub fn get(&self) -> Option<Arc<dyn chronicle_transcription::Transcriber>> {
         self.0.read().unwrap().clone()
     }
