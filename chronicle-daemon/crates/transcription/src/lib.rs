@@ -134,6 +134,23 @@ pub fn model_present(base_dir: &Path, variant: ModelVariant) -> bool {
     model_path(base_dir, variant).is_file()
 }
 
+/// Stream-SHA1 a file and compare against `expected` (lowercase hex,
+/// case-insensitive compare). Used by the daemon's downloader (NFR-1) —
+/// digest guards integrity, TLS guards authenticity (AD-6).
+///
+/// Streams via [`std::io::copy`] rather than reading the file in, so a 1.5 GB
+/// model never lands in memory. Returns `Err` only for I/O failures; a file
+/// that reads fine but hashes differently is `Ok(false)`, which is a rejected
+/// download rather than a broken one.
+pub fn verify_sha1(path: &Path, expected: &str) -> std::io::Result<bool> {
+    use sha1::{Digest, Sha1};
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha1::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    let actual = format!("{:x}", hasher.finalize());
+    Ok(actual.eq_ignore_ascii_case(expected))
+}
+
 /// A finished transcription.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transcript {
@@ -361,6 +378,28 @@ mod tests {
     /// Construct a `ModelVariant` for tests via the real allow-list parser.
     fn variant(name: &str) -> ModelVariant {
         parse_variant(name).expect("test variant must be allow-listed")
+    }
+
+    #[test]
+    fn verify_sha1_accepts_matching_digest() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("f");
+        std::fs::write(&p, b"hello world").unwrap();
+        // Known vector: sha1("hello world")
+        assert!(verify_sha1(&p, "2aae6c35c94fcfb415dbe95f408b9ce91ee846ed").unwrap());
+    }
+
+    #[test]
+    fn verify_sha1_rejects_mismatch() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("f");
+        std::fs::write(&p, b"hello world").unwrap();
+        assert!(!verify_sha1(&p, "0000000000000000000000000000000000000000").unwrap());
+    }
+
+    #[test]
+    fn verify_sha1_errors_on_missing_file() {
+        assert!(verify_sha1(std::path::Path::new("/no/such/file"), "00").is_err());
     }
 
     #[test]
