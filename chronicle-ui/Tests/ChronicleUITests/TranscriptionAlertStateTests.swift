@@ -75,8 +75,8 @@ struct TranscriptionAlertStateTests {
     }
 
     // One X click silences the operation the user dismissed — not every
-    // future one. A dismissal during a download must survive its own poll
-    // ticks, but a NEW operation starts fresh.
+    // future one. A dismissal must survive a popover reopen (which re-runs
+    // `.task` with the same state), but a NEW operation starts fresh.
     @Test func aDismissDoesNotSilenceLaterProvisions() {
         let alert = TranscriptionAlertState()
         alert.evaluate(status: status(.missing))
@@ -86,6 +86,53 @@ struct TranscriptionAlertStateTests {
         alert.dismissed = true
         alert.evaluate(status: status(.downloading))
         #expect(!alert.shouldShow, "…but the clear is edge-triggered, so this stays dismissed")
+    }
+
+    // Dismissing "Downloading base model…" is not dismissing "it failed".
+    // Different information — and the Retry button lives only on the banner,
+    // so swallowing the failure leaves no way back inside the session.
+    @Test func aDismissedDownloadStillReportsItsFailure() {
+        let alert = TranscriptionAlertState()
+        alert.evaluate(status: status(.missing))
+        alert.evaluate(status: status(.downloading))
+        alert.dismissed = true
+        alert.evaluate(status: status(.error))
+        #expect(alert.shouldShow, "the failure is news the user has not dismissed")
+    }
+
+    // ...but the SAME operation progressing is not news. downloading →
+    // verifying → loading must not resurrect a banner the user put away.
+    @Test func aDismissSurvivesTheSameOperationProgressing() {
+        let alert = TranscriptionAlertState()
+        alert.evaluate(status: status(.downloading))
+        alert.dismissed = true
+        alert.evaluate(status: status(.verifying))
+        #expect(!alert.shouldShow)
+        alert.evaluate(status: status(.loading))
+        #expect(!alert.shouldShow)
+    }
+
+    // A dismissed failure stays dismissed across a popover reopen...
+    @Test func aDismissedFailureStaysDismissedOnReopen() {
+        let alert = TranscriptionAlertState()
+        alert.evaluate(status: status(.downloading))
+        alert.evaluate(status: status(.error))
+        alert.dismissed = true
+        alert.evaluate(status: status(.error))
+        #expect(!alert.shouldShow)
+    }
+
+    // ...but a retry after it is a new operation. `provisionEngaged` cannot
+    // spot this on its own: `.error` is not a resolve, so it is still set.
+    // Leaving `.error` for an in-flight state only happens because the daemon
+    // accepted a fresh request.
+    @Test func aRetryAfterADismissedFailureShowsAgain() {
+        let alert = TranscriptionAlertState()
+        alert.evaluate(status: status(.downloading))
+        alert.evaluate(status: status(.error))
+        alert.dismissed = true
+        alert.evaluate(status: status(.downloading))
+        #expect(alert.shouldShow)
     }
 
     // A fast failure can land between two 30s status ticks with no in-flight

@@ -118,12 +118,9 @@ struct SearchPopoverView: View {
             if let status = connection.lastStatus {
                 transcriptionAlert.evaluate(status: status)
             }
-            // A rejection describes one attempt, not a state. Once the state
-            // moves it is stale, and leaving it would put "Already working on
-            // it…" under a headline that says the switch failed — hiding the
-            // daemon's own error, which is the only thing that distinguishes
-            // a failed download from a corrupt file. Safe to clear here: a
-            // rejection changes no daemon state, so it cannot clear itself.
+            // A rejection describes one attempt, not a state, so it goes stale
+            // the moment the state moves. Safe to clear here: a rejection
+            // changes no daemon state, so it cannot clear itself.
             provisionRejection = nil
         }
         // 1 Hz status poll while a provision runs and the popover is visible.

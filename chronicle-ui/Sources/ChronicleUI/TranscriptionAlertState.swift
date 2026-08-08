@@ -23,11 +23,15 @@ final class TranscriptionAlertState {
     /// Set ONLY by the X button. Nothing in `evaluate` sets it — that
     /// conflation is what made the banner un-raisable after the first resolve.
     ///
-    /// Cleared when a NEW operation starts, so one dismissal silences the
-    /// thing the user dismissed rather than every future download. The clear
-    /// is edge-triggered on purpose; a level-triggered one would re-show the
-    /// banner on every poll tick and make it impossible to dismiss during a
-    /// download.
+    /// Cleared when genuinely new information arrives — a new operation
+    /// starting, or one failing — so a dismissal silences what the user put
+    /// away rather than everything after it.
+    ///
+    /// The clear is edge-triggered, keyed on `lastRaisingState`. The re-entry
+    /// it guards against is a popover REOPEN: `evaluate` runs from a
+    /// `.task(id:)` keyed on the state, so an unchanged state does not re-run
+    /// it, but re-appearing re-runs the task with whatever state is current.
+    /// Level-triggered, that would silently undo a dismissal.
     var dismissed: Bool = false
 
     /// True iff the first status snapshot that carried a transcription block
@@ -51,6 +55,12 @@ final class TranscriptionAlertState {
     /// with no progress anywhere in the popover and its failure would offer no
     /// Retry: `bootedWithoutModel` is false on that path and never re-latches.
     private var provisionEngaged: Bool = false
+
+    /// The last state that put the banner on screen, so `evaluate` can tell an
+    /// edge from a level. Without it, a popover reopen — which re-runs
+    /// `.task(id:)` with the state unchanged — is indistinguishable from a
+    /// genuine transition.
+    private var lastRaisingState: TranscriptionState?
 
     var shouldShow: Bool { (bootedWithoutModel || provisionEngaged) && !dismissed }
 
@@ -77,15 +87,32 @@ final class TranscriptionAlertState {
         // ever being observed — so keying only on `isProvisioning` would leave
         // the user with a broken switch and no way to retry it.
         if Self.raisesBanner(state) {
-            // Edge-triggered: only the transition INTO a new operation clears
-            // a previous dismissal. Level-triggered, every poll tick would
-            // un-dismiss and the banner could not be dismissed during a
-            // download. One X click silences the thing the user dismissed —
-            // not every future download.
-            if !provisionEngaged {
+            // A dismissal covers the thing that was on screen, not everything
+            // that follows. Two edges bring genuinely NEW information and so
+            // clear it:
+            //
+            //   • a new operation starting. `!provisionEngaged` catches the
+            //     usual case, but not a retry after a failure — `.error` is
+            //     not a resolve, so the flag is still set. Coming out of
+            //     `.error` into an in-flight state can only happen because
+            //     the daemon accepted a fresh request, so that is the edge.
+            //   • an operation failing. Dismissing "Downloading base model…"
+            //     is not dismissing "it failed" — and the Retry button lives
+            //     only on the banner, so swallowing this left no way back
+            //     inside the session.
+            //
+            // Both are edges, not levels. `.downloading → .verifying →
+            // .loading` is one operation progressing and must NOT re-raise a
+            // banner the user put away; nor may a popover reopen, which
+            // re-runs `.task` with the state unchanged.
+            let startsNewOperation =
+                !provisionEngaged || (lastRaisingState == .error && Self.isProvisioning(state))
+            let justFailed = state == .error && lastRaisingState != .error
+            if startsNewOperation || justFailed {
                 dismissed = false
             }
             provisionEngaged = true
+            lastRaisingState = state
         }
 
         if Self.isResolved(state) {
