@@ -580,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn set_whisper_model_request_round_trip() {
+    fn set_whisper_model_request_deserializes() {
         let req: Request =
             serde_json::from_str(r#"{"type":"set_whisper_model","variant":"small"}"#).unwrap();
         assert_eq!(

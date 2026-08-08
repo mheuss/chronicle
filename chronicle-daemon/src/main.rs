@@ -67,14 +67,46 @@ fn handle_provision_event(base_dir: &std::path::Path, evt: provisioning::Provisi
                 Ok(()) => {
                     log::info!("whisper model '{variant}' provisioned; setting persisted")
                 }
+                // The io::Error from open/rename carries no path, so name the
+                // directory — otherwise an operator gets "No space left on
+                // device" twice with nothing saying which file.
                 Err(e) => log::error!(
                     "whisper model '{variant}' is serving, but persisting the setting \
-                     failed: {e} — the daemon will fall back to the previous variant \
-                     on next start"
+                     under {} failed: {e} — the daemon will fall back to the previous \
+                     variant on next start",
+                    base_dir.display()
                 ),
             }
         }
     }
+}
+
+/// Decide and start one model switch. Returns the accept/reject answer the
+/// caller must reply with, plus the spawned task when one was started.
+///
+/// **Sync on purpose.** AD-9 says the reply must not wait on the download or
+/// the load, and a `fn` returning a `JoinHandle` cannot await the provision
+/// even by accident — the contract is structural rather than a rule someone
+/// has to remember. Extracted from the event-loop arm because no
+/// handler-level test can reach that arm: the handler tests supply their own
+/// fake loop, so an `await` here would stall the real event loop for the
+/// length of a download with the whole suite still green.
+fn begin_model_switch(
+    provisioner: &Arc<provisioning::ProvisionerContext>,
+    variant: chronicle_transcription::ModelVariant,
+    evt_tx: &tokio::sync::mpsc::Sender<provisioning::ProvisionEvent>,
+) -> (bool, Option<tokio::task::JoinHandle<()>>) {
+    if !provisioner.try_begin(variant) {
+        return (false, None);
+    }
+    let ctx = Arc::clone(provisioner);
+    let evt_tx = evt_tx.clone();
+    (
+        true,
+        Some(tokio::spawn(
+            async move { ctx.provision(variant, evt_tx).await },
+        )),
+    )
 }
 
 /// Arm or clear the start-retry budget from a reconcile outcome (HEU-575):
@@ -465,6 +497,10 @@ async fn main() -> Result<()> {
     // always-equal flag.
     mic_ready.store(true, Ordering::Release);
     capture_ready.store(true, Ordering::Release);
+    // The provision currently in flight, if any. Only one can exist — the
+    // provisioner's in-flight CAS guarantees it — so the latest handle is the
+    // only one worth holding, and shutdown waits on it below.
+    let mut provision_task: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         tokio::select! {
             res = tokio::signal::ctrl_c() => {
@@ -518,12 +554,17 @@ async fn main() -> Result<()> {
                 // work. try_begin runs HERE and not in the IPC handler so
                 // accept/reject is serialized with everything else this loop
                 // owns.
-                let accepted = provisioner.try_begin(cmd.variant);
-                if accepted {
-                    let ctx = Arc::clone(&provisioner);
-                    let evt_tx = provision_evt_tx.clone();
-                    let variant = cmd.variant;
-                    tokio::spawn(async move { ctx.provision(variant, evt_tx).await });
+                // A switch to the ALREADY-loaded variant is accepted and
+                // reloaded rather than short-circuited. Deliberate: AD-11's
+                // retry-after-load-failure works by re-requesting the same
+                // variant, so a "same variant → no-op" guard would have to be
+                // Ready-gated to avoid breaking it. The cost is a brief ~2x
+                // model RAM while both engines are alive — noted for
+                // finish-branch triage rather than guarded here.
+                let (accepted, task) =
+                    begin_model_switch(&provisioner, cmd.variant, &provision_evt_tx);
+                if task.is_some() {
+                    provision_task = task;
                 }
                 let _ = cmd.reply.send(accepted);
             }
@@ -574,9 +615,33 @@ async fn main() -> Result<()> {
     while let Ok(cmd) = model_rx.try_recv() {
         let _ = cmd.reply.send(false);
     }
-    // A provision that finished while we were shutting down still earned its
-    // persist — applying these is cheap and keeps the next boot on the
-    // variant the user actually got.
+    // Wait for an in-flight provision BEFORE closing its event channel. It
+    // holds a `provision_evt_tx` clone, so closing first would turn a Ready
+    // it is about to emit into a dropped persist: the model file landed, the
+    // engine swapped, and the next boot still comes up on the old variant
+    // with nothing user-visible. That is the AD-10 divergence arriving
+    // through the back door.
+    //
+    // Bounded, because the alternative is waiting out a 1.5 GB download
+    // inside launchd's exit window. Abandoning is safe: the partial `.tmp` is
+    // swept by `cleanup_stale_tmps` at the next boot. Note `abort()` does not
+    // stop a `spawn_blocking` model load that has already started — runtime
+    // drop still waits for it, the same property the transcription drain
+    // below reasons about.
+    if let Some(mut task) = provision_task {
+        const PROVISION_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+        if tokio::time::timeout(PROVISION_GRACE, &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+            log::warn!(
+                "model provisioning still running at shutdown; abandoning it — \
+                 any partial download is swept at next start"
+            );
+        }
+    }
+    // Now safe to close: anything the provision emitted is already buffered.
     provision_evt_rx.close();
     while let Ok(evt) = provision_evt_rx.try_recv() {
         handle_provision_event(storage.base_dir(), evt);
@@ -705,6 +770,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn begin_model_switch_spawns_and_rejects_a_second_while_busy() {
+        // Covers the event-loop arm, which no handler test can reach — the
+        // handler tests supply their own fake loop. A listener that accepts
+        // nothing parks the first provision in the HTTP read, so the busy
+        // rejection below is deterministic rather than a race with a fast
+        // failure.
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let ctx = provisioning::ProvisionerContext::new_for_test_with_url(
+            dir.path(),
+            &format!("http://127.0.0.1:{port}/x"),
+        );
+        let (evt_tx, _evt_rx) = tokio::sync::mpsc::channel(4);
+
+        let (accepted, task) = begin_model_switch(
+            &ctx,
+            chronicle_transcription::parse_variant("small").unwrap(),
+            &evt_tx,
+        );
+        assert!(accepted, "the slot was free");
+        let task = task.expect("an accepted switch starts a task");
+        assert!(
+            !task.is_finished(),
+            "the provision is still running — begin_model_switch returned without it"
+        );
+
+        let (accepted2, task2) = begin_model_switch(
+            &ctx,
+            chronicle_transcription::parse_variant("base").unwrap(),
+            &evt_tx,
+        );
+        assert!(!accepted2, "one at a time — the slot is taken");
+        assert!(task2.is_none(), "a rejected switch starts no task");
+
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn failed_provision_leaves_settings_untouched() {
         // A failing switch emits no event and must not move the persisted
         // variant — after a restart the daemon boots the last WORKING one
@@ -722,11 +826,12 @@ mod tests {
             "http://127.0.0.1:1/x", // refused connection → provision fails
         );
         let (evt_tx, mut evt_rx) = tokio::sync::mpsc::channel(4);
-        ctx.provision(
-            chronicle_transcription::parse_variant("small").unwrap(),
-            evt_tx,
-        )
-        .await;
+        let small = chronicle_transcription::parse_variant("small").unwrap();
+        // provision() documents that the caller must already have won
+        // try_begin; honour it so this test models the production pairing
+        // rather than a shape no real call site uses.
+        assert!(ctx.try_begin(small));
+        ctx.provision(small, evt_tx).await;
         assert!(
             evt_rx.try_recv().is_err(),
             "no event from a failed provision"

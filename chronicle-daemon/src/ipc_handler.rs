@@ -196,9 +196,14 @@ impl DaemonHandler {
     ///
     /// `status` is re-read from the cell AFTER the reply arrives, never
     /// echoed from the request: the event loop commits the entering state
-    /// inside `try_begin` before it answers, so this read is what makes the
-    /// reply carry `Downloading`/`Loading` rather than the stale state
-    /// (design §2.2).
+    /// inside `try_begin` before it answers, so this read cannot return the
+    /// stale pre-request state (design §2.2).
+    ///
+    /// It is NOT a promise of `Downloading`/`Loading` specifically. On the
+    /// accept path the spawned provision is already running and may have
+    /// reached `Verifying`, `Ready` or `Error` before this read — a disk
+    /// precheck failure gets there almost immediately. The wire contract is
+    /// the honest one: whatever the state is after the decision.
     fn set_whisper_model(&self, variant: &str) -> Response {
         let stats = || self.transcription_status.stats(self.storage.base_dir());
 
