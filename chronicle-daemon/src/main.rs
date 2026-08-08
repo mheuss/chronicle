@@ -86,11 +86,13 @@ fn handle_provision_event(base_dir: &std::path::Path, evt: provisioning::Provisi
 ///
 /// **Sync on purpose.** AD-9 says the reply must not wait on the download or
 /// the load, and a `fn` returning a `JoinHandle` cannot await the provision
-/// even by accident — the contract is structural rather than a rule someone
-/// has to remember. Extracted from the event-loop arm because no
-/// handler-level test can reach that arm: the handler tests supply their own
-/// fake loop, so an `await` here would stall the real event loop for the
-/// length of a download with the whole suite still green.
+/// *inside this helper* — which is exactly where the slip would otherwise go
+/// unnoticed. It does not make the property airtight: the caller can still
+/// await the handle it gets back, and no test here would catch that.
+/// Extracted from the event-loop arm because no handler-level test can reach
+/// that arm — the handler tests supply their own fake loop, so an `await`
+/// there would stall the real event loop for the length of a download with
+/// the whole suite still green.
 fn begin_model_switch(
     provisioner: &Arc<provisioning::ProvisionerContext>,
     variant: chronicle_transcription::ModelVariant,
@@ -497,9 +499,13 @@ async fn main() -> Result<()> {
     // always-equal flag.
     mic_ready.store(true, Ordering::Release);
     capture_ready.store(true, Ordering::Release);
-    // The provision currently in flight, if any. Only one can exist — the
-    // provisioner's in-flight CAS guarantees it — so the latest handle is the
-    // only one worth holding, and shutdown waits on it below.
+    // The provision currently in flight, if any. At most one is ever doing
+    // real work — the provisioner's in-flight CAS guarantees it — so the
+    // latest handle is the only one worth holding, and shutdown waits on it
+    // below. (Strictly, `InFlightGuard` drops a hair before the task itself
+    // finishes, so a new switch can win the slot while the old handle is
+    // technically still unfinished. Harmless: by then the superseded task has
+    // already sent its event and has nothing left but to return.)
     let mut provision_task: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         tokio::select! {
@@ -563,6 +569,11 @@ async fn main() -> Result<()> {
                 // finish-branch triage rather than guarded here.
                 let (accepted, task) =
                     begin_model_switch(&provisioner, cmd.variant, &provision_evt_tx);
+                // Load-bearing, not defensive noise: a rejection means a
+                // provision IS in flight, so `provision_task` is holding its
+                // live handle. Assigning unconditionally would overwrite it
+                // with None, detaching the running task and reopening the
+                // shutdown bug below — for the "user clicks twice" case.
                 if task.is_some() {
                     provision_task = task;
                 }
@@ -595,6 +606,12 @@ async fn main() -> Result<()> {
             }
         }
     }
+    // Set when an owned task/thread panicked during shutdown. Those panics are
+    // deliberately swallowed mid-sequence so the rest of the shutdown still
+    // runs; this flag surfaces them in the exit code once it is done. Declared
+    // here rather than further down because the provision wait below is now
+    // the first step that can observe one.
+    let mut shutdown_failed = false;
     // Drain any control commands that raced this shutdown signal: reply now
     // so the IPC handler returns immediately instead of waiting out its
     // timeout. For mic, sending `MicState::Error` maps to `ok:false`.
@@ -623,22 +640,48 @@ async fn main() -> Result<()> {
     // through the back door.
     //
     // Bounded, because the alternative is waiting out a 1.5 GB download
-    // inside launchd's exit window. Abandoning is safe: the partial `.tmp` is
-    // swept by `cleanup_stale_tmps` at the next boot. Note `abort()` does not
-    // stop a `spawn_blocking` model load that has already started — runtime
-    // drop still waits for it, the same property the transcription drain
-    // below reasons about.
+    // inside launchd's exit window — but the right bound depends on which
+    // phase we interrupt, and the two are not symmetric:
+    //
+    //   Downloading — abandoning costs a partial `.tmp`, which
+    //     `cleanup_stale_tmps` sweeps at the next boot. Cheap. 2s.
+    //   Verifying/Loading — the file has already downloaded, verified, and
+    //     landed. There is no `.tmp` left to sweep, and the ONLY thing
+    //     abandoning costs is the setting: the model sits on disk unused and
+    //     the next boot comes up on the old variant. That is the same silent
+    //     divergence as above, reached through a narrower door. The remaining
+    //     work is one bounded load whose blocking half we pay for regardless
+    //     (see below), so give it the same grace as the transcription drain.
+    //
+    // `abort()` does not stop a `spawn_blocking` load that has already
+    // started — runtime drop waits for it either way. What abort buys is
+    // OVERLAP: the load finishes alongside the rest of shutdown instead of
+    // serializing ahead of it. That is the argument for aborting rather than
+    // awaiting, and it is why the longer grace below costs little in practice.
     if let Some(mut task) = provision_task {
-        const PROVISION_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
-        if tokio::time::timeout(PROVISION_GRACE, &mut task)
-            .await
-            .is_err()
-        {
-            task.abort();
-            log::warn!(
-                "model provisioning still running at shutdown; abandoning it — \
-                 any partial download is swept at next start"
-            );
+        const DOWNLOAD_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+        const LAND_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+        let grace = match transcription_status.stats(storage.base_dir()).state {
+            chronicle_ipc::TranscriptionState::Downloading => DOWNLOAD_GRACE,
+            _ => LAND_GRACE,
+        };
+        match tokio::time::timeout(grace, &mut task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                // The provision panicked. Nothing was persisted either way,
+                // but say so rather than counting it as a clean finish —
+                // the transcription drain below treats this shape the same.
+                shutdown_failed = true;
+                log::error!("model provisioning task failed: {e}");
+            }
+            Err(_) => {
+                task.abort();
+                log::warn!(
+                    "model provisioning still running after {}s at shutdown; \
+                     abandoning it — any partial download is swept at next start",
+                    grace.as_secs()
+                );
+            }
         }
     }
     // Now safe to close: anything the provision emitted is already buffered.
@@ -672,10 +715,6 @@ async fn main() -> Result<()> {
     // supervisor, which releases the &audio_pipeline borrow so
     // audio_pipeline.stop() (which needs &mut self) can run next.
     let poisoned = supervisor.shutdown().await;
-    // Set when an owned task/thread panicked during shutdown. Those panics are
-    // deliberately swallowed mid-sequence so the transcription drain still runs;
-    // this flag surfaces them in the exit code once the drain is done.
-    let mut shutdown_failed = false;
 
     // Stop audio pipeline — encoding thread sees EOF, flushes segments.
     if let Err(e) = audio_pipeline.stop() {
@@ -716,7 +755,9 @@ async fn main() -> Result<()> {
         // drop blocks until every blocking worker finishes its current task, so
         // worst-case exit is DRAIN_GRACE plus the in-flight whisper call either way;
         // the same delay precedes the `exit(3)` poison handoff. Kept short to leave
-        // headroom inside launchd's 20s default ExitTimeOut.
+        // headroom inside launchd's 20s default ExitTimeOut — which this is no
+        // longer the sole consumer of: the provision wait above can add up to 5s
+        // before we get here. The two together still clear 20s comfortably.
         const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
         // Borrow the handle — do NOT let `timeout` consume it. Dropping a JoinHandle
         // detaches the task, and runtime drop then destroys its future *without
@@ -772,10 +813,14 @@ mod tests {
     #[tokio::test]
     async fn begin_model_switch_spawns_and_rejects_a_second_while_busy() {
         // Covers the event-loop arm, which no handler test can reach — the
-        // handler tests supply their own fake loop. A listener that accepts
-        // nothing parks the first provision in the HTTP read, so the busy
-        // rejection below is deterministic rather than a race with a fast
-        // failure.
+        // handler tests supply their own fake loop.
+        //
+        // What makes the busy rejection deterministic is that `try_begin`'s
+        // CAS runs synchronously BEFORE the spawn, so the slot is taken the
+        // moment the first call returns — not the listener. The listener is
+        // belt-and-braces for the day this gains `flavor = "multi_thread"`:
+        // it accepts nothing, so a polled provision would park in the HTTP
+        // read rather than failing fast and freeing the slot.
         let dir = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -792,10 +837,10 @@ mod tests {
         );
         assert!(accepted, "the slot was free");
         let task = task.expect("an accepted switch starts a task");
-        assert!(
-            !task.is_finished(),
-            "the provision is still running — begin_model_switch returned without it"
-        );
+        // Tautological on this current-thread runtime — nothing has polled
+        // the task yet. Kept because it stops being free the moment someone
+        // adds `flavor = "multi_thread"`, and it documents the shape.
+        assert!(!task.is_finished(), "the task has not been polled yet");
 
         let (accepted2, task2) = begin_model_switch(
             &ctx,

@@ -1017,10 +1017,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn set_whisper_model_replies_before_any_provisioning_completes() {
-        // AD-9: the reply must not wait on download or load. The fake event
-        // loop replies immediately after accepting, and the wall-clock bound
-        // — far under the 20s command timeout — is what pins the contract.
+    async fn set_whisper_model_reply_does_not_wait_on_the_loop() {
+        // Named for what it measures: handler-to-loop round-trip latency.
+        // It does NOT pin AD-9's no-wait-on-provisioning property — the fake
+        // loop below never provisions, so the bound would pass against a
+        // handler that waited out a real download. That property lives in
+        // `begin_model_switch` and its test in main.rs; the previous name
+        // ("...before_any_provisioning_completes") was a false signpost
+        // pointing here.
         let (handler, mut model_rx, cell, _dir) = handler_with_model_channel(8, true).await;
         tokio::spawn(async move {
             while let Some(cmd) = model_rx.recv().await {
