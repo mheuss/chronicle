@@ -606,11 +606,14 @@ async fn main() -> Result<()> {
             }
         }
     }
-    // Set when an owned task/thread panicked during shutdown. Those panics are
-    // deliberately swallowed mid-sequence so the rest of the shutdown still
-    // runs; this flag surfaces them in the exit code once it is done. Declared
-    // here rather than further down because the provision wait below is now
-    // the first step that can observe one.
+    // Set when an owned task/thread panic is OBSERVED during shutdown — for
+    // the provision join below, the panic itself may have happened much
+    // earlier and only surfaces here, since nothing clears `provision_task`
+    // when a provision completes. Those panics are deliberately swallowed
+    // mid-sequence so the rest of the shutdown still runs; this flag surfaces
+    // them in the exit code once it is done. Declared here rather than
+    // further down because the provision wait is now the first step that can
+    // observe one.
     let mut shutdown_failed = false;
     // Drain any control commands that raced this shutdown signal: reply now
     // so the IPC handler returns immediately instead of waiting out its
@@ -645,13 +648,24 @@ async fn main() -> Result<()> {
     //
     //   Downloading — abandoning costs a partial `.tmp`, which
     //     `cleanup_stale_tmps` sweeps at the next boot. Cheap. 2s.
-    //   Verifying/Loading — the file has already downloaded, verified, and
-    //     landed. There is no `.tmp` left to sweep, and the ONLY thing
-    //     abandoning costs is the setting: the model sits on disk unused and
-    //     the next boot comes up on the old variant. That is the same silent
-    //     divergence as above, reached through a narrower door. The remaining
-    //     work is one bounded load whose blocking half we pay for regardless
-    //     (see below), so give it the same grace as the transcription drain.
+    //   Verifying — the rename has NOT happened yet (`finalize_model` hashes
+    //     first, renames after), so the `.tmp` is still there and abandoning
+    //     costs exactly what it costs above. The longer grace is not about
+    //     what is lost here — it is that finishing the hash *reaches* the
+    //     expensive phase below, and re-downloading to get back to it is the
+    //     waste worth avoiding.
+    //   Loading — now the file has downloaded, verified, and landed. There is
+    //     no `.tmp` left to sweep, and the ONLY thing abandoning costs is the
+    //     setting: the model sits on disk unused and the next boot comes up on
+    //     the old variant. That is the same silent divergence as above,
+    //     reached through a narrower door. The remaining work is one bounded
+    //     load whose blocking half we pay for regardless (see below), so give
+    //     it the same grace as the transcription drain.
+    //
+    // The state is sampled once, so a download that completes just after the
+    // read gets the short bound applied to a load. That is the original bug
+    // with a ~2s window instead of an unbounded one — strictly better, and
+    // not worth a re-check loop, but it is a window, not a guarantee.
     //
     // `abort()` does not stop a `spawn_blocking` load that has already
     // started — runtime drop waits for it either way. What abort buys is
@@ -676,9 +690,18 @@ async fn main() -> Result<()> {
             }
             Err(_) => {
                 task.abort();
+                // Name the consequence the operator actually gets, which
+                // differs by phase: a swept partial, or a model that landed
+                // but whose setting never persisted.
+                let cost = if grace == DOWNLOAD_GRACE {
+                    "any partial download is swept at next start"
+                } else {
+                    "if the model had already landed, the setting did not \
+                     persist and the next start will use the previous variant"
+                };
                 log::warn!(
                     "model provisioning still running after {}s at shutdown; \
-                     abandoning it — any partial download is swept at next start",
+                     abandoning it — {cost}",
                     grace.as_secs()
                 );
             }
@@ -755,9 +778,12 @@ async fn main() -> Result<()> {
         // drop blocks until every blocking worker finishes its current task, so
         // worst-case exit is DRAIN_GRACE plus the in-flight whisper call either way;
         // the same delay precedes the `exit(3)` poison handoff. Kept short to leave
-        // headroom inside launchd's 20s default ExitTimeOut — which this is no
-        // longer the sole consumer of: the provision wait above can add up to 5s
-        // before we get here. The two together still clear 20s comfortably.
+        // headroom inside launchd's 20s default ExitTimeOut — which this was
+        // never the sole consumer of, and is less so now that the provision
+        // wait above can add up to 5s. The unbounded steps between them
+        // (`ipc_server.shutdown`, `supervisor.shutdown`, the bridge join, the
+        // audio-store await) are the ones with no ceiling; these two explicit
+        // waits total 10s of the 20s and are the part we actually control.
         const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
         // Borrow the handle — do NOT let `timeout` consume it. Dropping a JoinHandle
         // detaches the task, and runtime drop then destroys its future *without

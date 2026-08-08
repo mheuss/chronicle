@@ -1021,8 +1021,9 @@ mod tests {
         // Named for what it measures: handler-to-loop round-trip latency.
         // It does NOT pin AD-9's no-wait-on-provisioning property — the fake
         // loop below never provisions, so the bound would pass against a
-        // handler that waited out a real download. That property lives in
-        // `begin_model_switch` and its test in main.rs; the previous name
+        // handler that waited out a real download. That property is
+        // structural in `begin_model_switch`'s signature — a sync `fn`
+        // returning a `JoinHandle` — and no test pins it. The previous name
         // ("...before_any_provisioning_completes") was a false signpost
         // pointing here.
         let (handler, mut model_rx, cell, _dir) = handler_with_model_channel(8, true).await;
