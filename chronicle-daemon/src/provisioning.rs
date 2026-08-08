@@ -414,14 +414,21 @@ pub async fn download_model(
         // `verify_sha1` reads back through that same cache, so it would not
         // catch the gap either. On the blocking pool because forcing
         // writeback of a multi-GB file is not a short operation.
-        tokio::task::spawn_blocking(move || file.sync_all())
-            .await
-            // JoinError::Display forwards arbitrary panic payloads, and this
-            // error string reaches the UI banner — keep it fixed.
-            .map_err(|e| {
+        // Both arms get the same banner lead-in. JoinError::Display forwards
+        // arbitrary panic payloads, and a bare io::Error reads as
+        // "No space left on device (os error 28)" — neither belongs in the
+        // UI unprefixed. The real error goes to the log either way.
+        match tokio::task::spawn_blocking(move || file.sync_all()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                log::error!("model write failed: {e}");
+                anyhow::bail!("download failed: could not write the model file ({e})");
+            }
+            Err(e) => {
                 log::error!("model write task failed: {e}");
-                anyhow::anyhow!("download failed: could not write the model file")
-            })??;
+                anyhow::bail!("download failed: could not write the model file");
+            }
+        }
         Ok(())
     }
     .await;
@@ -704,10 +711,14 @@ impl ProvisionerContext {
                 // while capture is already flowing.
                 self.handle.set(engine);
                 self.cell.set_ready(variant);
-                // Only THIS variant's marker. Clearing unconditionally would
-                // let `fail A → succeed B → retry A` reload A's corrupt file
+                // Clear only when the marker names the variant that just
+                // loaded. Clearing unconditionally would let
+                // `fail A → succeed B → retry A` reload A's corrupt file
                 // instead of re-downloading it, breaking the promise the
                 // banner just made ("retrying will re-download the file").
+                // This is one slot, not per-variant tracking: `fail A →
+                // fail C` still loses A's marker. Good enough — the marker
+                // only ever accelerates a retry, never gates correctness.
                 {
                     let mut marker = self.last_load_failed.lock().unwrap();
                     if *marker == Some(variant) {
@@ -765,18 +776,31 @@ pub async fn boot(
     cleanup_stale_tmps(base_dir);
 
     if !chronicle_transcription::model_present(base_dir, variant) {
-        // The startup presence check already logged the "model missing → idle"
-        // warning. This reconciles the cell with what boot ACTUALLY found —
-        // normally a no-op, but it is the one transition back to Missing in
-        // the whole state machine, and it is what keeps a file deleted during
-        // startup from stranding the daemon in Loading.
+        // Reconciles the cell with what boot ACTUALLY found. Normally a
+        // no-op — `main` already published Missing and logged the
+        // "model missing → idle" warning — but it is the one transition back
+        // to Missing in the whole state machine, and it is what keeps a file
+        // deleted during startup from stranding the daemon in Loading.
+        //
+        // In that case `main` took the PRESENT branch and logged nothing, so
+        // without the warning below the operator would get a Missing banner
+        // with no explanation anywhere in the log. Only fires on the real
+        // transition; the ordinary no-op stays quiet.
+        if cell.stats(base_dir).state != TranscriptionState::Missing {
+            log::warn!(
+                "whisper model \"{variant}\" was present at startup but is gone now — \
+                 transcription is off; the rest of Chronicle runs normally"
+            );
+        }
         cell.set_missing();
         return;
     }
 
     // Re-assert Loading for the same reason: `main` set it from an older
     // presence check, and on the "absent then created" ordering it would not
-    // have set it at all.
+    // have set it at all. That ordering also leaves `main`'s "not downloaded"
+    // warning in the log contradicting a successful load — the
+    // "transcription engine loaded" line below is what settles it.
     cell.set_loading(variant);
     let owned = base_dir.to_path_buf();
     let load = tokio::task::spawn_blocking(move || {

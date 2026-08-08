@@ -204,10 +204,10 @@ fn warn_abandoned_queue(abandoned: usize) {
 /// cancel would drop that tail un-transcribed, log a spurious "channel closed",
 /// and inflate `transcription_dropped` on every clean exit.
 ///
-/// `stop_after_current` is checked at the bottom of the body — never the top —
-/// and again on the empty-handle skip path, which `continue`s past the bottom
-/// check and so must observe the flag itself. It exists so `main` never has to
-/// drop our `JoinHandle` to stop waiting.
+/// `stop_after_current` is checked *after* the current segment is persisted,
+/// never before it — and again on the empty-handle skip path, which has
+/// nothing to persist and `continue`s past the bottom check. It exists so
+/// `main` never has to drop our `JoinHandle` to stop waiting.
 /// Dropping it would detach this task, and runtime drop destroys a detached
 /// future without polling it — discarding a transcript whose whisper call the
 /// blocking pool is still, separately, being waited on. Do not swap this flag
