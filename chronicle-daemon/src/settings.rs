@@ -145,7 +145,6 @@ pub fn read_whisper_model(base_dir: &Path) -> ModelVariant {
 /// daemon would silently fall back to the old one on next start. The caller
 /// has to be able to see that and tell the user, which is what AD-10 exists
 /// to guarantee.
-#[allow(dead_code)] // caller added in Task 14 (event loop, persist-on-success)
 pub fn write_whisper_model(base_dir: &Path, variant: ModelVariant) -> std::io::Result<()> {
     let mut map = read_all(base_dir);
     map.insert(WHISPER_MODEL_KEY.into(), variant.as_str().to_string());

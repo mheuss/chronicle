@@ -45,6 +45,38 @@ fn spawn_start_retry(tx: tokio::sync::mpsc::Sender<()>, delay: std::time::Durati
     });
 }
 
+/// Handle a completed provision: persist the variant that just started
+/// serving (AD-10, "persist on success").
+///
+/// **The sole call site is the event loop**, and that is a correctness
+/// requirement, not a style choice. All three settings writers share one
+/// fixed temp path (`settings.tmp`) — see the single-writer note at the mic
+/// arm below — so serialization on this loop is the only thing making that
+/// safe. Off-loop, a lost race surfaces as `AlreadyExists`, and worse, the
+/// loser's cleanup can delete the winner's temp file and break its rename.
+/// Extracted as a free function purely so it stays unit-testable.
+///
+/// A failed persist is surfaced, never swallowed: the swap already happened
+/// and the UI is now reporting the new variant as active, so a silent failure
+/// here means the daemon quietly reverts on next start — exactly the
+/// divergence AD-10 exists to prevent.
+fn handle_provision_event(base_dir: &std::path::Path, evt: provisioning::ProvisionEvent) {
+    match evt {
+        provisioning::ProvisionEvent::Ready { variant } => {
+            match settings::write_whisper_model(base_dir, variant) {
+                Ok(()) => {
+                    log::info!("whisper model '{variant}' provisioned; setting persisted")
+                }
+                Err(e) => log::error!(
+                    "whisper model '{variant}' is serving, but persisting the setting \
+                     failed: {e} — the daemon will fall back to the previous variant \
+                     on next start"
+                ),
+            }
+        }
+    }
+}
+
 /// Arm or clear the start-retry budget from a reconcile outcome (HEU-575):
 /// `StartFailed` arms the next backoff step (or reports an exhausted
 /// budget); every other outcome ends the incident and restores the budget.
@@ -155,6 +187,14 @@ async fn main() -> Result<()> {
     let (capture_tx, mut capture_rx) = tokio::sync::mpsc::channel::<ipc_handler::CaptureCommand>(8);
     let initial_capture_paused = settings::read_capture_paused(storage.base_dir());
     let capture_paused = Arc::new(AtomicBool::new(initial_capture_paused));
+    // Model-switch control channel (HEU-475). The handler forwards
+    // SetWhisperModel here; the event loop decides accept/reject and spawns
+    // the provision.
+    let (model_tx, mut model_rx) = tokio::sync::mpsc::channel::<ipc_handler::ModelCommand>(8);
+    // Provision completions flow back so the event loop — and only the event
+    // loop — persists the variant. See `handle_provision_event`.
+    let (provision_evt_tx, mut provision_evt_rx) =
+        tokio::sync::mpsc::channel::<provisioning::ProvisionEvent>(8);
     // Power observer (HEU-284). Sleep/wake transitions arrive on `power_rx`
     // and drive the supervisor's sleep flags. The observer thread is not
     // joined (design §4); dropping the handle is fine — process exit reaps
@@ -211,6 +251,7 @@ async fn main() -> Result<()> {
         Arc::clone(&capture_paused),
         Arc::clone(&capture_ready),
         Arc::clone(&transcription_status),
+        model_tx,
     );
     let ipc_server = IpcServer::start(&socket_path, handler, cancel.clone()).await?;
     log::info!("IPC server started");
@@ -303,6 +344,15 @@ async fn main() -> Result<()> {
         &engine_handle,
     )
     .await;
+    // Built AFTER boot, over the same cell and handle. boot() must finish
+    // before the event loop can drive a provision, or the two would race for
+    // the engine slot — `boot().await` above is what guarantees that, and it
+    // is load-bearing now rather than incidental.
+    let provisioner = provisioning::ProvisionerContext::new(
+        Arc::clone(&transcription_status),
+        Arc::clone(&engine_handle),
+        storage.base_dir(),
+    );
     // One handle, one channel, one sink, one loop — unconditionally. "No
     // model" is just an empty handle: the sink gates on it, so every enqueue
     // short-circuits to `Disabled` without touching the channel, identical to
@@ -408,9 +458,11 @@ async fn main() -> Result<()> {
     // supervisor's `start()` reads but never writes the mic setting when
     // restoring it on boot/resume/wake, so it can't race this loop's write.)
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    // Open the readiness gates: from here the loop drains `mic_rx` and
-    // `capture_rx`, so the IPC handler can forward toggles instead of
-    // rejecting them.
+    // Open the readiness gates: from here the loop drains `mic_rx`,
+    // `capture_rx` and `model_rx`, so the IPC handler can forward toggles
+    // instead of rejecting them. All gates open together, which is why the
+    // model path reuses `capture_ready` rather than carrying a third
+    // always-equal flag.
     mic_ready.store(true, Ordering::Release);
     capture_ready.store(true, Ordering::Release);
     loop {
@@ -458,6 +510,26 @@ async fn main() -> Result<()> {
                 note_reconcile_outcome(&outcome, &mut start_retry, &retry_tx);
                 let _ = cmd.reply.send(paused);
             }
+            Some(cmd) = model_rx.recv() => {
+                // Accept = the provisioner slot was free. try_begin commits
+                // the entering state (Downloading/Loading) synchronously, so
+                // the reply below already carries it (§2.2). Reply
+                // immediately (AD-9); the spawned provision() does the slow
+                // work. try_begin runs HERE and not in the IPC handler so
+                // accept/reject is serialized with everything else this loop
+                // owns.
+                let accepted = provisioner.try_begin(cmd.variant);
+                if accepted {
+                    let ctx = Arc::clone(&provisioner);
+                    let evt_tx = provision_evt_tx.clone();
+                    let variant = cmd.variant;
+                    tokio::spawn(async move { ctx.provision(variant, evt_tx).await });
+                }
+                let _ = cmd.reply.send(accepted);
+            }
+            Some(evt) = provision_evt_rx.recv() => {
+                handle_provision_event(storage.base_dir(), evt);
+            }
             Some(evt) = power_rx.recv() => {
                 log::info!("power event: {evt:?}");
                 let outcome = match evt {
@@ -494,6 +566,20 @@ async fn main() -> Result<()> {
     capture_rx.close();
     while let Ok(cmd) = capture_rx.try_recv() {
         drop(cmd.reply);
+    }
+    // Explicit `false` rather than a dropped sender: a model switch that
+    // raced shutdown was genuinely not accepted, and saying so immediately
+    // beats making the UI wait out the 20s timeout.
+    model_rx.close();
+    while let Ok(cmd) = model_rx.try_recv() {
+        let _ = cmd.reply.send(false);
+    }
+    // A provision that finished while we were shutting down still earned its
+    // persist — applying these is cheap and keeps the next boot on the
+    // variant the user actually got.
+    provision_evt_rx.close();
+    while let Ok(evt) = provision_evt_rx.try_recv() {
+        handle_provision_event(storage.base_dir(), evt);
     }
     // Discard any power events that raced shutdown — no reply channel to
     // satisfy. The observer thread itself is not joined; process exit reaps
@@ -605,6 +691,52 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ready_event_persists_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        handle_provision_event(
+            dir.path(),
+            provisioning::ProvisionEvent::Ready {
+                variant: chronicle_transcription::parse_variant("small").unwrap(),
+            },
+        );
+        assert_eq!(settings::read_whisper_model(dir.path()).as_str(), "small");
+    }
+
+    #[tokio::test]
+    async fn failed_provision_leaves_settings_untouched() {
+        // A failing switch emits no event and must not move the persisted
+        // variant — after a restart the daemon boots the last WORKING one
+        // (AD-10). This drives the real provisioner rather than asserting on
+        // the absence of a call, so a provision that wrongly emitted Ready on
+        // failure would be caught here too.
+        let dir = tempfile::tempdir().unwrap();
+        settings::write_whisper_model(
+            dir.path(),
+            chronicle_transcription::parse_variant("base").unwrap(),
+        )
+        .unwrap();
+        let ctx = provisioning::ProvisionerContext::new_for_test_with_url(
+            dir.path(),
+            "http://127.0.0.1:1/x", // refused connection → provision fails
+        );
+        let (evt_tx, mut evt_rx) = tokio::sync::mpsc::channel(4);
+        ctx.provision(
+            chronicle_transcription::parse_variant("small").unwrap(),
+            evt_tx,
+        )
+        .await;
+        assert!(
+            evt_rx.try_recv().is_err(),
+            "no event from a failed provision"
+        );
+        assert_eq!(
+            settings::read_whisper_model(dir.path()).as_str(),
+            "base",
+            "settings unchanged after a failed switch"
+        );
+    }
 
     fn failed() -> ReconcileOutcome {
         ReconcileOutcome::StartFailed {

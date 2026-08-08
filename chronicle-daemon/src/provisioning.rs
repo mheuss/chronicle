@@ -76,12 +76,10 @@ impl TranscriptionStatusCell {
 
     // Task 12's `download_model` takes the atomics as parameters, so it is
     // `provision()` (Task 13) that reads them off the cell to pass down.
-    #[allow(dead_code)] // reached via provision(); main.rs wires it in Task 14
     pub fn progress_bytes(&self) -> &AtomicU64 {
         &self.download_bytes
     }
 
-    #[allow(dead_code)] // reached via provision(); main.rs wires it in Task 14
     pub fn progress_total(&self) -> &AtomicU64 {
         &self.download_total
     }
@@ -108,7 +106,6 @@ impl TranscriptionStatusCell {
 
     /// Takes `ModelVariant`, not `&str` — every caller already holds one,
     /// and the allow-list guarantee lives in the type (no panic path here).
-    #[allow(dead_code)] // reached via provision(); main.rs wires it in Task 14
     pub fn set_downloading(&self, variant: ModelVariant) {
         self.download_bytes.store(0, Ordering::Relaxed);
         self.download_total.store(0, Ordering::Relaxed);
@@ -120,7 +117,6 @@ impl TranscriptionStatusCell {
         });
     }
 
-    #[allow(dead_code)] // reached via provision(); main.rs wires it in Task 14
     pub fn set_verifying(&self) {
         self.update(|s| Snapshot {
             state: TranscriptionState::Verifying,
@@ -226,7 +222,6 @@ const CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// statvfs-based free space check, run before a download starts.
-#[allow(dead_code)] // called by provision(); main.rs wires it in Task 14
 pub fn check_disk_space(base_dir: &Path, required_bytes: u64) -> anyhow::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(base_dir.as_os_str().as_bytes())?;
@@ -297,7 +292,6 @@ fn is_plaintext_downgrade(previous: &[reqwest::Url], next: &reqwest::Url) -> boo
 /// Cancellation note: the partial is deleted on every `Err`, but a dropped
 /// future (shutdown, `abort()`) skips that cleanup. [`cleanup_stale_tmps`] at
 /// boot is the backstop for that case.
-#[allow(dead_code)] // called by provision(); main.rs wires it in Task 14
 pub async fn download_model(
     url: &str,
     tmp: &Path,
@@ -450,7 +444,6 @@ pub async fn download_model(
 /// 1 Hz IPC status poll that renders `Verifying`. Keeping the blocking hop
 /// inside means a caller cannot forget it. Hashing happens BEFORE the
 /// rename, so the verified bytes are provably the bytes that get loaded.
-#[allow(dead_code)] // called by provision(); main.rs wires it in Task 14
 pub async fn finalize_model(tmp: &Path, dest: &Path, expected_sha1: &str) -> anyhow::Result<()> {
     let result: anyhow::Result<()> = async {
         use std::os::unix::fs::PermissionsExt; // for Permissions::from_mode
@@ -517,7 +510,6 @@ impl EngineHandle {
 /// Sent to the main event loop when a provision completes successfully —
 /// the loop persists the variant (sole settings writer, AD-10).
 #[derive(Debug)]
-#[allow(dead_code)] // consumed by the event loop in Phase 2 (Task 14)
 pub enum ProvisionEvent {
     Ready { variant: ModelVariant },
 }
@@ -551,7 +543,6 @@ pub struct ProvisionerContext {
 }
 
 impl ProvisionerContext {
-    #[allow(dead_code)] // constructed by main.rs in Phase 2 (Task 14)
     pub fn new(
         cell: Arc<TranscriptionStatusCell>,
         handle: Arc<EngineHandle>,
@@ -565,16 +556,6 @@ impl ProvisionerContext {
             last_load_failed: std::sync::Mutex::new(None),
             url_override: None,
         })
-    }
-
-    #[allow(dead_code)] // read by the Status handler wiring in Task 14
-    pub fn cell(&self) -> &Arc<TranscriptionStatusCell> {
-        &self.cell
-    }
-
-    #[allow(dead_code)] // read by the Status handler wiring in Task 14
-    pub fn handle(&self) -> &Arc<EngineHandle> {
-        &self.handle
     }
 
     fn url_for(&self, variant: ModelVariant) -> &str {
@@ -594,7 +575,6 @@ impl ProvisionerContext {
     ///
     /// Called by whoever owns the reply — the Task 14 event-loop arm, or a
     /// test. **Never by `provision()` itself**; see its precondition.
-    #[allow(dead_code)] // called by the event loop in Phase 2 (Task 14)
     pub fn try_begin(&self, variant: ModelVariant) -> bool {
         if self
             .in_flight
@@ -631,7 +611,6 @@ impl ProvisionerContext {
     ///
     /// Returns `()`: every failure is reported through the cell, not to the
     /// caller, because the caller already replied to the user.
-    #[allow(dead_code)] // spawned by the event loop in Phase 2 (Task 14)
     pub async fn provision(
         &self,
         variant: ModelVariant,
@@ -835,42 +814,57 @@ pub async fn boot(
     }
 }
 
+/// Refused-connection default for [`ProvisionerContext::new_for_test`].
+/// NEVER the real manifest URL: a mutation that made `provision()` download
+/// when it shouldn't would otherwise pull 148 MB from HuggingFace inside the
+/// unit suite. A test that wants a working server passes its own fixture port.
+#[cfg(test)]
+const NO_NETWORK_URL: &str = "http://127.0.0.1:1/unreachable";
+
+/// Test constructors and accessors. At module scope rather than inside
+/// `mod tests` because `main.rs`'s persist tests build a context too.
+#[cfg(test)]
+impl ProvisionerContext {
+    /// Returns an `Arc` because the progress test clones it into a spawned
+    /// provision task.
+    pub(crate) fn new_for_test(base_dir: &Path) -> Arc<Self> {
+        Self::new_for_test_with_url(base_dir, NO_NETWORK_URL)
+    }
+
+    pub(crate) fn new_for_test_with_url(base_dir: &Path, url: &str) -> Arc<Self> {
+        Arc::new(Self {
+            cell: TranscriptionStatusCell::new(parse_variant("base").unwrap()),
+            handle: Arc::new(EngineHandle::new()),
+            base_dir: base_dir.to_path_buf(),
+            in_flight: std::sync::atomic::AtomicBool::new(false),
+            last_load_failed: std::sync::Mutex::new(None),
+            url_override: Some(url.to_string()),
+        })
+    }
+
+    /// Simulate a provision already running, without starting one.
+    pub(crate) fn mark_in_flight(&self) {
+        self.in_flight.store(true, Ordering::Release);
+    }
+
+    /// Production never reaches through the context for these — `main`
+    /// already holds both Arcs and passes them in — so they are test-only
+    /// rather than carrying a dead-code marker.
+    pub(crate) fn cell(&self) -> &Arc<TranscriptionStatusCell> {
+        &self.cell
+    }
+
+    pub(crate) fn handle(&self) -> &Arc<EngineHandle> {
+        &self.handle
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chronicle_ipc::TranscriptionState;
     use chronicle_transcription::{MODELS_SUBDIR, parse_variant};
     use tempfile::tempdir;
-
-    /// Refused-connection default for `new_for_test`. NEVER the real manifest
-    /// URL: a mutation that made `provision()` download when it shouldn't
-    /// would otherwise pull 148 MB from HuggingFace inside the unit suite.
-    /// A test that wants a working server passes its own fixture port.
-    const NO_NETWORK_URL: &str = "http://127.0.0.1:1/unreachable";
-
-    impl ProvisionerContext {
-        /// Test constructor. Returns an `Arc` because the progress test clones
-        /// it into a spawned provision task.
-        fn new_for_test(base_dir: &Path) -> Arc<Self> {
-            Self::new_for_test_with_url(base_dir, NO_NETWORK_URL)
-        }
-
-        fn new_for_test_with_url(base_dir: &Path, url: &str) -> Arc<Self> {
-            Arc::new(Self {
-                cell: TranscriptionStatusCell::new(parse_variant("base").unwrap()),
-                handle: Arc::new(EngineHandle::new()),
-                base_dir: base_dir.to_path_buf(),
-                in_flight: std::sync::atomic::AtomicBool::new(false),
-                last_load_failed: std::sync::Mutex::new(None),
-                url_override: Some(url.to_string()),
-            })
-        }
-
-        /// Simulate a provision already running, without starting one.
-        fn mark_in_flight(&self) {
-            self.in_flight.store(true, Ordering::Release);
-        }
-    }
 
     /// Stand-in engine, tagged so tests can tell two instances apart.
     struct StubEngine(&'static str);
