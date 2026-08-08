@@ -1,27 +1,33 @@
 import Foundation
 import Observation
 
-/// Tracks the "we booted with no transcription model" condition that drives the
-/// transcription banner in the search popover. Mirrors `StartupAlertState`: a
-/// one-shot startup notification that appears only when the first status
-/// snapshot *carrying a transcription block* reports `.missing`, and
-/// auto-dismisses once a later snapshot shows transcription is no longer in a
-/// state worth warning about.
+/// Decides whether the search popover shows its transcription banner.
+///
+/// Two independent conditions raise it, and keeping them separate is the whole
+/// design: `bootedWithoutModel` says "you started with nothing", while
+/// `provisionEngaged` says "something is happening or has just failed, and its
+/// progress and Retry live here". Either one is enough.
+///
+/// It is NOT one-shot. An earlier version auto-dismissed on resolve, which
+/// meant the first successful provision silenced every later one — see the
+/// comment on the resolve edge in `evaluate(status:)`.
 ///
 /// "First snapshot carrying a block" rather than "first snapshot": a daemon
 /// older than this UI sends none, and those snapshots must not consume the
-/// latch — see `evaluate(status:)`.
+/// boot latch — see `evaluate(status:)`.
 ///
-/// `evaluate(status:)` is the single entry point. It's safe to call on every
-/// status push; once latched, everything after it is ignored except resolve
-/// edges.
-///
-/// Phase 1 has no call to action — the banner just tells the truth. The
-/// download button arrives with Phase 2 (Task 15).
+/// `evaluate(status:)` is the single entry point and is safe to call on every
+/// status push.
 @Observable
 final class TranscriptionAlertState {
-    /// Set when the user hits the X button (or a resolve edge auto-dismisses
-    /// below). Once true, the banner stays hidden for the rest of the session.
+    /// Set ONLY by the X button. Nothing in `evaluate` sets it — that
+    /// conflation is what made the banner un-raisable after the first resolve.
+    ///
+    /// Cleared when a NEW operation starts, so one dismissal silences the
+    /// thing the user dismissed rather than every future download. The clear
+    /// is edge-triggered on purpose; a level-triggered one would re-show the
+    /// banner on every poll tick and make it impossible to dismiss during a
+    /// download.
     var dismissed: Bool = false
 
     /// True iff the first status snapshot that carried a transcription block
@@ -33,22 +39,20 @@ final class TranscriptionAlertState {
     /// Cleared once transcription resolves, because by then the condition it
     /// describes is over. Only the class clears it; `hasEvaluated` is what
     /// prevents re-latching, so clearing here cannot resurrect the latch.
-    private(set) var missingOnFirstSnapshot: Bool = false
+    private(set) var bootedWithoutModel: Bool = false
 
     private var hasEvaluated: Bool = false
 
-    /// True once a provision has been seen in flight and until it resolves.
-    /// Separate from the boot latch because the two raise the banner for
-    /// different reasons: the latch says "you booted with nothing", this says
-    /// "something is happening right now and its progress lives here".
+    /// True while an operation is in flight, and through a failure — `.error`
+    /// keeps it set because that is the state that owns the Retry button.
+    /// Cleared only on resolve.
     ///
     /// Without it, a switch started from Settings on a healthy boot would run
-    /// with no progress anywhere in the popover, and its failure would have no
-    /// Retry button — `missingOnFirstSnapshot` is false on that path and never
-    /// re-evaluates by design.
+    /// with no progress anywhere in the popover and its failure would offer no
+    /// Retry: `bootedWithoutModel` is false on that path and never re-latches.
     private var provisionEngaged: Bool = false
 
-    var shouldShow: Bool { (missingOnFirstSnapshot || provisionEngaged) && !dismissed }
+    var shouldShow: Bool { (bootedWithoutModel || provisionEngaged) && !dismissed }
 
     func evaluate(status: StatusResponse) {
         // nil = a daemon too old to send the block at all. Nothing is known to
@@ -63,14 +67,24 @@ final class TranscriptionAlertState {
         let state = status.data.transcription?.state
         if !hasEvaluated, let state {
             hasEvaluated = true
-            missingOnFirstSnapshot = state == .missing
+            bootedWithoutModel = state == .missing
         }
         guard let state else { return }
 
-        // Latches on the way in, clears on the way out. `.error` deliberately
-        // leaves it set: a failed download has to keep its banner, because
-        // that is where Retry lives.
-        if Self.isProvisioning(state) {
+        // Latches on the way in, clears on the way out. `.error` raises it too
+        // and keeps it set: a failure is where Retry lives, and a fast one can
+        // land between two 30 s status ticks without any in-flight snapshot
+        // ever being observed — so keying only on `isProvisioning` would leave
+        // the user with a broken switch and no way to retry it.
+        if Self.raisesBanner(state) {
+            // Edge-triggered: only the transition INTO a new operation clears
+            // a previous dismissal. Level-triggered, every poll tick would
+            // un-dismiss and the banner could not be dismissed during a
+            // download. One X click silences the thing the user dismissed —
+            // not every future download.
+            if !provisionEngaged {
+                dismissed = false
+            }
             provisionEngaged = true
         }
 
@@ -93,7 +107,24 @@ final class TranscriptionAlertState {
             // still never re-arms — a model deleted mid-session does not
             // raise the banner again, which is the documented contract above.
             provisionEngaged = false
-            missingOnFirstSnapshot = false
+            bootedWithoutModel = false
+        }
+    }
+
+    /// Whether a state is worth putting the banner on screen for: an
+    /// operation running, or one that failed and needs Retry.
+    ///
+    /// Exhaustive for the same reason as `isResolved` — a new state must be
+    /// classified deliberately rather than defaulting to "say nothing".
+    private static func raisesBanner(_ state: TranscriptionState) -> Bool {
+        switch state {
+        case .downloading, .verifying, .loading, .error:
+            return true
+        case .missing, .ready, .unknown:
+            // `.missing` is the boot latch's job, not this one — raising here
+            // would re-show the banner every time a dismissed missing-model
+            // status is polled.
+            return false
         }
     }
 

@@ -65,6 +65,39 @@ struct TranscriptionAlertStateTests {
         #expect(!alert.shouldShow)
     }
 
+    // The plan's named case: the ordinary first-run flow. Boot with nothing,
+    // click Download, and the banner has to stay up to carry the progress.
+    @Test func downloadingAfterMissingKeepsTheBannerVisible() {
+        let alert = TranscriptionAlertState()
+        alert.evaluate(status: status(.missing))
+        alert.evaluate(status: status(.downloading))
+        #expect(alert.shouldShow)
+    }
+
+    // One X click silences the operation the user dismissed — not every
+    // future one. A dismissal during a download must survive its own poll
+    // ticks, but a NEW operation starts fresh.
+    @Test func aDismissDoesNotSilenceLaterProvisions() {
+        let alert = TranscriptionAlertState()
+        alert.evaluate(status: status(.missing))
+        alert.dismissed = true
+        alert.evaluate(status: status(.downloading))
+        #expect(alert.shouldShow, "a new operation clears a stale dismissal")
+        alert.dismissed = true
+        alert.evaluate(status: status(.downloading))
+        #expect(!alert.shouldShow, "…but the clear is edge-triggered, so this stays dismissed")
+    }
+
+    // A fast failure can land between two 30s status ticks with no in-flight
+    // snapshot ever observed. Keying only on "is provisioning" would leave a
+    // broken switch with no Retry anywhere.
+    @Test func anErrorRaisesTheBannerOnItsOwn() {
+        let alert = TranscriptionAlertState()
+        alert.evaluate(status: status(.ready))
+        alert.evaluate(status: status(.error))
+        #expect(alert.shouldShow)
+    }
+
     // Phase 2 reverses the Phase 1 behavior this replaces. Reopening the
     // popover mid-download re-runs `.task` against a `.downloading` snapshot,
     // and the banner is where the progress lives — hiding it would leave a
@@ -157,7 +190,7 @@ struct TranscriptionAlertStateTests {
         let alert = TranscriptionAlertState()
         alert.evaluate(status: status(.ready))
         #expect(!alert.dismissed)
-        #expect(!alert.missingOnFirstSnapshot)
+        #expect(!alert.bootedWithoutModel)
         alert.evaluate(status: status(.missing))
         #expect(!alert.shouldShow, "the boot latch does not re-arm mid-session")
     }

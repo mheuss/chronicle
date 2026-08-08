@@ -118,6 +118,13 @@ struct SearchPopoverView: View {
             if let status = connection.lastStatus {
                 transcriptionAlert.evaluate(status: status)
             }
+            // A rejection describes one attempt, not a state. Once the state
+            // moves it is stale, and leaving it would put "Already working on
+            // it…" under a headline that says the switch failed — hiding the
+            // daemon's own error, which is the only thing that distinguishes
+            // a failed download from a corrupt file. Safe to clear here: a
+            // rejection changes no daemon state, so it cannot clear itself.
+            provisionRejection = nil
         }
         // 1 Hz status poll while a provision runs and the popover is visible.
         // View-owned by design (§4.1): closing the popover cancels this task
@@ -163,13 +170,13 @@ struct SearchPopoverView: View {
     }
 
     /// True while the daemon reports an operation in flight worth polling for.
+    ///
+    /// Delegates rather than re-deriving: this is the same question the banner
+    /// asks to decide whether to draw a bar, and a `default:` arm here would
+    /// silently classify a future state as "not in flight" — the exact hazard
+    /// the exhaustive switches in `TranscriptionBannerCopy` guard against.
     private var isProvisioningActive: Bool {
-        switch connection.lastStatus?.data.transcription?.state {
-        case .downloading, .verifying, .loading:
-            return true
-        default:
-            return false
-        }
+        TranscriptionBannerCopy(connection.lastStatus?.data.transcription).showsProgress
     }
 
     @ViewBuilder
@@ -307,8 +314,10 @@ private struct PausedBanner: View {
     }
 }
 
-/// Phase 1 has no call to action — there is no download path yet, so offering
-/// a button would be a dead end. Task 15 adds the CTA and progress.
+/// State-driven: it offers a Download when no model is present, a live bar
+/// while one is being fetched or prepared, and a Retry with the daemon's own
+/// reason when something failed. What it SAYS lives in
+/// `TranscriptionBannerCopy`, which is testable; this type only renders.
 private struct TranscriptionBanner: View {
     /// nil only when the daemon is too old to send the block; the banner is
     /// not shown in that case, so the fallback copy is belt-and-braces.
@@ -328,7 +337,10 @@ private struct TranscriptionBanner: View {
                 Label(copy.headline, systemImage: copy.icon)
                     .font(.callout)
                     .foregroundStyle(copy.isFailure ? Color.red : Color.primary)
-                if let line = rejection ?? copy.detail {
+                // The daemon's own error wins when there is one: a rejection
+                // is vaguer and would bury the diagnosis. The rejection only
+                // gets the line when there is nothing better to say.
+                if let line = copy.detail ?? rejection {
                     // Capped: this is the daemon's own error text, which can
                     // carry two 64-char digests, and the popover is a fixed
                     // 520pt that cannot grow. Full text on hover.
@@ -336,6 +348,10 @@ private struct TranscriptionBanner: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(3)
+                        // Complementary, not redundant: lineLimit caps growth,
+                        // fixedSize stops the wrapped lines being compressed
+                        // away inside this fixed-height popover.
+                        .fixedSize(horizontal: false, vertical: true)
                         .help(line)
                 }
                 if copy.showsProgress {
@@ -375,7 +391,7 @@ private struct TranscriptionBanner: View {
             Text("\(byteLabel(done)) of \(byteLabel(total))")
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
-        } else if state == .downloading, let done = transcription?.downloadBytes {
+        } else if state == .downloading, let done = transcription?.downloadBytes, done > 0 {
             // Indeterminate bar, but the byte count is still live — the daemon
             // publishes `download_bytes` throughout and only withholds the
             // TOTAL until Content-Length arrives. Hiding a moving number
@@ -387,7 +403,9 @@ private struct TranscriptionBanner: View {
                 .foregroundStyle(.secondary)
         } else {
             // `.verifying` / `.loading` genuinely have no number to show; the
-            // "Preparing…" headline carries them.
+            // "Preparing…" headline carries them. Also the first instant of a
+            // download, where the daemon publishes `Some(0)` — "Zero KB
+            // downloaded" is worse than no label.
             ProgressView().progressViewStyle(.linear)
         }
     }
