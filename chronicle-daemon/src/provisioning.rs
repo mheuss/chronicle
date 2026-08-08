@@ -2,8 +2,15 @@
 //!
 //! Holds the status cell the IPC `Status` handler reads, the per-variant
 //! on-disk report, and [`EngineHandle`] — the shared slot the sink gates on,
-//! and which `transcribe_loop` will resolve per segment (Task 11). The
-//! download state machine and `SetWhisperModel` wiring land later in Phase 2.
+//! and which `transcribe_loop` resolves per segment (Task 11).
+//!
+//! Task 12 adds the download primitives: [`check_disk_space`],
+//! [`cleanup_stale_tmps`], [`download_model`] (fetch), and [`finalize_model`]
+//! (verify + land). They are deliberately separate steps rather than one
+//! `fetch_and_install` — the provisioner publishes a distinct status between
+//! fetching and verifying, so each design §2.1 state edge maps to one call.
+//! The state machine that sequences them, and the `SetWhisperModel` wiring,
+//! land in Tasks 13–14.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -67,12 +74,14 @@ impl TranscriptionStatusCell {
         }
     }
 
-    #[allow(dead_code)] // consumed by the downloader in Phase 2 (Task 12)
+    // Task 12's `download_model` takes the atomics as parameters, so it is
+    // `provision()` (Task 13) that reads them off the cell to pass down.
+    #[allow(dead_code)] // consumed by the provisioner in Phase 2 (Task 13)
     pub fn progress_bytes(&self) -> &AtomicU64 {
         &self.download_bytes
     }
 
-    #[allow(dead_code)] // consumed by the downloader in Phase 2 (Task 12)
+    #[allow(dead_code)] // consumed by the provisioner in Phase 2 (Task 13)
     pub fn progress_total(&self) -> &AtomicU64 {
         &self.download_total
     }
@@ -193,6 +202,150 @@ pub fn models_report(base_dir: &Path) -> Vec<ModelEntry> {
             }
         })
         .collect()
+}
+
+/// Margin on top of the advertised size before we start a download (NFR-3).
+const DISK_MARGIN_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Per-chunk stall timeout. A whole-request timeout would falsely kill a
+/// healthy 1.5 GB transfer; a stalled chunk read is the real failure signal.
+const CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// statvfs-based free space check, run before a download starts.
+#[allow(dead_code)] // called by provision() in Phase 2 (Task 13)
+pub fn check_disk_space(base_dir: &Path, required_bytes: u64) -> anyhow::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(base_dir.as_os_str().as_bytes())?;
+    let mut vfs: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c_path` is a valid NUL-terminated string that outlives the
+    // call, and `vfs` is a live, correctly-sized, zeroed statvfs.
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut vfs) };
+    anyhow::ensure!(
+        rc == 0,
+        "statvfs failed: {}",
+        std::io::Error::last_os_error()
+    );
+    let free = (vfs.f_bavail as u64).saturating_mul(vfs.f_frsize as u64);
+    let needed = required_bytes.saturating_add(DISK_MARGIN_BYTES);
+    anyhow::ensure!(
+        free >= needed,
+        "not enough free disk space: need {:.1} GB, have {:.1} GB",
+        needed as f64 / 1e9,
+        free as f64 / 1e9,
+    );
+    Ok(())
+}
+
+/// Delete any `*.tmp` partials in the models dir (startup + failure paths).
+#[allow(dead_code)] // called by boot() in Phase 2 (Task 13)
+pub fn cleanup_stale_tmps(base_dir: &Path) {
+    let models = base_dir.join(chronicle_transcription::MODELS_SUBDIR);
+    let Ok(entries) = std::fs::read_dir(&models) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.extension().is_some_and(|e| e == "tmp") {
+            if let Err(e) = std::fs::remove_file(&p) {
+                log::warn!("failed to remove stale partial {}: {e}", p.display());
+            } else {
+                log::info!("removed stale partial download {}", p.display());
+            }
+        }
+    }
+}
+
+/// Stream `url` into `tmp`. Fetch ONLY — no verify, no rename. The caller
+/// (`provision()`, Task 13) owns the Verifying and landing steps so every
+/// design §2.1 state edge maps to one visible provision() step. Progress
+/// lands in the two atomics. Any failure deletes the partial and returns
+/// Err with a user-facing message.
+///
+/// Transport safety is upstream of this function, not in it: the manifest
+/// pins `https` URLs (Task 1) and the client is built with rustls and no
+/// native-tls fallback, so there is no downgrade path in production. The
+/// scheme is deliberately not rejected here — the tests drive a loopback
+/// `http` fixture.
+#[allow(dead_code)] // called by provision() in Phase 2 (Task 13)
+pub async fn download_model(
+    url: &str,
+    tmp: &Path,
+    bytes_atom: &AtomicU64,
+    total_atom: &AtomicU64,
+) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    if let Some(parent) = tmp.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let result: anyhow::Result<()> = async {
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .build()?;
+        // Design Integration Architecture: offline/DNS/5xx surface as
+        // "download failed: …" — never reqwest's raw internal error text.
+        let mut resp = client
+            .get(url)
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| anyhow::anyhow!("download failed: {e}"))?;
+        if let Some(len) = resp.content_length() {
+            total_atom.store(len, Ordering::Relaxed);
+        }
+        let mut file = std::fs::File::create(tmp)?;
+        loop {
+            let chunk = tokio::time::timeout(CHUNK_TIMEOUT, resp.chunk())
+                .await
+                .map_err(|_| anyhow::anyhow!("download stalled (no data for 60s)"))??;
+            let Some(chunk) = chunk else { break };
+            file.write_all(&chunk)?;
+            bytes_atom.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+        }
+        file.flush()?;
+        Ok(())
+    }
+    .await;
+    if result.is_err() {
+        let _ = std::fs::remove_file(tmp);
+    }
+    result
+}
+
+/// Verify `tmp` against the pinned digest, chmod 0600, rename into `dest`.
+/// Called by `provision()` immediately AFTER it publishes `Verifying`. Every
+/// failure path deletes the partial; a mismatch reports the rotation-aware
+/// message (NFR-1, Integration Architecture).
+///
+/// Async purely to own the `spawn_blocking` the hash needs: `sha1` 0.10 has
+/// no aarch64 backend (x86 → SHA-NI, loongarch64 → asm, everything else →
+/// `soft`), so digesting the 1.5 GB `medium` model is seconds of CPU. Run
+/// direct from an await path it would stall a tokio worker and starve the
+/// 1 Hz IPC status poll that renders `Verifying`. Keeping the blocking hop
+/// inside means a caller cannot forget it. Hashing happens BEFORE the
+/// rename, so the verified bytes are provably the bytes that get loaded.
+#[allow(dead_code)] // called by provision() in Phase 2 (Task 13)
+pub async fn finalize_model(tmp: &Path, dest: &Path, expected_sha1: &str) -> anyhow::Result<()> {
+    let result: anyhow::Result<()> = async {
+        use std::os::unix::fs::PermissionsExt; // for Permissions::from_mode
+        let tmp_owned = tmp.to_path_buf();
+        let expected = expected_sha1.to_string();
+        let matches = tokio::task::spawn_blocking(move || {
+            chronicle_transcription::verify_sha1(&tmp_owned, &expected)
+        })
+        .await??;
+        anyhow::ensure!(
+            matches,
+            "checksum mismatch — upstream may have rotated the model; update Chronicle"
+        );
+        std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::rename(tmp, dest)?;
+        Ok(())
+    }
+    .await;
+    if result.is_err() {
+        let _ = std::fs::remove_file(tmp);
+    }
+    result
 }
 
 /// Shared slot for the live engine. `None` until first provision; then only
@@ -465,5 +618,131 @@ mod tests {
         let stats = cell.stats(std::path::Path::new("/nonexistent"));
         assert_eq!(stats.state, TranscriptionState::Missing);
         assert_eq!(stats.error, None, "error is set iff state == Error");
+    }
+
+    /// Minimal HTTP/1.1 fixture: serves `body` for any GET, optionally
+    /// stalling forever after `stall_after` bytes. Returns the bound port.
+    async fn http_fixture(body: Vec<u8>, stall_after: Option<usize>) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = sock.read(&mut buf).await; // consume request
+                    let head = format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n", body.len());
+                    sock.write_all(head.as_bytes()).await.unwrap();
+                    match stall_after {
+                        Some(n) => {
+                            sock.write_all(&body[..n]).await.unwrap();
+                            // Hold the socket open, never sending the rest.
+                            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                        }
+                        None => sock.write_all(&body).await.unwrap(),
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    /// sha1 of `body`, computed in-test so no digest is hardcoded.
+    fn sha1_hex(body: &[u8]) -> String {
+        use sha1::{Digest, Sha1};
+        let mut h = Sha1::new();
+        h.update(body);
+        format!("{:x}", h.finalize())
+    }
+
+    #[tokio::test]
+    async fn download_streams_body_to_tmp_with_progress() {
+        let dir = tempdir().unwrap();
+        let body = b"fake model bytes".to_vec();
+        let port = http_fixture(body.clone(), None).await;
+        let tmp = dir.path().join(MODELS_SUBDIR).join("ggml-base.bin.tmp");
+        let bytes = AtomicU64::new(0);
+        let total = AtomicU64::new(0);
+        download_model(
+            &format!("http://127.0.0.1:{port}/model"),
+            &tmp,
+            &bytes,
+            &total,
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&tmp).unwrap(), body, "fetch only — no rename");
+        assert_eq!(bytes.load(Ordering::Relaxed), body.len() as u64);
+        assert_eq!(
+            total.load(Ordering::Relaxed),
+            body.len() as u64,
+            "Content-Length"
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_verifies_chmods_and_renames() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let tmp = dir.path().join("ggml-base.bin.tmp");
+        let body = b"fake model bytes";
+        std::fs::write(&tmp, body).unwrap();
+        let expected = sha1_hex(body);
+        let dest = dir.path().join("ggml-base.bin");
+        finalize_model(&tmp, &dest, &expected).await.unwrap();
+        assert!(!tmp.exists());
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[tokio::test]
+    async fn finalize_rejects_checksum_mismatch() {
+        let dir = tempdir().unwrap();
+        let tmp = dir.path().join("ggml-base.bin.tmp");
+        std::fs::write(&tmp, b"corrupt").unwrap();
+        let dest = dir.path().join("ggml-base.bin");
+        let err = finalize_model(&tmp, &dest, "465707469ff3a37a2b9b8d8f89f2f99de7299dac")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("checksum mismatch"));
+        assert!(!dest.exists());
+        assert!(!tmp.exists(), "suspect partial deleted");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn download_errors_on_stalled_transfer() {
+        let dir = tempdir().unwrap();
+        let port = http_fixture(vec![0u8; 1024], Some(10)).await;
+        let tmp = dir.path().join(MODELS_SUBDIR).join("ggml-base.bin.tmp");
+        let result = download_model(
+            &format!("http://127.0.0.1:{port}/x"),
+            &tmp,
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .await;
+        assert!(result.is_err(), "stall must time out, not hang");
+        assert!(!tmp.exists(), "partial cleaned up on failure");
+    }
+
+    #[test]
+    fn precheck_fails_when_disk_cannot_fit() {
+        let dir = tempdir().unwrap();
+        let err = check_disk_space(dir.path(), u64::MAX).unwrap_err();
+        assert!(err.to_string().contains("free disk space"));
+    }
+
+    #[test]
+    fn cleanup_removes_stale_tmp_only() {
+        let dir = tempdir().unwrap();
+        let models = dir.path().join(MODELS_SUBDIR);
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(models.join("ggml-base.bin.tmp"), b"stale").unwrap();
+        std::fs::write(models.join("ggml-base.bin"), b"real").unwrap();
+        cleanup_stale_tmps(dir.path());
+        assert!(!models.join("ggml-base.bin.tmp").exists());
+        assert!(models.join("ggml-base.bin").exists());
     }
 }

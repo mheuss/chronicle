@@ -40,6 +40,12 @@ objc2-foundation = { version = "0.3", features = ["NSString"] }
 thiserror = "2"
 arc-swap = "1"
 async-trait = "0.1"
+# rustls only — no native-tls, so there is no plaintext or system-trust
+# fallback path for model downloads. default-features off also drops
+# macos-system-configuration, so system proxy settings are not consulted.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# statvfs for the pre-download free-space check.
+libc = "0.2"
 
 [features]
 default = ["transcription-metal"]
@@ -51,4 +57,10 @@ tempfile = "3"
 serde_json = "1"
 opus = "0.3"
 # test-util unlocks tokio::time::pause/advance for the StartRetry policy tests.
-tokio = { version = "1", features = ["test-util"] }
+# net + io-util back the hand-rolled HTTP fixture in provisioning tests. They
+# already arrive via chronicle-ipc, but naming them here keeps our tests from
+# depending on another crate's feature choices.
+tokio = { version = "1", features = ["test-util", "net", "io-util"] }
+# The downloader tests compute digests in-test rather than hardcoding them.
+# chronicle-transcription's sha1 is a private transitive dep, not importable.
+sha1 = "0.10"
