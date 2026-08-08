@@ -47,7 +47,14 @@ struct TranscriptionBannerCopy {
             return "exclamationmark.triangle"
         case .downloading, .verifying, .loading:
             return "arrow.down.circle"
-        case .missing, .ready, .unknown:
+        case .ready, .unknown:
+            // Not just tidiness: `body` can re-render on a `.ready` status
+            // before the `.task(id:)` that calls `evaluate` runs, so there is
+            // a pass where the banner is still on screen showing this copy.
+            // "Transcription is on" beside the off icon would be a lie for
+            // that frame.
+            return "waveform"
+        case .missing:
             return "waveform.slash"
         }
     }
@@ -102,6 +109,9 @@ struct TranscriptionBannerCopy {
         guard let entry = models.first(where: { $0.variant == variant }) else {
             return "size unknown"
         }
-        return ByteCountFormatter.string(fromByteCount: Int64(entry.sizeBytes), countStyle: .file)
+        // clamping, not trapping: a wrong label beats a crash if a future
+        // field ever carries a sentinel above Int64.max.
+        return ByteCountFormatter.string(
+            fromByteCount: Int64(clamping: entry.sizeBytes), countStyle: .file)
     }
 }

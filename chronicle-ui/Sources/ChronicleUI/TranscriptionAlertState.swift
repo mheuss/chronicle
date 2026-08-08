@@ -27,8 +27,12 @@ final class TranscriptionAlertState {
     /// True iff the first status snapshot that carried a transcription block
     /// reported `.missing`. Latched on the first call to `evaluate(status:)`
     /// whose status has a block — calls before that (an older daemon) leave it
-    /// unlatched — and never re-evaluated afterwards, so a model deleted
+    /// unlatched — and never re-latched afterwards, so a model deleted
     /// mid-session does not flip this back on.
+    ///
+    /// Cleared once transcription resolves, because by then the condition it
+    /// describes is over. Only the class clears it; `hasEvaluated` is what
+    /// prevents re-latching, so clearing here cannot resurrect the latch.
     private(set) var missingOnFirstSnapshot: Bool = false
 
     private var hasEvaluated: Bool = false
@@ -70,11 +74,26 @@ final class TranscriptionAlertState {
             provisionEngaged = true
         }
 
-        if missingOnFirstSnapshot || provisionEngaged, Self.isResolved(state) {
-            // Transcription became workable (from anywhere). Auto-dismiss so
-            // the banner doesn't linger past the condition that raised it.
+        if Self.isResolved(state) {
+            // Transcription became workable (from anywhere). Clear the two
+            // CAUSES rather than setting `dismissed`, so the banner can be
+            // raised again by a later provision.
+            //
+            // Setting `dismissed` here is what the plan's Step 3 said, and it
+            // was wrong once "in flight" joined the same predicate as a
+            // session-sticky dismiss: the first resolve killed the banner for
+            // the rest of the session. Not a rare path — the daemon enters
+            // `Loading` at cell creation before the IPC server starts, so
+            // merely opening the popover during a daemon boot engaged the
+            // flag, `.ready` burned the dismiss, and every later switch ran
+            // with no progress and no Retry. `dismissed` now means only what
+            // its name says: the user clicked X.
+            //
+            // `hasEvaluated` is deliberately NOT cleared, so the boot latch
+            // still never re-arms — a model deleted mid-session does not
+            // raise the banner again, which is the documented contract above.
             provisionEngaged = false
-            dismissed = true
+            missingOnFirstSnapshot = false
         }
     }
 

@@ -105,6 +105,63 @@ struct TranscriptionAlertStateTests {
         #expect(!alert.shouldShow)
     }
 
+    // Resolving must clear the CAUSE, not set `dismissed` — otherwise the
+    // first successful provision kills the banner for the whole session and
+    // every later switch runs with no progress and no Retry.
+    @Test func aSecondProvisionShowsAgain() {
+        let alert = TranscriptionAlertState()
+        alert.evaluate(status: status(.ready))
+        alert.evaluate(status: status(.downloading))
+        alert.evaluate(status: status(.ready))
+        alert.evaluate(status: status(.downloading))
+        #expect(alert.shouldShow)
+    }
+
+    // The ordinary path that made the above routine rather than rare: the
+    // daemon enters `.loading` at cell creation, before the IPC server
+    // starts, so merely opening the popover during a daemon boot engaged the
+    // in-flight flag. Resolving it must not cost the user their banner.
+    @Test func aBootLoadThenLaterSwitchStillShows() {
+        let alert = TranscriptionAlertState()
+        alert.evaluate(status: status(.loading))
+        alert.evaluate(status: status(.ready))
+        alert.evaluate(status: status(.downloading))
+        #expect(alert.shouldShow)
+    }
+
+    // The sharp end: a failed SECOND switch still needs its Retry button.
+    @Test func aSecondProvisionFailureStillShows() {
+        let alert = TranscriptionAlertState()
+        alert.evaluate(status: status(.ready))
+        alert.evaluate(status: status(.downloading))
+        alert.evaluate(status: status(.ready))
+        alert.evaluate(status: status(.downloading))
+        alert.evaluate(status: status(.error))
+        #expect(alert.shouldShow)
+    }
+
+    // `dismissed` means one thing only: the user clicked X. Nothing in
+    // `evaluate` may set it, or the banner stops being raisable.
+    @Test func resolvingNeverSetsDismissed() {
+        let alert = TranscriptionAlertState()
+        alert.evaluate(status: status(.missing))
+        alert.evaluate(status: status(.downloading))
+        alert.evaluate(status: status(.ready))
+        #expect(!alert.dismissed, "only the X button sets this")
+        #expect(!alert.shouldShow, "hidden because the causes cleared, not because it was dismissed")
+    }
+
+    // Guards the resolve arm itself: a healthy first snapshot must leave the
+    // state untouched rather than burning anything.
+    @Test func aHealthyFirstSnapshotChangesNothing() {
+        let alert = TranscriptionAlertState()
+        alert.evaluate(status: status(.ready))
+        #expect(!alert.dismissed)
+        #expect(!alert.missingOnFirstSnapshot)
+        alert.evaluate(status: status(.missing))
+        #expect(!alert.shouldShow, "the boot latch does not re-arm mid-session")
+    }
+
     // An old daemon sends no block. Nothing is known to be wrong, so no banner
     // — Settings carries the "Requires daemon update" wording instead.
     @Test func staysHiddenWhenDaemonSendsNoBlock() {

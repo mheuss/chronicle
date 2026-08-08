@@ -13,6 +13,10 @@ struct SearchPopoverView: View {
     @State private var isLoading: Bool = false
     @State private var requestID: UInt64 = 0
     @State private var searchError: Bool = false
+    /// Why the daemon turned down the last model request, if it did. Cleared
+    /// on the next attempt; a rejection changes no daemon state, so nothing
+    /// else would ever tell the user the click did nothing.
+    @State private var provisionRejection: String?
 
     /// Which message the search area should render. A pure function of the
     /// inputs so it can be unit-tested without driving the SwiftUI view — the
@@ -52,6 +56,7 @@ struct SearchPopoverView: View {
             if transcriptionAlert.shouldShow {
                 TranscriptionBanner(
                     transcription: connection.lastStatus?.data.transcription,
+                    rejection: provisionRejection,
                     onDismiss: { transcriptionAlert.dismissed = true },
                     onProvision: provisionModel
                 )
@@ -132,8 +137,29 @@ struct SearchPopoverView: View {
     /// the banner: `setWhisperModel` refreshes status on success, which moves
     /// the banner into its progress branch — dismissing here would hide the
     /// progress the user just asked for.
+    ///
+    /// A rejection changes no daemon state, so discarding the reply would
+    /// make the click a silent no-op — the banner would keep saying
+    /// "Download the base model…" with nothing at all having happened. The
+    /// commonest cause is a double-click landing while the first request is
+    /// still in flight.
     private func provisionModel(_ variant: String) {
-        Task { _ = try? await connection.setWhisperModel(variant) }
+        Task {
+            provisionRejection = nil
+            do {
+                let response = try await connection.setWhisperModel(variant)
+                if !response.ok {
+                    // `ok: false` collapses unknown-variant, already-busy and
+                    // daemon-not-ready. The state we just read back is the
+                    // only thing that distinguishes them, so lead with it.
+                    provisionRejection = TranscriptionBannerCopy(response.status).showsProgress
+                        ? "Already working on it…"
+                        : "The daemon turned that request down. Try again in a moment."
+                }
+            } catch {
+                provisionRejection = "Couldn't reach the daemon."
+            }
+        }
     }
 
     /// True while the daemon reports an operation in flight worth polling for.
@@ -287,29 +313,37 @@ private struct TranscriptionBanner: View {
     /// nil only when the daemon is too old to send the block; the banner is
     /// not shown in that case, so the fallback copy is belt-and-braces.
     let transcription: TranscriptionStats?
+    /// Set when the daemon REJECTED the last request. `ok: false` changes no
+    /// state, so without this the click is a silent no-op.
+    let rejection: String?
     let onDismiss: () -> Void
     let onProvision: (String) -> Void
 
     var body: some View {
+        let copy = TranscriptionBannerCopy(transcription)
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             VStack(alignment: .leading, spacing: 4) {
                 // [A11y] Every branch states the condition in words. The icon,
                 // the tint and the bar only reinforce what the sentence says.
-                Label(headline, systemImage: icon)
+                Label(copy.headline, systemImage: copy.icon)
                     .font(.callout)
-                    .foregroundStyle(isFailure ? Color.red : Color.primary)
-                if let detail {
-                    Text(detail)
+                    .foregroundStyle(copy.isFailure ? Color.red : Color.primary)
+                if let line = rejection ?? copy.detail {
+                    // Capped: this is the daemon's own error text, which can
+                    // carry two 64-char digests, and the popover is a fixed
+                    // 520pt that cannot grow. Full text on hover.
+                    Text(line)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .lineLimit(3)
+                        .help(line)
                 }
-                if isProvisioning {
+                if copy.showsProgress {
                     progressRow
                 }
             }
             Spacer(minLength: 8)
-            if let action {
+            if let action = copy.action {
                 // [A11y] A labeled button, never a bare icon.
                 Button(action.title) { onProvision(action.variant) }
                     .buttonStyle(.borderedProminent)
@@ -325,23 +359,13 @@ private struct TranscriptionBanner: View {
         .background(Color.secondary.opacity(0.12))
     }
 
-    // MARK: - Copy
-
-    private var copy: TranscriptionBannerCopy { TranscriptionBannerCopy(transcription) }
-    private var state: TranscriptionState { transcription?.state ?? .missing }
-    private var isFailure: Bool { copy.isFailure }
-    private var isProvisioning: Bool { copy.showsProgress }
-    private var icon: String { copy.icon }
-    private var headline: String { copy.headline }
-    private var detail: String? { copy.detail }
-    private var action: TranscriptionBannerCopy.Action? { copy.action }
-
     // MARK: - Progress
 
     @ViewBuilder
     private var progressRow: some View {
         // Total is nil until Content-Length lands, and `Some(0)` is never sent
         // — so an unknown total means indeterminate, never a divide by zero.
+        let state = transcription?.state ?? .missing
         if state == .downloading, let total = transcription?.downloadTotalBytes, total > 0 {
             let done = transcription?.downloadBytes ?? 0
             ProgressView(value: Double(done), total: Double(total))
@@ -351,12 +375,26 @@ private struct TranscriptionBanner: View {
             Text("\(byteLabel(done)) of \(byteLabel(total))")
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
+        } else if state == .downloading, let done = transcription?.downloadBytes {
+            // Indeterminate bar, but the byte count is still live — the daemon
+            // publishes `download_bytes` throughout and only withholds the
+            // TOTAL until Content-Length arrives. Hiding a moving number
+            // behind a barber pole is exactly what the [A11y] obligation is
+            // aimed at.
+            ProgressView().progressViewStyle(.linear)
+            Text("\(byteLabel(done)) downloaded")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
         } else {
+            // `.verifying` / `.loading` genuinely have no number to show; the
+            // "Preparing…" headline carries them.
             ProgressView().progressViewStyle(.linear)
         }
     }
 
     private func byteLabel(_ bytes: UInt64) -> String {
-        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+        // clamping, not the trapping initializer: a wrong label beats a crash
+        // if a future field ever carries a sentinel above Int64.max.
+        ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .file)
     }
 }

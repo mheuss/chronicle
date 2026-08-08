@@ -92,13 +92,21 @@ struct DaemonConnectionMethodsTests {
             #expect(req.contains("\"type\":\"set_whisper_model\""))
             #expect(req.contains("\"variant\":\"small\""))
             writeAll(reply + "\n", to: serverFD)
-            respondToOneRequest(on: serverFD, with: statusReply)
+            // Assert what the SECOND request was, not just that one arrived —
+            // otherwise an implementation that re-sent set_whisper_model
+            // instead of refreshing status would pass.
+            let refreshBytes = readLineSync(from: serverFD)
+            let refresh = refreshBytes.flatMap { String(bytes: $0, encoding: .utf8) } ?? ""
+            #expect(refresh.contains("\"type\":\"status\""), "an accepted switch refreshes status")
+            writeAll(statusReply + "\n", to: serverFD)
             Darwin.close(serverFD)
         }
 
         let response = try await conn.setWhisperModel("small")
         _ = await daemonTask.value
 
+        // The refresh has to actually land, or the banner waits a poll tick.
+        #expect(conn.lastStatus?.data.uptimeSecs == 1, "the refreshed status was stored")
         #expect(response.ok)
         #expect(response.status.state == .downloading)
         #expect(response.status.variant == "small")

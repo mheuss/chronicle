@@ -93,6 +93,10 @@ struct TranscriptionBannerCopyTests {
             #expect(copy.action == nil)
             #expect(!copy.showsProgress)
             #expect(!copy.isFailure)
+            #expect(copy.headline == "Audio transcription is on.")
+            // The banner can render one frame of this copy before `evaluate`
+            // hides it, so the icon must not contradict the sentence.
+            #expect(copy.icon == "waveform", "the OFF icon would be a lie here")
         }
     }
 
