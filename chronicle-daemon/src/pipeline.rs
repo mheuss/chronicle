@@ -206,6 +206,17 @@ pub async fn ocr_loop(storage: Arc<Storage>, mut ocr_rx: mpsc::Receiver<(i64, Pa
 /// transcript is produced and stamped by the same engine (design §3.3). A job
 /// that arrives while the handle is empty is skipped as idle — matching the
 /// sink's `Disabled` semantics — not treated as a failure.
+/// Both `stop_after_current` breaks report this, so the two paths cannot
+/// drift. The skip path reaches it only since Task 13 — before that the loop
+/// was spawned only after a successful load.
+fn warn_abandoned_queue(abandoned: usize) {
+    log::warn!(
+        "shutdown grace expired; stopping after the current segment — \
+         {abandoned} queued segment(s) left untranscribed \
+         (transcript = NULL, recoverable by backfill)"
+    );
+}
+
 pub async fn transcribe_loop(
     engine: Arc<crate::provisioning::EngineHandle>,
     storage: Arc<Storage>,
@@ -231,6 +242,12 @@ pub async fn transcribe_loop(
             // flag, so it is repeated here. Deleting this reintroduces a
             // shutdown hang when the handle is empty.
             if stop_after_current.load(Ordering::Relaxed) {
+                // Same warning as the bottom break. Unreachable before Task
+                // 13, which spawned the loop only after a successful load —
+                // now the loop always runs, so an operator whose grace
+                // expires with an empty handle would otherwise get no signal
+                // that a queue was abandoned.
+                warn_abandoned_queue(rx.len());
                 break;
             }
             continue;
@@ -288,12 +305,7 @@ pub async fn transcribe_loop(
         // in flight still gets persisted. Breaking here (rather than `main`
         // dropping our JoinHandle) is what keeps that write from being discarded.
         if stop_after_current.load(Ordering::Relaxed) {
-            let abandoned = rx.len();
-            log::warn!(
-                "shutdown grace expired; stopping after the current segment — \
-                 {abandoned} queued segment(s) left untranscribed \
-                 (transcript = NULL, recoverable by backfill)"
-            );
+            warn_abandoned_queue(rx.len());
             break;
         }
     }

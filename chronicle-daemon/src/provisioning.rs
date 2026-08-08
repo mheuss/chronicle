@@ -76,12 +76,12 @@ impl TranscriptionStatusCell {
 
     // Task 12's `download_model` takes the atomics as parameters, so it is
     // `provision()` (Task 13) that reads them off the cell to pass down.
-    #[allow(dead_code)] // consumed by the provisioner in Phase 2 (Task 13)
+    #[allow(dead_code)] // reached via provision(); main.rs wires it in Task 14
     pub fn progress_bytes(&self) -> &AtomicU64 {
         &self.download_bytes
     }
 
-    #[allow(dead_code)] // consumed by the provisioner in Phase 2 (Task 13)
+    #[allow(dead_code)] // reached via provision(); main.rs wires it in Task 14
     pub fn progress_total(&self) -> &AtomicU64 {
         &self.download_total
     }
@@ -94,7 +94,13 @@ impl TranscriptionStatusCell {
         self.snapshot.rcu(|s| f(s.as_ref()));
     }
 
-    #[allow(dead_code)] // consumed by the provisioner in Phase 2 (Task 13)
+    // NOT consumed by Task 13, and no later task consumes it either: the cell
+    // is constructed Missing and the design's state machine
+    // (Missing → Downloading → Verifying → Loading → Ready | Error) never
+    // returns there. The plan expected Tasks 12/13 to take this marker (plan
+    // line 769); they can't. Raised at the Batch 2 checkpoint — delete this
+    // and its test, or name the transition that needs it.
+    #[allow(dead_code)] // no caller by design — see above
     pub fn set_missing(&self) {
         self.update(|s| Snapshot {
             state: TranscriptionState::Missing,
@@ -105,7 +111,7 @@ impl TranscriptionStatusCell {
 
     /// Takes `ModelVariant`, not `&str` — every caller already holds one,
     /// and the allow-list guarantee lives in the type (no panic path here).
-    #[allow(dead_code)] // consumed by the provisioner in Phase 2 (Task 13)
+    #[allow(dead_code)] // reached via provision(); main.rs wires it in Task 14
     pub fn set_downloading(&self, variant: ModelVariant) {
         self.download_bytes.store(0, Ordering::Relaxed);
         self.download_total.store(0, Ordering::Relaxed);
@@ -117,7 +123,7 @@ impl TranscriptionStatusCell {
         });
     }
 
-    #[allow(dead_code)] // consumed by the provisioner in Phase 2 (Task 13)
+    #[allow(dead_code)] // reached via provision(); main.rs wires it in Task 14
     pub fn set_verifying(&self) {
         self.update(|s| Snapshot {
             state: TranscriptionState::Verifying,
@@ -223,7 +229,7 @@ const CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// statvfs-based free space check, run before a download starts.
-#[allow(dead_code)] // called by provision() in Phase 2 (Task 13)
+#[allow(dead_code)] // called by provision(); main.rs wires it in Task 14
 pub fn check_disk_space(base_dir: &Path, required_bytes: u64) -> anyhow::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(base_dir.as_os_str().as_bytes())?;
@@ -250,7 +256,6 @@ pub fn check_disk_space(base_dir: &Path, required_bytes: u64) -> anyhow::Result<
 }
 
 /// Delete any `*.tmp` partials in the models dir (startup + failure paths).
-#[allow(dead_code)] // called by boot() in Phase 2 (Task 13)
 pub fn cleanup_stale_tmps(base_dir: &Path) {
     let models = base_dir.join(chronicle_transcription::MODELS_SUBDIR);
     let Ok(entries) = std::fs::read_dir(&models) else {
@@ -295,7 +300,7 @@ fn is_plaintext_downgrade(previous: &[reqwest::Url], next: &reqwest::Url) -> boo
 /// Cancellation note: the partial is deleted on every `Err`, but a dropped
 /// future (shutdown, `abort()`) skips that cleanup. [`cleanup_stale_tmps`] at
 /// boot is the backstop for that case.
-#[allow(dead_code)] // called by provision() in Phase 2 (Task 13)
+#[allow(dead_code)] // called by provision(); main.rs wires it in Task 14
 pub async fn download_model(
     url: &str,
     tmp: &Path,
@@ -434,7 +439,7 @@ pub async fn download_model(
 /// 1 Hz IPC status poll that renders `Verifying`. Keeping the blocking hop
 /// inside means a caller cannot forget it. Hashing happens BEFORE the
 /// rename, so the verified bytes are provably the bytes that get loaded.
-#[allow(dead_code)] // called by provision() in Phase 2 (Task 13)
+#[allow(dead_code)] // called by provision(); main.rs wires it in Task 14
 pub async fn finalize_model(tmp: &Path, dest: &Path, expected_sha1: &str) -> anyhow::Result<()> {
     let result: anyhow::Result<()> = async {
         use std::os::unix::fs::PermissionsExt; // for Permissions::from_mode
@@ -492,12 +497,323 @@ impl EngineHandle {
     }
 }
 
+/// Sent to the main event loop when a provision completes successfully —
+/// the loop persists the variant (sole settings writer, AD-10).
+#[derive(Debug)]
+#[allow(dead_code)] // consumed by the event loop in Phase 2 (Task 14)
+pub enum ProvisionEvent {
+    Ready { variant: ModelVariant },
+}
+
+/// Clears the in-flight flag on every exit path, including a panic. Without
+/// this an early return anywhere in `provision()` would freeze status in
+/// `Downloading`/`Loading` forever, with no way to retry short of a restart.
+struct InFlightGuard<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// Owns everything a provision needs: the status cell it publishes to, the
+/// engine slot it installs into, the data dir, and the one-at-a-time guard.
+pub struct ProvisionerContext {
+    cell: Arc<TranscriptionStatusCell>,
+    handle: Arc<EngineHandle>,
+    base_dir: std::path::PathBuf,
+    in_flight: std::sync::atomic::AtomicBool,
+    /// AD-11: the variant whose *load* failed last. A retry of that same
+    /// variant deletes the on-disk file and re-downloads, on the theory that
+    /// a file which cannot be loaded is more likely corrupt than the loader
+    /// is broken.
+    last_load_failed: std::sync::Mutex<Option<ModelVariant>>,
+    /// Test seam only — production resolves URLs via `model_info(variant).url`
+    /// so the pinned manifest stays the single source of truth.
+    url_override: Option<String>,
+}
+
+impl ProvisionerContext {
+    #[allow(dead_code)] // constructed by main.rs in Phase 2 (Task 14)
+    pub fn new(
+        cell: Arc<TranscriptionStatusCell>,
+        handle: Arc<EngineHandle>,
+        base_dir: &Path,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            cell,
+            handle,
+            base_dir: base_dir.to_path_buf(),
+            in_flight: std::sync::atomic::AtomicBool::new(false),
+            last_load_failed: std::sync::Mutex::new(None),
+            url_override: None,
+        })
+    }
+
+    #[allow(dead_code)] // read by the Status handler wiring in Task 14
+    pub fn cell(&self) -> &Arc<TranscriptionStatusCell> {
+        &self.cell
+    }
+
+    #[allow(dead_code)] // read by the Status handler wiring in Task 14
+    pub fn handle(&self) -> &Arc<EngineHandle> {
+        &self.handle
+    }
+
+    fn url_for(&self, variant: ModelVariant) -> &str {
+        self.url_override
+            .as_deref()
+            .unwrap_or_else(|| model_info(variant).url)
+    }
+
+    /// Reserve the single provisioning slot AND commit the state the caller
+    /// is about to report. Returns `false` when one is already running, which
+    /// the caller answers as "busy".
+    ///
+    /// The state commit is synchronous and deliberate (design §2.2): the
+    /// `SetWhisperModel` reply carries the state just *entered*, so it must be
+    /// visible in the cell before this returns — otherwise the reply, or a
+    /// Status request racing it, could still observe the pre-request state.
+    ///
+    /// Called by whoever owns the reply — the Task 14 event-loop arm, or a
+    /// test. **Never by `provision()` itself**; see its precondition.
+    #[allow(dead_code)] // called by the event loop in Phase 2 (Task 14)
+    pub fn try_begin(&self, variant: ModelVariant) -> bool {
+        if self
+            .in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        if self.needs_download(variant) {
+            self.cell.set_downloading(variant);
+        } else {
+            // The ATTEMPTED variant, so a failed switch to an already-present
+            // variant reports the right name (Task 3 re-review).
+            self.cell.set_loading(variant);
+        }
+        true
+    }
+
+    /// True when the walk has to fetch: the file is absent, or it is present
+    /// but flagged by AD-11 as the variant whose load just failed (so it is
+    /// about to be deleted and re-fetched).
+    fn needs_download(&self, variant: ModelVariant) -> bool {
+        !chronicle_transcription::model_present(&self.base_dir, variant)
+            || *self.last_load_failed.lock().unwrap() == Some(variant)
+    }
+
+    /// Drive one full provision: fetch if needed, verify, land, load, swap.
+    ///
+    /// **Precondition: the caller already won [`try_begin`].** This must NOT
+    /// call it again — a second CAS would lose against its own caller's
+    /// reservation and bail out with the flag stuck set, freezing status
+    /// forever (codex plan review, critical 1). It starts from the committed
+    /// entering state and clears the flag on every exit via a drop guard.
+    ///
+    /// Returns `()`: every failure is reported through the cell, not to the
+    /// caller, because the caller already replied to the user.
+    #[allow(dead_code)] // spawned by the event loop in Phase 2 (Task 14)
+    pub async fn provision(
+        &self,
+        variant: ModelVariant,
+        evt_tx: tokio::sync::mpsc::Sender<ProvisionEvent>,
+    ) {
+        let _guard = InFlightGuard(&self.in_flight);
+
+        // AD-11: a file that failed to load last time is more likely corrupt
+        // than the loader is broken, so a retry starts clean.
+        if chronicle_transcription::model_present(&self.base_dir, variant)
+            && *self.last_load_failed.lock().unwrap() == Some(variant)
+        {
+            let path = model_path(&self.base_dir, variant);
+            log::info!("deleting suspect model file after load failure; re-downloading");
+            if let Err(e) = std::fs::remove_file(&path) {
+                log::warn!("could not delete suspect model file: {e}");
+            }
+            *self.last_load_failed.lock().unwrap() = None;
+        }
+
+        if !chronicle_transcription::model_present(&self.base_dir, variant) {
+            // Idempotent on top of try_begin's commit, and the re-zero of the
+            // progress atomics is wanted on a retry.
+            self.cell.set_downloading(variant);
+            let dest = model_path(&self.base_dir, variant);
+            let tmp = dest.with_extension("bin.tmp");
+
+            if let Err(e) = check_disk_space(&self.base_dir, model_info(variant).size_bytes) {
+                log::error!("model download precheck failed ({variant}): {e}");
+                self.cell.set_error(&e.to_string());
+                return;
+            }
+            if let Err(e) = download_model(
+                self.url_for(variant),
+                &tmp,
+                self.cell.progress_bytes(),
+                self.cell.progress_total(),
+            )
+            .await
+            {
+                log::error!("model download failed ({variant}): {e}");
+                self.cell.set_error(&e.to_string());
+                return;
+            }
+            // Downloading → Verifying. The window is the span until
+            // finalize_model returns; transient by nature, which is why the
+            // checksum test asserts the edge executed via its distinctive
+            // error rather than by catching the state.
+            self.cell.set_verifying();
+            if let Err(e) = finalize_model(&tmp, &dest, model_info(variant).sha1).await {
+                log::error!("model verification failed ({variant}): {e}");
+                self.cell.set_error(&e.to_string());
+                return;
+            }
+        }
+
+        self.cell.set_loading(variant);
+        let base_dir = self.base_dir.clone();
+        // Off the runtime: loading a ggml model is seconds of blocking work
+        // for a large variant and must not stall tokio workers (HEU-480).
+        let load = tokio::task::spawn_blocking(move || {
+            chronicle_transcription::TranscriptionEngine::load(&base_dir, variant)
+        })
+        .await;
+
+        match load {
+            Ok(Ok(engine)) => {
+                let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(engine);
+                // Engine BEFORE Ready, always. The Status handler reads the
+                // cell on its own task, so the other order opens a window
+                // where a client sees `ready` with `is_loaded()` still false.
+                // At boot that was harmless; here it is not — this path runs
+                // while capture is already flowing.
+                self.handle.set(engine);
+                self.cell.set_ready(variant);
+                *self.last_load_failed.lock().unwrap() = None;
+                log::info!("transcription engine swapped (variant={variant})");
+                // Best-effort: the loop persists on receipt (AD-10). A closed
+                // receiver means shutdown, not a reason to fail the swap.
+                if let Err(e) = evt_tx.send(ProvisionEvent::Ready { variant }).await {
+                    log::warn!("could not report Ready for persistence: {e}");
+                }
+            }
+            Ok(Err(e)) => {
+                log::error!("transcription engine load failed ({variant}): {e}");
+                *self.last_load_failed.lock().unwrap() = Some(variant);
+                // TranscriptionError::Display already carries the
+                // "model load failed:" prefix — don't double it on the wire.
+                self.cell
+                    .set_error(&format!("{e} — retrying will re-download the file"));
+            }
+            Err(e) => {
+                log::error!("transcription engine load task failed ({variant}): {e}");
+                *self.last_load_failed.lock().unwrap() = Some(variant);
+                // JoinError::Display forwards arbitrary panic payloads —
+                // keep the wire string fixed; the log line above has {e}.
+                self.cell
+                    .set_error("model load failed — retrying will re-download the file");
+            }
+        }
+    }
+}
+
+/// Startup path: clear stale partials, then load the configured variant if
+/// its file is already on disk. Never downloads — first-run provisioning is
+/// user-initiated via `SetWhisperModel` (design §2.1).
+///
+/// **Awaited in `main` before `audio_store_loop` spawns**, which preserves
+/// today's no-loss ordering (codex I2).
+pub async fn boot(
+    base_dir: &Path,
+    variant: ModelVariant,
+    cell: &Arc<TranscriptionStatusCell>,
+    handle: &Arc<EngineHandle>,
+) {
+    cleanup_stale_tmps(base_dir);
+
+    if !chronicle_transcription::model_present(base_dir, variant) {
+        // Cell stays Missing; the startup presence check already logged the
+        // "model missing → idle" warning.
+        return;
+    }
+
+    // The cell is already Loading — set at creation, before IpcServer::start,
+    // so Status never reports Missing during the ScreenCaptureKit startup.
+    let owned = base_dir.to_path_buf();
+    let load = tokio::task::spawn_blocking(move || {
+        chronicle_transcription::TranscriptionEngine::load(&owned, variant)
+    })
+    .await;
+
+    match load {
+        Ok(Ok(engine)) => {
+            let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(engine);
+            // Engine before Ready — see provision()'s note on the same order.
+            handle.set(engine);
+            cell.set_ready(variant);
+            log::info!(
+                "transcription engine loaded (variant={}, backend={})",
+                variant,
+                if cfg!(feature = "transcription-metal") {
+                    "metal"
+                } else {
+                    "cpu"
+                }
+            );
+        }
+        Ok(Err(e)) => {
+            log::error!("transcription engine load failed ({variant}): {e} — staying idle");
+            cell.set_error(&e.to_string());
+        }
+        Err(e) => {
+            log::error!("transcription engine load task failed ({variant}): {e} — staying idle");
+            cell.set_error("model load failed");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chronicle_ipc::TranscriptionState;
     use chronicle_transcription::{MODELS_SUBDIR, parse_variant};
     use tempfile::tempdir;
+
+    impl ProvisionerContext {
+        /// Test constructor: real manifest URLs, so only the on-disk paths
+        /// are exercised. Returns an `Arc` because the progress test clones
+        /// it into a spawned provision task.
+        fn new_for_test(base_dir: &Path) -> Arc<Self> {
+            Arc::new(Self {
+                cell: TranscriptionStatusCell::new(parse_variant("base").unwrap()),
+                handle: Arc::new(EngineHandle::new()),
+                base_dir: base_dir.to_path_buf(),
+                in_flight: std::sync::atomic::AtomicBool::new(false),
+                last_load_failed: std::sync::Mutex::new(None),
+                url_override: None,
+            })
+        }
+
+        /// Test constructor with a URL override, so no test ever reaches the
+        /// real network.
+        fn new_for_test_with_url(base_dir: &Path, url: &str) -> Arc<Self> {
+            let ctx = Self::new_for_test(base_dir);
+            Arc::new(Self {
+                cell: Arc::clone(&ctx.cell),
+                handle: Arc::clone(&ctx.handle),
+                base_dir: ctx.base_dir.clone(),
+                in_flight: std::sync::atomic::AtomicBool::new(false),
+                last_load_failed: std::sync::Mutex::new(None),
+                url_override: Some(url.to_string()),
+            })
+        }
+
+        /// Simulate a provision already running, without starting one.
+        fn mark_in_flight(&self) {
+            self.in_flight.store(true, Ordering::Release);
+        }
+    }
 
     /// Stand-in engine, tagged so tests can tell two instances apart.
     struct StubEngine(&'static str);
@@ -1112,6 +1428,220 @@ mod tests {
         assert!(
             !is_plaintext_downgrade(&[], &http),
             "an empty chain is the initial request, not a redirect"
+        );
+    }
+
+    // ---- Task 13: provisioner state machine ----
+
+    #[tokio::test]
+    async fn try_begin_rejects_while_in_flight() {
+        let dir = tempdir().unwrap();
+        let ctx = ProvisionerContext::new_for_test(dir.path());
+        ctx.mark_in_flight(); // simulate a running operation
+        let accepted = ctx.try_begin(parse_variant("base").unwrap());
+        assert!(!accepted, "second operation must be rejected while busy");
+    }
+
+    #[tokio::test]
+    async fn try_begin_commits_entering_state_synchronously() {
+        // Design §2.2 response contract: the SetWhisperModel reply carries
+        // the state just ENTERED. try_begin commits it before returning, so
+        // the event loop's reply (and the handler's cell re-read) can never
+        // observe the stale pre-request state.
+        let dir = tempdir().unwrap();
+        // File absent → entering state is Downloading.
+        let ctx = ProvisionerContext::new_for_test(dir.path());
+        assert!(ctx.try_begin(parse_variant("small").unwrap()));
+        let stats = ctx.cell().stats(dir.path());
+        assert_eq!(stats.state, TranscriptionState::Downloading);
+        assert_eq!(stats.variant, "small");
+
+        // File present → entering state is Loading.
+        let dir2 = tempdir().unwrap();
+        let models = dir2.path().join(MODELS_SUBDIR);
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(models.join("ggml-base.bin"), b"present").unwrap();
+        let ctx2 = ProvisionerContext::new_for_test(dir2.path());
+        assert!(ctx2.try_begin(parse_variant("base").unwrap()));
+        assert_eq!(
+            ctx2.cell().stats(dir2.path()).state,
+            TranscriptionState::Loading
+        );
+    }
+
+    #[tokio::test]
+    async fn provision_download_failure_sets_error_and_emits_no_ready() {
+        let dir = tempdir().unwrap();
+        // Port 1 refuses connections → download fails fast.
+        let ctx = ProvisionerContext::new_for_test_with_url(dir.path(), "http://127.0.0.1:1/x");
+        let (evt_tx, mut evt_rx) = tokio::sync::mpsc::channel(4);
+        ctx.provision(parse_variant("base").unwrap(), evt_tx).await;
+        let stats = ctx.cell().stats(dir.path());
+        assert_eq!(stats.state, TranscriptionState::Error);
+        assert!(
+            stats.error.unwrap().contains("download failed"),
+            "generic network failures use the design's 'download failed: …' message"
+        );
+        assert!(evt_rx.try_recv().is_err(), "no Ready event on failure");
+    }
+
+    #[tokio::test]
+    async fn provision_checksum_mismatch_walks_verifying_into_error() {
+        // Fixture bytes cannot match the manifest digest, so this drives the
+        // real Downloading → Verifying → Error path (design §2.1): the
+        // distinctive checksum message only exists on the Verifying edge.
+        let dir = tempdir().unwrap();
+        let port = http_fixture(b"definitely not the model".to_vec(), None).await;
+        let ctx = ProvisionerContext::new_for_test_with_url(
+            dir.path(),
+            &format!("http://127.0.0.1:{port}/x"),
+        );
+        let (evt_tx, mut evt_rx) = tokio::sync::mpsc::channel(4);
+        ctx.provision(parse_variant("base").unwrap(), evt_tx).await;
+        let stats = ctx.cell().stats(dir.path());
+        assert_eq!(stats.state, TranscriptionState::Error);
+        assert!(stats.error.unwrap().contains("checksum mismatch"));
+        assert!(
+            evt_rx.try_recv().is_err(),
+            "no Ready event on verify failure"
+        );
+        let models = dir.path().join(MODELS_SUBDIR);
+        assert!(!models.join("ggml-base.bin").exists(), "nothing landed");
+        assert!(
+            !models.join("ggml-base.bin.tmp").exists(),
+            "partial deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn try_begin_then_provision_walks_to_terminal_state() {
+        // The production pairing (Task 14 event loop): the loop wins
+        // try_begin — committing the entering state — then spawns
+        // provision(). provision() must run the walk WITHOUT re-CASing the
+        // in-flight flag (it would lose against its own caller's
+        // reservation and bail with status stuck) and must clear the flag
+        // on exit so the next request can begin.
+        let dir = tempdir().unwrap();
+        let port = http_fixture(b"definitely not the model".to_vec(), None).await;
+        let ctx = ProvisionerContext::new_for_test_with_url(
+            dir.path(),
+            &format!("http://127.0.0.1:{port}/x"),
+        );
+        let (evt_tx, _evt_rx) = tokio::sync::mpsc::channel(4);
+        assert!(ctx.try_begin(parse_variant("base").unwrap()));
+        ctx.provision(parse_variant("base").unwrap(), evt_tx).await;
+        let stats = ctx.cell().stats(dir.path());
+        assert_eq!(
+            stats.state,
+            TranscriptionState::Error,
+            "walk reached its terminal state despite the caller-held begin"
+        );
+        assert!(
+            ctx.try_begin(parse_variant("base").unwrap()),
+            "in-flight flag cleared on exit — the slot frees up"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_switch_leaves_old_engine_serving() {
+        // Design §3.6: "Failed switch leaves the old engine serving."
+        let dir = tempdir().unwrap();
+        let ctx = ProvisionerContext::new_for_test_with_url(dir.path(), "http://127.0.0.1:1/x");
+        ctx.handle().set(Arc::new(StubEngine("base")));
+        ctx.cell().set_ready(parse_variant("base").unwrap());
+
+        let (evt_tx, _evt_rx) = tokio::sync::mpsc::channel(4);
+        ctx.provision(parse_variant("small").unwrap(), evt_tx).await;
+
+        let stats = ctx.cell().stats(dir.path());
+        assert_eq!(stats.state, TranscriptionState::Error);
+        assert_eq!(
+            stats.loaded_variant.as_deref(),
+            Some("base"),
+            "status keeps reporting the serving engine"
+        );
+        assert_eq!(
+            ctx.handle().get().unwrap().variant(),
+            "base",
+            "the old engine is still installed in the handle"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_reports_advancing_progress_mid_download() {
+        // Design §3.6 / codex S2 (automated half) + NFR-4: while a download
+        // runs, cell.stats() answers normally and shows advancing bytes.
+        let dir = tempdir().unwrap();
+        // 10 bytes arrive, then the fixture stalls — freezing the download
+        // in the Downloading state for the poll below. The poll budget
+        // (300ms) stays under the cfg(test) CHUNK_TIMEOUT (500ms) so the
+        // stall cannot flip the state to Error mid-poll.
+        let port = http_fixture(vec![7u8; 1024], Some(10)).await;
+        let ctx = ProvisionerContext::new_for_test_with_url(
+            dir.path(),
+            &format!("http://127.0.0.1:{port}/x"),
+        );
+        let (evt_tx, _evt_rx) = tokio::sync::mpsc::channel(4);
+        let ctx2 = Arc::clone(&ctx);
+        let task =
+            tokio::spawn(
+                async move { ctx2.provision(parse_variant("base").unwrap(), evt_tx).await },
+            );
+
+        let mut observed = None;
+        for _ in 0..60 {
+            let stats = ctx.cell().stats(dir.path());
+            if stats.state == TranscriptionState::Downloading
+                && stats.download_bytes.unwrap_or(0) >= 10
+            {
+                observed = Some(stats);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let stats = observed.expect("never observed advancing download progress");
+        assert_eq!(
+            stats.download_total_bytes,
+            Some(1024),
+            "Content-Length surfaced"
+        );
+        task.abort(); // stalled fixture never completes; test is done
+    }
+
+    #[tokio::test]
+    async fn provision_load_failure_on_existing_garbage_marks_error() {
+        let dir = tempdir().unwrap();
+        let models = dir.path().join(MODELS_SUBDIR);
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(models.join("ggml-base.bin"), b"not a ggml model").unwrap();
+        let ctx = ProvisionerContext::new_for_test(dir.path());
+        let (evt_tx, _evt_rx) = tokio::sync::mpsc::channel(4);
+        ctx.provision(parse_variant("base").unwrap(), evt_tx).await;
+        let stats = ctx.cell().stats(dir.path());
+        assert_eq!(stats.state, TranscriptionState::Error);
+        assert!(
+            !ctx.handle().is_loaded(),
+            "no engine appears from a bad file"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_after_load_failure_deletes_suspect_file() {
+        let dir = tempdir().unwrap();
+        let models = dir.path().join(MODELS_SUBDIR);
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(models.join("ggml-base.bin"), b"garbage").unwrap();
+        let ctx = ProvisionerContext::new_for_test_with_url(dir.path(), "http://127.0.0.1:1/x");
+        let (evt_tx, _evt_rx) = tokio::sync::mpsc::channel(4);
+        // First attempt: load fails on garbage → Error, file still there.
+        ctx.provision(parse_variant("base").unwrap(), evt_tx.clone())
+            .await;
+        // Retry: AD-11 — suspect file is deleted, then re-download starts
+        // (and fails here on the dead URL, which is fine for the assertion).
+        ctx.provision(parse_variant("base").unwrap(), evt_tx).await;
+        assert!(
+            !models.join("ggml-base.bin").exists(),
+            "retry after load failure must delete the corrupt file (AD-11)"
         );
     }
 

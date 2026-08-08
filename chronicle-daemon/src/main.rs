@@ -292,15 +292,23 @@ async fn main() -> Result<()> {
     // Set only when the shutdown drain grace expires; tells `transcribe_loop` to
     // stop after the segment it is already working on.
     let stop_transcription = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // One handle, one channel, one sink for every path below. The sink gates
-    // on the handle, so while it is empty every enqueue short-circuits to
-    // `Disabled` without touching the channel — identical to the old
-    // `NoopTranscriptionSink`. The receiver exists from the moment the channel
-    // is created and, on the paths that never spawn the loop, stays alive as an
-    // unmoved local until `main` returns, so the channel is never closed behind
-    // a live sender. Only the successful-load arm sets the handle and spawns
-    // the loop, exactly as before; Task 13 restructures this block.
     let engine_handle = Arc::new(provisioning::EngineHandle::new());
+    // Awaited here, before `audio_store_loop` spawns below, so nothing can be
+    // enqueued while the engine slot is still being filled — the no-loss
+    // ordering this block has always had.
+    provisioning::boot(
+        storage.base_dir(),
+        whisper_variant,
+        &transcription_status,
+        &engine_handle,
+    )
+    .await;
+    // One handle, one channel, one sink, one loop — unconditionally. "No
+    // model" is just an empty handle: the sink gates on it, so every enqueue
+    // short-circuits to `Disabled` without touching the channel, identical to
+    // the old `NoopTranscriptionSink` (design §3.4). Spawning the loop even
+    // with no engine is what lets a mid-session `SetWhisperModel` start
+    // transcribing without a restart — there is no loop to create later.
     // Bounded channel (64), matching the audio bridge: drop-on-full.
     let (transcription_tx, transcription_rx) = tokio::sync::mpsc::channel(64);
     let transcription_sink: Arc<dyn pipeline::sinks::TranscriptionSink> =
@@ -308,74 +316,16 @@ async fn main() -> Result<()> {
             tx: transcription_tx,
             engine: Arc::clone(&engine_handle),
         });
-    let transcribe_handle: Option<tokio::task::JoinHandle<()>> = if model_present {
-        // Load the ggml model off the runtime — it's heavy blocking work
-        // (seconds for a large variant) and must not stall tokio workers
-        // (HEU-480). The cell is already in Loading (set at creation, before
-        // the IPC server started).
-        let base_dir = storage.base_dir().to_path_buf();
-        let load_result = tokio::task::spawn_blocking(move || {
-            chronicle_transcription::TranscriptionEngine::load(&base_dir, whisper_variant)
-        })
-        .await;
-        match load_result {
-            Ok(Ok(engine)) => {
-                let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(engine);
-                // Publish the engine BEFORE announcing Ready, in that order.
-                // IPC has been serving since `IpcServer::start`, and the Status
-                // handler reads the cell on its own task — announcing first
-                // opens a window where a client sees `ready` while
-                // `is_loaded()` is still false. Nothing can enqueue in that
-                // window today (`audio_store_loop` spawns further down), but
-                // Task 13 drives swaps while capture is already running, where
-                // the same ordering stops being harmless.
-                engine_handle.set(engine);
-                transcription_status.set_ready(whisper_variant);
-                // Not the global cancellation token, by design — the loop must
-                // outlive it so the shutdown flush still gets transcribed. This flag
-                // means "finish the segment you are on, then stop", and only the
-                // drain timeout below sets it. See `transcribe_loop`'s contract.
-                let handle = tokio::spawn(pipeline::transcribe_loop(
-                    Arc::clone(&engine_handle),
-                    Arc::clone(&storage),
-                    transcription_rx,
-                    Arc::clone(&stop_transcription),
-                ));
-                log::info!(
-                    "transcription engine loaded (variant={}, backend={})",
-                    whisper_variant,
-                    if cfg!(feature = "transcription-metal") {
-                        "metal"
-                    } else {
-                        "cpu"
-                    }
-                );
-                Some(handle)
-            }
-            Ok(Err(e)) => {
-                log::error!(
-                    "transcription engine load failed ({whisper_variant}): {e} — staying idle"
-                );
-                // TranscriptionError::Display already carries the
-                // "model load failed:" prefix — don't double it on the wire.
-                transcription_status.set_error(&e.to_string());
-                None
-            }
-            Err(e) => {
-                log::error!(
-                    "transcription engine load task failed ({whisper_variant}): {e} — staying idle"
-                );
-                // JoinError::Display forwards arbitrary panic payloads —
-                // keep the wire string fixed; the log line above has {e}.
-                transcription_status.set_error("model load failed");
-                None
-            }
-        }
-    } else {
-        // The startup model-presence check above already logged the
-        // "model missing → idle" warning.
-        None
-    };
+    // Not the global cancellation token, by design — the loop must outlive it
+    // so the shutdown flush still gets transcribed. `stop_transcription` means
+    // "finish the segment you are on, then stop", and only the drain timeout
+    // below sets it. See `transcribe_loop`'s contract.
+    let transcribe_handle = tokio::spawn(pipeline::transcribe_loop(
+        Arc::clone(&engine_handle),
+        Arc::clone(&storage),
+        transcription_rx,
+        Arc::clone(&stop_transcription),
+    ));
     let audio_store_handle = tokio::spawn(pipeline::audio_store_loop(
         audio_storage,
         audio_rx,
@@ -607,7 +557,10 @@ async fn main() -> Result<()> {
     // task released its clone by finishing — and that close is what tells
     // `transcribe_loop` to drain and exit.
     drop(transcription_sink);
-    if let Some(mut handle) = transcribe_handle {
+    {
+        // The loop always exists now (Task 13), so this is no longer an
+        // `if let Some`. Every timing and borrow property below is unchanged.
+        let mut handle = transcribe_handle;
         // Bounds how long we let the queue drain — NOT how long exit takes. Runtime
         // drop blocks until every blocking worker finishes its current task, so
         // worst-case exit is DRAIN_GRACE plus the in-flight whisper call either way;
