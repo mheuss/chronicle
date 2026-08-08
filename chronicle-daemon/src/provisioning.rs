@@ -333,6 +333,10 @@ pub async fn download_model(
                     // mismatch — update Chronicle" for a CDN misconfiguration.
                     // `> 10` matches reqwest's own default cap, whose chain
                     // also counts the initial URL.
+                    log::warn!(
+                        "refusing to follow more than 10 redirects, stopped at {}",
+                        attempt.url()
+                    );
                     attempt.error("too many redirects")
                 } else {
                     attempt.follow()
@@ -349,15 +353,30 @@ pub async fn download_model(
             .await
             .and_then(|r| r.error_for_status())
             .map_err(|e| anyhow::anyhow!("download failed: {e}"))?;
+        // The redirect policy is NOT a complete guard against a redirect
+        // landing as a download: tower-http returns a 3xx as Ok without ever
+        // consulting the policy when the status is outside
+        // {301,302,303,307,308} or Location is missing/unresolvable
+        // (follow_redirect/mod.rs:293 and :307). `error_for_status` doesn't
+        // catch those either, since it only rejects 4xx/5xx. Without this
+        // check the redirect body lands in .tmp and Task 13 reports it as a
+        // checksum mismatch — blaming the model for a broken CDN.
+        anyhow::ensure!(
+            resp.status().is_success(),
+            "download failed: unexpected HTTP status {}",
+            resp.status()
+        );
         if let Some(len) = resp.content_length() {
             total_atom.store(len, Ordering::Relaxed);
         }
         // 0600 from birth, not just at finalize: File::create would use
         // 0666 & umask, leaving the partial world-readable for the whole
-        // download. The unlink first is what makes that unconditional —
+        // download. Unlinking first is what makes that the normal case —
         // open(2) ignores the mode argument unless O_CREAT actually creates,
         // so reopening a leftover .tmp would silently keep its old
-        // permissions.
+        // permissions. (Not airtight: if the dir is read-only but the file
+        // is writable, the unlink fails and the old mode survives. That path
+        // cannot finish anyway — finalize's rename would fail too.)
         let _ = std::fs::remove_file(tmp);
         let mut file = {
             use std::os::unix::fs::OpenOptionsExt as _;
@@ -722,13 +741,14 @@ mod tests {
                         Some(n) => {
                             sock.write_all(&body[..n]).await.unwrap();
                             // Hold the socket open, never sending the rest.
-                            // 5s, not an hour: 10x the 500ms cfg(test)
-                            // CHUNK_TIMEOUT, so the real test is unchanged,
-                            // but a build that MUTATES the timeout away gets
-                            // a truncated-body error after 5s instead of
+                            // 15s, not an hour: 30x the 500ms cfg(test)
+                            // CHUNK_TIMEOUT, so the real test is unchanged
+                            // even under heavy scheduling starvation, but a
+                            // build that MUTATES the timeout away gets a
+                            // truncated-body error after 15s instead of
                             // wedging the whole suite with no output —
                             // libtest has no default per-test timeout.
-                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
                         }
                         None => sock.write_all(&body).await.unwrap(),
                     }
@@ -780,6 +800,24 @@ mod tests {
                               content-length: 0\r\nconnection: close\r\n\r\n",
                         )
                         .await;
+                });
+            }
+        });
+        port
+    }
+
+    /// Answers every request with `raw` verbatim — status line, headers and
+    /// body — so a test can drive statuses reqwest/tower-http treat specially.
+    async fn http_fixture_raw(raw: &'static str) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = sock.read(&mut buf).await;
+                    let _ = sock.write_all(raw.as_bytes()).await;
                 });
             }
         });
@@ -960,6 +998,71 @@ mod tests {
             "a redirect loop must fail, not land the 302 body as a download"
         );
         assert!(!tmp.exists(), "no partial left behind");
+    }
+
+    #[tokio::test]
+    async fn download_errors_on_a_3xx_that_bypasses_the_redirect_policy() {
+        // The redirect policy is not reachable for every 3xx: tower-http
+        // returns the response as Ok WITHOUT consulting the policy when the
+        // status is outside {301,302,303,307,308}, or when Location is
+        // missing/unresolvable. error_for_status only rejects 4xx/5xx, so
+        // both would otherwise land the redirect body as a "successful"
+        // download and Task 13 would blame the model for a broken CDN.
+        for raw in [
+            // A Location that is never followed, because 300 is not a
+            // followed status.
+            "HTTP/1.1 300 Multiple Choices\r\nlocation: /elsewhere\r\n\
+             content-length: 3\r\nconnection: close\r\n\r\nxxx",
+            // A followed status with no Location to follow.
+            "HTTP/1.1 302 Found\r\ncontent-length: 3\r\n\
+             connection: close\r\n\r\nxxx",
+        ] {
+            let dir = tempdir().unwrap();
+            let port = http_fixture_raw(raw).await;
+            let tmp = dir.path().join(MODELS_SUBDIR).join("ggml-base.bin.tmp");
+            let result = download_model(
+                &format!("http://127.0.0.1:{port}/x"),
+                &tmp,
+                &AtomicU64::new(0),
+                &AtomicU64::new(0),
+            )
+            .await;
+            assert!(
+                result.is_err(),
+                "a 3xx must not land as a download — response was: {raw}"
+            );
+            assert!(!tmp.exists(), "no partial left behind for: {raw}");
+        }
+    }
+
+    #[tokio::test]
+    async fn download_resets_a_leftover_partials_permissions() {
+        // open(2) ignores the mode argument unless O_CREAT actually creates
+        // the file, so without the unlink in download_model a leftover .tmp
+        // keeps its old mode for the whole download — a world-readable
+        // 1.5 GB partial. Deleting that one line leaves every other test in
+        // this file green, which is why this exists.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let body = b"fake model bytes".to_vec();
+        let port = http_fixture(body.clone(), None).await;
+        let tmp = dir.path().join(MODELS_SUBDIR).join("ggml-base.bin.tmp");
+        std::fs::create_dir_all(tmp.parent().unwrap()).unwrap();
+        std::fs::write(&tmp, b"stale").unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        download_model(
+            &format!("http://127.0.0.1:{port}/model"),
+            &tmp,
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .await
+        .unwrap();
+
+        let mode = std::fs::metadata(&tmp).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "a reopened partial must not keep its old mode");
+        assert_eq!(std::fs::read(&tmp).unwrap(), body, "stale bytes replaced");
     }
 
     #[test]
