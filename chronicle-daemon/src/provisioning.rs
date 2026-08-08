@@ -361,7 +361,7 @@ pub async fn download_model(
         //   - the redirect policy never sees a 3xx whose status is outside
         //     {301,302,303,307,308}, or that has no resolvable Location —
         //     tower-http returns those as Ok without consulting it
-        //     (follow_redirect/mod.rs:293 and :307).
+        //     (follow_redirect/mod.rs:292 and :308, tower-http 0.6.11).
         //   - `is_success()` accepts 204/206/203: a 204 (what corporate web
         //     filters and captive portals answer a blocked URL with) decodes
         //     as zero-length and lands an EMPTY .tmp as a complete download.
