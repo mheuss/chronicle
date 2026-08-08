@@ -50,7 +50,11 @@ struct SearchPopoverView: View {
             }
 
             if transcriptionAlert.shouldShow {
-                TranscriptionBanner(onDismiss: { transcriptionAlert.dismissed = true })
+                TranscriptionBanner(
+                    transcription: connection.lastStatus?.data.transcription,
+                    onDismiss: { transcriptionAlert.dismissed = true },
+                    onProvision: provisionModel
+                )
                 Divider()
             }
 
@@ -109,6 +113,36 @@ struct SearchPopoverView: View {
             if let status = connection.lastStatus {
                 transcriptionAlert.evaluate(status: status)
             }
+        }
+        // 1 Hz status poll while a provision runs and the popover is visible.
+        // View-owned by design (§4.1): closing the popover cancels this task
+        // and the daemon's download carries on regardless — the poll drives
+        // the progress bar, not the work. Keyed on the state so the loop
+        // restarts across transitions and exits once the state settles.
+        .task(id: connection.lastStatus?.data.transcription?.state) {
+            while !Task.isCancelled, isProvisioningActive {
+                try? await Task.sleep(for: .seconds(1))
+                if Task.isCancelled { return }
+                _ = try? await connection.requestStatus()
+            }
+        }
+    }
+
+    /// Start (or retry) a model download. Deliberately does not pre-dismiss
+    /// the banner: `setWhisperModel` refreshes status on success, which moves
+    /// the banner into its progress branch — dismissing here would hide the
+    /// progress the user just asked for.
+    private func provisionModel(_ variant: String) {
+        Task { _ = try? await connection.setWhisperModel(variant) }
+    }
+
+    /// True while the daemon reports an operation in flight worth polling for.
+    private var isProvisioningActive: Bool {
+        switch connection.lastStatus?.data.transcription?.state {
+        case .downloading, .verifying, .loading:
+            return true
+        default:
+            return false
         }
     }
 
@@ -250,18 +284,37 @@ private struct PausedBanner: View {
 /// Phase 1 has no call to action — there is no download path yet, so offering
 /// a button would be a dead end. Task 15 adds the CTA and progress.
 private struct TranscriptionBanner: View {
+    /// nil only when the daemon is too old to send the block; the banner is
+    /// not shown in that case, so the fallback copy is belt-and-braces.
+    let transcription: TranscriptionStats?
     let onDismiss: () -> Void
+    let onProvision: (String) -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
-            // [A11y] The sentence carries the state on its own; the icon and
-            // the tinted background only reinforce it.
-            Label(
-                "Audio transcription is off — no model downloaded.",
-                systemImage: "waveform.slash"
-            )
-            .font(.callout)
-            Spacer()
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                // [A11y] Every branch states the condition in words. The icon,
+                // the tint and the bar only reinforce what the sentence says.
+                Label(headline, systemImage: icon)
+                    .font(.callout)
+                    .foregroundStyle(isFailure ? Color.red : Color.primary)
+                if let detail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if isProvisioning {
+                    progressRow
+                }
+            }
+            Spacer(minLength: 8)
+            if let action {
+                // [A11y] A labeled button, never a bare icon.
+                Button(action.title) { onProvision(action.variant) }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+            }
             Button(action: onDismiss) {
                 Image(systemName: "xmark").foregroundStyle(.secondary)
             }
@@ -270,5 +323,40 @@ private struct TranscriptionBanner: View {
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(Color.secondary.opacity(0.12))
+    }
+
+    // MARK: - Copy
+
+    private var copy: TranscriptionBannerCopy { TranscriptionBannerCopy(transcription) }
+    private var state: TranscriptionState { transcription?.state ?? .missing }
+    private var isFailure: Bool { copy.isFailure }
+    private var isProvisioning: Bool { copy.showsProgress }
+    private var icon: String { copy.icon }
+    private var headline: String { copy.headline }
+    private var detail: String? { copy.detail }
+    private var action: TranscriptionBannerCopy.Action? { copy.action }
+
+    // MARK: - Progress
+
+    @ViewBuilder
+    private var progressRow: some View {
+        // Total is nil until Content-Length lands, and `Some(0)` is never sent
+        // — so an unknown total means indeterminate, never a divide by zero.
+        if state == .downloading, let total = transcription?.downloadTotalBytes, total > 0 {
+            let done = transcription?.downloadBytes ?? 0
+            ProgressView(value: Double(done), total: Double(total))
+                .progressViewStyle(.linear)
+            // [A11y] Numeric text beside the bar — progress is never conveyed
+            // by the bar's length alone.
+            Text("\(byteLabel(done)) of \(byteLabel(total))")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        } else {
+            ProgressView().progressViewStyle(.linear)
+        }
+    }
+
+    private func byteLabel(_ bytes: UInt64) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
 }

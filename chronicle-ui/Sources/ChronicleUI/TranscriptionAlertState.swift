@@ -33,7 +33,18 @@ final class TranscriptionAlertState {
 
     private var hasEvaluated: Bool = false
 
-    var shouldShow: Bool { missingOnFirstSnapshot && !dismissed }
+    /// True once a provision has been seen in flight and until it resolves.
+    /// Separate from the boot latch because the two raise the banner for
+    /// different reasons: the latch says "you booted with nothing", this says
+    /// "something is happening right now and its progress lives here".
+    ///
+    /// Without it, a switch started from Settings on a healthy boot would run
+    /// with no progress anywhere in the popover, and its failure would have no
+    /// Retry button — `missingOnFirstSnapshot` is false on that path and never
+    /// re-evaluates by design.
+    private var provisionEngaged: Bool = false
+
+    var shouldShow: Bool { (missingOnFirstSnapshot || provisionEngaged) && !dismissed }
 
     func evaluate(status: StatusResponse) {
         // nil = a daemon too old to send the block at all. Nothing is known to
@@ -49,10 +60,35 @@ final class TranscriptionAlertState {
         if !hasEvaluated, let state {
             hasEvaluated = true
             missingOnFirstSnapshot = state == .missing
-        } else if missingOnFirstSnapshot, let state, Self.isResolved(state) {
+        }
+        guard let state else { return }
+
+        // Latches on the way in, clears on the way out. `.error` deliberately
+        // leaves it set: a failed download has to keep its banner, because
+        // that is where Retry lives.
+        if Self.isProvisioning(state) {
+            provisionEngaged = true
+        }
+
+        if missingOnFirstSnapshot || provisionEngaged, Self.isResolved(state) {
             // Transcription became workable (from anywhere). Auto-dismiss so
             // the banner doesn't linger past the condition that raised it.
+            provisionEngaged = false
             dismissed = true
+        }
+    }
+
+    /// Whether a state means "an operation is running right now".
+    ///
+    /// Exhaustive for the same reason as `isResolved`: a new state must be
+    /// classified deliberately rather than defaulting to "not in flight" and
+    /// silently losing its progress UI.
+    private static func isProvisioning(_ state: TranscriptionState) -> Bool {
+        switch state {
+        case .downloading, .verifying, .loading:
+            return true
+        case .missing, .error, .ready, .unknown:
+            return false
         }
     }
 

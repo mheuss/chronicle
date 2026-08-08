@@ -65,11 +65,43 @@ struct TranscriptionAlertStateTests {
         #expect(!alert.shouldShow)
     }
 
-    // The latch only fires on `.missing`, so an in-flight state on the first
-    // snapshot must not raise the banner — Phase 2 owns progress UI.
-    @Test func staysHiddenWhenFirstSnapshotIsDownloading() {
+    // Phase 2 reverses the Phase 1 behavior this replaces. Reopening the
+    // popover mid-download re-runs `.task` against a `.downloading` snapshot,
+    // and the banner is where the progress lives — hiding it would leave a
+    // download the user started with nowhere to be seen.
+    @Test func showsWhenFirstSnapshotIsDownloading() {
         let alert = TranscriptionAlertState()
         alert.evaluate(status: status(.downloading))
+        #expect(alert.shouldShow)
+    }
+
+    // A switch started from Settings on a healthy boot: the first snapshot is
+    // `.ready`, so the missing-latch never fires, but the progress still has
+    // to surface here.
+    @Test func showsForAProvisionStartedAfterAHealthyBoot() {
+        let alert = TranscriptionAlertState()
+        alert.evaluate(status: status(.ready))
+        #expect(!alert.shouldShow)
+        alert.evaluate(status: status(.downloading))
+        #expect(alert.shouldShow)
+    }
+
+    // The failure of a download the user started must stay on screen — that
+    // is where the Retry button lives.
+    @Test func staysVisibleWhenAProvisionFails() {
+        let alert = TranscriptionAlertState()
+        alert.evaluate(status: status(.ready))
+        alert.evaluate(status: status(.downloading))
+        alert.evaluate(status: status(.error))
+        #expect(alert.shouldShow)
+    }
+
+    // ...and clears once it succeeds.
+    @Test func dismissesWhenAProvisionSucceeds() {
+        let alert = TranscriptionAlertState()
+        alert.evaluate(status: status(.ready))
+        alert.evaluate(status: status(.downloading))
+        alert.evaluate(status: status(.ready))
         #expect(!alert.shouldShow)
     }
 

@@ -134,6 +134,36 @@ final class DaemonConnection {
         return response.state
     }
 
+    /// Select (and download if needed) a whisper model variant.
+    ///
+    /// The daemon replies as soon as it accepts or rejects — it never waits
+    /// for the download or the load (AD-9), so `ok` means "the provisioner
+    /// took the job", not "the model is ready". Progress arrives via `Status`.
+    ///
+    /// `ok: false` collapses three cases the wire cannot tell apart: an
+    /// unknown variant, a provision already in flight, and a daemon not yet
+    /// ready. The returned `status` is what callers should render from.
+    ///
+    /// On success this issues one status refresh so the banner and Settings
+    /// update immediately instead of waiting for the next poll tick.
+    func setWhisperModel(_ variant: String) async throws -> SetWhisperModelResponse {
+        struct Req: Codable, Sendable {
+            let type: String
+            let variant: String
+        }
+        let response = try await sendRequest(
+            Req(type: "set_whisper_model", variant: variant),
+            expecting: SetWhisperModelResponse.self
+        )
+        if response.ok {
+            // Best-effort: the reply above already carries the entering
+            // state, so a failed refresh costs at most one second of
+            // staleness before the poll catches up.
+            _ = try? await requestStatus()
+        }
+        return response
+    }
+
     /// Search the daemon's OCR index. Returns up to `limit` screen-only hits
     /// ranked by relevance. Audio results are added in HEU-470.
     ///
@@ -536,6 +566,16 @@ struct TranscriptionStats: Codable, Sendable {
     let downloadBytes: UInt64?
     let downloadTotalBytes: UInt64?
     let models: [ModelEntry]
+}
+
+/// Reply to `set_whisper_model`. `ok` is the accept/reject decision only;
+/// `status` is the transcription block read after that decision, so an
+/// accepted switch normally shows `.downloading` or `.loading` — but a fast
+/// failure (a disk precheck, say) can already have moved it on.
+struct SetWhisperModelResponse: Codable, Sendable {
+    let type: String
+    let ok: Bool
+    let status: TranscriptionStats
 }
 
 struct ErrorResponse: Codable, Sendable {
