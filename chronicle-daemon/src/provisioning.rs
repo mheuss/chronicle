@@ -573,7 +573,7 @@ impl ProvisionerContext {
     /// visible in the cell before this returns — otherwise the reply, or a
     /// Status request racing it, could still observe the pre-request state.
     ///
-    /// Called by whoever owns the reply — the Task 14 event-loop arm, or a
+    /// Called by whoever owns the reply — the `model_rx` event-loop arm, or a
     /// test. **Never by `provision()` itself**; see its precondition.
     pub fn try_begin(&self, variant: ModelVariant) -> bool {
         if self

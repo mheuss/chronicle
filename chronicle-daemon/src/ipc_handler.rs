@@ -121,7 +121,12 @@ pub struct DaemonHandler {
     capture_tx: mpsc::Sender<CaptureCommand>,
     /// Latest capture-paused state, read by `Status`.
     capture_paused: Arc<AtomicBool>,
-    /// Gate that opens once the main loop starts draining `capture_tx`.
+    /// Gate that opens once the main loop starts draining `capture_tx` — and
+    /// `model_tx`, which deliberately shares this flag rather than carrying a
+    /// third always-equal one. The event loop opens every gate at the same
+    /// point, so a separate `model_ready` could only ever disagree by
+    /// accident. See the gate-opening block at the start of the event loop in
+    /// `main.rs`.
     capture_ready: Arc<AtomicBool>,
     capture_reply_timeout: Duration,
     /// Transcription status cell (HEU-475): boot/provisioner write it, the
@@ -129,10 +134,8 @@ pub struct DaemonHandler {
     transcription_status: Arc<TranscriptionStatusCell>,
     /// Control channel to the main event loop for model switches.
     model_tx: mpsc::Sender<ModelCommand>,
-    /// Deliberately reuses `capture_ready` rather than adding a third
-    /// always-equal flag: the event loop opens every gate at the same point,
-    /// so a separate `model_ready` could only ever disagree by accident. See
-    /// the gate-opening block at the start of the event loop in `main.rs`.
+    /// Backstop for a wedged daemon — `try_begin` is a CAS plus one ArcSwap
+    /// store, so a real accept/reject replies in microseconds.
     model_reply_timeout: Duration,
 }
 
