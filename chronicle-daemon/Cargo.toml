@@ -40,17 +40,19 @@ objc2-foundation = { version = "0.3", features = ["NSString"] }
 thiserror = "2"
 arc-swap = "1"
 async-trait = "0.1"
-# rustls only — no native-tls. macos-system-configuration is kept from the
-# default set on purpose: a launchd daemon inherits no HTTPS_PROXY, so without
-# it a user behind a system-configured proxy cannot download a model at all
-# and only sees "download failed". Trust anchors stay webpki-roots (a pinned
-# Mozilla snapshot), so an enterprise proxy with a custom root CA is still
-# unsupported — deliberate, since keychain trust would honour any locally
-# installed root. Dropped from the defaults: charset (only affects .text(),
-# unused) and http2 (ALPN falls back to HTTP/1.1).
+# rustls only — no native-tls. system-proxy is kept from the default set on
+# purpose: a launchd daemon inherits no HTTPS_PROXY, so without it a user
+# behind a system-configured proxy cannot download a model at all and only
+# sees "download failed". (Spelled system-proxy, not the macos-system-
+# configuration alias, which is back-compat and could be dropped in a future
+# 0.12.x.) Trust anchors stay webpki-roots — a pinned Mozilla snapshot — so an
+# enterprise proxy with a custom root CA is still unsupported. That is
+# deliberate: keychain trust would honour any locally installed root.
+# Dropped from the defaults: charset (only affects .text(), unused) and http2
+# (ALPN falls back to HTTP/1.1).
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
-    "macos-system-configuration",
+    "system-proxy",
 ] }
 # statvfs for the pre-download free-space check.
 libc = "0.2"

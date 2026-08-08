@@ -269,14 +269,14 @@ pub fn cleanup_stale_tmps(base_dir: &Path) {
 }
 
 /// True when following a redirect would drop from HTTPS to plaintext.
-/// `previous` is the redirect chain so far, oldest first, so its head is the
-/// scheme the caller actually asked for. Split out of the client's redirect
-/// policy so it can be tested without standing up a TLS origin.
+/// `previous` is the redirect chain so far. Checks whether ANY hop was https
+/// rather than just the head: the head IS the originally-requested URL in
+/// reqwest 0.12, but keying a security decision on that ordering makes the
+/// predicate fail OPEN if it ever changes. `any` fails closed instead, and
+/// still lets the all-plaintext loopback fixture through. Split out of the
+/// client's redirect policy so it can be tested without a TLS origin.
 fn is_plaintext_downgrade(previous: &[reqwest::Url], next: &reqwest::Url) -> bool {
-    previous
-        .first()
-        .is_some_and(|first| first.scheme() == "https")
-        && next.scheme() != "https"
+    previous.iter().any(|u| u.scheme() == "https") && next.scheme() != "https"
 }
 
 /// Stream `url` into `tmp`. Fetch ONLY — no verify, no rename. The caller
@@ -316,9 +316,24 @@ pub async fn download_model(
             // so the loopback http fixture in tests still works.
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 if is_plaintext_downgrade(attempt.previous(), attempt.url()) {
+                    // reqwest's Display prints only kind + URL and never the
+                    // source, and anyhow!("{e}") drops the chain — so without
+                    // this log the refusal fires completely invisibly and is
+                    // indistinguishable from a malformed Location header.
+                    log::warn!(
+                        "refusing an HTTPS → plaintext redirect to {}",
+                        attempt.url()
+                    );
                     attempt.error("refusing to follow a redirect from HTTPS to plaintext HTTP")
-                } else if attempt.previous().len() >= 10 {
-                    attempt.stop()
+                } else if attempt.previous().len() > 10 {
+                    // error(), NOT stop(): stop() returns the 30x itself as
+                    // Ok, and error_for_status only rejects 4xx/5xx — so a
+                    // redirect loop would "succeed" with the redirect body in
+                    // .tmp, and Task 13 would tell the user "checksum
+                    // mismatch — update Chronicle" for a CDN misconfiguration.
+                    // `> 10` matches reqwest's own default cap, whose chain
+                    // also counts the initial URL.
+                    attempt.error("too many redirects")
                 } else {
                     attempt.follow()
                 }
@@ -339,7 +354,11 @@ pub async fn download_model(
         }
         // 0600 from birth, not just at finalize: File::create would use
         // 0666 & umask, leaving the partial world-readable for the whole
-        // download.
+        // download. The unlink first is what makes that unconditional —
+        // open(2) ignores the mode argument unless O_CREAT actually creates,
+        // so reopening a leftover .tmp would silently keep its old
+        // permissions.
+        let _ = std::fs::remove_file(tmp);
         let mut file = {
             use std::os::unix::fs::OpenOptionsExt as _;
             std::fs::OpenOptions::new()
@@ -703,7 +722,13 @@ mod tests {
                         Some(n) => {
                             sock.write_all(&body[..n]).await.unwrap();
                             // Hold the socket open, never sending the rest.
-                            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                            // 5s, not an hour: 10x the 500ms cfg(test)
+                            // CHUNK_TIMEOUT, so the real test is unchanged,
+                            // but a build that MUTATES the timeout away gets
+                            // a truncated-body error after 5s instead of
+                            // wedging the whole suite with no output —
+                            // libtest has no default per-test timeout.
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         }
                         None => sock.write_all(&body).await.unwrap(),
                     }
@@ -734,6 +759,29 @@ mod tests {
             sock.flush().await.unwrap();
             let _ = gate.await;
             sock.write_all(&body[split..]).await.unwrap();
+        });
+        port
+    }
+
+    /// Answers every request with a 302 pointing at itself — a redirect loop.
+    /// `connection: close` so each hop is a fresh accept.
+    async fn http_fixture_redirect_loop() -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = sock.read(&mut buf).await;
+                    let _ = sock
+                        .write_all(
+                            b"HTTP/1.1 302 Found\r\nlocation: /again\r\n\
+                              content-length: 0\r\nconnection: close\r\n\r\n",
+                        )
+                        .await;
+                });
+            }
         });
         port
     }
@@ -850,14 +898,28 @@ mod tests {
         let task = tokio::spawn(async move { download_model(&url, &tmp2, &b2, &t2).await });
 
         // Bounded so a buffered implementation FAILS rather than hanging.
+        // The loop also watches the task: its 1000ms budget outlives the
+        // 500ms CHUNK_TIMEOUT, so a starved poll could see the download die
+        // of a stall and then blame streaming for it. Break on a finished
+        // task and report the real error instead.
         let mut saw_partial = false;
+        let mut died_early = false;
         for _ in 0..200 {
             if bytes.load(Ordering::Relaxed) as usize >= split {
                 saw_partial = true;
                 break;
             }
+            if task.is_finished() {
+                died_early = true;
+                break;
+            }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
+        assert!(
+            !died_early,
+            "download ended before publishing progress: {:?}",
+            task.await.unwrap()
+        );
         assert!(
             saw_partial,
             "no progress published before the body completed — not streaming"
@@ -872,6 +934,32 @@ mod tests {
         task.await.unwrap().unwrap();
         assert_eq!(std::fs::read(&tmp).unwrap(), body, "fetch only — no rename");
         assert_eq!(bytes.load(Ordering::Relaxed), body.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn download_errors_on_a_redirect_loop() {
+        // Covers the redirect-cap branch of the policy closure, which the
+        // predicate test below does not reach. The distinguishing signal is
+        // Err vs Ok, not the message: reqwest's `stop()` hands the 30x back
+        // as a SUCCESS and `error_for_status` only rejects 4xx/5xx, so the
+        // buggy form returns Ok(()) with the redirect body sitting in .tmp —
+        // which Task 13 would then report to the user as "checksum mismatch
+        // — update Chronicle" for what is really a CDN misconfiguration.
+        let dir = tempdir().unwrap();
+        let port = http_fixture_redirect_loop().await;
+        let tmp = dir.path().join(MODELS_SUBDIR).join("ggml-base.bin.tmp");
+        let result = download_model(
+            &format!("http://127.0.0.1:{port}/start"),
+            &tmp,
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a redirect loop must fail, not land the 302 body as a download"
+        );
+        assert!(!tmp.exists(), "no partial left behind");
     }
 
     #[test]
@@ -913,8 +1001,9 @@ mod tests {
         // Without this, an always-Err implementation passes the test above
         // and bricks every download with a green suite. Requiring 0 bytes
         // still has to clear DISK_MARGIN_BYTES, so this also pins that the
-        // margin arithmetic doesn't reject a healthy disk, and that the
-        // f_bavail × f_frsize product isn't being read off the wrong field.
+        // margin arithmetic doesn't reject a healthy disk. It does NOT pin
+        // the field choice — f_bfree or f_bsize would pass here too.
+        // Assumes 512 MiB free on the tempdir filesystem.
         let dir = tempdir().unwrap();
         check_disk_space(dir.path(), 0).expect("a temp dir on a working disk has 512 MiB free");
     }
