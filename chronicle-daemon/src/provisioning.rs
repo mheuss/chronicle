@@ -209,16 +209,29 @@ const DISK_MARGIN_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Per-chunk stall timeout. A whole-request timeout would falsely kill a
 /// healthy 1.5 GB transfer; a stalled chunk read is the real failure signal.
+///
+/// Shortened under `cfg(test)` — the plan's fallback (plan lines 1697-1701),
+/// taken after the `start_paused` version of the stall test was found to
+/// never reach this timeout at all. Under a paused clock the only timer armed
+/// during connect is the 30 s `connect_timeout`, so the runtime jumps the
+/// clock there before the loopback socket is ever observed ready, and the
+/// test passed on the connect error instead. Real socket I/O and an
+/// auto-advancing clock do not compose; a short real timeout does.
+#[cfg(not(test))]
 const CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+#[cfg(test)]
+const CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// statvfs-based free space check, run before a download starts.
 #[allow(dead_code)] // called by provision() in Phase 2 (Task 13)
 pub fn check_disk_space(base_dir: &Path, required_bytes: u64) -> anyhow::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(base_dir.as_os_str().as_bytes())?;
+    // SAFETY: `statvfs` is all integer fields, so all-zero is a valid bit
+    // pattern for it — there is no reference, enum, or NonZero to invalidate.
     let mut vfs: libc::statvfs = unsafe { std::mem::zeroed() };
     // SAFETY: `c_path` is a valid NUL-terminated string that outlives the
-    // call, and `vfs` is a live, correctly-sized, zeroed statvfs.
+    // call, and `vfs` is a live, correctly-sized, initialized statvfs.
     let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut vfs) };
     anyhow::ensure!(
         rc == 0,
@@ -255,17 +268,33 @@ pub fn cleanup_stale_tmps(base_dir: &Path) {
     }
 }
 
+/// True when following a redirect would drop from HTTPS to plaintext.
+/// `previous` is the redirect chain so far, oldest first, so its head is the
+/// scheme the caller actually asked for. Split out of the client's redirect
+/// policy so it can be tested without standing up a TLS origin.
+fn is_plaintext_downgrade(previous: &[reqwest::Url], next: &reqwest::Url) -> bool {
+    previous
+        .first()
+        .is_some_and(|first| first.scheme() == "https")
+        && next.scheme() != "https"
+}
+
 /// Stream `url` into `tmp`. Fetch ONLY — no verify, no rename. The caller
 /// (`provision()`, Task 13) owns the Verifying and landing steps so every
 /// design §2.1 state edge maps to one visible provision() step. Progress
 /// lands in the two atomics. Any failure deletes the partial and returns
 /// Err with a user-facing message.
 ///
-/// Transport safety is upstream of this function, not in it: the manifest
-/// pins `https` URLs (Task 1) and the client is built with rustls and no
-/// native-tls fallback, so there is no downgrade path in production. The
-/// scheme is deliberately not rejected here — the tests drive a loopback
-/// `http` fixture.
+/// Transport safety comes from three separate things, none of which is the
+/// TLS backend on its own: the manifest pins `https` URLs (Task 1), the
+/// redirect policy below refuses an HTTPS → plaintext hop, and the pinned
+/// SHA-1 in [`finalize_model`] is what actually guards the content. The
+/// initial scheme is deliberately NOT rejected here — the tests drive a
+/// loopback `http` fixture.
+///
+/// Cancellation note: the partial is deleted on every `Err`, but a dropped
+/// future (shutdown, `abort()`) skips that cleanup. [`cleanup_stale_tmps`] at
+/// boot is the backstop for that case.
 #[allow(dead_code)] // called by provision() in Phase 2 (Task 13)
 pub async fn download_model(
     url: &str,
@@ -280,9 +309,25 @@ pub async fn download_model(
     let result: anyhow::Result<()> = async {
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(30))
+            // `rustls-tls` selects the TLS backend; it does not forbid
+            // plaintext. reqwest defaults `https_only` to false, so without
+            // this an https manifest URL that 302s to http would be followed
+            // in the clear. Reject the DOWNGRADE rather than all plaintext,
+            // so the loopback http fixture in tests still works.
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if is_plaintext_downgrade(attempt.previous(), attempt.url()) {
+                    attempt.error("refusing to follow a redirect from HTTPS to plaintext HTTP")
+                } else if attempt.previous().len() >= 10 {
+                    attempt.stop()
+                } else {
+                    attempt.follow()
+                }
+            }))
             .build()?;
-        // Design Integration Architecture: offline/DNS/5xx surface as
-        // "download failed: …" — never reqwest's raw internal error text.
+        // Design Integration Architecture: offline/DNS/5xx are prefixed with
+        // "download failed: " so the banner has a stable lead-in. The reqwest
+        // text (and the URL it embeds) still rides along — mapping error
+        // kinds to friendlier copy belongs with Task 15's banner work.
         let mut resp = client
             .get(url)
             .send()
@@ -292,16 +337,36 @@ pub async fn download_model(
         if let Some(len) = resp.content_length() {
             total_atom.store(len, Ordering::Relaxed);
         }
-        let mut file = std::fs::File::create(tmp)?;
+        // 0600 from birth, not just at finalize: File::create would use
+        // 0666 & umask, leaving the partial world-readable for the whole
+        // download.
+        let mut file = {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(tmp)?
+        };
         loop {
             let chunk = tokio::time::timeout(CHUNK_TIMEOUT, resp.chunk())
                 .await
-                .map_err(|_| anyhow::anyhow!("download stalled (no data for 60s)"))??;
+                .map_err(|_| {
+                    anyhow::anyhow!("download stalled (no data for {CHUNK_TIMEOUT:?})")
+                })??;
             let Some(chunk) = chunk else { break };
             file.write_all(&chunk)?;
             bytes_atom.fetch_add(chunk.len() as u64, Ordering::Relaxed);
         }
-        file.flush()?;
+        // fsync, not flush: `Write::flush` on a `fs::File` is a no-op (there
+        // is no userspace buffer), so without this the caller could rename a
+        // 1.5 GB file into place with its bytes still only in the page cache,
+        // and a power loss would land a corrupt model at the final path.
+        // `verify_sha1` reads back through that same cache, so it would not
+        // catch the gap either. On the blocking pool because forcing
+        // writeback of a multi-GB file is not a short operation.
+        tokio::task::spawn_blocking(move || file.sync_all()).await??;
         Ok(())
     }
     .await;
@@ -648,6 +713,31 @@ mod tests {
         port
     }
 
+    /// Like `http_fixture`, but writes `split` bytes, waits for `gate`, then
+    /// writes the rest. Lets a test observe progress mid-body. Serves exactly
+    /// one connection, because the gate is single-use.
+    async fn http_fixture_gated(
+        body: Vec<u8>,
+        split: usize,
+        gate: tokio::sync::oneshot::Receiver<()>,
+    ) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await; // consume request
+            let head = format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n", body.len());
+            sock.write_all(head.as_bytes()).await.unwrap();
+            sock.write_all(&body[..split]).await.unwrap();
+            sock.flush().await.unwrap();
+            let _ = gate.await;
+            sock.write_all(&body[split..]).await.unwrap();
+        });
+        port
+    }
+
     /// sha1 of `body`, computed in-test so no digest is hardcoded.
     fn sha1_hex(body: &[u8]) -> String {
         use sha1::{Digest, Sha1};
@@ -711,8 +801,13 @@ mod tests {
         assert!(!tmp.exists(), "suspect partial deleted");
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn download_errors_on_stalled_transfer() {
+        // Real clock, short CHUNK_TIMEOUT. The `start_paused` form of this
+        // test never reached the chunk timeout at all — the paused clock
+        // jumped to the 30 s connect deadline before the loopback socket was
+        // observed ready, so it passed on a connect error, and deleting the
+        // timeout wrapper entirely left it green.
         let dir = tempdir().unwrap();
         let port = http_fixture(vec![0u8; 1024], Some(10)).await;
         let tmp = dir.path().join(MODELS_SUBDIR).join("ggml-base.bin.tmp");
@@ -723,8 +818,87 @@ mod tests {
             &AtomicU64::new(0),
         )
         .await;
-        assert!(result.is_err(), "stall must time out, not hang");
+        let err = result.expect_err("stall must time out, not hang");
+        assert!(
+            err.to_string().contains("stalled"),
+            "must fail on the chunk-stall timeout, not on connect or a \
+             truncated body — got: {err}"
+        );
         assert!(!tmp.exists(), "partial cleaned up on failure");
+    }
+
+    #[tokio::test]
+    async fn download_publishes_progress_before_the_body_completes() {
+        // Pins STREAMING, not merely "the bytes arrived". A buffered
+        // implementation (`resp.bytes().await`, the whole 1.5 GB in memory)
+        // cannot publish a byte count until the entire body is in hand — and
+        // the fixture withholds the second half until this test observes the
+        // first. So a buffered impl never satisfies the wait below and fails
+        // on the bounded loop instead of passing silently, which is what the
+        // single-chunk happy-path test above cannot detect.
+        let dir = tempdir().unwrap();
+        let body: Vec<u8> = (0..4096u32).map(|i| i as u8).collect();
+        let split = 1024usize;
+        let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
+        let port = http_fixture_gated(body.clone(), split, gate_rx).await;
+        let tmp = dir.path().join(MODELS_SUBDIR).join("ggml-base.bin.tmp");
+        let bytes = Arc::new(AtomicU64::new(0));
+        let total = Arc::new(AtomicU64::new(0));
+
+        let url = format!("http://127.0.0.1:{port}/model");
+        let (b2, t2, tmp2) = (Arc::clone(&bytes), Arc::clone(&total), tmp.clone());
+        let task = tokio::spawn(async move { download_model(&url, &tmp2, &b2, &t2).await });
+
+        // Bounded so a buffered implementation FAILS rather than hanging.
+        let mut saw_partial = false;
+        for _ in 0..200 {
+            if bytes.load(Ordering::Relaxed) as usize >= split {
+                saw_partial = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            saw_partial,
+            "no progress published before the body completed — not streaming"
+        );
+        assert_eq!(
+            total.load(Ordering::Relaxed),
+            body.len() as u64,
+            "Content-Length surfaces as soon as the headers land"
+        );
+
+        gate_tx.send(()).unwrap();
+        task.await.unwrap().unwrap();
+        assert_eq!(std::fs::read(&tmp).unwrap(), body, "fetch only — no rename");
+        assert_eq!(bytes.load(Ordering::Relaxed), body.len() as u64);
+    }
+
+    #[test]
+    fn redirect_policy_rejects_only_https_to_plaintext() {
+        // `rustls-tls` picks the TLS backend; it does not forbid plaintext,
+        // and reqwest defaults `https_only` to false. This predicate is what
+        // actually stops an https manifest URL from being 302'd into the
+        // clear, so it is pinned directly — standing up a TLS origin just to
+        // exercise the policy closure would not be worth it.
+        let https = reqwest::Url::parse("https://example.com/ggml-base.bin").unwrap();
+        let http = reqwest::Url::parse("http://example.com/ggml-base.bin").unwrap();
+        assert!(
+            is_plaintext_downgrade(std::slice::from_ref(&https), &http),
+            "https → http must be refused"
+        );
+        assert!(
+            !is_plaintext_downgrade(std::slice::from_ref(&https), &https),
+            "https → https is a normal redirect"
+        );
+        assert!(
+            !is_plaintext_downgrade(std::slice::from_ref(&http), &http),
+            "http → http is the loopback fixture's own path"
+        );
+        assert!(
+            !is_plaintext_downgrade(&[], &http),
+            "an empty chain is the initial request, not a redirect"
+        );
     }
 
     #[test]
@@ -732,6 +906,17 @@ mod tests {
         let dir = tempdir().unwrap();
         let err = check_disk_space(dir.path(), u64::MAX).unwrap_err();
         assert!(err.to_string().contains("free disk space"));
+    }
+
+    #[test]
+    fn precheck_passes_on_a_healthy_disk() {
+        // Without this, an always-Err implementation passes the test above
+        // and bricks every download with a green suite. Requiring 0 bytes
+        // still has to clear DISK_MARGIN_BYTES, so this also pins that the
+        // margin arithmetic doesn't reject a healthy disk, and that the
+        // f_bavail × f_frsize product isn't being read off the wrong field.
+        let dir = tempdir().unwrap();
+        check_disk_space(dir.path(), 0).expect("a temp dir on a working disk has 512 MiB free");
     }
 
     #[test]
