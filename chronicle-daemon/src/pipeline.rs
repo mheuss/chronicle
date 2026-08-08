@@ -176,6 +176,16 @@ pub async fn ocr_loop(storage: Arc<Storage>, mut ocr_rx: mpsc::Receiver<(i64, Pa
     log::info!("OCR loop exiting (channel closed)");
 }
 
+/// Warning for a shutdown that gives up on queued segments. Shared by both of
+/// `transcribe_loop`'s `stop_after_current` breaks so the two cannot drift.
+fn warn_abandoned_queue(abandoned: usize) {
+    log::warn!(
+        "shutdown grace expired; stopping after the current segment — \
+         {abandoned} queued segment(s) left untranscribed \
+         (transcript = NULL, recoverable by backfill)"
+    );
+}
+
 /// Transcribe persisted audio segments off the tokio runtime and store the text.
 ///
 /// Heavy work (Opus decode + whisper) runs inside `spawn_blocking` so it never
@@ -194,8 +204,10 @@ pub async fn ocr_loop(storage: Arc<Storage>, mut ocr_rx: mpsc::Receiver<(i64, Pa
 /// cancel would drop that tail un-transcribed, log a spurious "channel closed",
 /// and inflate `transcription_dropped` on every clean exit.
 ///
-/// `stop_after_current` is checked at the bottom of the body, never the top, and
-/// it exists so `main` never has to drop our `JoinHandle` to stop waiting.
+/// `stop_after_current` is checked at the bottom of the body — never the top —
+/// and again on the empty-handle skip path, which `continue`s past the bottom
+/// check and so must observe the flag itself. It exists so `main` never has to
+/// drop our `JoinHandle` to stop waiting.
 /// Dropping it would detach this task, and runtime drop destroys a detached
 /// future without polling it — discarding a transcript whose whisper call the
 /// blocking pool is still, separately, being waited on. Do not swap this flag
@@ -206,17 +218,6 @@ pub async fn ocr_loop(storage: Arc<Storage>, mut ocr_rx: mpsc::Receiver<(i64, Pa
 /// transcript is produced and stamped by the same engine (design §3.3). A job
 /// that arrives while the handle is empty is skipped as idle — matching the
 /// sink's `Disabled` semantics — not treated as a failure.
-/// Both `stop_after_current` breaks report this, so the two paths cannot
-/// drift. The skip path reaches it only since Task 13 — before that the loop
-/// was spawned only after a successful load.
-fn warn_abandoned_queue(abandoned: usize) {
-    log::warn!(
-        "shutdown grace expired; stopping after the current segment — \
-         {abandoned} queued segment(s) left untranscribed \
-         (transcript = NULL, recoverable by backfill)"
-    );
-}
-
 pub async fn transcribe_loop(
     engine: Arc<crate::provisioning::EngineHandle>,
     storage: Arc<Storage>,

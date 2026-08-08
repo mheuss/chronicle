@@ -94,13 +94,10 @@ impl TranscriptionStatusCell {
         self.snapshot.rcu(|s| f(s.as_ref()));
     }
 
-    // NOT consumed by Task 13, and no later task consumes it either: the cell
-    // is constructed Missing and the design's state machine
-    // (Missing → Downloading → Verifying → Loading → Ready | Error) never
-    // returns there. The plan expected Tasks 12/13 to take this marker (plan
-    // line 769); they can't. Raised at the Batch 2 checkpoint — delete this
-    // and its test, or name the transition that needs it.
-    #[allow(dead_code)] // no caller by design — see above
+    /// The one transition back to `Missing`: `boot()` reconciling the
+    /// creation-time entry `main` made from an older presence check against
+    /// what boot actually found on disk. Without it, a model deleted during
+    /// startup strands the daemon in `Loading` with no engine and no error.
     pub fn set_missing(&self) {
         self.update(|s| Snapshot {
             state: TranscriptionState::Missing,
@@ -417,7 +414,14 @@ pub async fn download_model(
         // `verify_sha1` reads back through that same cache, so it would not
         // catch the gap either. On the blocking pool because forcing
         // writeback of a multi-GB file is not a short operation.
-        tokio::task::spawn_blocking(move || file.sync_all()).await??;
+        tokio::task::spawn_blocking(move || file.sync_all())
+            .await
+            // JoinError::Display forwards arbitrary panic payloads, and this
+            // error string reaches the UI banner — keep it fixed.
+            .map_err(|e| {
+                log::error!("model write task failed: {e}");
+                anyhow::anyhow!("download failed: could not write the model file")
+            })??;
         Ok(())
     }
     .await;
@@ -448,7 +452,13 @@ pub async fn finalize_model(tmp: &Path, dest: &Path, expected_sha1: &str) -> any
         let matches = tokio::task::spawn_blocking(move || {
             chronicle_transcription::verify_sha1(&tmp_owned, &expected)
         })
-        .await??;
+        .await
+        // JoinError::Display forwards arbitrary panic payloads, and this
+        // error string reaches the UI banner — keep it fixed.
+        .map_err(|e| {
+            log::error!("model verification task failed: {e}");
+            anyhow::anyhow!("could not verify the downloaded model")
+        })??;
         anyhow::ensure!(
             matches,
             "checksum mismatch — upstream may have rotated the model; update Chronicle"
@@ -629,10 +639,14 @@ impl ProvisionerContext {
         {
             let path = model_path(&self.base_dir, variant);
             log::info!("deleting suspect model file after load failure; re-downloading");
-            if let Err(e) = std::fs::remove_file(&path) {
-                log::warn!("could not delete suspect model file: {e}");
+            match std::fs::remove_file(&path) {
+                // Only now is the file genuinely gone, so only now is the
+                // marker stale. Clearing it on a FAILED delete would drop
+                // straight through to loading the same corrupt bytes again,
+                // with the cell sitting in Downloading and no download run.
+                Ok(()) => *self.last_load_failed.lock().unwrap() = None,
+                Err(e) => log::warn!("could not delete suspect model file: {e}"),
             }
-            *self.last_load_failed.lock().unwrap() = None;
         }
 
         if !chronicle_transcription::model_present(&self.base_dir, variant) {
@@ -690,7 +704,16 @@ impl ProvisionerContext {
                 // while capture is already flowing.
                 self.handle.set(engine);
                 self.cell.set_ready(variant);
-                *self.last_load_failed.lock().unwrap() = None;
+                // Only THIS variant's marker. Clearing unconditionally would
+                // let `fail A → succeed B → retry A` reload A's corrupt file
+                // instead of re-downloading it, breaking the promise the
+                // banner just made ("retrying will re-download the file").
+                {
+                    let mut marker = self.last_load_failed.lock().unwrap();
+                    if *marker == Some(variant) {
+                        *marker = None;
+                    }
+                }
                 log::info!("transcription engine swapped (variant={variant})");
                 // Best-effort: the loop persists on receipt (AD-10). A closed
                 // receiver means shutdown, not a reason to fail the swap.
@@ -724,6 +747,15 @@ impl ProvisionerContext {
 ///
 /// **Awaited in `main` before `audio_store_loop` spawns**, which preserves
 /// today's no-loss ordering (codex I2).
+///
+/// This function owns the cell's startup state outright, rather than trusting
+/// the creation-time entry `main` made. `main` decides `Loading` vs `Missing`
+/// from a presence check taken before `IpcServer::start` and before
+/// `supervisor.reconcile().await` — hundreds of milliseconds earlier. If the
+/// file disappears in that window, deferring to that stale decision would
+/// leave the daemon reporting `Loading` forever: no engine, no error, and no
+/// way back until a `SetWhisperModel` arrives. Re-publishing here costs one
+/// `ArcSwap` store and closes that hole.
 pub async fn boot(
     base_dir: &Path,
     variant: ModelVariant,
@@ -733,13 +765,19 @@ pub async fn boot(
     cleanup_stale_tmps(base_dir);
 
     if !chronicle_transcription::model_present(base_dir, variant) {
-        // Cell stays Missing; the startup presence check already logged the
-        // "model missing → idle" warning.
+        // The startup presence check already logged the "model missing → idle"
+        // warning. This reconciles the cell with what boot ACTUALLY found —
+        // normally a no-op, but it is the one transition back to Missing in
+        // the whole state machine, and it is what keeps a file deleted during
+        // startup from stranding the daemon in Loading.
+        cell.set_missing();
         return;
     }
 
-    // The cell is already Loading — set at creation, before IpcServer::start,
-    // so Status never reports Missing during the ScreenCaptureKit startup.
+    // Re-assert Loading for the same reason: `main` set it from an older
+    // presence check, and on the "absent then created" ordering it would not
+    // have set it at all.
+    cell.set_loading(variant);
     let owned = base_dir.to_path_buf();
     let load = tokio::task::spawn_blocking(move || {
         chronicle_transcription::TranscriptionEngine::load(&owned, variant)
@@ -780,29 +818,24 @@ mod tests {
     use chronicle_transcription::{MODELS_SUBDIR, parse_variant};
     use tempfile::tempdir;
 
+    /// Refused-connection default for `new_for_test`. NEVER the real manifest
+    /// URL: a mutation that made `provision()` download when it shouldn't
+    /// would otherwise pull 148 MB from HuggingFace inside the unit suite.
+    /// A test that wants a working server passes its own fixture port.
+    const NO_NETWORK_URL: &str = "http://127.0.0.1:1/unreachable";
+
     impl ProvisionerContext {
-        /// Test constructor: real manifest URLs, so only the on-disk paths
-        /// are exercised. Returns an `Arc` because the progress test clones
+        /// Test constructor. Returns an `Arc` because the progress test clones
         /// it into a spawned provision task.
         fn new_for_test(base_dir: &Path) -> Arc<Self> {
+            Self::new_for_test_with_url(base_dir, NO_NETWORK_URL)
+        }
+
+        fn new_for_test_with_url(base_dir: &Path, url: &str) -> Arc<Self> {
             Arc::new(Self {
                 cell: TranscriptionStatusCell::new(parse_variant("base").unwrap()),
                 handle: Arc::new(EngineHandle::new()),
                 base_dir: base_dir.to_path_buf(),
-                in_flight: std::sync::atomic::AtomicBool::new(false),
-                last_load_failed: std::sync::Mutex::new(None),
-                url_override: None,
-            })
-        }
-
-        /// Test constructor with a URL override, so no test ever reaches the
-        /// real network.
-        fn new_for_test_with_url(base_dir: &Path, url: &str) -> Arc<Self> {
-            let ctx = Self::new_for_test(base_dir);
-            Arc::new(Self {
-                cell: Arc::clone(&ctx.cell),
-                handle: Arc::clone(&ctx.handle),
-                base_dir: ctx.base_dir.clone(),
                 in_flight: std::sync::atomic::AtomicBool::new(false),
                 last_load_failed: std::sync::Mutex::new(None),
                 url_override: Some(url.to_string()),
@@ -1589,6 +1622,7 @@ mod tests {
             );
 
         let mut observed = None;
+        let mut last = None;
         for _ in 0..60 {
             let stats = ctx.cell().stats(dir.path());
             if stats.state == TranscriptionState::Downloading
@@ -1597,9 +1631,19 @@ mod tests {
                 observed = Some(stats);
                 break;
             }
+            // A terminal state means the walk died; stop polling and report
+            // what actually happened rather than "never observed progress",
+            // which would point at the wrong thing entirely.
+            if stats.state == TranscriptionState::Error {
+                last = Some(stats);
+                break;
+            }
+            last = Some(stats);
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        let stats = observed.expect("never observed advancing download progress");
+        let stats = observed.unwrap_or_else(|| {
+            panic!("never observed advancing download progress; last seen: {last:?}")
+        });
         assert_eq!(
             stats.download_total_bytes,
             Some(1024),
@@ -1636,12 +1680,76 @@ mod tests {
         // First attempt: load fails on garbage → Error, file still there.
         ctx.provision(parse_variant("base").unwrap(), evt_tx.clone())
             .await;
+        assert!(
+            models.join("ggml-base.bin").exists(),
+            "the FIRST failure must leave the file alone — without this, an \
+             implementation that deletes on every entry also passes below"
+        );
         // Retry: AD-11 — suspect file is deleted, then re-download starts
         // (and fails here on the dead URL, which is fine for the assertion).
         ctx.provision(parse_variant("base").unwrap(), evt_tx).await;
         assert!(
             !models.join("ggml-base.bin").exists(),
             "retry after load failure must delete the corrupt file (AD-11)"
+        );
+    }
+
+    #[tokio::test]
+    async fn boot_with_no_model_reports_missing_and_loads_nothing() {
+        // main.rs decides Loading-vs-Missing from a presence check taken
+        // hundreds of ms earlier, before IpcServer::start and
+        // supervisor.reconcile(). Simulate the stale decision: the cell says
+        // Loading, the file is gone. boot() must reconcile it, or the daemon
+        // reports Loading forever with no engine and no error.
+        let dir = tempdir().unwrap();
+        let cell = TranscriptionStatusCell::new(parse_variant("base").unwrap());
+        let handle = Arc::new(EngineHandle::new());
+        cell.set_loading(parse_variant("base").unwrap());
+
+        boot(dir.path(), parse_variant("base").unwrap(), &cell, &handle).await;
+
+        let stats = cell.stats(dir.path());
+        assert_eq!(
+            stats.state,
+            TranscriptionState::Missing,
+            "boot must publish what it actually found, not inherit main's stale check"
+        );
+        assert!(!handle.is_loaded(), "no engine from an absent file");
+    }
+
+    #[tokio::test]
+    async fn boot_with_unloadable_model_reports_error_and_loads_nothing() {
+        let dir = tempdir().unwrap();
+        let models = dir.path().join(MODELS_SUBDIR);
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(models.join("ggml-base.bin"), b"not a ggml model").unwrap();
+        let cell = TranscriptionStatusCell::new(parse_variant("base").unwrap());
+        let handle = Arc::new(EngineHandle::new());
+
+        boot(dir.path(), parse_variant("base").unwrap(), &cell, &handle).await;
+
+        let stats = cell.stats(dir.path());
+        assert_eq!(stats.state, TranscriptionState::Error);
+        assert!(stats.error.is_some(), "the banner needs a reason");
+        assert!(!handle.is_loaded(), "no engine appears from a bad file");
+    }
+
+    #[tokio::test]
+    async fn boot_clears_stale_partials() {
+        // A .tmp survives a crash mid-download. Nothing else sweeps it, so
+        // deleting boot's cleanup_stale_tmps call must fail a test.
+        let dir = tempdir().unwrap();
+        let models = dir.path().join(MODELS_SUBDIR);
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(models.join("ggml-base.bin.tmp"), b"partial").unwrap();
+        let cell = TranscriptionStatusCell::new(parse_variant("base").unwrap());
+        let handle = Arc::new(EngineHandle::new());
+
+        boot(dir.path(), parse_variant("base").unwrap(), &cell, &handle).await;
+
+        assert!(
+            !models.join("ggml-base.bin.tmp").exists(),
+            "boot must sweep partials left by a crashed download"
         );
     }
 
