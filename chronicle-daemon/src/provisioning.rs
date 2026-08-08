@@ -353,16 +353,24 @@ pub async fn download_model(
             .await
             .and_then(|r| r.error_for_status())
             .map_err(|e| anyhow::anyhow!("download failed: {e}"))?;
-        // The redirect policy is NOT a complete guard against a redirect
-        // landing as a download: tower-http returns a 3xx as Ok without ever
-        // consulting the policy when the status is outside
-        // {301,302,303,307,308} or Location is missing/unresolvable
-        // (follow_redirect/mod.rs:293 and :307). `error_for_status` doesn't
-        // catch those either, since it only rejects 4xx/5xx. Without this
-        // check the redirect body lands in .tmp and Task 13 reports it as a
-        // checksum mismatch — blaming the model for a broken CDN.
+        // A plain GET with no Range header has exactly ONE correct success
+        // status, so anything else is a failed download however friendly it
+        // looks. Neither of the obvious guards is enough on its own:
+        //
+        //   - `error_for_status` only rejects 4xx/5xx, so 1xx/3xx pass.
+        //   - the redirect policy never sees a 3xx whose status is outside
+        //     {301,302,303,307,308}, or that has no resolvable Location —
+        //     tower-http returns those as Ok without consulting it
+        //     (follow_redirect/mod.rs:293 and :307).
+        //   - `is_success()` accepts 204/206/203: a 204 (what corporate web
+        //     filters and captive portals answer a blocked URL with) decodes
+        //     as zero-length and lands an EMPTY .tmp as a complete download.
+        //
+        // Every one of those ends the same way — Task 13 hashes the wrong
+        // bytes and tells the user "checksum mismatch — update Chronicle"
+        // when the model is fine and the network is not.
         anyhow::ensure!(
-            resp.status().is_success(),
+            resp.status() == reqwest::StatusCode::OK,
             "download failed: unexpected HTTP status {}",
             resp.status()
         );
@@ -1001,35 +1009,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn download_errors_on_a_3xx_that_bypasses_the_redirect_policy() {
-        // The redirect policy is not reachable for every 3xx: tower-http
-        // returns the response as Ok WITHOUT consulting the policy when the
-        // status is outside {301,302,303,307,308}, or when Location is
-        // missing/unresolvable. error_for_status only rejects 4xx/5xx, so
-        // both would otherwise land the redirect body as a "successful"
-        // download and Task 13 would blame the model for a broken CDN.
+    async fn download_errors_on_any_non_200_status() {
+        // Five statuses that each slip past a *different* guard and would
+        // otherwise land as a completed download, then surface to the user
+        // as "checksum mismatch — update Chronicle".
+        //
+        // The message is asserted, not just is_err(): these fixtures are
+        // hand-built, and a malformed response or an RST would also produce
+        // Err. The string is ours, so it is a stable signal that the status
+        // check is what fired — unlike download_errors_on_a_redirect_loop,
+        // where the message comes from reqwest.
         for raw in [
-            // A Location that is never followed, because 300 is not a
-            // followed status.
+            // Past the redirect policy: 300 is not a followed status, so
+            // tower-http returns it without consulting the policy at all.
             "HTTP/1.1 300 Multiple Choices\r\nlocation: /elsewhere\r\n\
              content-length: 3\r\nconnection: close\r\n\r\nxxx",
-            // A followed status with no Location to follow.
+            // Past the redirect policy: a followed status with no Location.
             "HTTP/1.1 302 Found\r\ncontent-length: 3\r\n\
              connection: close\r\n\r\nxxx",
+            // Past is_success(): decodes as zero-length, so it would have
+            // landed an EMPTY .tmp. This is what corporate web filters and
+            // captive portals answer a blocked URL with — the realistic one.
+            "HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n",
+            // Past is_success(): no Range was sent, so a 206 is a server
+            // bug that would land a truncated body as complete.
+            "HTTP/1.1 206 Partial Content\r\ncontent-length: 3\r\n\
+             connection: close\r\n\r\nxxx",
+            // Past is_success(): a transforming proxy's modified payload.
+            "HTTP/1.1 203 Non-Authoritative Information\r\n\
+             content-length: 3\r\nconnection: close\r\n\r\nxxx",
         ] {
             let dir = tempdir().unwrap();
             let port = http_fixture_raw(raw).await;
             let tmp = dir.path().join(MODELS_SUBDIR).join("ggml-base.bin.tmp");
-            let result = download_model(
+            let err = download_model(
                 &format!("http://127.0.0.1:{port}/x"),
                 &tmp,
                 &AtomicU64::new(0),
                 &AtomicU64::new(0),
             )
-            .await;
+            .await
+            .expect_err(raw);
             assert!(
-                result.is_err(),
-                "a 3xx must not land as a download — response was: {raw}"
+                err.to_string().contains("unexpected HTTP status"),
+                "must fail on the status guard, not transport — got {err} for: {raw}"
             );
             assert!(!tmp.exists(), "no partial left behind for: {raw}");
         }
