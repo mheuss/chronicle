@@ -94,6 +94,16 @@ open chronicle-ui/.build/Chronicle.app
 A green `record.circle` icon should appear in the menu bar. Left-click it to
 open the search popover, or use `Cmd+,` for Settings.
 
+### First run
+
+Audio transcription needs a speech model, and the popover offers it the first
+time you open it: "Audio transcription is off. Download the base model
+(148 MB) to enable it." Click **Download**, wait for the progress bar, and
+transcription is on. Settings → General has the same button and a picker if
+you want a larger, more accurate model instead.
+
+No Terminal step — the app downloads and verifies the model itself.
+
 To stop the daemon cleanly, send `SIGTERM` (`Ctrl-C` in the terminal where it
 runs). Pause state persists in `~/Library/Application Support/Chronicle/settings`
 across restarts — if you paused capture before quitting, the daemon will boot

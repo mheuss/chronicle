@@ -2,6 +2,12 @@
 # Fetch a whisper.cpp ggml model into Chronicle's data dir.
 # Usage: scripts/fetch-whisper-model.sh [base|small|medium]
 # Default: base
+#
+# NOTE: developer/CI tool. The daemon downloads models itself (HEU-475);
+# the app never calls this script. Pinned URL/SHA1 values are duplicated
+# in chronicle-daemon/crates/transcription/src/lib.rs (MANIFEST) — update
+# BOTH when upstream rotates. File mode: daemon provisions 0600; this
+# script's 0644 is legacy dev-tool behavior.
 set -euo pipefail
 
 VARIANT="${1:-base}"
