@@ -1030,6 +1030,45 @@ mod tests {
         }
     }
 
+    // The producer half of the abandoned-command guard. `begin_model_switch`
+    // is tested for "given a cleared flag, start nothing"; this pins that the
+    // handler actually clears it, so a refactor cannot silently drop the
+    // withdrawal and leave every test green while a timed-out request starts
+    // a multi-gigabyte download.
+    //
+    // Driven by dropping the reply sender rather than waiting out the 20s
+    // timeout: `recv_timeout` returns `Err(Disconnected)` immediately, and
+    // both errors run the same withdrawal line.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_handler_that_gives_up_withdraws_the_request() {
+        let (handler, mut model_rx, _cell, _dir) = handler_with_model_channel(8, true).await;
+        let (flag_tx, flag_rx) = std::sync::mpsc::channel();
+        tokio::spawn(async move {
+            while let Some(cmd) = model_rx.recv().await {
+                // Keep the flag, discard the reply channel — the loop is
+                // "still busy" and the handler will stop waiting.
+                let _ = flag_tx.send(std::sync::Arc::clone(&cmd.still_waiting));
+                drop(cmd.reply);
+            }
+        });
+
+        let resp = handler.handle(Request::SetWhisperModel {
+            variant: "base".into(),
+        });
+        assert!(
+            matches!(resp, Response::SetWhisperModel { ok: false, .. }),
+            "a request nobody answered is a rejection"
+        );
+
+        let flag = flag_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the loop received the command");
+        assert!(
+            !flag.load(std::sync::atomic::Ordering::Acquire),
+            "the handler must withdraw the request it just called rejected"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn set_whisper_model_reply_does_not_wait_on_the_loop() {
         // Named for what it measures: handler-to-loop round-trip latency.

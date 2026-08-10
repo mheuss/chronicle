@@ -48,12 +48,15 @@ fn spawn_start_retry(tx: tokio::sync::mpsc::Sender<()>, delay: std::time::Durati
 /// Handle a completed provision: persist the variant that just started
 /// serving (AD-10, "persist on success").
 ///
-/// **The sole call site is the event loop**, and that is a correctness
-/// requirement, not a style choice. All three settings writers share one
-/// fixed temp path (`settings.tmp`) — see the single-writer note at the mic
-/// arm below — so serialization on this loop is the only thing making that
-/// safe. Off-loop, a lost race surfaces as `AlreadyExists`, and worse, the
-/// loser's cleanup can delete the winner's temp file and break its rename.
+/// **Called from the event loop, and once more from the shutdown drain after
+/// that loop has exited** — never concurrently, which is the correctness
+/// requirement here rather than a style choice. All three settings writers
+/// share one fixed temp path (`settings.tmp`) — see the single-writer note at
+/// the mic arm below — so strict serialization is the only thing making that
+/// safe. Two truly concurrent callers would surface a lost race as
+/// `AlreadyExists`, and worse, the loser's cleanup can delete the winner's
+/// temp file and break its rename. The drain is safe because `main` is
+/// single-threaded past the loop and no other writer can still be running.
 /// Extracted as a free function purely so it stays unit-testable.
 ///
 /// A failed persist is surfaced, never swallowed: the swap already happened
@@ -516,15 +519,20 @@ async fn main() -> Result<()> {
     // --- Event loop: serve mic toggles until a shutdown signal arrives ---
     // Toggles are handled inline, one per iteration.
     //
-    // **The single-writer note.** This loop is the only caller of ALL THREE
-    // settings writers — `write_mic_setting` here, `write_capture_paused` via
+    // **The single-writer note.** All three settings writers run from this
+    // loop — `write_mic_setting` here, `write_capture_paused` via
     // `set_user_paused` in the capture arm, and `write_whisper_model` via
     // `handle_provision_event`. They share one fixed temp path
-    // (`settings.tmp`), so the one-at-a-time processing here is the only
-    // thing keeping that safe: off-loop, a lost race surfaces as
-    // `AlreadyExists`, and the loser's cleanup can delete the winner's temp
-    // file and break its rename. `handle_provision_event`'s doc points here
-    // for exactly this, so it must keep naming all three.
+    // (`settings.tmp`), so one-at-a-time processing is the only thing keeping
+    // that safe: concurrently, a lost race surfaces as `AlreadyExists`, and
+    // the loser's cleanup can delete the winner's temp file and break its
+    // rename.
+    //
+    // The one call outside this loop is `handle_provision_event` in the
+    // shutdown drain below, which runs after the loop has exited and cannot
+    // overlap it. `handle_provision_event`'s doc points here for exactly this
+    // reasoning, so it must keep naming all three writers — and this note
+    // must keep naming that exception.
     //
     // (The supervisor's `start()` reads but never writes the mic setting when
     // restoring it on boot/resume/wake, so it can't race this loop's write.)

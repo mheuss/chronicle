@@ -240,11 +240,12 @@ pub fn check_disk_space(base_dir: &Path, required_bytes: u64) -> anyhow::Result<
         "could not check free disk space: {}",
         std::io::Error::last_os_error()
     );
-    // `f_bavail`/`f_frsize` are 32-bit (`c_uint`) on Apple platforms, so both
-    // casts widen rather than narrow — the multiply is what could overflow,
-    // hence `saturating_mul`. A volume large enough to saturate would report
-    // "plenty of space", which is the safe direction for a precheck: the
-    // download's own size ceiling still bounds the write.
+    // `f_bavail` is 32-bit on Apple platforms (`__darwin_fsblkcnt_t` is
+    // `unsigned int`), so that cast widens; `f_frsize` is already `c_ulong`,
+    // i.e. 64-bit here, so its cast is a no-op. The multiply is what could
+    // overflow, hence `saturating_mul`. A volume large enough to saturate
+    // would report "plenty of space", which is the safe direction for a
+    // precheck: the download's own size ceiling still bounds the write.
     let free = (vfs.f_bavail as u64).saturating_mul(vfs.f_frsize as u64);
     let needed = required_bytes.saturating_add(DISK_MARGIN_BYTES);
     anyhow::ensure!(
@@ -264,14 +265,20 @@ pub fn check_disk_space(base_dir: &Path, required_bytes: u64) -> anyhow::Result<
 /// connection — without pasting a HuggingFace URL into the UI. Anything
 /// unrecognised falls back to a neutral phrase rather than the raw text.
 fn describe_request_error(e: &reqwest::Error) -> &'static str {
-    if e.is_timeout() {
-        "the server took too long to respond"
-    } else if e.is_connect() {
+    // `is_connect` FIRST: `is_timeout` walks the source chain, so the 30s
+    // `connect_timeout` above matches both — and "check your connection" is
+    // far more actionable than "the server took too long".
+    if e.is_connect() {
         "could not reach the server — check your connection"
+    } else if e.is_timeout() {
+        "the server took too long to respond"
     } else if e.is_status() {
         "the server refused the request"
     } else if e.is_redirect() {
-        "the download was redirected somewhere unsafe"
+        // Covers both the plaintext-downgrade refusal and the >10-hop cap,
+        // which reqwest reports the same way. Worded for both: a redirect
+        // loop is not "somewhere unsafe".
+        "the download kept redirecting"
     } else if e.is_decode() || e.is_body() {
         "the response could not be read"
     } else {
@@ -326,6 +333,7 @@ fn is_plaintext_downgrade(previous: &[reqwest::Url], next: &reqwest::Url) -> boo
 /// Cancellation note: the partial is deleted on every `Err`, but a dropped
 /// future (shutdown, `abort()`) skips that cleanup. [`cleanup_stale_tmps`] at
 /// boot is the backstop for that case.
+///
 /// `advertised_bytes` is the manifest's size for this variant, and it is a
 /// ceiling on the transfer, not just a label. [`check_disk_space`] reserves
 /// `advertised + 512 MiB` before the first byte (NFR-3), and that reservation
@@ -822,6 +830,7 @@ impl ProvisionerContext {
 /// leave the daemon reporting `Loading` forever: no engine, no error, and no
 /// way back until a `SetWhisperModel` arrives. Re-publishing here costs one
 /// `ArcSwap` store and closes that hole.
+///
 /// Returns the variant whose **load failed**, if one did — `None` on every
 /// other outcome. The caller must feed this into
 /// [`ProvisionerContext::new`]'s `last_load_failed`.
@@ -1476,16 +1485,22 @@ mod tests {
             tokio::spawn(async move { download_model(&url, &tmp2, TEST_NO_LIMIT, &b2, &t2).await });
 
         // Bounded so a buffered implementation FAILS rather than hanging.
-        // The budget is deliberately UNDER the 500ms `cfg(test)`
-        // CHUNK_TIMEOUT: at 1000ms a starved runner could watch the download
-        // die of a stall and then blame streaming for it — a red build with
-        // nothing wrong. 60 × 5ms = 300ms leaves the stall path out of reach
-        // while still being ~19× the split the fixture writes before pausing.
-        // The `died_early` branch stays as the honest report if it ever does
-        // happen.
+        // The loop also watches the task: its 1000ms budget outlives the
+        // 500ms CHUNK_TIMEOUT, so a starved poll could see the download die
+        // of a stall and then blame streaming for it. Break on a finished
+        // task and report the real error instead.
+        //
+        // That outliving is deliberate and was briefly "fixed" the wrong way.
+        // Shortening the budget under CHUNK_TIMEOUT does not remove the
+        // hazard, it removes the HANDLING of it: a runner that takes 300-500ms
+        // to deliver the first KiB then exits with `saw_partial == false` and
+        // fails as "not streaming", which is both a new flake and a worse
+        // diagnosis than the stall error `died_early` prints. On a healthy
+        // runner the loop breaks in ~3 iterations, so the budget is never
+        // approached anyway.
         let mut saw_partial = false;
         let mut died_early = false;
-        for _ in 0..60 {
+        for _ in 0..200 {
             if bytes.load(Ordering::Relaxed) as usize >= split {
                 saw_partial = true;
                 break;
@@ -1807,6 +1822,10 @@ mod tests {
         );
         let (evt_tx, _evt_rx) = tokio::sync::mpsc::channel(4);
         let ctx2 = Arc::clone(&ctx);
+        // Won here rather than inside the spawn, so the slot is taken before
+        // the poll below starts — the same ordering the event loop uses, and
+        // the precondition `provision()` documents.
+        assert!(ctx.try_begin(parse_variant("base").unwrap()));
         let task =
             tokio::spawn(
                 async move { ctx2.provision(parse_variant("base").unwrap(), evt_tx).await },

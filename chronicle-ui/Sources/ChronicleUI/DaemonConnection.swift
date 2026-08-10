@@ -166,6 +166,18 @@ final class DaemonConnection {
             //
             // The reply we are holding carries the state the daemon just
             // entered, so on a failed refresh we publish that instead.
+            //
+            // Not a total fallback: with `lastStatus` still nil there is no
+            // snapshot to splice into and this does nothing. Practically
+            // unreachable — the model UI only renders once a transcription
+            // block has arrived — but it is not a guarantee.
+            //
+            // `lastStatus` is read here, after the await, rather than
+            // captured before it: a poll tick can land a fresher snapshot in
+            // between, and overwriting that with this older reply block would
+            // be a step backwards. Bounded to one tick and self-correcting
+            // either way, since at the moment this matters the poll is not
+            // yet running.
             if (try? await requestStatus()) == nil, let last = lastStatus {
                 lastStatus = last.replacingTranscription(response.status)
             }
@@ -287,7 +299,7 @@ final class DaemonConnection {
                 return try self.decoder.decode(Res.self, from: responseData)
             } catch let firstError {
                 if let err = try? self.decoder.decode(ErrorResponse.self, from: responseData) {
-                    throw IPCError.daemonError(err.message)
+                    throw IPCError.daemonError(err.message, code: err.code)
                 }
                 throw IPCError.malformedResponse(String(describing: firstError))
             }
@@ -697,7 +709,11 @@ enum IPCError: Error, LocalizedError {
     case connectionClosed
     case encodingFailed
     case responseTooLarge
-    case daemonError(String)
+    /// The daemon refused the request. `code` is the stable, machine-readable
+    /// reason the protocol tells clients to branch on; `nil` from a daemon
+    /// that predates the field. Carried here rather than decoded and dropped,
+    /// so a caller that wants to branch actually can.
+    case daemonError(String, code: DaemonErrorCode?)
     case invalidUTF8
     case malformedResponse(String)
 
@@ -712,7 +728,7 @@ enum IPCError: Error, LocalizedError {
         case .connectionClosed: "Connection closed by daemon"
         case .encodingFailed: "Failed to encode request"
         case .responseTooLarge: "Response exceeded maximum size"
-        case .daemonError(let msg): "Daemon error: \(msg)"
+        case .daemonError(let msg, _): "Daemon error: \(msg)"
         case .invalidUTF8: "Response contained invalid UTF-8"
         case .malformedResponse(let detail): "Malformed daemon response: \(detail)"
         }
