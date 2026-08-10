@@ -64,6 +64,26 @@ final class TranscriptionAlertState {
 
     var shouldShow: Bool { (bootedWithoutModel || provisionEngaged) && !dismissed }
 
+    /// Call at every point that ASKS the daemon for a provision — the popover's
+    /// Retry and Settings' picker and Retry. Spends the current dismissal,
+    /// because the user just asked for something new and the banner is where
+    /// its progress and its failure live.
+    ///
+    /// `evaluate` cannot do this job. Its clears are edge-triggered on the
+    /// state, and the case that needs one has no edge: with the banner
+    /// dismissed at `.error`, a fresh request whose status refresh fails — the
+    /// refresh in `setWhisperModel` is best-effort `try?` — followed by a fast
+    /// failure gives `.error(msg1) → .error(msg2)`. `lastRaisingState` is
+    /// already `.error`, so neither `startsNewOperation` nor `justFailed`
+    /// fires, and the second failure would never reach the user.
+    ///
+    /// It only clears the dismissal; it never raises the banner on its own.
+    /// `shouldShow` still needs a cause, so a request the daemon REJECTS
+    /// leaves nothing on screen with nothing to say.
+    func provisionRequested() {
+        dismissed = false
+    }
+
     func evaluate(status: StatusResponse) {
         // nil = a daemon too old to send the block at all. Nothing is known to
         // be wrong, so it neither latches the banner nor dismisses it; Settings

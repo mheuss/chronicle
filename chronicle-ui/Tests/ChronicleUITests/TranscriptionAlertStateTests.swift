@@ -261,6 +261,49 @@ struct TranscriptionAlertStateTests {
         #expect(alert.shouldShow)
     }
 
+    // The Task 16 hole. A provision started from Settings while the banner
+    // sits dismissed at `.error`: `setWhisperModel`'s status refresh is
+    // best-effort, so if it fails and the provision then fails instantly (the
+    // disk precheck), the UI goes `.error(msg1) → .error(msg2)`. `evaluate`
+    // cannot see that edge — with `lastRaisingState` already `.error`, neither
+    // `startsNewOperation` nor `justFailed` fires — so the entry point clears
+    // the dismissal instead, and the banner is already up when msg2 lands.
+    @Test func aProvisionRequestClearsADismissedFailure() {
+        let alert = TranscriptionAlertState()
+        alert.evaluate(status: status(.downloading))
+        alert.evaluate(status: status(.error))
+        alert.dismissed = true
+        #expect(!alert.shouldShow)
+
+        alert.provisionRequested()
+        #expect(alert.shouldShow, "the user asked for a new operation; the old dismissal is spent")
+
+        alert.evaluate(status: status(.error))
+        #expect(alert.shouldShow, "the second failure is not swallowed")
+    }
+
+    // The same entry point on the ordinary first-run path: the boot banner was
+    // put away, and the user starts the download from Settings instead.
+    @Test func aProvisionRequestClearsADismissedBootBanner() {
+        let alert = TranscriptionAlertState()
+        alert.evaluate(status: status(.missing))
+        alert.dismissed = true
+        alert.provisionRequested()
+        #expect(alert.shouldShow)
+    }
+
+    // It clears a dismissal; it does not raise a banner by itself. A switch
+    // from a healthy state shows nothing until the daemon confirms an
+    // operation is running — otherwise a request the daemon REJECTS would
+    // leave a banner up with nothing to say.
+    @Test func aProvisionRequestAloneRaisesNothing() {
+        let alert = TranscriptionAlertState()
+        alert.evaluate(status: status(.ready))
+        alert.provisionRequested()
+        #expect(!alert.shouldShow)
+        #expect(!alert.dismissed)
+    }
+
     // A still-unresolved state must NOT auto-dismiss — the banner has to
     // survive until transcription actually works.
     @Test func staysVisibleWhileStillUnresolved() {

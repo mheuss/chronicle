@@ -150,6 +150,11 @@ struct SearchPopoverView: View {
     private func provisionModel(_ variant: String) {
         Task {
             provisionRejection = nil
+            // Redundant from this button — it lives on a banner that is by
+            // definition visible — but the clear belongs to the ACT of
+            // requesting a provision, not to whichever view requested it.
+            // Settings makes the same call for the case that is not redundant.
+            transcriptionAlert.provisionRequested()
             do {
                 let response = try await connection.setWhisperModel(variant)
                 if !response.ok {
