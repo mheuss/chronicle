@@ -294,13 +294,28 @@ fn is_plaintext_downgrade(previous: &[reqwest::Url], next: &reqwest::Url) -> boo
 /// Cancellation note: the partial is deleted on every `Err`, but a dropped
 /// future (shutdown, `abort()`) skips that cleanup. [`cleanup_stale_tmps`] at
 /// boot is the backstop for that case.
+/// `advertised_bytes` is the manifest's size for this variant, and it is a
+/// ceiling on the transfer, not just a label. [`check_disk_space`] reserves
+/// `advertised + 512 MiB` before the first byte (NFR-3), and that reservation
+/// means nothing unless something stops the write when the response runs past
+/// it. A server that streams forever — a misconfigured mirror, an
+/// intercepting proxy, a compromised CDN — would otherwise write until
+/// `ENOSPC`, taking SQLite, screenshot capture and OCR down with it, and the
+/// SHA-1 check that would have caught the bad content only runs afterwards.
 pub async fn download_model(
     url: &str,
     tmp: &Path,
+    advertised_bytes: u64,
     bytes_atom: &AtomicU64,
     total_atom: &AtomicU64,
 ) -> anyhow::Result<()> {
     use std::io::Write as _;
+    /// Headroom over the advertised size. The manifest rounds sizes UP, so a
+    /// well-behaved server always lands under this; the slack only absorbs a
+    /// future manifest entry that rounds the other way. Deliberately small —
+    /// this bounds a write, it is not a courtesy.
+    const SIZE_SLACK: u64 = 8 * 1024 * 1024;
+    let ceiling = advertised_bytes.saturating_add(SIZE_SLACK);
     if let Some(parent) = tmp.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -393,6 +408,7 @@ pub async fn download_model(
                 .mode(0o600)
                 .open(tmp)?
         };
+        let mut written: u64 = 0;
         loop {
             let chunk = tokio::time::timeout(CHUNK_TIMEOUT, resp.chunk())
                 .await
@@ -400,6 +416,16 @@ pub async fn download_model(
                     anyhow::anyhow!("download stalled (no data for {CHUNK_TIMEOUT:?})")
                 })??;
             let Some(chunk) = chunk else { break };
+            written = written.saturating_add(chunk.len() as u64);
+            // Checked before the write, not after: the point is to never put
+            // the over-long bytes on disk in the first place. The `.tmp` is
+            // removed by the `is_err()` cleanup below.
+            if written > ceiling {
+                anyhow::bail!(
+                    "download ran past the advertised size \
+                     ({advertised_bytes} bytes) — stopped at {written}"
+                );
+            }
             file.write_all(&chunk)?;
             bytes_atom.fetch_add(chunk.len() as u64, Ordering::Relaxed);
         }
@@ -545,17 +571,23 @@ pub struct ProvisionerContext {
 }
 
 impl ProvisionerContext {
+    /// `last_load_failed` seeds AD-11's marker — pass [`boot`]'s return value
+    /// straight through. Seeding it is not optional: the context is built
+    /// after `boot()` runs, so a load failure there is invisible to the retry
+    /// path unless it arrives this way, and the user pays for it with a
+    /// Retry click that silently does nothing.
     pub fn new(
         cell: Arc<TranscriptionStatusCell>,
         handle: Arc<EngineHandle>,
         base_dir: &Path,
+        last_load_failed: Option<ModelVariant>,
     ) -> Arc<Self> {
         Arc::new(Self {
             cell,
             handle,
             base_dir: base_dir.to_path_buf(),
             in_flight: std::sync::atomic::AtomicBool::new(false),
-            last_load_failed: std::sync::Mutex::new(None),
+            last_load_failed: std::sync::Mutex::new(last_load_failed),
             url_override: None,
         })
     }
@@ -652,6 +684,9 @@ impl ProvisionerContext {
             if let Err(e) = download_model(
                 self.url_for(variant),
                 &tmp,
+                // The same figure the precheck reserved against, so the
+                // ceiling and the reservation cannot drift apart.
+                model_info(variant).size_bytes,
                 self.cell.progress_bytes(),
                 self.cell.progress_total(),
             )
@@ -748,12 +783,23 @@ impl ProvisionerContext {
 /// leave the daemon reporting `Loading` forever: no engine, no error, and no
 /// way back until a `SetWhisperModel` arrives. Re-publishing here costs one
 /// `ArcSwap` store and closes that hole.
+/// Returns the variant whose **load failed**, if one did — `None` on every
+/// other outcome. The caller must feed this into
+/// [`ProvisionerContext::new`]'s `last_load_failed`.
+///
+/// That return is load-bearing, not informational. The context is built after
+/// this runs, so a load failure here is invisible to AD-11 unless it is
+/// carried across: `needs_download` would say false for a present-but-corrupt
+/// file, the first Retry would reload the same bytes, and only the *second*
+/// would delete and re-fetch. A corrupt file at startup — a truncated
+/// download from a previous session, a hand-copied model — is the trigger
+/// AD-11 exists for, so it is the one path that must not need two clicks.
 pub async fn boot(
     base_dir: &Path,
     variant: ModelVariant,
     cell: &Arc<TranscriptionStatusCell>,
     handle: &Arc<EngineHandle>,
-) {
+) -> Option<ModelVariant> {
     cleanup_stale_tmps(base_dir);
 
     if !chronicle_transcription::model_present(base_dir, variant) {
@@ -774,7 +820,7 @@ pub async fn boot(
             );
         }
         cell.set_missing();
-        return;
+        return None;
     }
 
     // Re-assert Loading for the same reason: `main` set it from an older
@@ -804,14 +850,21 @@ pub async fn boot(
                     "cpu"
                 }
             );
+            None
         }
+        // Both failure arms carry the same " — retrying will re-download the
+        // file" suffix `provision()` uses, and now they can honour it: the
+        // returned marker is what makes the first Retry delete and re-fetch.
+        // Before that return existed the suffix would have been a lie here.
         Ok(Err(e)) => {
             log::error!("transcription engine load failed ({variant}): {e} — staying idle");
-            cell.set_error(&e.to_string());
+            cell.set_error(&format!("{e} — retrying will re-download the file"));
+            Some(variant)
         }
         Err(e) => {
             log::error!("transcription engine load task failed ({variant}): {e} — staying idle");
-            cell.set_error("model load failed");
+            cell.set_error("model load failed — retrying will re-download the file");
+            Some(variant)
         }
     }
 }
@@ -834,12 +887,22 @@ impl ProvisionerContext {
     }
 
     pub(crate) fn new_for_test_with_url(base_dir: &Path, url: &str) -> Arc<Self> {
+        Self::new_for_test_seeded(base_dir, url, None)
+    }
+
+    /// Same, but seeds AD-11's marker the way production seeds it from
+    /// [`boot`] — the only way to exercise the boot-load-failure retry path.
+    pub(crate) fn new_for_test_seeded(
+        base_dir: &Path,
+        url: &str,
+        last_load_failed: Option<ModelVariant>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             cell: TranscriptionStatusCell::new(parse_variant("base").unwrap()),
             handle: Arc::new(EngineHandle::new()),
             base_dir: base_dir.to_path_buf(),
             in_flight: std::sync::atomic::AtomicBool::new(false),
-            last_load_failed: std::sync::Mutex::new(None),
+            last_load_failed: std::sync::Mutex::new(last_load_failed),
             url_override: Some(url.to_string()),
         })
     }
@@ -1209,6 +1272,42 @@ mod tests {
         format!("{:x}", h.finalize())
     }
 
+    /// For the download tests that are not about the size ceiling. Named
+    /// rather than a bare literal so a reader can tell "this test does not
+    /// care about the bound" from "this test picked a number".
+    const TEST_NO_LIMIT: u64 = u64::MAX / 2;
+
+    // NFR-3's precheck reserves advertised + 512 MiB before a byte is
+    // fetched, and that reservation is only worth what enforces it. Without a
+    // ceiling a server that keeps streaming writes until ENOSPC and takes
+    // SQLite, capture and OCR down with it — and SHA-1, which would have
+    // caught the bad content, only runs after the whole body has landed.
+    #[tokio::test]
+    async fn download_refuses_a_body_past_the_advertised_size() {
+        let dir = tempdir().unwrap();
+        // Comfortably past the 8 MiB slack over a 1-byte advertised size.
+        let body = vec![0u8; 12 * 1024 * 1024];
+        let port = http_fixture(body, None).await;
+        let tmp = dir.path().join(MODELS_SUBDIR).join("ggml-base.bin.tmp");
+        let err = download_model(
+            &format!("http://127.0.0.1:{port}/model"),
+            &tmp,
+            1,
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .await
+        .expect_err("a body past the advertised size must be refused");
+        assert!(
+            err.to_string().contains("advertised size"),
+            "the error must name the cause, got: {err}"
+        );
+        assert!(
+            !tmp.exists(),
+            "the over-long partial must not be left on disk"
+        );
+    }
+
     #[tokio::test]
     async fn download_streams_body_to_tmp_with_progress() {
         let dir = tempdir().unwrap();
@@ -1220,6 +1319,7 @@ mod tests {
         download_model(
             &format!("http://127.0.0.1:{port}/model"),
             &tmp,
+            body.len() as u64,
             &bytes,
             &total,
         )
@@ -1277,6 +1377,7 @@ mod tests {
         let result = download_model(
             &format!("http://127.0.0.1:{port}/x"),
             &tmp,
+            TEST_NO_LIMIT,
             &AtomicU64::new(0),
             &AtomicU64::new(0),
         )
@@ -1310,7 +1411,8 @@ mod tests {
 
         let url = format!("http://127.0.0.1:{port}/model");
         let (b2, t2, tmp2) = (Arc::clone(&bytes), Arc::clone(&total), tmp.clone());
-        let task = tokio::spawn(async move { download_model(&url, &tmp2, &b2, &t2).await });
+        let task =
+            tokio::spawn(async move { download_model(&url, &tmp2, TEST_NO_LIMIT, &b2, &t2).await });
 
         // Bounded so a buffered implementation FAILS rather than hanging.
         // The loop also watches the task: its 1000ms budget outlives the
@@ -1366,6 +1468,7 @@ mod tests {
         let result = download_model(
             &format!("http://127.0.0.1:{port}/start"),
             &tmp,
+            TEST_NO_LIMIT,
             &AtomicU64::new(0),
             &AtomicU64::new(0),
         )
@@ -1414,6 +1517,7 @@ mod tests {
             let err = download_model(
                 &format!("http://127.0.0.1:{port}/x"),
                 &tmp,
+                TEST_NO_LIMIT,
                 &AtomicU64::new(0),
                 &AtomicU64::new(0),
             )
@@ -1446,6 +1550,7 @@ mod tests {
         download_model(
             &format!("http://127.0.0.1:{port}/model"),
             &tmp,
+            TEST_NO_LIMIT,
             &AtomicU64::new(0),
             &AtomicU64::new(0),
         )
@@ -1712,6 +1817,50 @@ mod tests {
             !models.join("ggml-base.bin").exists(),
             "retry after load failure must delete the corrupt file (AD-11)"
         );
+    }
+
+    // AD-11's designed recovery, on the path that actually triggers it: a
+    // corrupt-but-present model at startup. `boot()` fails the load and the
+    // context is constructed afterwards, so unless boot's outcome is carried
+    // into it, the first Retry reloads the same bytes and only the SECOND
+    // deletes. That is the trigger the design names — a truncated download
+    // from a previous session, or a hand-copied file.
+    #[tokio::test]
+    async fn a_boot_load_failure_makes_the_first_retry_re_download() {
+        let dir = tempdir().unwrap();
+        let models = dir.path().join(MODELS_SUBDIR);
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(models.join("ggml-base.bin"), b"garbage").unwrap();
+        let cell = TranscriptionStatusCell::new(parse_variant("base").unwrap());
+        let handle = Arc::new(EngineHandle::new());
+
+        let failed = boot(dir.path(), parse_variant("base").unwrap(), &cell, &handle).await;
+        assert_eq!(
+            failed,
+            Some(parse_variant("base").unwrap()),
+            "boot must report which variant failed to load, or the marker is lost"
+        );
+
+        let ctx =
+            ProvisionerContext::new_for_test_seeded(dir.path(), "http://127.0.0.1:1/x", failed);
+        let (evt_tx, _evt_rx) = tokio::sync::mpsc::channel(4);
+        ctx.provision(parse_variant("base").unwrap(), evt_tx).await;
+        assert!(
+            !models.join("ggml-base.bin").exists(),
+            "the FIRST retry after a boot load failure must delete the corrupt file (AD-11)"
+        );
+    }
+
+    // The other half: a clean boot must NOT seed the marker, or the first
+    // switch to an already-present variant would delete and re-download a
+    // perfectly good file.
+    #[tokio::test]
+    async fn a_boot_with_no_model_seeds_no_load_failure() {
+        let dir = tempdir().unwrap();
+        let cell = TranscriptionStatusCell::new(parse_variant("base").unwrap());
+        let handle = Arc::new(EngineHandle::new());
+        let failed = boot(dir.path(), parse_variant("base").unwrap(), &cell, &handle).await;
+        assert_eq!(failed, None, "nothing loaded, so nothing failed to load");
     }
 
     #[tokio::test]

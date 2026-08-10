@@ -96,8 +96,30 @@ fn handle_provision_event(base_dir: &std::path::Path, evt: provisioning::Provisi
 fn begin_model_switch(
     provisioner: &Arc<provisioning::ProvisionerContext>,
     variant: chronicle_transcription::ModelVariant,
+    still_waiting: &std::sync::atomic::AtomicBool,
     evt_tx: &tokio::sync::mpsc::Sender<provisioning::ProvisionEvent>,
 ) -> (bool, Option<tokio::task::JoinHandle<()>>) {
+    // Checked BEFORE `try_begin`, which is the whole point: `try_begin`
+    // commits the entering state and takes the slot synchronously, so a check
+    // after it would need a rollback path with no snapshot to roll back to.
+    //
+    // The requester is gone when the handler's 20s timeout fired — reachable
+    // whenever the event loop is tied up by a slow pause/resume or a power
+    // reconcile. It has already answered `ok: false`. Starting the download
+    // and the engine swap now would do work nobody asked for, report it
+    // nowhere, and on success persist a variant the user was told was
+    // refused.
+    //
+    // The residual race — the handler giving up in the microseconds between
+    // this load and the send below — leaves the old behaviour, but the window
+    // shrinks from twenty seconds to the width of a CAS.
+    if !still_waiting.load(std::sync::atomic::Ordering::Acquire) {
+        log::warn!(
+            "dropping model command for {variant}: the requester stopped waiting \
+             and was already told it was rejected"
+        );
+        return (false, None);
+    }
     if !provisioner.try_begin(variant) {
         return (false, None);
     }
@@ -371,7 +393,7 @@ async fn main() -> Result<()> {
     // Awaited here, before `audio_store_loop` spawns below, so nothing can be
     // enqueued while the engine slot is still being filled — the no-loss
     // ordering this block has always had.
-    provisioning::boot(
+    let boot_load_failed = provisioning::boot(
         storage.base_dir(),
         whisper_variant,
         &transcription_status,
@@ -382,10 +404,16 @@ async fn main() -> Result<()> {
     // before the event loop can drive a provision, or the two would race for
     // the engine slot — `boot().await` above is what guarantees that, and it
     // is load-bearing now rather than incidental.
+    //
+    // That ordering is also why `boot_load_failed` has to be threaded through
+    // rather than left to the provisioner to discover: boot owns the only
+    // load that happens before this line exists, so a corrupt model at
+    // startup is invisible to AD-11 unless boot hands the verdict over.
     let provisioner = provisioning::ProvisionerContext::new(
         Arc::clone(&transcription_status),
         Arc::clone(&engine_handle),
         storage.base_dir(),
+        boot_load_failed,
     );
     // One handle, one channel, one sink, one loop — unconditionally. "No
     // model" is just an empty handle: the sink gates on it, so every enqueue
@@ -567,8 +595,12 @@ async fn main() -> Result<()> {
                 // Ready-gated to avoid breaking it. The cost is a brief ~2x
                 // model RAM while both engines are alive — noted for
                 // finish-branch triage rather than guarded here.
-                let (accepted, task) =
-                    begin_model_switch(&provisioner, cmd.variant, &provision_evt_tx);
+                let (accepted, task) = begin_model_switch(
+                    &provisioner,
+                    cmd.variant,
+                    &cmd.still_waiting,
+                    &provision_evt_tx,
+                );
                 // Load-bearing, not defensive noise: a rejection means a
                 // provision IS in flight, so `provision_task` is holding its
                 // live handle. Assigning unconditionally would overwrite it
@@ -856,9 +888,11 @@ mod tests {
         );
         let (evt_tx, _evt_rx) = tokio::sync::mpsc::channel(4);
 
+        let waiting = std::sync::atomic::AtomicBool::new(true);
         let (accepted, task) = begin_model_switch(
             &ctx,
             chronicle_transcription::parse_variant("small").unwrap(),
+            &waiting,
             &evt_tx,
         );
         assert!(accepted, "the slot was free");
@@ -871,12 +905,54 @@ mod tests {
         let (accepted2, task2) = begin_model_switch(
             &ctx,
             chronicle_transcription::parse_variant("base").unwrap(),
+            &waiting,
             &evt_tx,
         );
         assert!(!accepted2, "one at a time — the slot is taken");
         assert!(task2.is_none(), "a rejected switch starts no task");
 
         task.abort();
+    }
+
+    // The handler's 20s timeout answers `ok: false` but leaves the command in
+    // the channel. When a long pause/resume or power reconcile finally frees
+    // the loop, it must NOT start the work: the UI was told the request was
+    // rejected, so a multi-gigabyte download and an engine swap would run
+    // with nobody watching and nobody informed — the silent-divergence shape
+    // this branch spent three tasks closing, arriving through the one door
+    // that bypasses the reply.
+    #[tokio::test]
+    async fn an_abandoned_model_command_starts_no_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = provisioning::ProvisionerContext::new_for_test(dir.path());
+        let (evt_tx, _evt_rx) = tokio::sync::mpsc::channel(4);
+
+        let abandoned = std::sync::atomic::AtomicBool::new(false);
+        let (accepted, task) = begin_model_switch(
+            &ctx,
+            chronicle_transcription::parse_variant("small").unwrap(),
+            &abandoned,
+            &evt_tx,
+        );
+        assert!(!accepted, "nobody is waiting for this answer");
+        assert!(task.is_none(), "and no download may start");
+
+        // The slot must be left free, not consumed — otherwise one abandoned
+        // command would wedge every later switch behind a phantom provision.
+        let still_waiting = std::sync::atomic::AtomicBool::new(true);
+        let (accepted2, task2) = begin_model_switch(
+            &ctx,
+            chronicle_transcription::parse_variant("base").unwrap(),
+            &still_waiting,
+            &evt_tx,
+        );
+        assert!(
+            accepted2,
+            "the abandoned command must not have taken the slot"
+        );
+        if let Some(t) = task2 {
+            t.abort();
+        }
     }
 
     #[tokio::test]

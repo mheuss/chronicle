@@ -58,6 +58,13 @@ pub(crate) enum CaptureAction {
 pub(crate) struct ModelCommand {
     pub variant: chronicle_transcription::ModelVariant,
     pub reply: std::sync::mpsc::SyncSender<bool>,
+    /// Cleared by the handler when it stops waiting for the reply.
+    ///
+    /// A `SyncSender` cannot be probed for a live receiver without consuming
+    /// a send, and the verdict is not known until `try_begin` has already
+    /// committed state — so liveness needs its own channel. The event loop
+    /// reads this **before** committing anything.
+    pub still_waiting: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Engine status as observed by the background refresher. Owned by the
@@ -226,11 +233,13 @@ impl DaemonHandler {
             };
         }
         let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel::<bool>(1);
+        let still_waiting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         if self
             .model_tx
             .try_send(ModelCommand {
                 variant,
                 reply: reply_tx,
+                still_waiting: std::sync::Arc::clone(&still_waiting),
             })
             .is_err()
         {
@@ -247,7 +256,12 @@ impl DaemonHandler {
             match tokio::task::block_in_place(|| reply_rx.recv_timeout(self.model_reply_timeout)) {
                 Ok(accepted) => accepted,
                 Err(e) => {
-                    log::warn!("model command reply failed: {e}");
+                    // Withdraw the request before answering. The command is
+                    // still sitting in the channel, and without this the loop
+                    // would pick it up whenever it frees up and start a
+                    // download the reply below is about to call rejected.
+                    still_waiting.store(false, std::sync::atomic::Ordering::Release);
+                    log::warn!("model command reply failed: {e} — request withdrawn");
                     false
                 }
             };

@@ -156,10 +156,19 @@ final class DaemonConnection {
             expecting: SetWhisperModelResponse.self
         )
         if response.ok {
-            // Best-effort: the reply above already carries the entering
-            // state, so a failed refresh costs at most one second of
-            // staleness before the poll catches up.
-            _ = try? await requestStatus()
+            // The refresh is still best-effort, but its failure is NOT
+            // harmless. Both views decide whether to run their 1 Hz
+            // provisioning poll by reading `lastStatus`, so leaving it on the
+            // pre-request state means neither loop starts: no progress bar,
+            // and a fast failure invisible until the connection monitor's
+            // 30-second tick. "One second of staleness" was only ever true
+            // when the poll was already running.
+            //
+            // The reply we are holding carries the state the daemon just
+            // entered, so on a failed refresh we publish that instead.
+            if (try? await requestStatus()) == nil, let last = lastStatus {
+                lastStatus = last.replacingTranscription(response.status)
+            }
         }
         return response
     }
@@ -488,6 +497,28 @@ struct StatusResponse: Codable, Sendable {
     let type: String
     let ok: Bool
     let data: StatusData
+
+    /// A copy carrying a fresher transcription block, leaving every other
+    /// field alone.
+    ///
+    /// Not a status refresh — one field arriving by a different route. The
+    /// `set_whisper_model` reply already contains the state the daemon just
+    /// entered, so when the follow-up refresh fails there is no reason to
+    /// throw that away and show the user nothing. The rest of the snapshot
+    /// stays as it was and the next poll replaces all of it.
+    func replacingTranscription(_ stats: TranscriptionStats) -> StatusResponse {
+        StatusResponse(
+            type: type,
+            ok: ok,
+            data: StatusData(
+                uptimeSecs: data.uptimeSecs,
+                version: data.version,
+                capture: data.capture,
+                ocr: data.ocr,
+                audio: data.audio,
+                storage: data.storage,
+                transcription: stats))
+    }
 }
 
 struct StatusData: Codable, Sendable {

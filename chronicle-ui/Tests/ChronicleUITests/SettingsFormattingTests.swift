@@ -94,3 +94,60 @@ struct SettingsFormattingTests {
             downloadBytes: nil, downloadTotalBytes: nil, models: [])
     }
 }
+
+/// The fallback that keeps a provision visible when `setWhisperModel`'s
+/// follow-up status refresh fails. Both views start their 1 Hz poll by
+/// reading `lastStatus`, so a stale block there means no progress and a
+/// swallowed fast failure until the 30-second monitor tick.
+@Suite("Status transcription splice")
+struct StatusTranscriptionSpliceTests {
+    private func status(_ state: TranscriptionState) -> StatusResponse {
+        StatusResponse(
+            type: "status", ok: true,
+            data: StatusData(
+                uptimeSecs: 42, version: "v",
+                capture: CaptureStats(
+                    state: "running", activeDisplays: 1, framesCaptured: 7,
+                    framesDropped: 0, framesProcessed: 7, framesFailed: 0, paused: false),
+                ocr: nil, audio: nil, storage: nil,
+                transcription: TranscriptionStats(
+                    state: state, variant: "base", loadedVariant: "base", error: nil,
+                    downloadBytes: nil, downloadTotalBytes: nil, models: [])))
+    }
+
+    @Test("the fresher block lands and the rest of the snapshot is untouched")
+    func spliceReplacesOnlyTranscription() {
+        let before = status(.ready)
+        let entering = TranscriptionStats(
+            state: .downloading, variant: "small", loadedVariant: "base", error: nil,
+            downloadBytes: 0, downloadTotalBytes: nil, models: [])
+
+        let after = before.replacingTranscription(entering)
+
+        #expect(after.data.transcription?.state == .downloading)
+        #expect(after.data.transcription?.variant == "small")
+        // Everything else must survive — this is one field arriving by a
+        // different route, not a status refresh.
+        #expect(after.type == before.type)
+        #expect(after.ok == before.ok)
+        #expect(after.data.uptimeSecs == before.data.uptimeSecs)
+        #expect(after.data.version == before.data.version)
+        #expect(after.data.capture?.framesCaptured == 7)
+        #expect(after.data.capture?.paused == false)
+    }
+
+    // The point of the splice: the state the views poll on actually moves.
+    @Test("the spliced state is one the poll acts on")
+    func splicedStateDrivesThePoll() {
+        let before = status(.ready)
+        #expect(!TranscriptionBannerCopy(before.data.transcription).showsProgress)
+
+        let entering = TranscriptionStats(
+            state: .downloading, variant: "small", loadedVariant: "base", error: nil,
+            downloadBytes: 0, downloadTotalBytes: nil, models: [])
+        let after = before.replacingTranscription(entering)
+
+        #expect(TranscriptionBannerCopy(after.data.transcription).showsProgress,
+                "without this the 1 Hz poll never starts and progress never shows")
+    }
+}
