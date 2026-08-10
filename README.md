@@ -104,6 +104,8 @@ you want a larger, more accurate model instead.
 
 No Terminal step — the app downloads and verifies the model itself.
 
+### Stopping
+
 To stop the daemon cleanly, send `SIGTERM` (`Ctrl-C` in the terminal where it
 runs). Pause state persists in `~/Library/Application Support/Chronicle/settings`
 across restarts — if you paused capture before quitting, the daemon will boot
