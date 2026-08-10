@@ -34,7 +34,7 @@ chronicle-daemon/          Rust workspace
     ├── capture/           Screen capture via ScreenCaptureKit
     ├── ocr/               Text extraction via Apple Vision
     ├── audio/             Mic + system audio capture
-    ├── transcription/     Placeholder crate for future speech-to-text work
+    ├── transcription/     Whisper model management + speech-to-text
     ├── storage/           SQLite + FTS5 search indexes
     └── ipc/               Unix socket JSON protocol
 

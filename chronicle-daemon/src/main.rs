@@ -514,10 +514,19 @@ async fn main() -> Result<()> {
     });
 
     // --- Event loop: serve mic toggles until a shutdown signal arrives ---
-    // Toggles are handled inline, one per iteration. This loop is the only
-    // caller of write_mic_setting, which writes a fixed temp path — the
-    // one-at-a-time processing here is what keeps that path safe. (The
-    // supervisor's `start()` reads but never writes the mic setting when
+    // Toggles are handled inline, one per iteration.
+    //
+    // **The single-writer note.** This loop is the only caller of ALL THREE
+    // settings writers — `write_mic_setting` here, `write_capture_paused` via
+    // `set_user_paused` in the capture arm, and `write_whisper_model` via
+    // `handle_provision_event`. They share one fixed temp path
+    // (`settings.tmp`), so the one-at-a-time processing here is the only
+    // thing keeping that safe: off-loop, a lost race surfaces as
+    // `AlreadyExists`, and the loser's cleanup can delete the winner's temp
+    // file and break its rename. `handle_provision_event`'s doc points here
+    // for exactly this, so it must keep naming all three.
+    //
+    // (The supervisor's `start()` reads but never writes the mic setting when
     // restoring it on boot/resume/wake, so it can't race this loop's write.)
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     // Open the readiness gates: from here the loop drains `mic_rx`,

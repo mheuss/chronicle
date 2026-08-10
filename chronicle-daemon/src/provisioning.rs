@@ -231,11 +231,20 @@ pub fn check_disk_space(base_dir: &Path, required_bytes: u64) -> anyhow::Result<
     // SAFETY: `c_path` is a valid NUL-terminated string that outlives the
     // call, and `vfs` is a live, correctly-sized, initialized statvfs.
     let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut vfs) };
+    // Lead-in matters: this string reaches the banner verbatim, and a bare
+    // "statvfs failed: No such file or directory" reads as gibberish to
+    // someone who just clicked Download. Unreachable today — `Storage::open`
+    // creates `base_dir` first — but nothing enforces that ordering.
     anyhow::ensure!(
         rc == 0,
-        "statvfs failed: {}",
+        "could not check free disk space: {}",
         std::io::Error::last_os_error()
     );
+    // `f_bavail`/`f_frsize` are 32-bit (`c_uint`) on Apple platforms, so both
+    // casts widen rather than narrow — the multiply is what could overflow,
+    // hence `saturating_mul`. A volume large enough to saturate would report
+    // "plenty of space", which is the safe direction for a precheck: the
+    // download's own size ceiling still bounds the write.
     let free = (vfs.f_bavail as u64).saturating_mul(vfs.f_frsize as u64);
     let needed = required_bytes.saturating_add(DISK_MARGIN_BYTES);
     anyhow::ensure!(
@@ -245,6 +254,29 @@ pub fn check_disk_space(base_dir: &Path, required_bytes: u64) -> anyhow::Result<
         free as f64 / 1e9,
     );
     Ok(())
+}
+
+/// Short, user-facing copy for a failed download request.
+///
+/// `reqwest::Error`'s own `Display` carries the full request URL, and this
+/// string is rendered verbatim in the banner and the Settings row. Naming the
+/// kind tells the user as much as they can act on — retry, check the
+/// connection — without pasting a HuggingFace URL into the UI. Anything
+/// unrecognised falls back to a neutral phrase rather than the raw text.
+fn describe_request_error(e: &reqwest::Error) -> &'static str {
+    if e.is_timeout() {
+        "the server took too long to respond"
+    } else if e.is_connect() {
+        "could not reach the server — check your connection"
+    } else if e.is_status() {
+        "the server refused the request"
+    } else if e.is_redirect() {
+        "the download was redirected somewhere unsafe"
+    } else if e.is_decode() || e.is_body() {
+        "the response could not be read"
+    } else {
+        "the request did not complete"
+    }
 }
 
 /// Delete any `*.tmp` partials in the models dir. Called from `boot()` only —
@@ -357,15 +389,22 @@ pub async fn download_model(
             }))
             .build()?;
         // Design Integration Architecture: offline/DNS/5xx are prefixed with
-        // "download failed: " so the banner has a stable lead-in. The reqwest
-        // text (and the URL it embeds) still rides along — mapping error
-        // kinds to friendlier copy belongs with Task 15's banner work.
+        // "download failed: " so the banner has a stable lead-in.
+        //
+        // The kind is named rather than passing reqwest's Display through.
+        // That text embeds the full HuggingFace URL, and this string is
+        // rendered verbatim in a 420pt popover — a URL is not something to
+        // show a user who just wanted a progress bar. The full error still
+        // reaches the log, where a developer can read it.
         let mut resp = client
             .get(url)
             .send()
             .await
             .and_then(|r| r.error_for_status())
-            .map_err(|e| anyhow::anyhow!("download failed: {e}"))?;
+            .map_err(|e| {
+                log::error!("model download request failed: {e}");
+                anyhow::anyhow!("download failed: {}", describe_request_error(&e))
+            })?;
         // A plain GET with no Range header has exactly ONE correct success
         // status, so anything else is a failed download however friendly it
         // looks. Neither of the obvious guards is enough on its own:
@@ -955,7 +994,10 @@ mod tests {
     }
 
     #[test]
-    fn engine_handle_set_replaces_and_never_clears() {
+    // Named for what a single-threaded test can actually pin: that a second
+    // `set` swaps the engine. It cannot observe a clear-then-set window, so
+    // it must not claim to (plan Decisions, 2026-08-07 item b).
+    fn engine_handle_set_swaps_the_engine() {
         // The slot is "only ever REPLACED, never cleared" (design §2.1
         // invariant 1). Pins that a second `set` swaps the engine rather than
         // being ignored, and that the handle stays loaded across the swap —
@@ -1265,6 +1307,25 @@ mod tests {
     }
 
     /// sha1 of `body`, computed in-test so no digest is hardcoded.
+    /// Drive a provision the way production does: win the slot first, exactly
+    /// as the event-loop arm does.
+    ///
+    /// Calling `provision()` bare violates its documented precondition and
+    /// passes only because the flag starts `false`. That mattered: the
+    /// boot-load-failure bug lived precisely in the pairing these tests were
+    /// skipping, so none of them could have caught it.
+    async fn provision_as_production_does(
+        ctx: &Arc<ProvisionerContext>,
+        variant: ModelVariant,
+        evt_tx: tokio::sync::mpsc::Sender<ProvisionEvent>,
+    ) {
+        assert!(
+            ctx.try_begin(variant),
+            "the slot must be free before a provision"
+        );
+        ctx.provision(variant, evt_tx).await;
+    }
+
     fn sha1_hex(body: &[u8]) -> String {
         use sha1::{Digest, Sha1};
         let mut h = Sha1::new();
@@ -1415,13 +1476,16 @@ mod tests {
             tokio::spawn(async move { download_model(&url, &tmp2, TEST_NO_LIMIT, &b2, &t2).await });
 
         // Bounded so a buffered implementation FAILS rather than hanging.
-        // The loop also watches the task: its 1000ms budget outlives the
-        // 500ms CHUNK_TIMEOUT, so a starved poll could see the download die
-        // of a stall and then blame streaming for it. Break on a finished
-        // task and report the real error instead.
+        // The budget is deliberately UNDER the 500ms `cfg(test)`
+        // CHUNK_TIMEOUT: at 1000ms a starved runner could watch the download
+        // die of a stall and then blame streaming for it — a red build with
+        // nothing wrong. 60 × 5ms = 300ms leaves the stall path out of reach
+        // while still being ~19× the split the fixture writes before pausing.
+        // The `died_early` branch stays as the honest report if it ever does
+        // happen.
         let mut saw_partial = false;
         let mut died_early = false;
-        for _ in 0..200 {
+        for _ in 0..60 {
             if bytes.load(Ordering::Relaxed) as usize >= split {
                 saw_partial = true;
                 break;
@@ -1633,7 +1697,7 @@ mod tests {
         // Port 1 refuses connections → download fails fast.
         let ctx = ProvisionerContext::new_for_test_with_url(dir.path(), "http://127.0.0.1:1/x");
         let (evt_tx, mut evt_rx) = tokio::sync::mpsc::channel(4);
-        ctx.provision(parse_variant("base").unwrap(), evt_tx).await;
+        provision_as_production_does(&ctx, parse_variant("base").unwrap(), evt_tx).await;
         let stats = ctx.cell().stats(dir.path());
         assert_eq!(stats.state, TranscriptionState::Error);
         assert!(
@@ -1655,7 +1719,7 @@ mod tests {
             &format!("http://127.0.0.1:{port}/x"),
         );
         let (evt_tx, mut evt_rx) = tokio::sync::mpsc::channel(4);
-        ctx.provision(parse_variant("base").unwrap(), evt_tx).await;
+        provision_as_production_does(&ctx, parse_variant("base").unwrap(), evt_tx).await;
         let stats = ctx.cell().stats(dir.path());
         assert_eq!(stats.state, TranscriptionState::Error);
         assert!(stats.error.unwrap().contains("checksum mismatch"));
@@ -1686,6 +1750,8 @@ mod tests {
             &format!("http://127.0.0.1:{port}/x"),
         );
         let (evt_tx, _evt_rx) = tokio::sync::mpsc::channel(4);
+        // Spelled out inline rather than via `provision_as_production_does`:
+        // this is the test ABOUT the pairing, so it has to show both halves.
         assert!(ctx.try_begin(parse_variant("base").unwrap()));
         ctx.provision(parse_variant("base").unwrap(), evt_tx).await;
         let stats = ctx.cell().stats(dir.path());
@@ -1709,7 +1775,7 @@ mod tests {
         ctx.cell().set_ready(parse_variant("base").unwrap());
 
         let (evt_tx, _evt_rx) = tokio::sync::mpsc::channel(4);
-        ctx.provision(parse_variant("small").unwrap(), evt_tx).await;
+        provision_as_production_does(&ctx, parse_variant("small").unwrap(), evt_tx).await;
 
         let stats = ctx.cell().stats(dir.path());
         assert_eq!(stats.state, TranscriptionState::Error);
@@ -1785,7 +1851,7 @@ mod tests {
         std::fs::write(models.join("ggml-base.bin"), b"not a ggml model").unwrap();
         let ctx = ProvisionerContext::new_for_test(dir.path());
         let (evt_tx, _evt_rx) = tokio::sync::mpsc::channel(4);
-        ctx.provision(parse_variant("base").unwrap(), evt_tx).await;
+        provision_as_production_does(&ctx, parse_variant("base").unwrap(), evt_tx).await;
         let stats = ctx.cell().stats(dir.path());
         assert_eq!(stats.state, TranscriptionState::Error);
         assert!(
@@ -1803,8 +1869,7 @@ mod tests {
         let ctx = ProvisionerContext::new_for_test_with_url(dir.path(), "http://127.0.0.1:1/x");
         let (evt_tx, _evt_rx) = tokio::sync::mpsc::channel(4);
         // First attempt: load fails on garbage → Error, file still there.
-        ctx.provision(parse_variant("base").unwrap(), evt_tx.clone())
-            .await;
+        provision_as_production_does(&ctx, parse_variant("base").unwrap(), evt_tx.clone()).await;
         assert!(
             models.join("ggml-base.bin").exists(),
             "the FIRST failure must leave the file alone — without this, an \
@@ -1812,7 +1877,7 @@ mod tests {
         );
         // Retry: AD-11 — suspect file is deleted, then re-download starts
         // (and fails here on the dead URL, which is fine for the assertion).
-        ctx.provision(parse_variant("base").unwrap(), evt_tx).await;
+        provision_as_production_does(&ctx, parse_variant("base").unwrap(), evt_tx).await;
         assert!(
             !models.join("ggml-base.bin").exists(),
             "retry after load failure must delete the corrupt file (AD-11)"
@@ -1844,7 +1909,7 @@ mod tests {
         let ctx =
             ProvisionerContext::new_for_test_seeded(dir.path(), "http://127.0.0.1:1/x", failed);
         let (evt_tx, _evt_rx) = tokio::sync::mpsc::channel(4);
-        ctx.provision(parse_variant("base").unwrap(), evt_tx).await;
+        provision_as_production_does(&ctx, parse_variant("base").unwrap(), evt_tx).await;
         assert!(
             !models.join("ggml-base.bin").exists(),
             "the FIRST retry after a boot load failure must delete the corrupt file (AD-11)"

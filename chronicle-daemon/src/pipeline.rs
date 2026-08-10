@@ -248,7 +248,13 @@ pub async fn transcribe_loop(
                 // now the loop always runs, so an operator whose grace
                 // expires with an empty handle would otherwise get no signal
                 // that a queue was abandoned.
-                warn_abandoned_queue(rx.len());
+                //
+                // `+ 1`, unlike the bottom break: there the current segment
+                // has already been persisted, so `rx.len()` is exact. Here it
+                // has NOT — it leaves with a NULL transcript and is abandoned
+                // too, so the operator's backfill list is one longer than the
+                // queue.
+                warn_abandoned_queue(rx.len() + 1);
                 break;
             }
             continue;

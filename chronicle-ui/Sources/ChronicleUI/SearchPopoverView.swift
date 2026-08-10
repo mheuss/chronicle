@@ -29,7 +29,12 @@ struct SearchPopoverView: View {
         case results
     }
 
-    static func searchContent(
+    // `nonisolated` for the same reason SettingsView's formatters are: `View`
+    // conformance makes the type `@MainActor`, and this is a pure function of
+    // its arguments called from a nonisolated test. It doesn't trap today
+    // only because it contains no closure — which is exactly the "trap
+    // waiting for the next edit" the note in SettingsView describes.
+    nonisolated static func searchContent(
         connected: Bool,
         queryEmpty: Bool,
         isLoading: Bool,
@@ -128,6 +133,12 @@ struct SearchPopoverView: View {
         // and the daemon's download carries on regardless — the poll drives
         // the progress bar, not the work. Keyed on the state so the loop
         // restarts across transitions and exits once the state settles.
+        //
+        // Deliberately a SECOND `.task` on the same id as the one above, not
+        // a consolidation of it. Merging them would tie `evaluate` — which
+        // must run once per transition — to the lifetime of a loop that sits
+        // sleeping for a second at a time, so a cancellation mid-sleep would
+        // take the alert evaluation with it.
         .task(id: connection.lastStatus?.data.transcription?.state) {
             while !Task.isCancelled, isProvisioningActive {
                 try? await Task.sleep(for: .seconds(1))

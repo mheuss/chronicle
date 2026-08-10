@@ -609,9 +609,31 @@ struct SetWhisperModelResponse: Codable, Sendable {
     let status: TranscriptionStats
 }
 
+/// A stable, machine-readable failure reason from the daemon.
+///
+/// Tolerant decode for the same reason `TranscriptionState` has one: a closed
+/// enum on a wire field throws on an unrecognized value, and that failure
+/// takes the whole response down rather than just this field.
+enum DaemonErrorCode: String, Codable, Sendable {
+    case requestTooLarge = "request_too_large"
+    case invalidUtf8 = "invalid_utf8"
+    case invalidRequest = "invalid_request"
+    case unknown
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = DaemonErrorCode(rawValue: raw) ?? .unknown
+    }
+}
+
 struct ErrorResponse: Codable, Sendable {
     let type: String
     let ok: Bool
+    /// The protocol reference tells clients to branch on this rather than on
+    /// the human-readable message — and until now the one client could not,
+    /// because it wasn't decoded. Optional so a daemon that predates the
+    /// field still decodes.
+    let code: DaemonErrorCode?
     let message: String
 }
 

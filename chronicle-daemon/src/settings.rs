@@ -142,9 +142,13 @@ pub fn read_whisper_model(base_dir: &Path) -> ModelVariant {
 /// error. Their live state is already correct for the session, so a failed
 /// persist costs nothing until restart. A failed model persist is different —
 /// the swap succeeded and the UI reports the new variant as active, but the
-/// daemon would silently fall back to the old one on next start. The caller
-/// has to be able to see that and tell the user, which is what AD-10 exists
-/// to guarantee.
+/// daemon would silently fall back to the old one on next start, so the
+/// caller has to be able to SEE that rather than have it swallowed here.
+///
+/// What the caller then does with it is log it — `handle_provision_event`
+/// writes an error line and nothing reaches the status cell or the banner.
+/// That is a recorded decision, not an oversight (plan Decisions,
+/// 2026-08-08), and this sentence used to claim the user was told.
 pub fn write_whisper_model(base_dir: &Path, variant: ModelVariant) -> std::io::Result<()> {
     let mut map = read_all(base_dir);
     map.insert(WHISPER_MODEL_KEY.into(), variant.as_str().to_string());

@@ -50,7 +50,9 @@ async-trait = "0.1"
 # deliberate: keychain trust would honour any locally installed root.
 # Dropped from the defaults: charset (only affects .text(), unused) and http2
 # (ALPN falls back to HTTP/1.1).
-reqwest = { version = "0.12", default-features = false, features = [
+# 0.12.24 is the floor, not cosmetic: `system-proxy` does not exist before it,
+# so a bare "0.12" lets Cargo resolve a version where this feature list fails.
+reqwest = { version = "0.12.24", default-features = false, features = [
     "rustls-tls",
     "system-proxy",
 ] }
