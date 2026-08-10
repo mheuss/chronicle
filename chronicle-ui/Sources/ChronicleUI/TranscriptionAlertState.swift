@@ -77,9 +77,15 @@ final class TranscriptionAlertState {
     /// already `.error`, so neither `startsNewOperation` nor `justFailed`
     /// fires, and the second failure would never reach the user.
     ///
-    /// It only clears the dismissal; it never raises the banner on its own.
-    /// `shouldShow` still needs a cause, so a request the daemon REJECTS
-    /// leaves nothing on screen with nothing to say.
+    /// It only clears the dismissal; it never raises the banner by itself.
+    /// `shouldShow` still needs a latched cause, so on a healthy boot a
+    /// request the daemon REJECTS puts nothing on screen.
+    ///
+    /// Where a cause IS latched it does re-show the banner, carrying the state
+    /// that latched it. Dismissed at `.error`, a rejected pick from Settings
+    /// brings back that error and its Retry — both still true, since a
+    /// rejection changed nothing — while the rejection itself is reported by
+    /// whichever surface made the request.
     func provisionRequested() {
         dismissed = false
     }

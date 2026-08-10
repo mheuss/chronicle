@@ -70,6 +70,9 @@ struct SettingsFormattingTests {
         }
     }
 
+    // `.error` is the case that matters here: a failed switch is exactly when
+    // the user wants to pick something else, so the picker stays live even
+    // though the Retry button is also on screen.
     @Test("the picker is enabled once the state settles")
     func pickerEnabledWhenSettled() {
         for state in [TranscriptionState.ready, .missing, .error, .unknown] {
@@ -78,9 +81,6 @@ struct SettingsFormattingTests {
         }
     }
 
-    // `.error` is the case that matters here: a failed switch is exactly when
-    // the user wants to pick something else, so the picker stays live even
-    // though the Retry button is also on screen.
     @Test("a disconnected daemon or a missing block disables the picker")
     func pickerDisabledWithoutADaemon() {
         #expect(!SettingsView.pickerEnabled(connected: false, transcription: stats(.ready)))

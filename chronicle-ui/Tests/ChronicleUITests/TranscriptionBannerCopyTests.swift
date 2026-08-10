@@ -100,6 +100,31 @@ struct TranscriptionBannerCopyTests {
         }
     }
 
+    // Both surfaces that can ask for a provision render this copy, which is
+    // why it lives here rather than twice in two views.
+    @Test("a rejection names the in-flight case when there is one")
+    func rejectionWhileBusy() {
+        for state in [TranscriptionState.downloading, .verifying, .loading] {
+            #expect(TranscriptionBannerCopy.rejection(stats(state)) == "Already working on it…",
+                    "\(state) is the one refusal cause the reply can identify")
+        }
+    }
+
+    // `ok: false` also covers an unknown variant and a daemon not yet ready,
+    // and the reply cannot tell those apart — so the copy must not guess.
+    @Test("a rejection with nothing in flight stays neutral about the cause")
+    func rejectionWhenIdle() {
+        for state in [TranscriptionState.missing, .error, .ready, .unknown] {
+            #expect(TranscriptionBannerCopy.rejection(stats(state))
+                    == "The daemon turned that request down. Try again in a moment.")
+        }
+    }
+
+    @Test("a rejection with no status block does not claim work is in flight")
+    func rejectionWithNoStatus() {
+        #expect(TranscriptionBannerCopy.rejection(nil).hasPrefix("The daemon turned"))
+    }
+
     // The banner is hidden for a block-less daemon, so this only guards
     // against a crash if that ever changes.
     @Test("a nil block falls back without trapping")

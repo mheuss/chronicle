@@ -30,6 +30,26 @@ struct TranscriptionBannerCopy {
         models = transcription?.models ?? []
     }
 
+    /// What to say when the daemon REFUSES a provision request.
+    ///
+    /// `ok: false` collapses three cases the wire cannot tell apart — an
+    /// unknown variant, a provision already in flight, and a daemon not yet
+    /// ready. The status read back with the reply is the only thing that
+    /// separates them, so it leads.
+    ///
+    /// Static and shared because both surfaces that can request a provision
+    /// render this. Two copies of one sentence drift, which is the same hazard
+    /// that put the rest of this copy in one place.
+    static func rejection(_ status: TranscriptionStats?) -> String {
+        TranscriptionBannerCopy(status).showsProgress
+            ? "Already working on it…"
+            : "The daemon turned that request down. Try again in a moment."
+    }
+
+    /// The request never reached the daemon at all — a different failure from
+    /// one the daemon considered and declined.
+    static let unreachable = "Couldn't reach the daemon."
+
     var isFailure: Bool { state == .error }
 
     var showsProgress: Bool {

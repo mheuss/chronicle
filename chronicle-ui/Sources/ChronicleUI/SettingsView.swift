@@ -172,7 +172,16 @@ struct SettingsView: View {
             Text("Requires daemon update").foregroundStyle(.secondary)
         case .missing:
             Image(systemName: "waveform.slash").foregroundStyle(.secondary)
-            Text("Off — model not downloaded")
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Off — model not downloaded")
+                // Settings needs its own way to start the first download. The
+                // picker cannot be it: the model the user wants is already the
+                // selection, so choosing it is not a change and `onChange`
+                // never fires. Without this button, a user who dismissed the
+                // popover banner could only enable transcription by switching
+                // to a bigger variant and back, or by relaunching.
+                provisionButton(transcription)
+            }
         case .error:
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
             errorBody(transcription)
@@ -216,13 +225,24 @@ struct SettingsView: View {
                     .frame(maxWidth: 300, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if let action = copy.action {
-                // [A11y] A labeled button, never a bare icon. Retries the
-                // variant the daemon was acting on; picking a DIFFERENT one is
-                // the picker's job, and it stays enabled for exactly that.
-                Button(action.title) { provision(action.variant) }
-                    .controlSize(.small)
-            }
+            provisionButton(transcription)
+        }
+    }
+
+    /// The button that starts — or retries — a provision, for the states that
+    /// have one to offer.
+    ///
+    /// Title and target variant come from `TranscriptionBannerCopy.action`, the
+    /// same source the popover's button uses, so the two surfaces cannot offer
+    /// different things for one daemon state.
+    @ViewBuilder
+    private func provisionButton(_ transcription: TranscriptionStats) -> some View {
+        if let action = TranscriptionBannerCopy(transcription).action {
+            // [A11y] A labeled button, never a bare icon. Acts on the variant
+            // the daemon is already working toward; picking a DIFFERENT one is
+            // the picker's job, and it stays enabled for exactly that.
+            Button(action.title) { provision(action.variant) }
+                .controlSize(.small)
         }
     }
 
@@ -260,12 +280,14 @@ struct SettingsView: View {
 
     // All `nonisolated`. Conforming to `View` makes the whole type
     // `@MainActor`, which these pure functions of their arguments have no need
-    // of — and inheriting it is not merely untidy. A MainActor-isolated
-    // function containing a CLOSURE gets a real executor check at runtime, so
-    // `downloadedSummary`'s `map` traps with SIGTRAP the moment a test calls it
-    // off the main actor. The closure-free ones do not trap, which is what
-    // makes this worth stating: leaving them isolated would be a trap waiting
-    // for whichever helper grows a closure next.
+    // of — and inheriting it is not merely untidy. Observed, not theorised:
+    // with `downloadedSummary` isolated, calling it from a test off the main
+    // actor died with SIGTRAP inside the `map` closure, under
+    // `swift_task_isCurrentExecutor` reached from a compiler-inserted
+    // isolation check. `pickerLabel` and `pickerEnabled` were isolated exactly
+    // the same way and did NOT trap. Whatever separates the two cases, it is
+    // not something to rely on: leaving any of these isolated is a trap
+    // waiting for the next edit, and none of them touches actor state anyway.
 
     /// One picker row: what the variant costs, and whether picking it starts a
     /// download. [A11y] Both facts are words, never colour or an icon.
@@ -339,15 +361,10 @@ struct SettingsView: View {
             do {
                 let response = try await connection.setWhisperModel(variant)
                 guard !response.ok else { return }
-                // `ok: false` collapses unknown-variant, already-busy and
-                // daemon-not-ready. The state read back with the reply is the
-                // only thing that separates them, so lead with it.
-                provisionRejection = TranscriptionBannerCopy(response.status).showsProgress
-                    ? "Already working on it…"
-                    : "The daemon turned that request down. Try again in a moment."
+                provisionRejection = TranscriptionBannerCopy.rejection(response.status)
                 syncSelection()
             } catch {
-                provisionRejection = "Couldn't reach the daemon."
+                provisionRejection = TranscriptionBannerCopy.unreachable
                 syncSelection()
             }
         }

@@ -158,15 +158,10 @@ struct SearchPopoverView: View {
             do {
                 let response = try await connection.setWhisperModel(variant)
                 if !response.ok {
-                    // `ok: false` collapses unknown-variant, already-busy and
-                    // daemon-not-ready. The state we just read back is the
-                    // only thing that distinguishes them, so lead with it.
-                    provisionRejection = TranscriptionBannerCopy(response.status).showsProgress
-                        ? "Already working on it…"
-                        : "The daemon turned that request down. Try again in a moment."
+                    provisionRejection = TranscriptionBannerCopy.rejection(response.status)
                 }
             } catch {
-                provisionRejection = "Couldn't reach the daemon."
+                provisionRejection = TranscriptionBannerCopy.unreachable
             }
         }
     }

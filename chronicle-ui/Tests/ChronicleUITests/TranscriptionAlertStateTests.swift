@@ -282,6 +282,25 @@ struct TranscriptionAlertStateTests {
         #expect(alert.shouldShow, "the second failure is not swallowed")
     }
 
+    // The counterfactual that protects the fix above from being refactored
+    // away. `evaluate` must NOT learn to clear on a repeated `.error` — if it
+    // did, `provisionRequested()` would start to look redundant, and deleting
+    // it would silently take the Settings path with it, where the state does
+    // not move at all.
+    @Test func onlyAProvisionRequestSpendsADismissedFailure() {
+        let alert = TranscriptionAlertState()
+        alert.evaluate(status: status(.downloading))
+        alert.evaluate(status: status(.error))
+        alert.dismissed = true
+
+        alert.evaluate(status: status(.error))
+        alert.evaluate(status: status(.error))
+        #expect(!alert.shouldShow, "a repeated failure is not an edge evaluate can see")
+
+        alert.provisionRequested()
+        #expect(alert.shouldShow, "…the explicit request is")
+    }
+
     // The same entry point on the ordinary first-run path: the boot banner was
     // put away, and the user starts the download from Settings instead.
     @Test func aProvisionRequestClearsADismissedBootBanner() {
