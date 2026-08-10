@@ -206,11 +206,15 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(copy.headline)
             if let detail = copy.detail {
-                // This is the only free-form daemon string in Settings — every
-                // other daemon-sourced text here is a variant name or a
-                // formatted number — and the Settings scene sizes to content
-                // ideal width. Uncapped, this row's ideal width just tracks
-                // the error length with no ceiling — measured 579pt at 70
+                // This is the only free-form daemon string in Settings: every
+                // other daemon-sourced text in this file is bounded, so this
+                // is the only one whose length the daemon can make arbitrary.
+                // (Stated as the property, not as a list of the others — an
+                // enumeration here goes stale the moment a row is added.)
+                //
+                // The Settings scene sizes to content ideal width, so
+                // uncapped, this row's ideal width just tracks the error
+                // length with no ceiling — measured 579pt at 70
                 // characters, 1439pt at 210. Those are row widths; the window
                 // adds scene padding and tab chrome on top, so it opens far
                 // past the `minWidth: 480` the Settings scene is given in
