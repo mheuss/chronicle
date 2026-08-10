@@ -206,13 +206,15 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(copy.headline)
             if let detail = copy.detail {
-                // This is the only unbounded daemon string in Settings, and the
-                // Settings scene sizes to content ideal width. Uncapped, this
-                // row's ideal width just tracks the error length with no
-                // ceiling — measured 579pt at 70 characters, 1439pt at 210.
-                // Those are row widths; the window adds scene padding and tab
-                // chrome on top, so it opens far past the 480pt minimum at
-                // ChronicleApp.swift:23. The 300pt cap pins the row at 458pt
+                // This is the only free-form daemon string in Settings — every
+                // other daemon-sourced text here is a variant name or a
+                // formatted number — and the Settings scene sizes to content
+                // ideal width. Uncapped, this row's ideal width just tracks
+                // the error length with no ceiling — measured 579pt at 70
+                // characters, 1439pt at 210. Those are row widths; the window
+                // adds scene padding and tab chrome on top, so it opens far
+                // past the `minWidth: 480` the Settings scene is given in
+                // `ChronicleApp.swift`. The 300pt cap pins the row at 458pt
                 // flat no matter how long the error is, which puts the window
                 // at ~500pt — essentially on its floor. The fixedSize then
                 // keeps the wrapped lines from being compressed away if this

@@ -72,7 +72,8 @@ struct SettingsFormattingTests {
 
     // `.error` is the case that matters here: a failed switch is exactly when
     // the user wants to pick something else, so the picker stays live even
-    // though the Retry button is also on screen.
+    // though an action button is also on screen. Same for `.missing`, which
+    // carries a Download button beside an enabled picker.
     @Test("the picker is enabled once the state settles")
     func pickerEnabledWhenSettled() {
         for state in [TranscriptionState.ready, .missing, .error, .unknown] {
