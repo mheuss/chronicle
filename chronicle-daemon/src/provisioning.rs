@@ -249,7 +249,7 @@ pub fn check_disk_space(base_dir: &Path, required_bytes: u64) -> anyhow::Result<
 
 /// Delete any `*.tmp` partials in the models dir. Called from `boot()` only —
 /// the failure paths delete their own partial inline, and this is the backstop
-/// for the case they miss (a dropped future at shutdown or `abort()`).
+/// for what they miss: a crash, or a dropped future at shutdown or `abort()`.
 pub fn cleanup_stale_tmps(base_dir: &Path) {
     let models = base_dir.join(chronicle_transcription::MODELS_SUBDIR);
     let Ok(entries) = std::fs::read_dir(&models) else {
