@@ -38,6 +38,15 @@ pub enum Request {
     /// Resume capture. Mic is restored to its persisted `mic_enabled`
     /// preference.
     ResumeCapture,
+    /// Switch the active whisper model, downloading it first if needed.
+    ///
+    /// Replies as soon as the operation is accepted or rejected; it never
+    /// waits for the download or the load (AD-9). Progress is observed via
+    /// `Status`. `variant` is validated against the allow-list daemon-side —
+    /// an unknown value is a rejection, not an error response.
+    SetWhisperModel {
+        variant: String,
+    },
 }
 
 /// Stable, machine-readable error code on an error response.
@@ -568,6 +577,18 @@ mod tests {
     fn request_resume_capture_serializes_to_tagged_json() {
         let json = serde_json::to_string(&Request::ResumeCapture).unwrap();
         assert_eq!(json, r#"{"type":"resume_capture"}"#);
+    }
+
+    #[test]
+    fn set_whisper_model_request_deserializes() {
+        let req: Request =
+            serde_json::from_str(r#"{"type":"set_whisper_model","variant":"small"}"#).unwrap();
+        assert_eq!(
+            req,
+            Request::SetWhisperModel {
+                variant: "small".into()
+            }
+        );
     }
 
     #[test]

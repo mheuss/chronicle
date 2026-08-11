@@ -70,6 +70,49 @@ struct DaemonConnectionMethodsTests {
         #expect(hits[0].snippet == "hello")
     }
 
+    @Test("setWhisperModel sends the variant and decodes the reply")
+    func setWhisperModelRoundTrip() async throws {
+        let pair = try SocketPairHelper.make()
+        let conn = DaemonConnection(testingSocketFD: pair.clientFD)
+        let serverFD = pair.serverFD
+
+        let reply = """
+        {"type":"set_whisper_model","ok":true,"status":{"state":"downloading","variant":"small","loaded_variant":null,"error":null,"download_bytes":0,"download_total_bytes":488000000,"models":[]}}
+        """
+        // Two requests, not one: an accepted switch triggers a status refresh
+        // so the banner and Settings update without waiting for the next poll
+        // tick. Answering both keeps the refresh on the tested path instead of
+        // letting `try?` quietly swallow a closed socket.
+        let statusReply = """
+        {"type":"status","ok":true,"data":{"uptime_secs":1,"version":"t"}}
+        """
+        let daemonTask = Task.detached {
+            let reqBytes = readLineSync(from: serverFD)
+            let req = reqBytes.flatMap { String(bytes: $0, encoding: .utf8) } ?? ""
+            #expect(req.contains("\"type\":\"set_whisper_model\""))
+            #expect(req.contains("\"variant\":\"small\""))
+            writeAll(reply + "\n", to: serverFD)
+            // Assert what the SECOND request was, not just that one arrived —
+            // otherwise an implementation that re-sent set_whisper_model
+            // instead of refreshing status would pass.
+            let refreshBytes = readLineSync(from: serverFD)
+            let refresh = refreshBytes.flatMap { String(bytes: $0, encoding: .utf8) } ?? ""
+            #expect(refresh.contains("\"type\":\"status\""), "an accepted switch refreshes status")
+            writeAll(statusReply + "\n", to: serverFD)
+            Darwin.close(serverFD)
+        }
+
+        let response = try await conn.setWhisperModel("small")
+        _ = await daemonTask.value
+
+        // The refresh has to actually land, or the banner waits a poll tick.
+        #expect(conn.lastStatus?.data.uptimeSecs == 1, "the refreshed status was stored")
+        #expect(response.ok)
+        #expect(response.status.state == .downloading)
+        #expect(response.status.variant == "small")
+        #expect(response.status.downloadTotalBytes == 488_000_000)
+    }
+
     @Test("getScreenshot returns a hit when daemon finds the id")
     func getScreenshotFound() async throws {
         let pair = try SocketPairHelper.make()

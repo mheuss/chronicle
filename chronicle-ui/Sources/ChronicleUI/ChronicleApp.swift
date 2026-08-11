@@ -20,6 +20,10 @@ struct ChronicleApp: App {
         Settings {
             SettingsView()
                 .environment(connection)
+                // Settings is a provision entry point too, so it needs to be
+                // able to spend a stale dismissal — see
+                // `TranscriptionAlertState.provisionRequested()`.
+                .environment(transcriptionAlert)
                 .frame(minWidth: 480, minHeight: 320)
         }
 

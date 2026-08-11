@@ -345,6 +345,40 @@ struct CodableTests {
                 "new transcription block ignored, not a decode failure")
     }
 
+    @Test("SetWhisperModelResponse decodes the accept reply")
+    func setWhisperModelResponseDecodes() throws {
+        // The reply carries the whole transcription block, not just a flag —
+        // that is what lets the banner re-render from the response instead of
+        // waiting for the next poll.
+        let json = """
+        {"type":"set_whisper_model","ok":true,"status":{"state":"downloading","variant":"small","loaded_variant":null,"error":null,"download_bytes":1024,"download_total_bytes":488000000,"models":[{"variant":"small","downloaded":false,"size_bytes":488000000}]}}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(SetWhisperModelResponse.self, from: Data(json.utf8))
+        #expect(resp.ok)
+        #expect(resp.status.state == .downloading)
+        #expect(resp.status.variant == "small")
+        #expect(resp.status.downloadBytes == 1024)
+        #expect(resp.status.downloadTotalBytes == 488_000_000)
+        #expect(resp.status.models.first?.sizeBytes == 488_000_000)
+    }
+
+    @Test("SetWhisperModelResponse decodes a rejection with live status")
+    func setWhisperModelRejectionDecodes() throws {
+        // A rejection is not an error response: the block still has to arrive
+        // so the UI can re-render from what IS true.
+        let json = """
+        {"type":"set_whisper_model","ok":false,"status":{"state":"ready","variant":"base","loaded_variant":"base","error":null,"download_bytes":null,"download_total_bytes":null,"models":[]}}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(SetWhisperModelResponse.self, from: Data(json.utf8))
+        #expect(!resp.ok)
+        #expect(resp.status.state == .ready)
+        #expect(resp.status.loadedVariant == "base")
+    }
+
     @Test("Unknown transcription state degrades, not throws")
     func unknownTranscriptionStateDegrades() throws {
         // A future daemon may add a 7th state. A closed enum would throw and

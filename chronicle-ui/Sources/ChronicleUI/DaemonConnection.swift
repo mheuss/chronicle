@@ -134,6 +134,57 @@ final class DaemonConnection {
         return response.state
     }
 
+    /// Select (and download if needed) a whisper model variant.
+    ///
+    /// The daemon replies as soon as it accepts or rejects — it never waits
+    /// for the download or the load (AD-9), so `ok` means "the provisioner
+    /// took the job", not "the model is ready". Progress arrives via `Status`.
+    ///
+    /// `ok: false` collapses three cases the wire cannot tell apart: an
+    /// unknown variant, a provision already in flight, and a daemon not yet
+    /// ready. The returned `status` is what callers should render from.
+    ///
+    /// On success this issues one status refresh so the banner and Settings
+    /// update immediately instead of waiting for the next poll tick.
+    func setWhisperModel(_ variant: String) async throws -> SetWhisperModelResponse {
+        struct Req: Codable, Sendable {
+            let type: String
+            let variant: String
+        }
+        let response = try await sendRequest(
+            Req(type: "set_whisper_model", variant: variant),
+            expecting: SetWhisperModelResponse.self
+        )
+        if response.ok {
+            // The refresh is still best-effort, but its failure is NOT
+            // harmless. Both views decide whether to run their 1 Hz
+            // provisioning poll by reading `lastStatus`, so leaving it on the
+            // pre-request state means neither loop starts: no progress bar,
+            // and a fast failure invisible until the connection monitor's
+            // 30-second tick. "One second of staleness" was only ever true
+            // when the poll was already running.
+            //
+            // The reply we are holding carries the state the daemon just
+            // entered, so on a failed refresh we publish that instead.
+            //
+            // Not a total fallback: with `lastStatus` still nil there is no
+            // snapshot to splice into and this does nothing. Practically
+            // unreachable — the model UI only renders once a transcription
+            // block has arrived — but it is not a guarantee.
+            //
+            // `lastStatus` is read here, after the await, rather than
+            // captured before it: a poll tick can land a fresher snapshot in
+            // between, and overwriting that with this older reply block would
+            // be a step backwards. Bounded to one tick and self-correcting
+            // either way, since at the moment this matters the poll is not
+            // yet running.
+            if (try? await requestStatus()) == nil, let last = lastStatus {
+                lastStatus = last.replacingTranscription(response.status)
+            }
+        }
+        return response
+    }
+
     /// Search the daemon's OCR index. Returns up to `limit` screen-only hits
     /// ranked by relevance. Audio results are added in HEU-470.
     ///
@@ -248,7 +299,7 @@ final class DaemonConnection {
                 return try self.decoder.decode(Res.self, from: responseData)
             } catch let firstError {
                 if let err = try? self.decoder.decode(ErrorResponse.self, from: responseData) {
-                    throw IPCError.daemonError(err.message)
+                    throw IPCError.daemonError(err.message, code: err.code)
                 }
                 throw IPCError.malformedResponse(String(describing: firstError))
             }
@@ -458,6 +509,28 @@ struct StatusResponse: Codable, Sendable {
     let type: String
     let ok: Bool
     let data: StatusData
+
+    /// A copy carrying a fresher transcription block, leaving every other
+    /// field alone.
+    ///
+    /// Not a status refresh — one field arriving by a different route. The
+    /// `set_whisper_model` reply already contains the state the daemon just
+    /// entered, so when the follow-up refresh fails there is no reason to
+    /// throw that away and show the user nothing. The rest of the snapshot
+    /// stays as it was and the next poll replaces all of it.
+    func replacingTranscription(_ stats: TranscriptionStats) -> StatusResponse {
+        StatusResponse(
+            type: type,
+            ok: ok,
+            data: StatusData(
+                uptimeSecs: data.uptimeSecs,
+                version: data.version,
+                capture: data.capture,
+                ocr: data.ocr,
+                audio: data.audio,
+                storage: data.storage,
+                transcription: stats))
+    }
 }
 
 struct StatusData: Codable, Sendable {
@@ -538,9 +611,41 @@ struct TranscriptionStats: Codable, Sendable {
     let models: [ModelEntry]
 }
 
+/// Reply to `set_whisper_model`. `ok` is the accept/reject decision only;
+/// `status` is the transcription block read after that decision, so an
+/// accepted switch normally shows `.downloading` or `.loading` — but a fast
+/// failure (a disk precheck, say) can already have moved it on.
+struct SetWhisperModelResponse: Codable, Sendable {
+    let type: String
+    let ok: Bool
+    let status: TranscriptionStats
+}
+
+/// A stable, machine-readable failure reason from the daemon.
+///
+/// Tolerant decode for the same reason `TranscriptionState` has one: a closed
+/// enum on a wire field throws on an unrecognized value, and that failure
+/// takes the whole response down rather than just this field.
+enum DaemonErrorCode: String, Codable, Sendable {
+    case requestTooLarge = "request_too_large"
+    case invalidUtf8 = "invalid_utf8"
+    case invalidRequest = "invalid_request"
+    case unknown
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = DaemonErrorCode(rawValue: raw) ?? .unknown
+    }
+}
+
 struct ErrorResponse: Codable, Sendable {
     let type: String
     let ok: Bool
+    /// The protocol reference tells clients to branch on this rather than on
+    /// the human-readable message — and until now the one client could not,
+    /// because it wasn't decoded. Optional so a daemon that predates the
+    /// field still decodes.
+    let code: DaemonErrorCode?
     let message: String
 }
 
@@ -604,7 +709,11 @@ enum IPCError: Error, LocalizedError {
     case connectionClosed
     case encodingFailed
     case responseTooLarge
-    case daemonError(String)
+    /// The daemon refused the request. `code` is the stable, machine-readable
+    /// reason the protocol tells clients to branch on; `nil` from a daemon
+    /// that predates the field. Carried here rather than decoded and dropped,
+    /// so a caller that wants to branch actually can.
+    case daemonError(String, code: DaemonErrorCode?)
     case invalidUTF8
     case malformedResponse(String)
 
@@ -619,7 +728,7 @@ enum IPCError: Error, LocalizedError {
         case .connectionClosed: "Connection closed by daemon"
         case .encodingFailed: "Failed to encode request"
         case .responseTooLarge: "Response exceeded maximum size"
-        case .daemonError(let msg): "Daemon error: \(msg)"
+        case .daemonError(let msg, _): "Daemon error: \(msg)"
         case .invalidUTF8: "Response contained invalid UTF-8"
         case .malformedResponse(let detail): "Malformed daemon response: \(detail)"
         }

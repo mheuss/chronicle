@@ -316,6 +316,10 @@ mod tests {
                     ok: true,
                     paused: false,
                 },
+                Request::SetWhisperModel { .. } => Response::SetWhisperModel {
+                    ok: true,
+                    status: TranscriptionStats::default(),
+                },
             }
         }
     }
@@ -373,6 +377,39 @@ mod tests {
         assert_eq!(value["type"], "set_mic_enabled");
         assert_eq!(value["ok"], true);
         assert!(value["state"].is_string(), "state should be present");
+
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn server_responds_to_set_whisper_model_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("test.sock");
+        let cancel = CancellationToken::new();
+
+        let _server = IpcServer::start(&sock, MockHandler, cancel.clone())
+            .await
+            .unwrap();
+
+        let stream = UnixStream::connect(&sock).await.unwrap();
+        let (reader, mut writer) = tokio::io::split(stream);
+        let mut buf_reader = BufReader::new(reader);
+
+        writer
+            .write_all(b"{\"type\":\"set_whisper_model\",\"variant\":\"small\"}\n")
+            .await
+            .unwrap();
+
+        let mut line = String::new();
+        buf_reader.read_line(&mut line).await.unwrap();
+
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["type"], "set_whisper_model");
+        assert_eq!(value["ok"], true);
+        assert!(
+            value["status"].is_object(),
+            "the reply carries the transcription block, not just a flag"
+        );
 
         cancel.cancel();
     }

@@ -48,6 +48,25 @@ pub(crate) enum CaptureAction {
     Resume,
 }
 
+/// In-process control message: a model-switch request plus its reply channel.
+/// The reply is the event loop's accept/reject decision, not the outcome of
+/// the provision — that lands asynchronously in the status cell (AD-9).
+///
+/// `variant` is a `ModelVariant`, not a `String`: the allow-list check happens
+/// in the handler, so nothing downstream can be reached with an unvalidated
+/// name (docs/use-cases/transcription.md "Allow-Listed Model Variant").
+pub(crate) struct ModelCommand {
+    pub variant: chronicle_transcription::ModelVariant,
+    pub reply: std::sync::mpsc::SyncSender<bool>,
+    /// Cleared by the handler when it stops waiting for the reply.
+    ///
+    /// A `SyncSender` cannot be probed for a live receiver without consuming
+    /// a send, and the verdict is not known until `try_begin` has already
+    /// committed state — so liveness needs its own channel. The event loop
+    /// reads this **before** committing anything.
+    pub still_waiting: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
 /// Engine status as observed by the background refresher. Owned by the
 /// daemon; published via `ArcSwap` so the sync `RequestHandler::handle`
 /// can read without blocking.
@@ -109,12 +128,22 @@ pub struct DaemonHandler {
     capture_tx: mpsc::Sender<CaptureCommand>,
     /// Latest capture-paused state, read by `Status`.
     capture_paused: Arc<AtomicBool>,
-    /// Gate that opens once the main loop starts draining `capture_tx`.
+    /// Gate that opens once the main loop starts draining `capture_tx` — and
+    /// `model_tx`, which deliberately shares this flag rather than carrying a
+    /// third always-equal one. The event loop opens every gate at the same
+    /// point, so a separate `model_ready` could only ever disagree by
+    /// accident. See the gate-opening block at the start of the event loop in
+    /// `main.rs`.
     capture_ready: Arc<AtomicBool>,
     capture_reply_timeout: Duration,
     /// Transcription status cell (HEU-475): boot/provisioner write it, the
     /// `Status` arm reads it.
     transcription_status: Arc<TranscriptionStatusCell>,
+    /// Control channel to the main event loop for model switches.
+    model_tx: mpsc::Sender<ModelCommand>,
+    /// Backstop for a wedged daemon — `try_begin` is a CAS plus one ArcSwap
+    /// store, so a real accept/reject replies in microseconds.
+    model_reply_timeout: Duration,
 }
 
 impl DaemonHandler {
@@ -168,6 +197,81 @@ impl DaemonHandler {
         }
     }
 
+    /// Accept or reject a model switch. Never waits for the download or the
+    /// load (AD-9) — the reply says only whether the provisioner took the
+    /// job, and progress is observed through `Status`.
+    ///
+    /// `status` is re-read from the cell AFTER the reply arrives, never
+    /// echoed from the request: the event loop commits the entering state
+    /// inside `try_begin` before it answers, so this read cannot return the
+    /// stale pre-request state (design §2.2).
+    ///
+    /// It is NOT a promise of `Downloading`/`Loading` specifically. On the
+    /// accept path the spawned provision is already running and may have
+    /// reached `Verifying`, `Ready` or `Error` before this read — a disk
+    /// precheck failure gets there almost immediately. The wire contract is
+    /// the honest one: whatever the state is after the decision.
+    fn set_whisper_model(&self, variant: &str) -> Response {
+        let stats = || self.transcription_status.stats(self.storage.base_dir());
+
+        // The allow-list is the path-traversal guard, and this is the only
+        // place the wire string can cross it.
+        let Some(variant) = chronicle_transcription::parse_variant(variant) else {
+            log::warn!("rejected SetWhisperModel: unknown variant");
+            return Response::SetWhisperModel {
+                ok: false,
+                status: stats(),
+            };
+        };
+        // Same reasoning as the mic gate: before the event loop starts there
+        // is no consumer, so reject now rather than blocking the caller for
+        // the full reply timeout.
+        if !self.capture_ready.load(Ordering::Acquire) {
+            return Response::SetWhisperModel {
+                ok: false,
+                status: stats(),
+            };
+        }
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel::<bool>(1);
+        let still_waiting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        if self
+            .model_tx
+            .try_send(ModelCommand {
+                variant,
+                reply: reply_tx,
+                still_waiting: std::sync::Arc::clone(&still_waiting),
+            })
+            .is_err()
+        {
+            return Response::SetWhisperModel {
+                ok: false,
+                status: stats(),
+            };
+        }
+        // handle() is sync but runs inside the async IPC server;
+        // block_in_place keeps the runtime healthy. The 20s timeout is a
+        // wedged-daemon backstop — try_begin is a CAS plus one ArcSwap store,
+        // so a real accept/reject replies in microseconds.
+        let ok =
+            match tokio::task::block_in_place(|| reply_rx.recv_timeout(self.model_reply_timeout)) {
+                Ok(accepted) => accepted,
+                Err(e) => {
+                    // Withdraw the request before answering. The command is
+                    // still sitting in the channel, and without this the loop
+                    // would pick it up whenever it frees up and start a
+                    // download the reply below is about to call rejected.
+                    still_waiting.store(false, std::sync::atomic::Ordering::Release);
+                    log::warn!("model command reply failed: {e} — request withdrawn");
+                    false
+                }
+            };
+        log::info!("set whisper model {variant} -> ok={ok}");
+        Response::SetWhisperModel {
+            ok,
+            status: stats(),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         counters: Arc<PipelineCounters>,
@@ -181,6 +285,7 @@ impl DaemonHandler {
         capture_paused: Arc<AtomicBool>,
         capture_ready: Arc<AtomicBool>,
         transcription_status: Arc<TranscriptionStatusCell>,
+        model_tx: mpsc::Sender<ModelCommand>,
     ) -> Self {
         Self {
             started_at: Instant::now(),
@@ -197,6 +302,8 @@ impl DaemonHandler {
             capture_ready,
             capture_reply_timeout: Duration::from_secs(20),
             transcription_status,
+            model_tx,
+            model_reply_timeout: Duration::from_secs(20),
         }
     }
 }
@@ -412,6 +519,7 @@ impl RequestHandler for DaemonHandler {
                 let ok = matches!(state, MicState::On | MicState::Off);
                 Response::SetMicEnabled { ok, state }
             }
+            Request::SetWhisperModel { variant } => self.set_whisper_model(&variant),
         }
     }
 }
@@ -836,7 +944,201 @@ mod tests {
         Arc<TranscriptionStatusCell>,
         tempfile::TempDir,
     ) {
-        handler_with_full_channels_and_capture_ready(capacity, mic_ready, true).await
+        // Drops the model receiver, the same way `handler_with_mic_channel`
+        // drops the capture side — the twelve callers of this helper predate
+        // the model channel and none of them care about it. Keeping the
+        // widening confined to the inner helper avoids rewriting a
+        // twelve-way positional destructure at every one of those sites.
+        let (handler, mic_rx, mic_state, cap_rx, cap_paused, ss, tcell, _model_rx, dir) =
+            handler_with_full_channels_and_capture_ready(capacity, mic_ready, true).await;
+        (
+            handler, mic_rx, mic_state, cap_rx, cap_paused, ss, tcell, dir,
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_whisper_model_accepted_reports_entered_state() {
+        let (handler, mut model_rx, cell, _dir) = handler_with_model_channel(8, true).await;
+        tokio::spawn(async move {
+            let cmd = model_rx.recv().await.expect("command should arrive");
+            assert_eq!(cmd.variant.as_str(), "small");
+            cell.set_downloading(cmd.variant);
+            let _ = cmd.reply.send(true);
+        });
+        let resp = handler.handle(Request::SetWhisperModel {
+            variant: "small".into(),
+        });
+        match resp {
+            Response::SetWhisperModel { ok, status } => {
+                assert!(ok);
+                assert_eq!(
+                    status.state,
+                    chronicle_ipc::TranscriptionState::Downloading,
+                    "reply carries the state just entered, not the stale one"
+                );
+                assert_eq!(status.variant, "small", "status read from cell, not echo");
+            }
+            other => panic!("expected SetWhisperModel response, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_whisper_model_rejects_unknown_variant() {
+        // The allow-list is the path-traversal guard, so this must be
+        // rejected without ever reaching the event loop.
+        let (handler, mut model_rx, _cell, _dir) = handler_with_model_channel(8, true).await;
+        let resp = handler.handle(Request::SetWhisperModel {
+            variant: "tiny".into(),
+        });
+        match resp {
+            Response::SetWhisperModel { ok, .. } => assert!(!ok),
+            other => panic!("expected SetWhisperModel response, got: {other:?}"),
+        }
+        assert!(
+            model_rx.try_recv().is_err(),
+            "an unknown variant must never reach the provisioner"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_whisper_model_rejects_traversal_attempt() {
+        // Same guard, stated in the shape that makes it a security control
+        // rather than a typo check.
+        let (handler, mut model_rx, _cell, _dir) = handler_with_model_channel(8, true).await;
+        let resp = handler.handle(Request::SetWhisperModel {
+            variant: "../../etc/passwd".into(),
+        });
+        match resp {
+            Response::SetWhisperModel { ok, .. } => assert!(!ok),
+            other => panic!("expected SetWhisperModel response, got: {other:?}"),
+        }
+        assert!(
+            model_rx.try_recv().is_err(),
+            "never reaches a filesystem path"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_whisper_model_not_ready_rejects() {
+        let (handler, _model_rx, _cell, _dir) = handler_with_model_channel(8, false).await;
+        let resp = handler.handle(Request::SetWhisperModel {
+            variant: "base".into(),
+        });
+        match resp {
+            Response::SetWhisperModel { ok, .. } => assert!(!ok),
+            other => panic!("expected SetWhisperModel response, got: {other:?}"),
+        }
+    }
+
+    // The producer half of the abandoned-command guard. `begin_model_switch`
+    // is tested for "given a cleared flag, start nothing"; this pins that the
+    // handler actually clears it, so a refactor cannot silently drop the
+    // withdrawal and leave every test green while a timed-out request starts
+    // a multi-gigabyte download.
+    //
+    // Driven by dropping the reply sender rather than waiting out the 20s
+    // timeout: `recv_timeout` returns `Err(Disconnected)` immediately, and
+    // both errors run the same withdrawal line.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_handler_that_gives_up_withdraws_the_request() {
+        let (handler, mut model_rx, _cell, _dir) = handler_with_model_channel(8, true).await;
+        let (flag_tx, flag_rx) = std::sync::mpsc::channel();
+        tokio::spawn(async move {
+            while let Some(cmd) = model_rx.recv().await {
+                // Keep the flag, discard the reply channel — the loop is
+                // "still busy" and the handler will stop waiting.
+                let _ = flag_tx.send(std::sync::Arc::clone(&cmd.still_waiting));
+                drop(cmd.reply);
+            }
+        });
+
+        let resp = handler.handle(Request::SetWhisperModel {
+            variant: "base".into(),
+        });
+        assert!(
+            matches!(resp, Response::SetWhisperModel { ok: false, .. }),
+            "a request nobody answered is a rejection"
+        );
+
+        let flag = flag_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the loop received the command");
+        assert!(
+            !flag.load(std::sync::atomic::Ordering::Acquire),
+            "the handler must withdraw the request it just called rejected"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_whisper_model_reply_does_not_wait_on_the_loop() {
+        // Named for what it measures: handler-to-loop round-trip latency.
+        // It does NOT pin AD-9's no-wait-on-provisioning property — the fake
+        // loop below never provisions, so the bound would pass against a
+        // handler that waited out a real download. That property is
+        // structural in `begin_model_switch`'s signature — a sync `fn`
+        // returning a `JoinHandle` — and no test pins it. The previous name
+        // ("...before_any_provisioning_completes") was a false signpost
+        // pointing here.
+        let (handler, mut model_rx, cell, _dir) = handler_with_model_channel(8, true).await;
+        tokio::spawn(async move {
+            while let Some(cmd) = model_rx.recv().await {
+                cell.set_downloading(cmd.variant);
+                let _ = cmd.reply.send(true);
+            }
+        });
+        let started = std::time::Instant::now();
+        let resp = handler.handle(Request::SetWhisperModel {
+            variant: "base".into(),
+        });
+        assert!(matches!(resp, Response::SetWhisperModel { ok: true, .. }));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "accept/reject reply must be immediate"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_whisper_model_rejected_still_reports_current_status() {
+        // A rejection is not an error response: the UI needs the current
+        // transcription block to re-render from, whatever the answer was.
+        let (handler, mut model_rx, cell, _dir) = handler_with_model_channel(8, true).await;
+        cell.set_ready(chronicle_transcription::parse_variant("base").unwrap());
+        tokio::spawn(async move {
+            let cmd = model_rx.recv().await.expect("command should arrive");
+            let _ = cmd.reply.send(false); // slot busy
+        });
+        let resp = handler.handle(Request::SetWhisperModel {
+            variant: "small".into(),
+        });
+        match resp {
+            Response::SetWhisperModel { ok, status } => {
+                assert!(!ok);
+                assert_eq!(status.state, chronicle_ipc::TranscriptionState::Ready);
+                assert_eq!(
+                    status.loaded_variant.as_deref(),
+                    Some("base"),
+                    "a rejected switch still reports the engine that is serving"
+                );
+            }
+            other => panic!("expected SetWhisperModel response, got: {other:?}"),
+        }
+    }
+
+    /// Handler plus the model channel and the status cell, so a test can play
+    /// the event loop's real role: commit the entering state (which production
+    /// does inside `try_begin`, §2.2) BEFORE replying.
+    async fn handler_with_model_channel(
+        capacity: usize,
+        ready: bool,
+    ) -> (
+        DaemonHandler,
+        tokio::sync::mpsc::Receiver<ModelCommand>,
+        Arc<TranscriptionStatusCell>,
+        tempfile::TempDir,
+    ) {
+        let (handler, _mic_rx, _mic_state, _cap_rx, _cap_paused, _ss, tcell, model_rx, dir) =
+            handler_with_full_channels_and_capture_ready(capacity, true, ready).await;
+        (handler, model_rx, tcell, dir)
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -951,6 +1253,7 @@ mod tests {
         Arc<AtomicBool>,
         Arc<ArcSwap<StorageStatusSnapshot>>,
         Arc<TranscriptionStatusCell>,
+        tokio::sync::mpsc::Receiver<ModelCommand>,
         tempfile::TempDir,
     ) {
         let counters = crate::pipeline::counters::PipelineCounters::new();
@@ -973,6 +1276,7 @@ mod tests {
         let capture_ready_atom = Arc::new(AtomicBool::new(capture_ready));
         let transcription_status =
             TranscriptionStatusCell::new(chronicle_transcription::DEFAULT_VARIANT);
+        let (model_tx, model_rx) = tokio::sync::mpsc::channel(capacity);
         let handler = DaemonHandler::new(
             counters,
             cap_snapshot,
@@ -985,6 +1289,7 @@ mod tests {
             Arc::clone(&capture_paused),
             capture_ready_atom,
             Arc::clone(&transcription_status),
+            model_tx,
         );
         (
             handler,
@@ -994,6 +1299,7 @@ mod tests {
             capture_paused,
             storage_status,
             transcription_status,
+            model_rx,
             dir,
         )
     }
@@ -1001,7 +1307,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn pause_capture_not_ready_returns_error_immediately() {
         // capture_ready = false: main loop hasn't started draining yet.
-        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _model_rx, _dir) =
             handler_with_full_channels_and_capture_ready(8, true, false).await;
         let resp = handler.handle(Request::PauseCapture);
         match resp {

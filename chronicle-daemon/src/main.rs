@@ -45,6 +45,97 @@ fn spawn_start_retry(tx: tokio::sync::mpsc::Sender<()>, delay: std::time::Durati
     });
 }
 
+/// Handle a completed provision: persist the variant that just started
+/// serving (AD-10, "persist on success").
+///
+/// **Called from the event loop, and once more from the shutdown drain after
+/// that loop has exited** — never concurrently, which is the correctness
+/// requirement here rather than a style choice. All three settings writers
+/// share one fixed temp path (`settings.tmp`) — see the single-writer note at
+/// the mic arm below — so strict serialization is the only thing making that
+/// safe. Two truly concurrent callers would surface a lost race as
+/// `AlreadyExists`, and worse, the loser's cleanup can delete the winner's
+/// temp file and break its rename. The drain is safe because `main` is
+/// single-threaded past the loop and no other writer can still be running.
+/// Extracted as a free function purely so it stays unit-testable.
+///
+/// A failed persist is surfaced, never swallowed: the swap already happened
+/// and the UI is now reporting the new variant as active, so a silent failure
+/// here means the daemon quietly reverts on next start — exactly the
+/// divergence AD-10 exists to prevent.
+fn handle_provision_event(base_dir: &std::path::Path, evt: provisioning::ProvisionEvent) {
+    match evt {
+        provisioning::ProvisionEvent::Ready { variant } => {
+            match settings::write_whisper_model(base_dir, variant) {
+                Ok(()) => {
+                    log::info!("whisper model '{variant}' provisioned; setting persisted")
+                }
+                // The io::Error from open/rename carries no path, so name the
+                // directory — otherwise an operator gets "No space left on
+                // device" twice with nothing saying which file.
+                Err(e) => log::error!(
+                    "whisper model '{variant}' is serving, but persisting the setting \
+                     under {} failed: {e} — the daemon will fall back to the previous \
+                     variant on next start",
+                    base_dir.display()
+                ),
+            }
+        }
+    }
+}
+
+/// Decide and start one model switch. Returns the accept/reject answer the
+/// caller must reply with, plus the spawned task when one was started.
+///
+/// **Sync on purpose.** AD-9 says the reply must not wait on the download or
+/// the load, and a `fn` returning a `JoinHandle` cannot await the provision
+/// *inside this helper* — which is exactly where the slip would otherwise go
+/// unnoticed. It does not make the property airtight: the caller can still
+/// await the handle it gets back, and no test here would catch that.
+/// Extracted from the event-loop arm because no handler-level test can reach
+/// that arm — the handler tests supply their own fake loop, so an `await`
+/// there would stall the real event loop for the length of a download with
+/// the whole suite still green.
+fn begin_model_switch(
+    provisioner: &Arc<provisioning::ProvisionerContext>,
+    variant: chronicle_transcription::ModelVariant,
+    still_waiting: &std::sync::atomic::AtomicBool,
+    evt_tx: &tokio::sync::mpsc::Sender<provisioning::ProvisionEvent>,
+) -> (bool, Option<tokio::task::JoinHandle<()>>) {
+    // Checked BEFORE `try_begin`, which is the whole point: `try_begin`
+    // commits the entering state and takes the slot synchronously, so a check
+    // after it would need a rollback path with no snapshot to roll back to.
+    //
+    // The requester is gone when the handler's 20s timeout fired — reachable
+    // whenever the event loop is tied up by a slow pause/resume or a power
+    // reconcile. It has already answered `ok: false`. Starting the download
+    // and the engine swap now would do work nobody asked for, report it
+    // nowhere, and on success persist a variant the user was told was
+    // refused.
+    //
+    // The residual race — the handler giving up in the microseconds between
+    // this load and the send below — leaves the old behaviour, but the window
+    // shrinks from twenty seconds to the width of a CAS.
+    if !still_waiting.load(std::sync::atomic::Ordering::Acquire) {
+        log::warn!(
+            "dropping model command for {variant}: the requester stopped waiting \
+             and was already told it was rejected"
+        );
+        return (false, None);
+    }
+    if !provisioner.try_begin(variant) {
+        return (false, None);
+    }
+    let ctx = Arc::clone(provisioner);
+    let evt_tx = evt_tx.clone();
+    (
+        true,
+        Some(tokio::spawn(
+            async move { ctx.provision(variant, evt_tx).await },
+        )),
+    )
+}
+
 /// Arm or clear the start-retry budget from a reconcile outcome (HEU-575):
 /// `StartFailed` arms the next backoff step (or reports an exhausted
 /// budget); every other outcome ends the incident and restores the budget.
@@ -155,6 +246,14 @@ async fn main() -> Result<()> {
     let (capture_tx, mut capture_rx) = tokio::sync::mpsc::channel::<ipc_handler::CaptureCommand>(8);
     let initial_capture_paused = settings::read_capture_paused(storage.base_dir());
     let capture_paused = Arc::new(AtomicBool::new(initial_capture_paused));
+    // Model-switch control channel (HEU-475). The handler forwards
+    // SetWhisperModel here; the event loop decides accept/reject and spawns
+    // the provision.
+    let (model_tx, mut model_rx) = tokio::sync::mpsc::channel::<ipc_handler::ModelCommand>(8);
+    // Provision completions flow back so the event loop — and only the event
+    // loop — persists the variant. See `handle_provision_event`.
+    let (provision_evt_tx, mut provision_evt_rx) =
+        tokio::sync::mpsc::channel::<provisioning::ProvisionEvent>(8);
     // Power observer (HEU-284). Sleep/wake transitions arrive on `power_rx`
     // and drive the supervisor's sleep flags. The observer thread is not
     // joined (design §4); dropping the handle is fine — process exit reaps
@@ -211,6 +310,7 @@ async fn main() -> Result<()> {
         Arc::clone(&capture_paused),
         Arc::clone(&capture_ready),
         Arc::clone(&transcription_status),
+        model_tx,
     );
     let ipc_server = IpcServer::start(&socket_path, handler, cancel.clone()).await?;
     log::info!("IPC server started");
@@ -287,78 +387,60 @@ async fn main() -> Result<()> {
 
     let audio_storage = Arc::clone(&storage);
     let audio_counters = Arc::clone(&counters);
-    // Transcription: load the model once if present; otherwise stay idle with a
-    // no-op sink (graceful degradation — capture/OCR/IPC unaffected).
+    // Transcription: load the model once if present; otherwise stay idle
+    // (graceful degradation — capture/OCR/IPC unaffected).
     // Set only when the shutdown drain grace expires; tells `transcribe_loop` to
     // stop after the segment it is already working on.
     let stop_transcription = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let (transcription_sink, transcribe_handle): (
-        Arc<dyn pipeline::sinks::TranscriptionSink>,
-        Option<tokio::task::JoinHandle<()>>,
-    ) = if model_present {
-        // Load the ggml model off the runtime — it's heavy blocking work
-        // (seconds for a large variant) and must not stall tokio workers
-        // (HEU-480). The cell is already in Loading (set at creation, before
-        // the IPC server started).
-        let base_dir = storage.base_dir().to_path_buf();
-        let load_result = tokio::task::spawn_blocking(move || {
-            chronicle_transcription::TranscriptionEngine::load(&base_dir, whisper_variant)
-        })
-        .await;
-        match load_result {
-            Ok(Ok(engine)) => {
-                transcription_status.set_ready(whisper_variant);
-                let engine: Arc<dyn chronicle_transcription::Transcriber> = Arc::new(engine);
-                // Bounded channel (64), matching the audio bridge: drop-on-full.
-                let (tx, rx) = tokio::sync::mpsc::channel(64);
-                // Not the global cancellation token, by design — the loop must
-                // outlive it so the shutdown flush still gets transcribed. This flag
-                // means "finish the segment you are on, then stop", and only the
-                // drain timeout below sets it. See `transcribe_loop`'s contract.
-                let handle = tokio::spawn(pipeline::transcribe_loop(
-                    engine,
-                    Arc::clone(&storage),
-                    rx,
-                    Arc::clone(&stop_transcription),
-                ));
-                log::info!(
-                    "transcription engine loaded (variant={}, backend={})",
-                    whisper_variant,
-                    if cfg!(feature = "transcription-metal") {
-                        "metal"
-                    } else {
-                        "cpu"
-                    }
-                );
-                (
-                    Arc::new(pipeline::sinks::TokioTranscriptionSink(tx)),
-                    Some(handle),
-                )
-            }
-            Ok(Err(e)) => {
-                log::error!(
-                    "transcription engine load failed ({whisper_variant}): {e} — staying idle"
-                );
-                // TranscriptionError::Display already carries the
-                // "model load failed:" prefix — don't double it on the wire.
-                transcription_status.set_error(&e.to_string());
-                (Arc::new(pipeline::sinks::NoopTranscriptionSink), None)
-            }
-            Err(e) => {
-                log::error!(
-                    "transcription engine load task failed ({whisper_variant}): {e} — staying idle"
-                );
-                // JoinError::Display forwards arbitrary panic payloads —
-                // keep the wire string fixed; the log line above has {e}.
-                transcription_status.set_error("model load failed");
-                (Arc::new(pipeline::sinks::NoopTranscriptionSink), None)
-            }
-        }
-    } else {
-        // The startup model-presence check above already logged the
-        // "model missing → idle" warning.
-        (Arc::new(pipeline::sinks::NoopTranscriptionSink), None)
-    };
+    let engine_handle = Arc::new(provisioning::EngineHandle::new());
+    // Awaited here, before `audio_store_loop` spawns below, so nothing can be
+    // enqueued while the engine slot is still being filled — the no-loss
+    // ordering this block has always had.
+    let boot_load_failed = provisioning::boot(
+        storage.base_dir(),
+        whisper_variant,
+        &transcription_status,
+        &engine_handle,
+    )
+    .await;
+    // Built AFTER boot, over the same cell and handle. boot() must finish
+    // before the event loop can drive a provision, or the two would race for
+    // the engine slot — `boot().await` above is what guarantees that, and it
+    // is load-bearing now rather than incidental.
+    //
+    // That ordering is also why `boot_load_failed` has to be threaded through
+    // rather than left to the provisioner to discover: boot owns the only
+    // load that happens before this line exists, so a corrupt model at
+    // startup is invisible to AD-11 unless boot hands the verdict over.
+    let provisioner = provisioning::ProvisionerContext::new(
+        Arc::clone(&transcription_status),
+        Arc::clone(&engine_handle),
+        storage.base_dir(),
+        boot_load_failed,
+    );
+    // One handle, one channel, one sink, one loop — unconditionally. "No
+    // model" is just an empty handle: the sink gates on it, so every enqueue
+    // short-circuits to `Disabled` without touching the channel, identical to
+    // the old `NoopTranscriptionSink` (design §3.4). Spawning the loop even
+    // with no engine is what lets a mid-session `SetWhisperModel` start
+    // transcribing without a restart — there is no loop to create later.
+    // Bounded channel (64), matching the audio bridge: drop-on-full.
+    let (transcription_tx, transcription_rx) = tokio::sync::mpsc::channel(64);
+    let transcription_sink: Arc<dyn pipeline::sinks::TranscriptionSink> =
+        Arc::new(pipeline::sinks::TokioTranscriptionSink {
+            tx: transcription_tx,
+            engine: Arc::clone(&engine_handle),
+        });
+    // Not the global cancellation token, by design — the loop must outlive it
+    // so the shutdown flush still gets transcribed. `stop_transcription` means
+    // "finish the segment you are on, then stop", and only the drain timeout
+    // below sets it. See `transcribe_loop`'s contract.
+    let transcribe_handle = tokio::spawn(pipeline::transcribe_loop(
+        Arc::clone(&engine_handle),
+        Arc::clone(&storage),
+        transcription_rx,
+        Arc::clone(&stop_transcription),
+    ));
     let audio_store_handle = tokio::spawn(pipeline::audio_store_loop(
         audio_storage,
         audio_rx,
@@ -435,17 +517,41 @@ async fn main() -> Result<()> {
     });
 
     // --- Event loop: serve mic toggles until a shutdown signal arrives ---
-    // Toggles are handled inline, one per iteration. This loop is the only
-    // caller of write_mic_setting, which writes a fixed temp path — the
-    // one-at-a-time processing here is what keeps that path safe. (The
-    // supervisor's `start()` reads but never writes the mic setting when
+    // Toggles are handled inline, one per iteration.
+    //
+    // **The single-writer note.** All three settings writers run from this
+    // loop — `write_mic_setting` here, `write_capture_paused` via
+    // `set_user_paused` in the capture arm, and `write_whisper_model` via
+    // `handle_provision_event`. They share one fixed temp path
+    // (`settings.tmp`), so one-at-a-time processing is the only thing keeping
+    // that safe: concurrently, a lost race surfaces as `AlreadyExists`, and
+    // the loser's cleanup can delete the winner's temp file and break its
+    // rename.
+    //
+    // The one call outside this loop is `handle_provision_event` in the
+    // shutdown drain below, which runs after the loop has exited and cannot
+    // overlap it. `handle_provision_event`'s doc points here for exactly this
+    // reasoning, so it must keep naming all three writers — and this note
+    // must keep naming that exception.
+    //
+    // (The supervisor's `start()` reads but never writes the mic setting when
     // restoring it on boot/resume/wake, so it can't race this loop's write.)
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    // Open the readiness gates: from here the loop drains `mic_rx` and
-    // `capture_rx`, so the IPC handler can forward toggles instead of
-    // rejecting them.
+    // Open the readiness gates: from here the loop drains `mic_rx`,
+    // `capture_rx` and `model_rx`, so the IPC handler can forward toggles
+    // instead of rejecting them. All gates open together, which is why the
+    // model path reuses `capture_ready` rather than carrying a third
+    // always-equal flag.
     mic_ready.store(true, Ordering::Release);
     capture_ready.store(true, Ordering::Release);
+    // The provision currently in flight, if any. At most one is ever doing
+    // real work — the provisioner's in-flight CAS guarantees it — so the
+    // latest handle is the only one worth holding, and shutdown waits on it
+    // below. (Strictly, `InFlightGuard` drops a hair before the task itself
+    // finishes, so a new switch can win the slot while the old handle is
+    // technically still unfinished. Harmless: by then the superseded task has
+    // already sent its event and has nothing left but to return.)
+    let mut provision_task: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         tokio::select! {
             res = tokio::signal::ctrl_c() => {
@@ -491,6 +597,40 @@ async fn main() -> Result<()> {
                 note_reconcile_outcome(&outcome, &mut start_retry, &retry_tx);
                 let _ = cmd.reply.send(paused);
             }
+            Some(cmd) = model_rx.recv() => {
+                // Accept = the provisioner slot was free. try_begin commits
+                // the entering state (Downloading/Loading) synchronously, so
+                // the reply below already carries it (§2.2). Reply
+                // immediately (AD-9); the spawned provision() does the slow
+                // work. try_begin runs HERE and not in the IPC handler so
+                // accept/reject is serialized with everything else this loop
+                // owns.
+                // A switch to the ALREADY-loaded variant is accepted and
+                // reloaded rather than short-circuited. Deliberate: AD-11's
+                // retry-after-load-failure works by re-requesting the same
+                // variant, so a "same variant → no-op" guard would have to be
+                // Ready-gated to avoid breaking it. The cost is a brief ~2x
+                // model RAM while both engines are alive — noted for
+                // finish-branch triage rather than guarded here.
+                let (accepted, task) = begin_model_switch(
+                    &provisioner,
+                    cmd.variant,
+                    &cmd.still_waiting,
+                    &provision_evt_tx,
+                );
+                // Load-bearing, not defensive noise: a rejection means a
+                // provision IS in flight, so `provision_task` is holding its
+                // live handle. Assigning unconditionally would overwrite it
+                // with None, detaching the running task and reopening the
+                // shutdown bug below — for the "user clicks twice" case.
+                if task.is_some() {
+                    provision_task = task;
+                }
+                let _ = cmd.reply.send(accepted);
+            }
+            Some(evt) = provision_evt_rx.recv() => {
+                handle_provision_event(storage.base_dir(), evt);
+            }
             Some(evt) = power_rx.recv() => {
                 log::info!("power event: {evt:?}");
                 let outcome = match evt {
@@ -515,6 +655,15 @@ async fn main() -> Result<()> {
             }
         }
     }
+    // Set when an owned task/thread panic is OBSERVED during shutdown — for
+    // the provision join below, the panic itself may have happened much
+    // earlier and only surfaces here, since nothing clears `provision_task`
+    // when a provision completes. Those panics are deliberately swallowed
+    // mid-sequence so the rest of the shutdown still runs; this flag surfaces
+    // them in the exit code once it is done. Declared here rather than
+    // further down because the provision wait is now the first step that can
+    // observe one.
+    let mut shutdown_failed = false;
     // Drain any control commands that raced this shutdown signal: reply now
     // so the IPC handler returns immediately instead of waiting out its
     // timeout. For mic, sending `MicState::Error` maps to `ok:false`.
@@ -527,6 +676,90 @@ async fn main() -> Result<()> {
     capture_rx.close();
     while let Ok(cmd) = capture_rx.try_recv() {
         drop(cmd.reply);
+    }
+    // Explicit `false` rather than a dropped sender: a model switch that
+    // raced shutdown was genuinely not accepted, and saying so immediately
+    // beats making the UI wait out the 20s timeout.
+    model_rx.close();
+    while let Ok(cmd) = model_rx.try_recv() {
+        let _ = cmd.reply.send(false);
+    }
+    // Wait for an in-flight provision BEFORE closing its event channel. It
+    // holds a `provision_evt_tx` clone, so closing first would turn a Ready
+    // it is about to emit into a dropped persist: the model file landed, the
+    // engine swapped, and the next boot still comes up on the old variant
+    // with nothing user-visible. That is the AD-10 divergence arriving
+    // through the back door.
+    //
+    // Bounded, because the alternative is waiting out a 1.5 GB download
+    // inside launchd's exit window — but the right bound depends on which
+    // phase we interrupt, and the two are not symmetric:
+    //
+    //   Downloading — abandoning costs a partial `.tmp`, which
+    //     `cleanup_stale_tmps` sweeps at the next boot. Cheap. 2s.
+    //   Verifying — the rename has NOT happened yet (`finalize_model` hashes
+    //     first, renames after), so the `.tmp` is still there and abandoning
+    //     costs exactly what it costs above. The longer grace is not about
+    //     what is lost here — it is that finishing the hash *reaches* the
+    //     expensive phase below, and re-downloading to get back to it is the
+    //     waste worth avoiding.
+    //   Loading — now the file has downloaded, verified, and landed. There is
+    //     no `.tmp` left to sweep, and the ONLY thing abandoning costs is the
+    //     setting: the model sits on disk unused and the next boot comes up on
+    //     the old variant. That is the same silent divergence as above,
+    //     reached through a narrower door. The remaining work is one bounded
+    //     load whose blocking half we pay for regardless (see below), so give
+    //     it the same grace as the transcription drain.
+    //
+    // The state is sampled once, so a download that completes just after the
+    // read gets the short bound applied to a load. That is the original bug
+    // with a ~2s window instead of an unbounded one — strictly better, and
+    // not worth a re-check loop, but it is a window, not a guarantee.
+    //
+    // `abort()` does not stop a `spawn_blocking` load that has already
+    // started — runtime drop waits for it either way. What abort buys is
+    // OVERLAP: the load finishes alongside the rest of shutdown instead of
+    // serializing ahead of it. That is the argument for aborting rather than
+    // awaiting, and it is why the longer grace below costs little in practice.
+    if let Some(mut task) = provision_task {
+        const DOWNLOAD_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+        const LAND_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+        let grace = match transcription_status.stats(storage.base_dir()).state {
+            chronicle_ipc::TranscriptionState::Downloading => DOWNLOAD_GRACE,
+            _ => LAND_GRACE,
+        };
+        match tokio::time::timeout(grace, &mut task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                // The provision panicked. Nothing was persisted either way,
+                // but say so rather than counting it as a clean finish —
+                // the transcription drain below treats this shape the same.
+                shutdown_failed = true;
+                log::error!("model provisioning task failed: {e}");
+            }
+            Err(_) => {
+                task.abort();
+                // Name the consequence the operator actually gets, which
+                // differs by phase: a swept partial, or a model that landed
+                // but whose setting never persisted.
+                let cost = if grace == DOWNLOAD_GRACE {
+                    "any partial download is swept at next start"
+                } else {
+                    "if the model had already landed, the setting did not \
+                     persist and the next start will use the previous variant"
+                };
+                log::warn!(
+                    "model provisioning still running after {}s at shutdown; \
+                     abandoning it — {cost}",
+                    grace.as_secs()
+                );
+            }
+        }
+    }
+    // Now safe to close: anything the provision emitted is already buffered.
+    provision_evt_rx.close();
+    while let Ok(evt) = provision_evt_rx.try_recv() {
+        handle_provision_event(storage.base_dir(), evt);
     }
     // Discard any power events that raced shutdown — no reply channel to
     // satisfy. The observer thread itself is not joined; process exit reaps
@@ -554,10 +787,6 @@ async fn main() -> Result<()> {
     // supervisor, which releases the &audio_pipeline borrow so
     // audio_pipeline.stop() (which needs &mut self) can run next.
     let poisoned = supervisor.shutdown().await;
-    // Set when an owned task/thread panicked during shutdown. Those panics are
-    // deliberately swallowed mid-sequence so the transcription drain still runs;
-    // this flag surfaces them in the exit code once the drain is done.
-    let mut shutdown_failed = false;
 
     // Stop audio pipeline — encoding thread sees EOF, flushes segments.
     if let Err(e) = audio_pipeline.stop() {
@@ -590,12 +819,20 @@ async fn main() -> Result<()> {
     // task released its clone by finishing — and that close is what tells
     // `transcribe_loop` to drain and exit.
     drop(transcription_sink);
-    if let Some(mut handle) = transcribe_handle {
+    {
+        // The loop always exists now (Task 13), so this is no longer an
+        // `if let Some`. Every timing and borrow property below is unchanged.
+        let mut handle = transcribe_handle;
         // Bounds how long we let the queue drain — NOT how long exit takes. Runtime
         // drop blocks until every blocking worker finishes its current task, so
         // worst-case exit is DRAIN_GRACE plus the in-flight whisper call either way;
         // the same delay precedes the `exit(3)` poison handoff. Kept short to leave
-        // headroom inside launchd's 20s default ExitTimeOut.
+        // headroom inside launchd's 20s default ExitTimeOut — which this was
+        // never the sole consumer of, and is less so now that the provision
+        // wait above can add up to 5s. The unbounded steps between them
+        // (`ipc_server.shutdown`, `supervisor.shutdown`, the bridge join, the
+        // audio-store await) are the ones with no ceiling; these two explicit
+        // waits total 10s of the 20s and are the part we actually control.
         const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
         // Borrow the handle — do NOT let `timeout` consume it. Dropping a JoinHandle
         // detaches the task, and runtime drop then destroys its future *without
@@ -635,6 +872,140 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ready_event_persists_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        handle_provision_event(
+            dir.path(),
+            provisioning::ProvisionEvent::Ready {
+                variant: chronicle_transcription::parse_variant("small").unwrap(),
+            },
+        );
+        assert_eq!(settings::read_whisper_model(dir.path()).as_str(), "small");
+    }
+
+    #[tokio::test]
+    async fn begin_model_switch_spawns_and_rejects_a_second_while_busy() {
+        // Covers the event-loop arm, which no handler test can reach — the
+        // handler tests supply their own fake loop.
+        //
+        // What makes the busy rejection deterministic is that `try_begin`'s
+        // CAS runs synchronously BEFORE the spawn, so the slot is taken the
+        // moment the first call returns — not the listener. The listener is
+        // belt-and-braces for the day this gains `flavor = "multi_thread"`:
+        // it accepts nothing, so a polled provision would park in the HTTP
+        // read rather than failing fast and freeing the slot.
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let ctx = provisioning::ProvisionerContext::new_for_test_with_url(
+            dir.path(),
+            &format!("http://127.0.0.1:{port}/x"),
+        );
+        let (evt_tx, _evt_rx) = tokio::sync::mpsc::channel(4);
+
+        let waiting = std::sync::atomic::AtomicBool::new(true);
+        let (accepted, task) = begin_model_switch(
+            &ctx,
+            chronicle_transcription::parse_variant("small").unwrap(),
+            &waiting,
+            &evt_tx,
+        );
+        assert!(accepted, "the slot was free");
+        let task = task.expect("an accepted switch starts a task");
+        // Tautological on this current-thread runtime — nothing has polled
+        // the task yet. Kept because it stops being free the moment someone
+        // adds `flavor = "multi_thread"`, and it documents the shape.
+        assert!(!task.is_finished(), "the task has not been polled yet");
+
+        let (accepted2, task2) = begin_model_switch(
+            &ctx,
+            chronicle_transcription::parse_variant("base").unwrap(),
+            &waiting,
+            &evt_tx,
+        );
+        assert!(!accepted2, "one at a time — the slot is taken");
+        assert!(task2.is_none(), "a rejected switch starts no task");
+
+        task.abort();
+    }
+
+    // The handler's 20s timeout answers `ok: false` but leaves the command in
+    // the channel. When a long pause/resume or power reconcile finally frees
+    // the loop, it must NOT start the work: the UI was told the request was
+    // rejected, so a multi-gigabyte download and an engine swap would run
+    // with nobody watching and nobody informed — the silent-divergence shape
+    // this branch spent three tasks closing, arriving through the one door
+    // that bypasses the reply.
+    #[tokio::test]
+    async fn an_abandoned_model_command_starts_no_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = provisioning::ProvisionerContext::new_for_test(dir.path());
+        let (evt_tx, _evt_rx) = tokio::sync::mpsc::channel(4);
+
+        let abandoned = std::sync::atomic::AtomicBool::new(false);
+        let (accepted, task) = begin_model_switch(
+            &ctx,
+            chronicle_transcription::parse_variant("small").unwrap(),
+            &abandoned,
+            &evt_tx,
+        );
+        assert!(!accepted, "nobody is waiting for this answer");
+        assert!(task.is_none(), "and no download may start");
+
+        // The slot must be left free, not consumed — otherwise one abandoned
+        // command would wedge every later switch behind a phantom provision.
+        let still_waiting = std::sync::atomic::AtomicBool::new(true);
+        let (accepted2, task2) = begin_model_switch(
+            &ctx,
+            chronicle_transcription::parse_variant("base").unwrap(),
+            &still_waiting,
+            &evt_tx,
+        );
+        assert!(
+            accepted2,
+            "the abandoned command must not have taken the slot"
+        );
+        if let Some(t) = task2 {
+            t.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_provision_leaves_settings_untouched() {
+        // A failing switch emits no event and must not move the persisted
+        // variant — after a restart the daemon boots the last WORKING one
+        // (AD-10). This drives the real provisioner rather than asserting on
+        // the absence of a call, so a provision that wrongly emitted Ready on
+        // failure would be caught here too.
+        let dir = tempfile::tempdir().unwrap();
+        settings::write_whisper_model(
+            dir.path(),
+            chronicle_transcription::parse_variant("base").unwrap(),
+        )
+        .unwrap();
+        let ctx = provisioning::ProvisionerContext::new_for_test_with_url(
+            dir.path(),
+            "http://127.0.0.1:1/x", // refused connection → provision fails
+        );
+        let (evt_tx, mut evt_rx) = tokio::sync::mpsc::channel(4);
+        let small = chronicle_transcription::parse_variant("small").unwrap();
+        // provision() documents that the caller must already have won
+        // try_begin; honour it so this test models the production pairing
+        // rather than a shape no real call site uses.
+        assert!(ctx.try_begin(small));
+        ctx.provision(small, evt_tx).await;
+        assert!(
+            evt_rx.try_recv().is_err(),
+            "no event from a failed provision"
+        );
+        assert_eq!(
+            settings::read_whisper_model(dir.path()).as_str(),
+            "base",
+            "settings unchanged after a failed switch"
+        );
+    }
 
     fn failed() -> ReconcileOutcome {
         ReconcileOutcome::StartFailed {

@@ -186,8 +186,10 @@ struct DaemonConnectionGateTests {
         let serverFD = pair.serverFD
 
         // Valid ErrorResponse JSON. After the Task 7 refactor, sendRequest
-        // must still route this through IPCError.daemonError(message), not
-        // wrap it in malformedResponse.
+        // must still route this through IPCError.daemonError, not wrap it in
+        // malformedResponse.
+        // No `code` key: a daemon predating the field must still decode, which
+        // is why `ErrorResponse.code` is Optional.
         let errorResponse = #"{"type":"error","ok":false,"message":"internal failure"}"#
         let serverTask = Task.detached {
             respondToOneRequest(on: serverFD, with: errorResponse)
@@ -197,8 +199,9 @@ struct DaemonConnectionGateTests {
         do {
             _ = try await conn.requestStatus()
             Issue.record("Expected throw")
-        } catch IPCError.daemonError(let message) {
+        } catch IPCError.daemonError(let message, let code) {
             #expect(message == "internal failure")
+            #expect(code == nil, "no code key means no code, not a decode failure")
         } catch {
             Issue.record("Expected IPCError.daemonError, got \(error)")
         }
