@@ -53,7 +53,7 @@ struct SettingsFormattingTests {
         #expect(!summary.contains("488"))
     }
 
-    @Test("a models list the daemon did not send degrades to a dash")
+    @Test("a model list the daemon did not send degrades to a dash")
     func summaryWithNoModels() {
         #expect(SettingsView.downloadedSummary([]) == "—")
     }

@@ -387,8 +387,11 @@ private struct TranscriptionBanner: View {
 
     @ViewBuilder
     private var progressRow: some View {
-        // Total is nil until Content-Length lands, and `Some(0)` is never sent
-        // — so an unknown total means indeterminate, never a divide by zero.
+        // `downloadTotalBytes` is nil until Content-Length lands, and is
+        // never `Some(0)` — so an unknown TOTAL means indeterminate, never a
+        // divide by zero. That guarantee is about the total only:
+        // `downloadBytes` is published from zero and the branch below has to
+        // handle it, which is not a contradiction of this line.
         let state = transcription?.state ?? .missing
         if state == .downloading, let total = transcription?.downloadTotalBytes, total > 0 {
             let done = transcription?.downloadBytes ?? 0

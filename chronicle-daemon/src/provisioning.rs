@@ -457,11 +457,19 @@ pub async fn download_model(
         };
         let mut written: u64 = 0;
         loop {
+            // Two error paths, both user-facing. The outer `map_err` is the
+            // stall timeout; the inner one is a body-read failure, and it
+            // needs the same `describe_request_error` treatment as the
+            // request above — a bare `?` here propagates reqwest's Display,
+            // which appends " for url (…)" and puts the HuggingFace URL in
+            // the banner. Full error to the log, safe copy to the user.
             let chunk = tokio::time::timeout(CHUNK_TIMEOUT, resp.chunk())
                 .await
-                .map_err(|_| {
-                    anyhow::anyhow!("download stalled (no data for {CHUNK_TIMEOUT:?})")
-                })??;
+                .map_err(|_| anyhow::anyhow!("download stalled (no data for {CHUNK_TIMEOUT:?})"))?
+                .map_err(|e| {
+                    log::error!("model download body read failed: {e}");
+                    anyhow::anyhow!("download failed: {}", describe_request_error(&e))
+                })?;
             let Some(chunk) = chunk else { break };
             written = written.saturating_add(chunk.len() as u64);
             // Checked before the write, not after: the point is to never put
