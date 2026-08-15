@@ -29,9 +29,11 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             // schema at version N stamped N-1, and the replay re-runs the whole
             // migration. That is harmless today, but by two different
             // mechanisms: 001 and 002 are entirely `IF NOT EXISTS` /
-            // `INSERT OR IGNORE`, while 003 is a data UPDATE whose own
-            // `transcript IS NOT NULL` guard excludes the rows it already
-            // cleared (pinned by `migration_003_nulls_marker_transcripts_only`).
+            // `INSERT OR IGNORE`, while 003 is a data UPDATE that cannot
+            // re-touch a row it already cleared — every clause of its WHERE
+            // propagates NULL, so a cleared (NULL) transcript makes the whole
+            // predicate NULL (asserted by
+            // `migration_003_nulls_marker_transcripts_only`).
             // Do not assume `IF NOT EXISTS` is the only pattern in play — the
             // next migration need not be idempotent at all, and
             // `ALTER TABLE ADD COLUMN` has no idempotent form.
@@ -61,9 +63,12 @@ mod tests {
     /// dropping the length, bracket, space, tab, newline, CR, or ASCII clause
     /// pulls in row 8, 7, 5, 9, 10, 11, or 6 respectively.
     ///
-    /// `transcript IS NOT NULL` is the one element that cannot be pinned by
-    /// outcome — NULL never satisfies the other clauses either — so row 13
-    /// guards it indirectly, via the FTS integrity-check.
+    /// `transcript IS NOT NULL` is the one element that is genuinely redundant:
+    /// dropping it leaves the cleared set identical, because every other clause
+    /// propagates NULL, so a NULL transcript makes the whole WHERE evaluate to
+    /// NULL and the row is never touched. It stays because it states the intent
+    /// at a glance, but NULL propagation — not that clause — is what actually
+    /// makes a replay harmless. Row 13 documents the case; it does not pin it.
     #[test]
     fn migration_003_nulls_marker_transcripts_only() {
         let conn = Connection::open_in_memory().unwrap();
@@ -93,8 +98,12 @@ mod tests {
         // can spare it. Deleting this row would be irreversible loss of real
         // speech, and only for non-English users.
         insert(6, "[这是一个完整的句子]");
-        // Only the closing-bracket clause spares this one.
+        // Only the closing-bracket half of `LIKE '[%]'` spares this one.
         insert(7, "[unclosed");
+        // ...and only the OPENING-bracket half spares this one. Without it,
+        // mutating the clause to `LIKE '%]'` changes nothing and the leading
+        // bracket goes untested.
+        insert(14, "sic]");
         // Only the length clause spares this one.
         insert(8, "[]");
         // The Rust rule rejects ANY whitespace; SQL has to name each kind, so
@@ -105,8 +114,8 @@ mod tests {
         insert(10, "[nl\nhere]");
         insert(11, "[cr\rhere]");
         // Pins `trim()` itself. Every other fixture row is already
-        // whitespace-clean, so all six trim() calls are no-ops across them —
-        // delete `trim(` throughout the migration and they all still pass.
+        // whitespace-clean, so every trim() call in the migration is a no-op
+        // across them — delete `trim(` throughout and they all still pass.
         // This row is a marker ONLY after trimming, so it is cleared only if
         // trim() is doing its job.
         insert(12, "  [BLANK_AUDIO]  ");
@@ -177,7 +186,12 @@ mod tests {
         assert_eq!(
             col(7, "transcript").as_deref(),
             Some("[unclosed"),
-            "unclosed bracket survives (closing-bracket clause)"
+            "unclosed bracket survives (closing-bracket half of LIKE)"
+        );
+        assert_eq!(
+            col(14, "transcript").as_deref(),
+            Some("sic]"),
+            "a trailing bracket alone survives (opening-bracket half of LIKE)"
         );
         assert_eq!(
             col(8, "transcript").as_deref(),
@@ -244,14 +258,24 @@ mod tests {
         // no-op and proves nothing — apply the migration body directly instead.
         // A crash between `execute_batch` and the `user_version` stamp replays
         // exactly this, and `transcript IS NOT NULL` is what makes it harmless.
+        // Count rows rather than read `changes()`: in a batch that only
+        // reflects the LAST DML statement, so if 003 ever grows a second one
+        // the assertion would silently stop covering the UPDATE.
+        let with_text = || -> i64 {
+            conn.query_row(
+                "SELECT count(*) FROM audio_segments WHERE transcript IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let before = with_text();
         conn.execute_batch(MIGRATIONS[2]).unwrap();
-        let changed: i64 = conn
-            .query_row("SELECT changes()", [], |r| r.get(0))
-            .unwrap();
         assert_eq!(
-            changed, 0,
-            "replaying 003 must clear nothing further — already-cleared rows are \
-             excluded by `transcript IS NOT NULL`"
+            with_text(),
+            before,
+            "replaying 003 must clear nothing further — every clause propagates \
+             NULL, so an already-cleared row can never match again"
         );
         conn.execute_batch("INSERT INTO audio_fts(audio_fts) VALUES('integrity-check')")
             .expect("audio_fts must survive a replay too");

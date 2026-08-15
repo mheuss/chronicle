@@ -11,14 +11,22 @@
 -- whitespace. Note SQLite's LIKE treats '[' as an ordinary character, so '[%]'
 -- means "starts with [ and ends with ]".
 --
--- It is not an exact mirror, and the difference is deliberate. The Rust rule
--- rejects any `char::is_whitespace`; SQL has no such predicate, so this names
--- the four whitespace characters whisper actually emits (space, tab, CR, LF).
--- Vertical tab and form feed are therefore treated as ordinary characters
--- here. A transcript that is one bracketed ASCII token whose ONLY internal
--- whitespace is a form feed would be cleared here and spared by the Rust
--- rule. No such row exists in the live database and whisper has no path to
--- producing one, so the divergence is recorded rather than closed.
+-- It is not an exact mirror, and the two differences are deliberate.
+--
+-- INTERNAL whitespace: the Rust rule rejects any `char::is_whitespace`; SQL
+-- has no such predicate, so the clauses below name the four characters
+-- whisper actually emits (space, tab, CR, LF). Within ASCII that leaves
+-- exactly vertical tab and form feed unnamed, and non-ASCII whitespace is
+-- already excluded by the ASCII clause. So a transcript that is one bracketed
+-- ASCII token whose ONLY internal whitespace is a form feed would be cleared
+-- here and spared by the Rust rule. That is the one divergence running in the
+-- aggressive direction. No such row exists in the live database and whisper
+-- has no path to producing one, so it is recorded rather than closed.
+--
+-- LEADING/TRAILING whitespace: SQLite's `trim(X)` with no second argument
+-- strips U+0020 only -- not tab, CR or LF. So "<TAB>[BLANK_AUDIO]" is spared
+-- here and cleared by the Rust rule, which trims all whitespace. This
+-- divergence always runs toward SPARING, so it can never destroy speech.
 --
 -- Each clause rules out a different way of destroying real speech:
 --
