@@ -185,18 +185,37 @@ pub enum TranscriptionError {
 ///
 /// The rule is structural rather than an allow-list: whisper's marker
 /// vocabulary is not stable across models, but every marker is a single
-/// bracketed token with no internal whitespace. A bracketed aside in real prose
-/// ("the [sic] answer") does not match, because the whole string must be the
-/// token.
+/// bracketed ASCII token with no internal whitespace.
+///
+/// All three inner conditions earn their place, and each rules out a different
+/// false positive:
+///
+/// - **non-empty** — `[]` is not a marker.
+/// - **ASCII** — this is the one that keeps the guard honest in spaceless
+///   scripts. `set_language(None)` means any language can come back, and a
+///   bracketed Chinese, Japanese, or Thai phrase is a single whitespace-free
+///   token, so whitespace alone cannot tell it from a marker. Requiring ASCII
+///   inside the brackets keeps `[这是一个完整的句子]` as speech while still
+///   dropping `[BLANK_AUDIO]`. Without it this function silently deletes real
+///   transcript text, and only for non-English users.
+/// - **whitespace-free** — a bracketed aside in space-delimited prose
+///   ("the [sic] answer") survives.
 fn is_whisper_marker(s: &str) -> bool {
-    let t = s.trim();
-    t.len() >= 3 && t.starts_with('[') && t.ends_with(']') && !t.contains(char::is_whitespace)
+    let Some(inner) = s
+        .trim()
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+    else {
+        return false;
+    };
+    !inner.is_empty() && inner.is_ascii() && !inner.contains(char::is_whitespace)
 }
 
 /// Concatenate whisper sub-segment texts and trim, dropping whisper's own
-/// markers. An empty result means "no usable speech" — the caller records the
-/// attempt with a NULL transcript rather than skipping the write, so a silent
-/// segment stays distinguishable from an untranscribed one (HEU-620).
+/// markers, so a segment whisper filled with `[BLANK_AUDIO]` reads as empty
+/// here. An empty result means "no usable speech"; what the caller persists for
+/// that is the caller's business — see `pipeline::transcribe_loop`.
+///
 /// whisper-rs 0.14.4 exposes no per-segment `no_speech_prob`, so probability
 /// filtering of music/noise is deferred (see the design §4); the
 /// `suppress_blank` whisper param, this marker filter, and the empty check are
@@ -383,7 +402,8 @@ impl Transcriber for TranscriptionEngine {
             );
         }
 
-        // Empty-text guard (whisper-rs 0.14.4 has no per-segment no_speech_prob).
+        // Marker filter + empty-text guard (whisper-rs 0.14.4 has no
+        // per-segment no_speech_prob).
         let text = concat_segment_text(texts.iter().map(String::as_str));
         let language = state
             .full_lang_id_from_state()
@@ -569,10 +589,44 @@ mod tests {
     #[test]
     fn concat_segment_text_keeps_multiword_bracketed_text() {
         // Isolates the whitespace condition: this string satisfies both the
-        // length and bracket-shape checks, so only the whitespace check can
+        // bracket-shape and ASCII checks, so only the whitespace check can
         // spare it (docs/development/storage.md, "Testing a guard?").
         let segs = ["[hello world]"];
         assert_eq!(concat_segment_text(segs.iter().copied()), "[hello world]");
+    }
+
+    #[test]
+    fn concat_segment_text_keeps_bracketed_text_in_spaceless_scripts() {
+        // Isolates the ASCII condition. CJK and Thai have no inter-word
+        // spaces, so a bracketed phrase is a single whitespace-free token and
+        // the whitespace check cannot spare it — only the ASCII check can.
+        // Dropping these would be silent transcript loss for exactly the
+        // users the auto-detect path exists to serve.
+        for s in ["[这是一个完整的句子]", "[こんにちは世界]", "[สวัสดีชาวโลก]"]
+        {
+            let segs = [s];
+            assert_eq!(
+                concat_segment_text(segs.iter().copied()),
+                s,
+                "spaceless-script speech must survive the marker filter"
+            );
+        }
+    }
+
+    #[test]
+    fn concat_segment_text_keeps_unclosed_bracket() {
+        // Isolates the closing-bracket condition: nothing else in the test set
+        // fails without it.
+        let segs = ["[unclosed"];
+        assert_eq!(concat_segment_text(segs.iter().copied()), "[unclosed");
+    }
+
+    #[test]
+    fn concat_segment_text_keeps_empty_brackets() {
+        // Isolates the non-empty condition. `[]` carries no marker name, so it
+        // is punctuation, not a whisper emission.
+        let segs = ["[]"];
+        assert_eq!(concat_segment_text(segs.iter().copied()), "[]");
     }
 
     #[test]
