@@ -228,10 +228,18 @@ impl Storage {
     /// stamped with `whisper_model` and routine backfill will never revisit it.
     /// That is not hypothetical — `set_detect_language(true)` once returned
     /// empty text for every segment of real speech (see the whisper-rs notes).
-    /// Recovering from that class of bug means re-NULLing the affected rows
-    /// first; no select predicate can do it alone. A model-variant change is the
-    /// only regression the predicate catches on its own, since `whisper_model`
-    /// records the variant.
+    /// Recovering from that class of bug needs something wider than the routine
+    /// predicate — but not necessarily a destructive one. `transcript IS NULL
+    /// AND whisper_model IS NOT NULL` selects exactly the affected rows
+    /// read-only, at the cost of re-transcribing genuinely silent segments;
+    /// re-NULLing `whisper_model` first is the alternative, and it mutates. Reach
+    /// for the widened `SELECT` before the `UPDATE`.
+    ///
+    /// Separately, because `whisper_model` records the *variant*, the column
+    /// makes a variant-targeted re-run expressible without mutating anything
+    /// first (`whisper_model != 'large-v3'`). That is a property of the column,
+    /// not of the `whisper_model IS NULL` predicate, which by construction skips
+    /// every already-stamped row.
     pub async fn update_transcript(&self, id: i64, transcript: String) -> Result<()> {
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {
