@@ -177,14 +177,36 @@ pub enum TranscriptionError {
     Whisper(String),
 }
 
-/// Concatenate whisper sub-segment texts and trim. An empty result means "no
-/// usable speech" and the caller must skip the DB write so blank rows never reach
-/// `audio_fts`. whisper-rs 0.14.4 exposes no per-segment `no_speech_prob`, so
-/// probability filtering of music/noise is deferred (see the design §4); the
-/// `suppress_blank` whisper param plus this empty check is the 472 guard.
+/// True when `s` is entirely one bracketed whisper marker — `[BLANK_AUDIO]`,
+/// `[Motor]`, `[_BEG_]`. whisper.cpp emits these as ordinary segment text, so
+/// without this check they are indistinguishable from speech to every layer
+/// above and land in `audio_fts` as searchable words (FTS5 tokenizes
+/// `[BLANK_AUDIO]` into `blank` and `audio`).
+///
+/// The rule is structural rather than an allow-list: whisper's marker
+/// vocabulary is not stable across models, but every marker is a single
+/// bracketed token with no internal whitespace. A bracketed aside in real prose
+/// ("the [sic] answer") does not match, because the whole string must be the
+/// token.
+fn is_whisper_marker(s: &str) -> bool {
+    let t = s.trim();
+    t.len() >= 3 && t.starts_with('[') && t.ends_with(']') && !t.contains(char::is_whitespace)
+}
+
+/// Concatenate whisper sub-segment texts and trim, dropping whisper's own
+/// markers. An empty result means "no usable speech" — the caller records the
+/// attempt with a NULL transcript rather than skipping the write, so a silent
+/// segment stays distinguishable from an untranscribed one (HEU-620).
+/// whisper-rs 0.14.4 exposes no per-segment `no_speech_prob`, so probability
+/// filtering of music/noise is deferred (see the design §4); the
+/// `suppress_blank` whisper param, this marker filter, and the empty check are
+/// the combined guard.
 pub fn concat_segment_text<'a>(segments: impl IntoIterator<Item = &'a str>) -> String {
     let mut out = String::new();
     for text in segments {
+        if is_whisper_marker(text) {
+            continue;
+        }
         out.push_str(text);
     }
     out.trim().to_string()
@@ -511,6 +533,46 @@ mod tests {
     fn concat_segment_text_empty_for_whitespace_only() {
         let segs = ["   ", "\n\t"];
         assert_eq!(concat_segment_text(segs.iter().copied()), "");
+    }
+
+    #[test]
+    fn concat_segment_text_drops_blank_audio_marker() {
+        let segs = ["[BLANK_AUDIO]"];
+        assert_eq!(concat_segment_text(segs.iter().copied()), "");
+    }
+
+    #[test]
+    fn concat_segment_text_drops_marker_but_keeps_speech() {
+        let segs = ["hello ", "[BLANK_AUDIO]", " world"];
+        assert_eq!(concat_segment_text(segs.iter().copied()), "hello  world");
+    }
+
+    #[test]
+    fn concat_segment_text_drops_other_bracketed_markers() {
+        // `[Motor]` appears 3 times in the live database; `[_BEG_]` is another
+        // whisper.cpp emission. The rule is structural, not an allow-list.
+        let segs = ["[Motor]", "[_BEG_]"];
+        assert_eq!(concat_segment_text(segs.iter().copied()), "");
+    }
+
+    #[test]
+    fn concat_segment_text_keeps_brackets_inside_prose() {
+        // A bracketed aside in real speech keeps its spaces, so the whitespace
+        // check leaves it alone. Losing this would silently truncate transcripts.
+        let segs = ["the [sic] answer"];
+        assert_eq!(
+            concat_segment_text(segs.iter().copied()),
+            "the [sic] answer"
+        );
+    }
+
+    #[test]
+    fn concat_segment_text_keeps_multiword_bracketed_text() {
+        // Isolates the whitespace condition: this string satisfies both the
+        // length and bracket-shape checks, so only the whitespace check can
+        // spare it (docs/development/storage.md, "Testing a guard?").
+        let segs = ["[hello world]"];
+        assert_eq!(concat_segment_text(segs.iter().copied()), "[hello world]");
     }
 
     #[test]
