@@ -217,10 +217,21 @@ impl Storage {
     ///
     /// **It cannot express "transcribed, no speech found."** Taking `String`, the
     /// closest it can do is `""` — a fourth state that is neither NULL nor
-    /// speech, and that nothing queries for. To clear a transcript, or to record
-    /// a silent segment, call [`Storage::update_transcript_full`] with
-    /// `transcript: None` (HEU-620). A backfill scheduler in particular must
-    /// select on `whisper_model IS NULL`, never `transcript IS NULL`.
+    /// speech, and that nothing queries for. To record a silent segment, call
+    /// [`Storage::update_transcript_full`] with `transcript: None` (HEU-620).
+    ///
+    /// For a backfill scheduler, `whisper_model IS NULL` is the right predicate
+    /// for routine work and `transcript IS NULL` is not — the latter re-queues
+    /// every silent segment forever. But note what that costs: before HEU-620 a
+    /// segment that produced no text stayed NULL and was retried on the next
+    /// pass, so an engine-side regression healed itself. Now such a row is
+    /// stamped with `whisper_model` and routine backfill will never revisit it.
+    /// That is not hypothetical — `set_detect_language(true)` once returned
+    /// empty text for every segment of real speech (see the whisper-rs notes).
+    /// Recovering from that class of bug means re-NULLing the affected rows
+    /// first; no select predicate can do it alone. A model-variant change is the
+    /// only regression the predicate catches on its own, since `whisper_model`
+    /// records the variant.
     pub async fn update_transcript(&self, id: i64, transcript: String) -> Result<()> {
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {

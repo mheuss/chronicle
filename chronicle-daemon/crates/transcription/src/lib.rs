@@ -330,6 +330,21 @@ pub fn decode_opus_16k_mono(path: &Path) -> Result<Vec<f32>, TranscriptionError>
 
 /// A type that can turn 16 kHz mono PCM into a [`Transcript`]. The trait makes
 /// the transcribe loop testable with a fake — the real impl needs a model file.
+///
+/// # Contract
+///
+/// Implementations return **speech text only**, with engine-specific markers
+/// already removed — `TranscriptionEngine` does this via
+/// [`concat_segment_text`], which drops whisper.cpp's `[BLANK_AUDIO]` and
+/// friends. Content-level filtering is the implementation's job, not the
+/// caller's: the rule for what counts as a marker is engine-specific, and a
+/// caller applying one engine's rule to every implementation would corrupt
+/// output from the others.
+///
+/// An empty or whitespace-only result means **no usable speech was found**.
+/// That is a meaningful answer rather than a failure, and callers act on it:
+/// `pipeline::transcribe_loop` records it as an attempt with a NULL transcript
+/// (HEU-620). Return `Err` only when transcription could not be performed.
 pub trait Transcriber: Send + Sync {
     fn transcribe(&self, pcm_16k_mono: &[f32]) -> Result<Transcript, TranscriptionError>;
     /// The resolved model variant, written to the transcript row.
