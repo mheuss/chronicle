@@ -5,6 +5,7 @@ use crate::error::Result;
 const MIGRATIONS: &[&str] = &[
     include_str!("migrations/001_initial_schema.sql"),
     include_str!("migrations/002_path_indexes.sql"),
+    include_str!("migrations/003_null_marker_transcripts.sql"),
 ];
 
 /// Configure connection-level PRAGMAs. Call on every new connection.
@@ -43,6 +44,152 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    /// Migration 003 clears whisper's own markers from persisted transcripts.
+    /// Stops at version 2 first, so `migrate` below runs only 003.
+    ///
+    /// The fixture is built so each spared row is spared by exactly ONE clause
+    /// of the predicate — see `docs/development/storage.md`, "Testing a guard?":
+    /// when two guards can each independently spare a fixture, a test targeting
+    /// one of them proves nothing.
+    #[test]
+    fn migration_003_nulls_marker_transcripts_only() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_connection(&conn).unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.execute_batch(MIGRATIONS[1]).unwrap();
+        conn.pragma_update(None, "user_version", 2u32).unwrap();
+
+        // Seed a language on every row. Without it the "language is cleared"
+        // assertion below passes vacuously, since the column would be NULL
+        // already.
+        let insert = |id: i64, transcript: &str| {
+            conn.execute(
+                "INSERT INTO audio_segments
+                   (id, start_timestamp, end_timestamp, source, audio_path, transcript, whisper_model, language)
+                 VALUES (?1, 1, 2, 'mic', '/tmp/x.opus', ?2, 'base', 'nn')",
+                rusqlite::params![id, transcript],
+            )
+            .unwrap();
+        };
+        insert(1, "[BLANK_AUDIO]");
+        insert(2, "[Motor]");
+        insert(3, "the quick brown fox");
+        insert(4, "the [sic] answer");
+        insert(5, "[hello world]");
+        // Spaceless script: no internal whitespace, so ONLY the ASCII clause
+        // can spare it. Deleting this row would be irreversible loss of real
+        // speech, and only for non-English users.
+        insert(6, "[这是一个完整的句子]");
+        // Only the closing-bracket clause spares this one.
+        insert(7, "[unclosed");
+        // Only the length clause spares this one.
+        insert(8, "[]");
+        // The Rust rule rejects ANY whitespace; SQL has to name each kind, so
+        // these two pin the tab and newline clauses. Without them those clauses
+        // could be deleted and every assertion would still pass — the exact
+        // trap docs/development/storage.md warns about.
+        insert(9, "[tab\there]");
+        insert(10, "[nl\nhere]");
+
+        migrate(&conn).unwrap();
+
+        let col = |id: i64, c: &str| -> Option<String> {
+            conn.query_row(
+                &format!("SELECT {c} FROM audio_segments WHERE id = ?1"),
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(col(1, "transcript"), None, "[BLANK_AUDIO] is cleared");
+        assert_eq!(
+            col(2, "transcript"),
+            None,
+            "any bracketed ASCII token is cleared"
+        );
+
+        // language is cleared with the transcript, so a migrated legacy row
+        // matches what the pipeline now writes for the same state (HEU-620).
+        assert_eq!(
+            col(1, "language"),
+            None,
+            "a cleared row keeps no detected language"
+        );
+        // whisper_model survives — it is what still marks the row as attempted.
+        assert_eq!(
+            col(1, "whisper_model").as_deref(),
+            Some("base"),
+            "whisper_model survives — the row still reads as attempted, not untranscribed"
+        );
+
+        assert_eq!(
+            col(3, "transcript").as_deref(),
+            Some("the quick brown fox"),
+            "speech survives"
+        );
+        assert_eq!(
+            col(4, "transcript").as_deref(),
+            Some("the [sic] answer"),
+            "bracketed aside in prose survives (whitespace clause)"
+        );
+        assert_eq!(
+            col(5, "transcript").as_deref(),
+            Some("[hello world]"),
+            "multi-word bracket survives (whitespace clause)"
+        );
+        assert_eq!(
+            col(6, "transcript").as_deref(),
+            Some("[这是一个完整的句子]"),
+            "spaceless-script speech survives — only the ASCII clause spares this"
+        );
+        assert_eq!(
+            col(7, "transcript").as_deref(),
+            Some("[unclosed"),
+            "unclosed bracket survives (closing-bracket clause)"
+        );
+        assert_eq!(
+            col(8, "transcript").as_deref(),
+            Some("[]"),
+            "empty brackets survive (length clause)"
+        );
+        assert_eq!(
+            col(9, "transcript").as_deref(),
+            Some("[tab\there]"),
+            "an internal tab survives (tab clause)"
+        );
+        assert_eq!(
+            col(10, "transcript").as_deref(),
+            Some("[nl\nhere]"),
+            "an internal newline survives (newline clause)"
+        );
+        // A spared row keeps every column, not just its text.
+        assert_eq!(
+            col(3, "language").as_deref(),
+            Some("nn"),
+            "rows the migration does not touch are left entirely alone"
+        );
+
+        // The whole point of clearing them: the trigger reindexes audio_fts,
+        // so the marker's tokens stop matching. Without this the migration
+        // could pass while leaving the search pollution in place.
+        let hits: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM audio_fts WHERE audio_fts MATCH 'blank'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            hits, 0,
+            "clearing the transcript must clear the FTS index too"
+        );
+
+        // External-content FTS5 desyncs silently; ask SQLite directly.
+        conn.execute_batch("INSERT INTO audio_fts(audio_fts) VALUES('integrity-check')")
+            .expect("audio_fts must stay consistent with audio_segments");
+    }
 
     #[test]
     fn migration_creates_all_tables() {
