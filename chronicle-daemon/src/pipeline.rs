@@ -191,7 +191,11 @@ fn warn_abandoned_queue(abandoned: usize) {
 /// Heavy work (Opus decode + whisper) runs inside `spawn_blocking` so it never
 /// starves tokio workers (cf. HEU-480). Each pulled job is processed to
 /// completion before the next `recv`, so at most one whisper call is in flight
-/// (sequential). Empty results are skipped so blank rows never reach `audio_fts`.
+/// (sequential). An empty result is **recorded as an attempt** — `whisper_model`
+/// set, `transcript` and `language` NULL — so blank text still never reaches
+/// `audio_fts` while the row stays distinguishable from one that was never
+/// transcribed (HEU-620). It is deliberately not skipped; see the comment on the
+/// empty branch below.
 ///
 /// **Shutdown contract — this loop must outlive `audio_store_loop`.** It exits
 /// when the channel closes (every `TranscriptionSink` clone dropped) or when
@@ -215,7 +219,7 @@ fn warn_abandoned_queue(abandoned: usize) {
 ///
 /// The engine is resolved from the handle **once per job** and held for that
 /// whole job, so a model swap takes effect on the next segment and the
-/// transcript is produced and stamped by the same engine (design §3.3). A job
+/// transcript is produced and stamped by the same engine (HEU-589). A job
 /// that arrives while the handle is empty is skipped as idle — matching the
 /// sink's `Disabled` semantics — not treated as a failure.
 pub async fn transcribe_loop(
@@ -229,7 +233,7 @@ pub async fn transcribe_loop(
     while let Some(job) = rx.recv().await {
         // Resolve per job and hold for the whole job: the transcript is
         // produced AND stamped by the engine that ran it — a swap mid-queue
-        // affects the next job, never the current one (design §3.3).
+        // affects the next job, never the current one (HEU-589).
         let Some(engine) = engine.get() else {
             // Benign race with the sink's is_loaded gate: idle, not failing —
             // same "Disabled" semantics, no counter.
@@ -296,8 +300,8 @@ pub async fn transcribe_loop(
                         job.row_id
                     );
                     // Language goes NULL too. whisper reports a detection even
-                    // for silence, derived from noise: on the live database the
-                    // no-speech rows carry `en` (165 of them) and `nn` (3), and
+                    // for silence, derived from noise: of the live database's
+                    // 169 no-speech rows, 166 carry `en` and 3 carry `nn`, and
                     // neither means anything — `en` is the more misleading of
                     // the two precisely because it looks plausible. `search.rs`
                     // reads this column back out to callers, so keeping it would
