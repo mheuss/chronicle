@@ -282,26 +282,37 @@ pub async fn transcribe_loop(
                 // write, so a future impl returning "  hi  " can neither slip a
                 // whitespace-only row nor a padded one into `audio_fts` (BR-4).
                 let text = transcript.text.trim();
-                // if/else rather than `continue`: the stop check at the bottom of the
-                // loop must run on every iteration, including skipped segments.
-                if text.is_empty() {
+                // Empty means whisper ran and found no speech. Record the attempt
+                // with a NULL transcript rather than skipping the write: skipping
+                // also discards the fact that we tried, leaving the row
+                // indistinguishable from one that was never transcribed, which
+                // makes a backfill scheduler re-queue it forever (HEU-620).
+                let stored = if text.is_empty() {
                     log::debug!(
-                        "transcription skipped (no usable speech) for segment {}",
+                        "no usable speech in segment {} — recording the attempt",
                         job.row_id
                     );
+                    None
                 } else {
-                    let text = text.to_string();
-                    if let Err(e) = storage
-                        .update_transcript_full(
-                            job.row_id,
-                            Some(text),
-                            engine.variant().to_string(),
-                            transcript.language,
-                        )
-                        .await
-                    {
-                        log::error!("failed to store transcript for segment {}: {e}", job.row_id);
-                    }
+                    Some(text.to_string())
+                };
+                // One write on both paths, so the stop check at the bottom of the
+                // loop still runs on every iteration — there is no `continue` here.
+                // Never log `text` itself: transcripts are recordings of speech
+                // near the user and are treated as PII.
+                if let Err(e) = storage
+                    .update_transcript_full(
+                        job.row_id,
+                        stored,
+                        engine.variant().to_string(),
+                        transcript.language,
+                    )
+                    .await
+                {
+                    log::error!(
+                        "failed to record transcription result for segment {}: {e}",
+                        job.row_id
+                    );
                 }
             }
             Ok(Err(e)) => log::warn!("transcription failed for segment {}: {e}", job.row_id),
@@ -1471,7 +1482,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transcribe_loop_skips_empty_transcript() {
+    async fn transcribe_loop_records_attempt_when_no_speech() {
         let (storage, row_id, opus_path, _dir) = persist_segment_with_opus().await;
         let engine = handle_with(base_engine(""));
         let (tx, rx) = mpsc::channel(4);
@@ -1485,7 +1496,16 @@ mod tests {
         transcribe_loop(engine, storage.clone(), rx, never_stop()).await;
 
         let seg = storage.get_audio_segment(row_id).await.unwrap();
-        assert!(seg.transcript.is_none());
+        assert!(
+            seg.transcript.is_none(),
+            "no speech means no transcript text — a blank row must never reach audio_fts"
+        );
+        assert_eq!(
+            seg.whisper_model.as_deref(),
+            Some("base"),
+            "but the attempt IS recorded; without this a backfill scheduler \
+             re-queues silent segments forever (HEU-620)"
+        );
     }
 
     #[tokio::test]
@@ -1642,7 +1662,8 @@ mod tests {
             })
             .await
             .unwrap();
-        // Whitespace only — trims to empty, so every job takes the skip path.
+        // Whitespace only — trims to empty, so every job takes the no-speech
+        // path (a NULL-transcript write since HEU-620, not a skip).
         let engine = handle_with(base_engine("   "));
         let (tx, rx) = mpsc::channel(4);
         for id in [row_id, queued_id] {

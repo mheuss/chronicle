@@ -214,6 +214,13 @@ impl Storage {
     /// This narrower setter is retained for the transcript-only case (e.g. a
     /// future backfill that has no model metadata to record) and currently has no
     /// production caller.
+    ///
+    /// **It cannot express "transcribed, no speech found."** Taking `String`, the
+    /// closest it can do is `""` — a fourth state that is neither NULL nor
+    /// speech, and that nothing queries for. To clear a transcript, or to record
+    /// a silent segment, call [`Storage::update_transcript_full`] with
+    /// `transcript: None` (HEU-620). A backfill scheduler in particular must
+    /// select on `whisper_model IS NULL`, never `transcript IS NULL`.
     pub async fn update_transcript(&self, id: i64, transcript: String) -> Result<()> {
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {
