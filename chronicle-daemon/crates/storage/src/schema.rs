@@ -27,9 +27,14 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             // The migration and its version stamp must land together. As two
             // separate autocommit statements, a crash between them leaves the
             // schema at version N stamped N-1, and the replay re-runs the whole
-            // migration. That is harmless today because 001 and 002 are entirely
-            // `IF NOT EXISTS` / `INSERT OR IGNORE`, but the next migration need
-            // not be — `ALTER TABLE ADD COLUMN` has no idempotent form.
+            // migration. That is harmless today, but by two different
+            // mechanisms: 001 and 002 are entirely `IF NOT EXISTS` /
+            // `INSERT OR IGNORE`, while 003 is a data UPDATE whose own
+            // `transcript IS NOT NULL` guard excludes the rows it already
+            // cleared (pinned by `migration_003_nulls_marker_transcripts_only`).
+            // Do not assume `IF NOT EXISTS` is the only pattern in play — the
+            // next migration need not be idempotent at all, and
+            // `ALTER TABLE ADD COLUMN` has no idempotent form.
             let tx = conn.unchecked_transaction()?;
             tx.execute_batch(migration)?;
             tx.pragma_update(None, "user_version", version)?;
@@ -48,10 +53,17 @@ mod tests {
     /// Migration 003 clears whisper's own markers from persisted transcripts.
     /// Stops at version 2 first, so `migrate` below runs only 003.
     ///
-    /// The fixture is built so each spared row is spared by exactly ONE clause
-    /// of the predicate — see `docs/development/storage.md`, "Testing a guard?":
-    /// when two guards can each independently spare a fixture, a test targeting
-    /// one of them proves nothing.
+    /// The fixture is built so that removing any single element of the
+    /// predicate changes the outcome for exactly one row — see
+    /// `docs/development/storage.md`, "Testing a guard?": when two guards can
+    /// each independently spare a fixture, a test targeting one of them proves
+    /// nothing. Verified by mutation: dropping `trim()` spares row 12, and
+    /// dropping the length, bracket, space, tab, newline, CR, or ASCII clause
+    /// pulls in row 8, 7, 5, 9, 10, 11, or 6 respectively.
+    ///
+    /// `transcript IS NOT NULL` is the one element that cannot be pinned by
+    /// outcome — NULL never satisfies the other clauses either — so row 13
+    /// guards it indirectly, via the FTS integrity-check.
     #[test]
     fn migration_003_nulls_marker_transcripts_only() {
         let conn = Connection::open_in_memory().unwrap();
@@ -91,6 +103,24 @@ mod tests {
         // trap docs/development/storage.md warns about.
         insert(9, "[tab\there]");
         insert(10, "[nl\nhere]");
+        insert(11, "[cr\rhere]");
+        // Pins `trim()` itself. Every other fixture row is already
+        // whitespace-clean, so all six trim() calls are no-ops across them —
+        // delete `trim(` throughout the migration and they all still pass.
+        // This row is a marker ONLY after trimming, so it is cleared only if
+        // trim() is doing its job.
+        insert(12, "  [BLANK_AUDIO]  ");
+        // A row that was never transcribed. `transcript IS NOT NULL` must skip
+        // it, so the audio_au trigger never hands a NULL OLD.transcript to the
+        // FTS5 'delete' command — which is what the integrity-check below would
+        // catch.
+        conn.execute(
+            "INSERT INTO audio_segments
+               (id, start_timestamp, end_timestamp, source, audio_path, transcript, whisper_model, language)
+             VALUES (13, 1, 2, 'mic', '/tmp/x.opus', NULL, NULL, NULL)",
+            [],
+        )
+        .unwrap();
 
         migrate(&conn).unwrap();
 
@@ -164,6 +194,26 @@ mod tests {
             Some("[nl\nhere]"),
             "an internal newline survives (newline clause)"
         );
+        assert_eq!(
+            col(11, "transcript").as_deref(),
+            Some("[cr\rhere]"),
+            "an internal carriage return survives (CR clause)"
+        );
+        assert_eq!(
+            col(12, "transcript"),
+            None,
+            "a marker padded with whitespace is still a marker (trim clause)"
+        );
+        assert_eq!(
+            col(13, "transcript"),
+            None,
+            "an untranscribed row is untouched — it was already NULL"
+        );
+        assert_eq!(
+            col(13, "whisper_model"),
+            None,
+            "and it stays untranscribed: the migration must not stamp it"
+        );
         // A spared row keeps every column, not just its text.
         assert_eq!(
             col(3, "language").as_deref(),
@@ -189,6 +239,22 @@ mod tests {
         // External-content FTS5 desyncs silently; ask SQLite directly.
         conn.execute_batch("INSERT INTO audio_fts(audio_fts) VALUES('integrity-check')")
             .expect("audio_fts must stay consistent with audio_segments");
+
+        // Replay safety. `migrate` is version-gated, so running it again is a
+        // no-op and proves nothing — apply the migration body directly instead.
+        // A crash between `execute_batch` and the `user_version` stamp replays
+        // exactly this, and `transcript IS NOT NULL` is what makes it harmless.
+        conn.execute_batch(MIGRATIONS[2]).unwrap();
+        let changed: i64 = conn
+            .query_row("SELECT changes()", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            changed, 0,
+            "replaying 003 must clear nothing further — already-cleared rows are \
+             excluded by `transcript IS NOT NULL`"
+        );
+        conn.execute_batch("INSERT INTO audio_fts(audio_fts) VALUES('integrity-check')")
+            .expect("audio_fts must survive a replay too");
     }
 
     #[test]

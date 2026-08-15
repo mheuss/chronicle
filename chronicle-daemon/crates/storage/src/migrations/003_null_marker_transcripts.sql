@@ -6,10 +6,19 @@
 -- this migration was written against, `audio` matched 174 rows and `blank`
 -- matched 171, almost all of them silence.
 --
--- The predicate mirrors `is_whisper_marker` in the transcription crate: the
+-- The predicate follows `is_whisper_marker` in the transcription crate: the
 -- ENTIRE trimmed transcript must be one bracketed ASCII token with no internal
 -- whitespace. Note SQLite's LIKE treats '[' as an ordinary character, so '[%]'
 -- means "starts with [ and ends with ]".
+--
+-- It is not an exact mirror, and the difference is deliberate. The Rust rule
+-- rejects any `char::is_whitespace`; SQL has no such predicate, so this names
+-- the four whitespace characters whisper actually emits (space, tab, CR, LF).
+-- Vertical tab and form feed are therefore treated as ordinary characters
+-- here. A transcript that is one bracketed ASCII token whose ONLY internal
+-- whitespace is a form feed would be cleared here and spared by the Rust
+-- rule. No such row exists in the live database and whisper has no path to
+-- producing one, so the divergence is recorded rather than closed.
 --
 -- Each clause rules out a different way of destroying real speech:
 --
@@ -54,4 +63,5 @@ WHERE transcript IS NOT NULL
   AND instr(trim(transcript), ' ') = 0
   AND instr(trim(transcript), char(9)) = 0
   AND instr(trim(transcript), char(10)) = 0
+  AND instr(trim(transcript), char(13)) = 0
   AND length(trim(transcript)) = length(CAST(trim(transcript) AS BLOB));
