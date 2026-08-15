@@ -217,9 +217,8 @@ fn is_whisper_marker(s: &str) -> bool {
 /// that is the caller's business — see `pipeline::transcribe_loop`.
 ///
 /// whisper-rs 0.14.4 exposes no per-segment `no_speech_prob`, so probability
-/// filtering of music/noise is deferred (see the design §4); the
-/// `suppress_blank` whisper param, this marker filter, and the empty check are
-/// the combined guard.
+/// filtering of music/noise is deferred (HEU-472); the `suppress_blank` whisper
+/// param, this marker filter, and the empty check are the combined guard.
 pub fn concat_segment_text<'a>(segments: impl IntoIterator<Item = &'a str>) -> String {
     let mut out = String::new();
     for text in segments {

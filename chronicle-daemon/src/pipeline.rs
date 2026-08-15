@@ -296,11 +296,13 @@ pub async fn transcribe_loop(
                         job.row_id
                     );
                     // Language goes NULL too. whisper reports a detection even
-                    // for silence, and it is made on noise — the live database
-                    // has silent rows stamped `nn` (Nynorsk). `search.rs` reads
-                    // this column back out to callers, so keeping it would leave
-                    // one fabricated value in a row whose whole purpose is to
-                    // say truthfully what happened.
+                    // for silence, derived from noise: on the live database the
+                    // no-speech rows carry `en` (165 of them) and `nn` (3), and
+                    // neither means anything — `en` is the more misleading of
+                    // the two precisely because it looks plausible. `search.rs`
+                    // reads this column back out to callers, so keeping it would
+                    // leave one fabricated value in a row whose whole purpose is
+                    // to say truthfully what happened.
                     (None, None)
                 } else {
                     (Some(text.to_string()), transcript.language)
