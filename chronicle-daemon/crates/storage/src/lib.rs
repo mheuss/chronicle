@@ -226,10 +226,15 @@ impl Storage {
     /// Attach transcript + model variant + detected language in one update.
     /// Reuses the `audio_fts` reindex trigger that fires on any audio_segments
     /// update, so writing the transcript indexes it for search.
+    ///
+    /// `transcript: None` records that transcription ran and found no speech.
+    /// That is a different state from an untranscribed row, which has no
+    /// `whisper_model` — see HEU-620. Passing `None` also clears any previous
+    /// transcript from `audio_fts` via the same trigger.
     pub async fn update_transcript_full(
         &self,
         id: i64,
-        transcript: String,
+        transcript: Option<String>,
         whisper_model: String,
         language: Option<String>,
     ) -> Result<()> {
@@ -239,7 +244,7 @@ impl Storage {
             audio::update_transcript_full(
                 &conn,
                 id,
-                &transcript,
+                transcript.as_deref(),
                 &whisper_model,
                 language.as_deref(),
             )

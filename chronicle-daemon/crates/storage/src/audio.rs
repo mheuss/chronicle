@@ -58,10 +58,14 @@ pub(crate) fn update_transcript(conn: &Connection, id: i64, transcript: &str) ->
     Ok(())
 }
 
+/// `transcript: None` records that transcription ran and found no speech — a
+/// different state from an untranscribed row, which has no `whisper_model`
+/// (HEU-620). Passing `None` also clears any previous transcript from
+/// `audio_fts`, because the `audio_au` trigger reindexes on every update.
 pub(crate) fn update_transcript_full(
     conn: &Connection,
     id: i64,
-    transcript: &str,
+    transcript: Option<&str>,
     whisper_model: &str,
     language: Option<&str>,
 ) -> Result<()> {
@@ -212,7 +216,14 @@ mod tests {
         let conn = setup_db();
         let id = insert(&conn, &sample_meta()).unwrap();
 
-        update_transcript_full(&conn, id, "quarterly budget review", "base", Some("en")).unwrap();
+        update_transcript_full(
+            &conn,
+            id,
+            Some("quarterly budget review"),
+            "base",
+            Some("en"),
+        )
+        .unwrap();
 
         let seg = get(&conn, id).unwrap();
         assert_eq!(seg.transcript.as_deref(), Some("quarterly budget review"));
@@ -241,6 +252,62 @@ mod tests {
     #[test]
     fn update_transcript_full_nonexistent_id_errors() {
         let conn = setup_db();
-        assert!(update_transcript_full(&conn, 999, "x", "base", None).is_err());
+        assert!(update_transcript_full(&conn, 999, Some("x"), "base", None).is_err());
+    }
+
+    #[test]
+    fn update_transcript_full_records_attempt_with_null_transcript() {
+        let conn = setup_db();
+        // sample_meta() arrives WITH a transcript, so this also proves the
+        // update clears text that was already there.
+        let id = insert(&conn, &sample_meta()).unwrap();
+
+        update_transcript_full(&conn, id, None, "small", Some("en")).unwrap();
+
+        let seg = get(&conn, id).unwrap();
+        assert!(
+            seg.transcript.is_none(),
+            "a silent segment stores no transcript text, and any prior text is cleared"
+        );
+        assert_eq!(
+            seg.whisper_model.as_deref(),
+            Some("small"),
+            "the attempt is recorded, which is what distinguishes it from untranscribed \
+             (deliberately not sample_meta's \"base\" — that would pass without the write)"
+        );
+        assert_eq!(seg.language.as_deref(), Some("en"));
+    }
+
+    #[test]
+    fn update_transcript_full_null_transcript_clears_fts() {
+        let conn = setup_db();
+        let id = insert(&conn, &sample_meta()).unwrap();
+        // sample_meta's transcript is "meeting notes about project timeline".
+        let indexed: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM audio_fts WHERE audio_fts MATCH 'timeline'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            indexed, 1,
+            "precondition: the row is indexed before we clear"
+        );
+
+        update_transcript_full(&conn, id, None, "base", None).unwrap();
+
+        // The audio_au trigger issues the FTS5 'delete' with the OLD value,
+        // so nulling the transcript must remove its terms from the index.
+        // This is what makes the Task 4 migration clear search pollution as a
+        // side effect rather than needing to touch audio_fts directly.
+        let after: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM audio_fts WHERE audio_fts MATCH 'timeline'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, 0, "clearing the transcript must clear the FTS index");
     }
 }

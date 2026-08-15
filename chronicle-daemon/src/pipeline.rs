@@ -294,7 +294,7 @@ pub async fn transcribe_loop(
                     if let Err(e) = storage
                         .update_transcript_full(
                             job.row_id,
-                            text,
+                            Some(text),
                             engine.variant().to_string(),
                             transcript.language,
                         )
