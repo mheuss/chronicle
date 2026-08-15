@@ -15,10 +15,12 @@
 --
 --   length >= 3        '[]' is punctuation, not a marker.
 --   no space/tab/nl    A bracketed aside in prose survives. This is what
---                      spares the live row that reads
+--                      spares the live row (id 1501) that begins
 --                      "[ Background noise ] Kind of a family for some
---                      time. [ Background noise ]" -- markers wrapped
---                      around genuine speech.
+--                      time. [ Background noise ]..." -- markers wrapped
+--                      around genuine speech. Abridged: the full row is
+--                      115 characters and ends with two more of the same
+--                      marker.
 --   char len = byte    THE ASCII TEST, and the one that is easy to omit.
 --   len                Chinese, Japanese and Thai have no inter-word spaces,
 --                      so a bracketed phrase in those scripts is a single
