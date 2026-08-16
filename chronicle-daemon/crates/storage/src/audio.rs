@@ -62,6 +62,12 @@ pub(crate) fn update_transcript(conn: &Connection, id: i64, transcript: &str) ->
 /// different state from an untranscribed row, which has no `whisper_model`
 /// (HEU-620). Passing `None` also clears any previous transcript from
 /// `audio_fts`, because the `audio_au` trigger reindexes on every update.
+///
+/// **This function does no normalization.** It will write `Some("")` — the
+/// fourth state — exactly as given. Trimming, the blank-to-`None` collapse, and
+/// the pairing that clears `language` alongside all live one level up in
+/// [`crate::Storage::update_transcript_full`]. Go through the wrapper unless you
+/// have a specific reason not to.
 pub(crate) fn update_transcript_full(
     conn: &Connection,
     id: i64,

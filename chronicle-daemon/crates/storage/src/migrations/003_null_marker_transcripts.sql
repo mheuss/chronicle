@@ -13,15 +13,22 @@
 --
 -- It is not an exact mirror, and the three differences are deliberate.
 --
--- GRANULARITY, and this is the big one: `is_whisper_marker` runs per whisper
--- SEGMENT, before concatenation. This predicate runs on the whole CONCATENATED
--- transcript. So `[Music] [Music] [Music]` (live row 1404) is three segments the
--- runtime rule would drop individually, joined into one string this rule spares
--- because of the spaces between them. That mismatch is the mechanism behind
--- most of what the migration leaves behind -- six pure-marker rows survive, and
--- `audio_fts` still matches `music` and `silence` against them. Not closable
--- here: a rule loose enough to catch those also catches live row 1501,
--- `[ Background noise ] Kind of a family for some time. ...`.
+-- GRANULARITY: `is_whisper_marker` runs per whisper SEGMENT, before
+-- concatenation. This predicate runs on the whole CONCATENATED transcript. So
+-- `[Music] [Music] [Music]` (live row 1404) is three segments the runtime rule
+-- would drop individually, joined into one string this rule spares because of
+-- the spaces between them.
+--
+-- That accounts for exactly TWO of the six pure-marker rows the migration
+-- leaves behind -- 1060 `[silence] [silence]` and 1404 `[Music] [Music]
+-- [Music]`. The other four (`[ Inaudible ]`, `[Distant by the wind]`,
+-- `[sad music]`, `[報告 ]`) are single markers whose internal whitespace or
+-- non-ASCII content spares them under BOTH rules, at any granularity -- see
+-- HEU-622. `audio_fts` keeps matching those rows on their words (`music`,
+-- `silence`, `inaudible`, `distant`, `wind`, among others).
+--
+-- Not closable here either way: a rule loose enough to catch them also catches
+-- live row 1501, `[ Background noise ] Kind of a family for some time. ...`.
 --
 -- INTERNAL whitespace: the Rust rule rejects any `char::is_whitespace`; SQL
 -- has no such predicate, so the clauses below name the four characters

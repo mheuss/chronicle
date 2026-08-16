@@ -633,6 +633,12 @@ mod tests {
     /// Asserted so the limitation is visible in the suite. If a future change
     /// makes this return `"the [sic] answer"`, that is an improvement — update
     /// the test and close HEU-622.
+    ///
+    /// One caveat before drawing that conclusion: the expected `"the  answer"`
+    /// has a DOUBLE space, an artifact of both neighbours keeping their own
+    /// spacing across the dropped segment. A change to how the join handles
+    /// whitespace runs would also fail this test, and that has nothing to do
+    /// with HEU-622. Check which of the two moved before deciding.
     #[test]
     fn concat_segment_text_drops_bracketed_token_split_into_own_segment() {
         let segs = ["the ", "[sic]", " answer"];

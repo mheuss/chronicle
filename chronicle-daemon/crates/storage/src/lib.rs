@@ -238,10 +238,19 @@ impl Storage {
     /// `whisper_model` — see HEU-620. Passing `None` also clears any previous
     /// transcript from `audio_fts` via the same trigger.
     ///
-    /// An all-whitespace `Some` is normalized to `None`, so the three-state
-    /// encoding cannot be broken from here: `Some("")` would otherwise persist a
-    /// fourth state that is neither NULL nor speech and that nothing queries for.
-    /// Callers need not trim first.
+    /// Transcript text is trimmed, and an all-whitespace `Some` normalizes to
+    /// `None`, so the three-state encoding cannot be broken from here:
+    /// `Some("")` would otherwise persist a fourth state that is neither NULL
+    /// nor speech and that nothing queries for. Callers need not trim first —
+    /// padding is stripped rather than stored, so a sloppy `Some("  hi  ")`
+    /// cannot land a padded row in `audio_fts` either (BR-4).
+    ///
+    /// **`language` is cleared with it.** A `transcript NULL` row that still
+    /// carries a language is precisely the shape migration 003 exists to remove:
+    /// whisper reports a detection even for silence, derived from noise, and
+    /// `search.rs` hands that column back to callers. `pipeline::transcribe_loop`
+    /// already pairs them; this makes the pairing hold for every other caller
+    /// too, so the invariant lives at the boundary rather than in one call site.
     ///
     /// # Backfill guidance
     ///
@@ -273,8 +282,16 @@ impl Storage {
         whisper_model: String,
         language: Option<String>,
     ) -> Result<()> {
-        // Collapse the fourth state at the boundary — see the note above.
-        let transcript = transcript.filter(|t| !t.trim().is_empty());
+        // Collapse the fourth state at the boundary — see the note above. Trim
+        // rather than merely test, and clear `language` alongside, so no caller
+        // can write a row shape the migration would have to clean up later.
+        let (transcript, language) = match transcript
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+        {
+            text @ Some(_) => (text, language),
+            None => (None, None),
+        };
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
@@ -503,11 +520,18 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    /// The three-state encoding must not be breakable through the public API.
-    /// `Some("")` and `Some("   ")` would each persist a fourth state — neither
-    /// NULL nor speech, and queried by nothing — so they collapse to NULL here.
-    /// Today's only caller trims first, which is exactly why this needs its own
-    /// test: the guard is unreachable from production and would rot unnoticed.
+    /// The three-state encoding must not be breakable through
+    /// `update_transcript_full`. `Some("")` and `Some("   ")` would each persist
+    /// a fourth state — neither NULL nor speech, and queried by nothing — so
+    /// they collapse to NULL here, taking `language` with them.
+    ///
+    /// Scoped deliberately: [`Storage::update_transcript`] is also public, takes
+    /// `String`, and CAN still write `""`. Its own docs say so. It has no
+    /// production caller, which is why the hole is documented rather than closed.
+    ///
+    /// Today's only `update_transcript_full` caller trims first, which is exactly
+    /// why this needs its own test: the guard is unreachable from production and
+    /// would rot unnoticed.
     #[tokio::test]
     async fn update_transcript_full_normalizes_blank_transcript_to_null() {
         let dir = tempdir().unwrap();
@@ -542,12 +566,58 @@ mod tests {
                 seg.transcript.is_none(),
                 "a blank transcript ({blank:?}) must collapse to NULL, not persist a fourth state"
             );
+            assert!(
+                seg.language.is_none(),
+                "language is cleared with the transcript ({blank:?}) — a NULL-transcript row \
+                 carrying a language is the shape migration 003 exists to remove"
+            );
             assert_eq!(
                 seg.whisper_model.as_deref(),
                 Some("base"),
                 "the attempt is still recorded"
             );
         }
+    }
+
+    /// The trim is real, not just a test: padding is stripped rather than
+    /// stored, so a caller that skips its own trim cannot land a padded row in
+    /// `audio_fts` (BR-4). `language` survives here — the pairing only fires
+    /// when the transcript collapses to nothing.
+    #[tokio::test]
+    async fn update_transcript_full_trims_stored_transcript() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::open(StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        })
+        .await
+        .unwrap();
+
+        let id = storage
+            .insert_audio_segment(crate::models::AudioSegmentMetadata {
+                start_timestamp: 1_700_000_000_000,
+                end_timestamp: 1_700_000_030_000,
+                source: "mic".into(),
+                audio_path: "/data/audio/seg.opus".into(),
+                transcript: None,
+                whisper_model: None,
+                language: None,
+            })
+            .await
+            .unwrap();
+
+        storage
+            .update_transcript_full(id, Some("  hi  ".into()), "base".into(), Some("en".into()))
+            .await
+            .unwrap();
+
+        let seg = storage.get_audio_segment(id).await.unwrap();
+        assert_eq!(seg.transcript.as_deref(), Some("hi"), "padding is stripped");
+        assert_eq!(
+            seg.language.as_deref(),
+            Some("en"),
+            "language survives when there IS speech"
+        );
     }
 
     #[tokio::test]

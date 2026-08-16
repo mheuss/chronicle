@@ -51,6 +51,7 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             // Do not assume `IF NOT EXISTS` is the only pattern in play — the
             // next migration need not be idempotent at all, and
             // `ALTER TABLE ADD COLUMN` has no idempotent form.
+            //
             // Announce before running. 003 is the first migration that mutates
             // existing user data rather than only shaping the schema, and it
             // cannot be undone from inside the app — so "when did my transcripts
@@ -66,13 +67,25 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             tx.pragma_update(None, "user_version", version)?;
             tx.commit()?;
 
+            // Report "nothing cleared" ONLY when that is measured. A count we
+            // could not read is not a count of zero, and on an irreversible
+            // migration a confidently wrong "no transcripts cleared" is worse
+            // than saying nothing.
             match (before, rows_with_transcript(conn)) {
-                (Some(b), Some(a)) if b != a => log::info!(
+                (Some(b), Some(a)) if b > a => log::info!(
                     "migration {version} cleared {} transcript(s); \
                      {a} row(s) still hold text",
                     b - a
                 ),
-                _ => log::info!("migration {version} applied (no transcripts cleared)"),
+                (Some(b), Some(a)) if b < a => log::info!(
+                    "migration {version} added {} transcript(s); \
+                     {a} row(s) now hold text",
+                    a - b
+                ),
+                (Some(_), Some(_)) => {
+                    log::info!("migration {version} applied (no transcripts cleared)")
+                }
+                _ => log::info!("migration {version} applied (transcript count unavailable)"),
             }
         }
     }
