@@ -747,8 +747,10 @@ mod tests {
         // SQL side's `trim()` with row 12; this is the Rust side.
         //
         // It also shows the words staying apart across the dropped segment, but
-        // that alone is already covered by `_joins_and_trims` and
-        // `_drops_marker_but_keeps_speech`.
+        // that alone is already covered three times over — by `_joins_and_trims`,
+        // `_drops_marker_but_keeps_speech`, and
+        // `_drops_bracketed_token_split_into_own_segment`. Each puts a word on
+        // either side of a boundary and asserts the spaces survive.
         let segs = ["hello", " [BLANK_AUDIO]", " world"];
         assert_eq!(concat_segment_text(segs.iter().copied()), "hello world");
     }
