@@ -387,7 +387,9 @@ mod tests {
         // Replay safety. `migrate` is version-gated, so running it again is a
         // no-op and proves nothing — apply the migration body directly instead.
         // A crash between `execute_batch` and the `user_version` stamp replays
-        // exactly this, and `transcript IS NOT NULL` is what makes it harmless.
+        // exactly this, and NULL propagation through the transcript-reading
+        // clauses is what makes it harmless — not `transcript IS NOT NULL`,
+        // which yields false rather than NULL. See this test's doc comment.
         // Count rows rather than read `changes()`: in a batch that only
         // reflects the LAST DML statement, so if 003 ever grows a second one
         // the assertion would silently stop covering the UPDATE.
@@ -404,8 +406,9 @@ mod tests {
         assert_eq!(
             with_text(),
             before,
-            "replaying 003 must clear nothing further — every clause propagates \
-             NULL, so an already-cleared row can never match again"
+            "replaying 003 must clear nothing further — every clause that READS \
+             transcript propagates NULL, so an already-cleared row can never \
+             match again"
         );
         conn.execute_batch("INSERT INTO audio_fts(audio_fts) VALUES('integrity-check')")
             .expect("audio_fts must survive a replay too");

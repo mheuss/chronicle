@@ -192,10 +192,12 @@ pub enum TranscriptionError {
 /// function deliberately keeps.
 ///
 /// (The live database also holds `[silence] [silence]` and `[Music] [Music]
-/// [Music]`, but those are not examples of this: they are multi-marker strings,
-/// and this function runs per segment, so it never receives one as input. They
-/// predate the filter — with it in place each `[silence]` segment is dropped
-/// before concatenation. See `003_null_marker_transcripts.sql`, GRANULARITY.)
+/// [Music]`. Those are weaker evidence, not stronger: whether whisper ever hands
+/// this function a whole multi-marker string as ONE segment is not recoverable
+/// from a stored transcript. Either way the outcome is the same — split across
+/// segments each `[silence]` is dropped individually, and packed into one
+/// segment the internal space spares it here. The four rows above need no such
+/// assumption. See `003_null_marker_transcripts.sql`, GRANULARITY.)
 ///
 /// It errs in both directions, knowingly:
 ///
@@ -373,10 +375,15 @@ pub fn decode_opus_16k_mono(path: &Path) -> Result<Vec<f32>, TranscriptionError>
 /// `language` on such a result is **not** required to be `None`, and
 /// `TranscriptionEngine`'s is not — whisper reports a detection even for
 /// silence, derived from noise. Implementations need not suppress it, because
-/// no caller is permitted to trust it: `Storage::update_transcript_full` clears
-/// `language` whenever the transcript collapses to nothing, so a fabricated
-/// value can never reach the database. Stated here because this trait doc is
-/// where a second implementor would look for the rule.
+/// `Storage::update_transcript_full` clears `language` whenever the transcript
+/// collapses to nothing, so a language fabricated on THAT result cannot reach
+/// the database.
+///
+/// Scoped deliberately: it is not a storage-wide invariant (see that method's
+/// own docs). A row whose text does not collapse keeps whatever language it was
+/// given — which is why the six pure-marker rows migration 003 knowingly spares
+/// still carry a noise-derived one. Stated here because this trait doc is where
+/// a second implementor would look for the rule.
 pub trait Transcriber: Send + Sync {
     fn transcribe(&self, pcm_16k_mono: &[f32]) -> Result<Transcript, TranscriptionError>;
     /// The resolved model variant, written to the transcript row.
@@ -731,12 +738,17 @@ mod tests {
     }
 
     #[test]
-    fn concat_segment_text_does_not_glue_words_across_a_dropped_marker() {
-        // Dropping a segment drops its whitespace too. whisper emits a leading
-        // space per segment, so the surviving neighbour carries its own
-        // separator and the words stay apart. If that ever stops being true this
-        // silently corrupts speech into "helloworld", which no other assertion
-        // would catch.
+    fn concat_segment_text_drops_a_marker_carrying_a_leading_space() {
+        // Pins the `trim()` INSIDE `is_whisper_marker`, which nothing else does.
+        // whisper emits a leading space per segment, so the marker arrives as
+        // `" [BLANK_AUDIO]"` — without the trim it is not recognised, survives
+        // as text, and lands in the transcript. Delete that trim and this is the
+        // only assertion in the suite that fails. The migration fixture pins the
+        // SQL side's `trim()` with row 12; this is the Rust side.
+        //
+        // It also shows the words staying apart across the dropped segment, but
+        // that alone is already covered by `_joins_and_trims` and
+        // `_drops_marker_but_keeps_speech`.
         let segs = ["hello", " [BLANK_AUDIO]", " world"];
         assert_eq!(concat_segment_text(segs.iter().copied()), "hello world");
     }

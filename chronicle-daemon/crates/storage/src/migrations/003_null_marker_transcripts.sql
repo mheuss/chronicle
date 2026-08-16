@@ -98,10 +98,9 @@
 -- noise -- of the live database's 169 no-speech rows, 166 carry 'en' and 3
 -- carry 'nn' (Nynorsk), and neither means anything; 'en' is the more
 -- misleading of the two precisely because it looks plausible. search.rs reads
--- the column
--- back out to callers. Leaving it populated here would make a migrated legacy
--- row disagree with a freshly written one about the same state, which is
--- exactly the ambiguity this ticket exists to remove.
+-- the column back out to callers. Leaving it populated here would make a
+-- migrated legacy row disagree with a freshly written one about the same
+-- state, which is exactly the ambiguity this ticket exists to remove.
 --
 -- The audio_au trigger fires per row and reindexes audio_fts via the FTS5
 -- 'delete' command with the OLD value. Never touch audio_fts directly here --
