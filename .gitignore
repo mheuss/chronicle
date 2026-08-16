@@ -40,6 +40,9 @@ CLAUDE.md
 .claude/settings.local.json
 chronicle-daemon/.claude/settings.local.json
 
+# S.O.P. scratch — finish-branch writes the review diff here each run
+.sop-tmp/
+
 docs/plans/
 docs/development/
 docs/decisions/
