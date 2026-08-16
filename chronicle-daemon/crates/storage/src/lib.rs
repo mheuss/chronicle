@@ -249,8 +249,16 @@ impl Storage {
     /// carries a language is precisely the shape migration 003 exists to remove:
     /// whisper reports a detection even for silence, derived from noise, and
     /// `search.rs` hands that column back to callers. `pipeline::transcribe_loop`
-    /// already pairs them; this makes the pairing hold for every other caller
-    /// too, so the invariant lives at the boundary rather than in one call site.
+    /// already pairs them; this makes the pairing hold for every caller of *this
+    /// function*.
+    ///
+    /// It is **not** a storage-wide invariant, and do not read it as one.
+    /// [`Storage::insert_audio_segment`] takes `transcript` and `language` as
+    /// independent fields of [`AudioSegmentMetadata`] and inserts them
+    /// unguarded, so that path can still create the shape this one prevents. No
+    /// caller does today — every production insert passes both as `None` — but
+    /// an insert path that starts recording transcripts would need the pairing
+    /// applied there too.
     ///
     /// # Backfill guidance
     ///

@@ -281,6 +281,11 @@ mod tests {
             "the attempt is recorded, which is what distinguishes it from untranscribed \
              (deliberately not sample_meta's \"base\" — that would pass without the write)"
         );
+        // NULL transcript + a language IS the shape migration 003 exists to
+        // remove — asserted here deliberately, because THIS function does no
+        // normalization and must be shown not to. The pairing that prevents it
+        // lives in `Storage::update_transcript_full`; see its docs. Do not read
+        // this assertion as the sanctioned row shape.
         assert_eq!(seg.language.as_deref(), Some("en"));
     }
 

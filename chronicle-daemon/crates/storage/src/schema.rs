@@ -85,6 +85,13 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
                 (Some(_), Some(_)) => {
                     log::info!("migration {version} applied (no transcripts cleared)")
                 }
+                // No count beforehand but one after: a fresh database, where the
+                // table did not exist until this migration created it. Nothing
+                // could have been cleared, and saying "unavailable" would
+                // contradict `rows_with_transcript`'s own contract.
+                (None, Some(a)) => log::info!(
+                    "migration {version} applied (no prior transcripts; {a} row(s) hold text)"
+                ),
                 _ => log::info!("migration {version} applied (transcript count unavailable)"),
             }
         }

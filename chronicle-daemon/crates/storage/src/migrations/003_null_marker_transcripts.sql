@@ -14,18 +14,22 @@
 -- It is not an exact mirror, and the three differences are deliberate.
 --
 -- GRANULARITY: `is_whisper_marker` runs per whisper SEGMENT, before
--- concatenation. This predicate runs on the whole CONCATENATED transcript. So
--- `[Music] [Music] [Music]` (live row 1404) is three segments the runtime rule
--- would drop individually, joined into one string this rule spares because of
--- the spaces between them.
+-- concatenation. This predicate runs on the whole CONCATENATED transcript.
+-- whisper emits each marker as its own segment, so a row like `[Music] [Music]
+-- [Music]` (live row 1404) reaches the database as three segments the runtime
+-- rule drops individually, joined into one string this rule spares because of
+-- the spaces between them. (Segment boundaries are not recoverable from a
+-- stored transcript, so that is the mechanism, not a claim about that row's
+-- history.)
 --
 -- That accounts for exactly TWO of the six pure-marker rows the migration
 -- leaves behind -- 1060 `[silence] [silence]` and 1404 `[Music] [Music]
 -- [Music]`. The other four (`[ Inaudible ]`, `[Distant by the wind]`,
 -- `[sad music]`, `[報告 ]`) are single markers whose internal whitespace or
 -- non-ASCII content spares them under BOTH rules, at any granularity -- see
--- HEU-622. `audio_fts` keeps matching those rows on their words (`music`,
--- `silence`, `inaudible`, `distant`, `wind`, among others).
+-- HEU-622. `audio_fts` keeps matching all six on their words: `music`
+-- (1404, 1453), `silence` (1060), `inaudible` (1147), `distant` and `wind`
+-- (1326).
 --
 -- Not closable here either way: a rule loose enough to catch them also catches
 -- live row 1501, `[ Background noise ] Kind of a family for some time. ...`.
