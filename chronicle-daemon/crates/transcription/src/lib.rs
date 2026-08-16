@@ -183,12 +183,29 @@ pub enum TranscriptionError {
 /// above and land in `audio_fts` as searchable words (FTS5 tokenizes
 /// `[BLANK_AUDIO]` into `blank` and `audio`).
 ///
-/// The rule is structural rather than an allow-list: whisper's marker
-/// vocabulary is not stable across models, but every marker is a single
-/// bracketed ASCII token with no internal whitespace.
+/// **This is a heuristic biased toward keeping text, not a definition of what a
+/// marker is.** It is structural rather than an allow-list because whisper's
+/// marker vocabulary is not stable across models — but it does not follow that
+/// every marker fits this shape, and rows this pipeline itself wrote prove
+/// otherwise: `[ Inaudible ]`, `[sad music]`, `[Distant by the wind]`,
+/// `[silence] [silence]`, `[報告 ]`. Every one is pure marker text that this
+/// function deliberately keeps.
 ///
-/// All three inner conditions earn their place, and each rules out a different
-/// false positive:
+/// It errs in both directions, knowingly:
+///
+/// - **Misses** markers with internal whitespace or non-ASCII content (the rows
+///   above). They survive into `transcript` and `audio_fts`. Widening the rule
+///   to catch them would put real speech at risk — live row 1501 reads
+///   `[ Background noise ] Kind of a family for some time. …`, and any rule
+///   loose enough to catch `[silence] [silence]` also catches that.
+/// - **Over-matches** a bracketed ASCII token that is genuinely speech, when
+///   whisper isolates it in its own segment. `["the ", "[sic]", " answer"]`
+///   yields `"the  answer"` — pinned by
+///   `concat_segment_text_drops_bracketed_token_split_into_own_segment`, which
+///   asserts the loss rather than hiding it. Nothing structural distinguishes
+///   `[sic]` from `[Motor]`; see HEU-622.
+///
+/// Given that, each inner condition rules out a different false positive:
 ///
 /// - **non-empty** — `[]` is not a marker.
 /// - **ASCII** — this is the one that keeps the guard honest in spaceless
@@ -198,8 +215,10 @@ pub enum TranscriptionError {
 ///   inside the brackets keeps `[这是一个完整的句子]` as speech while still
 ///   dropping `[BLANK_AUDIO]`. Without it this function silently deletes real
 ///   transcript text, and only for non-English users.
-/// - **whitespace-free** — a bracketed aside in space-delimited prose
-///   ("the [sic] answer") survives.
+/// - **whitespace-free** — a bracketed aside survives *when whisper keeps it in
+///   one segment with its surrounding words*. That caveat is load-bearing: the
+///   filter runs per segment, so this condition cannot protect a token whisper
+///   split out on its own.
 fn is_whisper_marker(s: &str) -> bool {
     let Some(inner) = s
         .trim()
@@ -593,10 +612,46 @@ mod tests {
     fn concat_segment_text_keeps_brackets_inside_prose() {
         // A bracketed aside in real speech keeps its spaces, so the whitespace
         // check leaves it alone. Losing this would silently truncate transcripts.
+        // NOTE the single segment: that is what makes this pass. See the
+        // split-segment test below for the case where it does not.
         let segs = ["the [sic] answer"];
         assert_eq!(
             concat_segment_text(segs.iter().copied()),
             "the [sic] answer"
+        );
+    }
+
+    /// Pins a KNOWN LOSS rather than a guarantee.
+    ///
+    /// `is_whisper_marker` runs per segment, and whisper's boundaries are
+    /// timing-dependent. When it isolates a bracketed ASCII token, that token is
+    /// dropped whether it is a marker or genuine speech — nothing structural
+    /// separates `[sic]` from `[Motor]`. The sibling test above passes only
+    /// because it puts the whole sentence in one segment, which was giving false
+    /// confidence in a case it never exercised.
+    ///
+    /// Asserted so the limitation is visible in the suite. If a future change
+    /// makes this return `"the [sic] answer"`, that is an improvement — update
+    /// the test and close HEU-622.
+    #[test]
+    fn concat_segment_text_drops_bracketed_token_split_into_own_segment() {
+        let segs = ["the ", "[sic]", " answer"];
+        assert_eq!(
+            concat_segment_text(segs.iter().copied()),
+            "the  answer",
+            "a bracketed token in its own segment is dropped — known limitation, HEU-622"
+        );
+    }
+
+    /// The other side of the same mechanism, and the reason it is worth having:
+    /// a marker whisper splits out is removed cleanly while the speech beside it
+    /// survives. This is the common real-world shape — live rows 1082 and 1396.
+    #[test]
+    fn concat_segment_text_drops_split_marker_but_keeps_neighbouring_speech() {
+        let segs = ["[BLANK_AUDIO]", " >> I haven't got anybody to hold."];
+        assert_eq!(
+            concat_segment_text(segs.iter().copied()),
+            ">> I haven't got anybody to hold."
         );
     }
 

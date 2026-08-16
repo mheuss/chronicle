@@ -11,7 +11,17 @@
 -- whitespace. Note SQLite's LIKE treats '[' as an ordinary character, so '[%]'
 -- means "starts with [ and ends with ]".
 --
--- It is not an exact mirror, and the two differences are deliberate.
+-- It is not an exact mirror, and the three differences are deliberate.
+--
+-- GRANULARITY, and this is the big one: `is_whisper_marker` runs per whisper
+-- SEGMENT, before concatenation. This predicate runs on the whole CONCATENATED
+-- transcript. So `[Music] [Music] [Music]` (live row 1404) is three segments the
+-- runtime rule would drop individually, joined into one string this rule spares
+-- because of the spaces between them. That mismatch is the mechanism behind
+-- most of what the migration leaves behind -- six pure-marker rows survive, and
+-- `audio_fts` still matches `music` and `silence` against them. Not closable
+-- here: a rule loose enough to catch those also catches live row 1501,
+-- `[ Background noise ] Kind of a family for some time. ...`.
 --
 -- INTERNAL whitespace: the Rust rule rejects any `char::is_whitespace`; SQL
 -- has no such predicate, so the clauses below name the four characters

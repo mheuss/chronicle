@@ -17,6 +17,20 @@ pub(crate) fn setup_connection(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Count rows currently holding transcript text, for the migration log line.
+///
+/// Returns `None` rather than erroring when the table does not exist yet — on a
+/// fresh database, migration 001 is what creates it, so this is called before
+/// there is anything to count. A failure here must never fail a migration.
+fn rows_with_transcript(conn: &Connection) -> Option<i64> {
+    conn.query_row(
+        "SELECT count(*) FROM audio_segments WHERE transcript IS NOT NULL",
+        [],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
 /// Run pending migrations. Uses PRAGMA user_version to track progress.
 pub(crate) fn migrate(conn: &Connection) -> Result<()> {
     let current_version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -37,10 +51,29 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             // Do not assume `IF NOT EXISTS` is the only pattern in play — the
             // next migration need not be idempotent at all, and
             // `ALTER TABLE ADD COLUMN` has no idempotent form.
+            // Announce before running. 003 is the first migration that mutates
+            // existing user data rather than only shaping the schema, and it
+            // cannot be undone from inside the app — so "when did my transcripts
+            // change?" has to be answerable from the daemon log. `execute_batch`
+            // discards `changes()`, so the count is reported by counting the
+            // affected shape either side of the batch rather than by restructuring
+            // the migration into single statements.
+            log::info!("applying storage migration {version}");
+            let before = rows_with_transcript(conn);
+
             let tx = conn.unchecked_transaction()?;
             tx.execute_batch(migration)?;
             tx.pragma_update(None, "user_version", version)?;
             tx.commit()?;
+
+            match (before, rows_with_transcript(conn)) {
+                (Some(b), Some(a)) if b != a => log::info!(
+                    "migration {version} cleared {} transcript(s); \
+                     {a} row(s) still hold text",
+                    b - a
+                ),
+                _ => log::info!("migration {version} applied (no transcripts cleared)"),
+            }
         }
     }
 
