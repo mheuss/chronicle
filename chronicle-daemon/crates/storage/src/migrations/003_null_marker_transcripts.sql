@@ -1,0 +1,123 @@
+-- HEU-620: clear whisper's own markers from persisted transcripts.
+--
+-- whisper.cpp emits [BLANK_AUDIO] (and [Motor], [_BEG_], ...) as ordinary
+-- segment text. Those passed the empty-text guard, were stored as transcripts,
+-- and were tokenized into audio_fts as searchable words -- on the database
+-- this migration was written against, `audio` matched 174 rows and `blank`
+-- matched 171, almost all of them silence.
+--
+-- The predicate follows `is_whisper_marker` in the transcription crate: the
+-- ENTIRE trimmed transcript must be one bracketed ASCII token with no internal
+-- whitespace. Note SQLite's LIKE treats '[' as an ordinary character, so '[%]'
+-- means "starts with [ and ends with ]".
+--
+-- It is not an exact mirror, and the three differences are deliberate.
+--
+-- GRANULARITY: `is_whisper_marker` runs per whisper SEGMENT, before
+-- concatenation. This predicate runs on the whole CONCATENATED transcript.
+-- The two rules therefore see different strings, and can disagree in both
+-- directions. Conservative: a stored string holding several markers, such as
+-- row 1404 `[Music] [Music] [Music]`, is spared here because the whole string
+-- is not one bracketed token. That row predates the runtime filter -- with the
+-- filter in place each `[Music]` segment is dropped before concatenation, so
+-- nothing of that shape is written today. Aggressive: if whisper splits one
+-- marker across segments -- `" [Motor"` then `"]"` -- neither fragment is a
+-- marker on its own, so the runtime rule keeps both; `concat_segment_text`
+-- joins them with NO separator and trims, and the resulting `[Motor]` is
+-- cleared here. (Segment boundaries are not recoverable from a stored
+-- transcript, so both of these are mechanisms derived from the two predicates,
+-- not claims about how any one row was produced.)
+--
+-- The conservative direction accounts for exactly TWO of the six pure-marker
+-- rows the migration leaves behind -- 1060 `[silence] [silence]` and 1404
+-- `[Music] [Music] [Music]`. The other four (`[ Inaudible ]`,
+-- `[Distant by the wind]`, `[sad music]`, `[報告 ]`) are single markers whose
+-- internal whitespace or non-ASCII content spares them under BOTH rules, at
+-- any granularity -- see HEU-622. `audio_fts` keeps matching all six on their
+-- words: `music` (1404, 1453), `silence` (1060), `inaudible` (1147), `distant`
+-- and `wind` (1326), `報告` (1427).
+--
+-- Not closable here either way: a rule loose enough to catch them also catches
+-- live row 1501, which is `[ Background noise ]` wrapped around ordinary
+-- conversation. (Transcript text is captured audio, so rows are cited by id and
+-- shape here, never quoted.)
+--
+-- INTERNAL whitespace: the Rust rule rejects any `char::is_whitespace`; SQL
+-- has no such predicate, so the clauses below name the four characters
+-- whisper actually emits (space, tab, CR, LF). Within ASCII that leaves
+-- exactly vertical tab and form feed unnamed, and non-ASCII whitespace is
+-- already excluded by the ASCII clause. So a transcript that is one bracketed
+-- ASCII token whose ONLY internal whitespace is a form feed would be cleared
+-- here and spared by the Rust rule. That is the only aggressive divergence the
+-- whitespace clauses introduce -- the granularity split above is the other one,
+-- from a different cause. No such row exists in the live database and whisper
+-- has no path to producing one, so it is recorded rather than closed.
+--
+-- LEADING/TRAILING whitespace: SQLite's `trim(X)` with no second argument
+-- strips U+0020 only -- not tab, CR or LF. So "<TAB>[BLANK_AUDIO]" is spared
+-- here and cleared by the Rust rule, which trims all whitespace. This
+-- divergence always runs toward SPARING, so it can never destroy speech.
+--
+-- Each clause rules out a different way of destroying real speech:
+--
+--   whisper_model      PROVENANCE. Every clause below asks "does this LOOK
+--   IS NOT NULL        like a marker?", and a bracketed ASCII token is not
+--                      proof whisper wrote it. Only the pipeline stamps
+--                      whisper_model, so a NULL model means some other path
+--                      produced this text and there is no evidence a marker
+--                      is what it is. Without this clause a hand-written
+--                      '[sic]' is destroyed AND its row is left reading
+--                      "never transcribed" (transcript NULL, model NULL),
+--                      which is the exact ambiguity HEU-620 exists to remove
+--                      -- so the migration would manufacture the state it is
+--                      meant to eliminate. Costs nothing on the database this
+--                      was written against: all 169 rows the predicate clears
+--                      carry a model, so the clause spares none of them.
+--   length >= 3        '[]' is punctuation, not a marker.
+--   no space/tab/nl    A bracketed aside in prose survives. This is what
+--                      spares the live row (id 1501), which begins with
+--                      "[ Background noise ]" and continues into ordinary
+--                      conversation -- markers wrapped around genuine
+--                      speech. That row is 115 characters and repeats
+--                      "[ Background noise ]" four times in all; the
+--                      speech between them is what must not be lost.
+--                      Verify it with: SELECT length(transcript) FROM
+--                      audio_segments WHERE id = 1501;
+--   char len = byte    THE ASCII TEST, and the one that is easy to omit.
+--   len                Chinese, Japanese and Thai have no inter-word spaces,
+--                      so a bracketed phrase in those scripts is a single
+--                      whitespace-free token and the clause above cannot
+--                      tell it from a marker. In UTF-8, character count
+--                      equals byte count only when every character is ASCII,
+--                      so this clause keeps '[这是一个完整的句子]' while
+--                      still dropping '[BLANK_AUDIO]'. Without it this
+--                      migration irreversibly deletes transcript text, and
+--                      only for non-English users.
+--
+-- whisper_model is deliberately left in place. It is what marks the row as
+-- "transcription ran and found no speech" rather than "never transcribed".
+--
+-- language IS cleared, alongside the transcript. The pipeline stopped writing
+-- a language on no-speech rows because whisper's detection there is made on
+-- noise -- of the live database's 169 no-speech rows, 166 carry 'en' and 3
+-- carry 'nn' (Nynorsk), and neither means anything; 'en' is the more
+-- misleading of the two precisely because it looks plausible. search.rs reads
+-- the column back out to callers. Leaving it populated here would make a
+-- migrated legacy row disagree with a freshly written one about the same
+-- state, which is exactly the ambiguity this ticket exists to remove.
+--
+-- The audio_au trigger fires per row and reindexes audio_fts via the FTS5
+-- 'delete' command with the OLD value. Never touch audio_fts directly here --
+-- it is an external-content table and will corrupt if the two disagree.
+UPDATE audio_segments
+SET transcript = NULL,
+    language   = NULL
+WHERE transcript IS NOT NULL
+  AND whisper_model IS NOT NULL
+  AND length(trim(transcript)) >= 3
+  AND trim(transcript) LIKE '[%]'
+  AND instr(trim(transcript), ' ') = 0
+  AND instr(trim(transcript), char(9)) = 0
+  AND instr(trim(transcript), char(10)) = 0
+  AND instr(trim(transcript), char(13)) = 0
+  AND length(trim(transcript)) = length(CAST(trim(transcript) AS BLOB));

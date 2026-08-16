@@ -191,7 +191,11 @@ fn warn_abandoned_queue(abandoned: usize) {
 /// Heavy work (Opus decode + whisper) runs inside `spawn_blocking` so it never
 /// starves tokio workers (cf. HEU-480). Each pulled job is processed to
 /// completion before the next `recv`, so at most one whisper call is in flight
-/// (sequential). Empty results are skipped so blank rows never reach `audio_fts`.
+/// (sequential). An empty result is **recorded as an attempt** — `whisper_model`
+/// set, `transcript` and `language` NULL — so blank text still never reaches
+/// `audio_fts` while the row stays distinguishable from one that was never
+/// transcribed (HEU-620). It is deliberately not skipped; see the comment on the
+/// empty branch below.
 ///
 /// **Shutdown contract — this loop must outlive `audio_store_loop`.** It exits
 /// when the channel closes (every `TranscriptionSink` clone dropped) or when
@@ -215,7 +219,7 @@ fn warn_abandoned_queue(abandoned: usize) {
 ///
 /// The engine is resolved from the handle **once per job** and held for that
 /// whole job, so a model swap takes effect on the next segment and the
-/// transcript is produced and stamped by the same engine (design §3.3). A job
+/// transcript is produced and stamped by the same engine (HEU-589). A job
 /// that arrives while the handle is empty is skipped as idle — matching the
 /// sink's `Disabled` semantics — not treated as a failure.
 pub async fn transcribe_loop(
@@ -229,7 +233,7 @@ pub async fn transcribe_loop(
     while let Some(job) = rx.recv().await {
         // Resolve per job and hold for the whole job: the transcript is
         // produced AND stamped by the engine that ran it — a swap mid-queue
-        // affects the next job, never the current one (design §3.3).
+        // affects the next job, never the current one (HEU-589).
         let Some(engine) = engine.get() else {
             // Benign race with the sink's is_loaded gate: idle, not failing —
             // same "Disabled" semantics, no counter.
@@ -276,32 +280,54 @@ pub async fn transcribe_loop(
 
         match result {
             Ok(Ok(transcript)) => {
-                // Trim guards the seam, not this impl: `TranscriptionEngine` already
-                // trims via `concat_segment_text`, but the `Transcriber` trait
-                // promises nothing. Trim once and use it for both the check and the
-                // write, so a future impl returning "  hi  " can neither slip a
-                // whitespace-only row nor a padded one into `audio_fts` (BR-4).
+                // Whitespace normalization only, and deliberately only that: trim
+                // once and use it for both the check and the write, so a sloppy
+                // impl returning "  hi  " can land neither a padded nor a
+                // whitespace-only row in `audio_fts` (BR-4). Content-level
+                // filtering — dropping engine markers like `[BLANK_AUDIO]` — is
+                // the implementation's contract, documented on `Transcriber`,
+                // and is NOT re-derived here: the marker rule is whisper-specific,
+                // so applying it to every impl would corrupt the others' output.
                 let text = transcript.text.trim();
-                // if/else rather than `continue`: the stop check at the bottom of the
-                // loop must run on every iteration, including skipped segments.
-                if text.is_empty() {
+                // Empty means whisper ran and found no speech. Record the attempt
+                // with a NULL transcript rather than skipping the write: skipping
+                // also discards the fact that we tried, leaving the row
+                // indistinguishable from one that was never transcribed, which
+                // makes a backfill scheduler re-queue it forever (HEU-620).
+                let (stored, language) = if text.is_empty() {
                     log::debug!(
-                        "transcription skipped (no usable speech) for segment {}",
+                        "no usable speech in segment {} — recording the attempt",
                         job.row_id
                     );
+                    // Language goes NULL too. whisper reports a detection even
+                    // for silence, derived from noise: of the live database's
+                    // 169 no-speech rows, 166 carry `en` and 3 carry `nn`, and
+                    // neither means anything — `en` is the more misleading of
+                    // the two precisely because it looks plausible. `search.rs`
+                    // reads this column back out to callers, so keeping it would
+                    // leave one fabricated value in a row whose whole purpose is
+                    // to say truthfully what happened.
+                    (None, None)
                 } else {
-                    let text = text.to_string();
-                    if let Err(e) = storage
-                        .update_transcript_full(
-                            job.row_id,
-                            text,
-                            engine.variant().to_string(),
-                            transcript.language,
-                        )
-                        .await
-                    {
-                        log::error!("failed to store transcript for segment {}: {e}", job.row_id);
-                    }
+                    (Some(text.to_string()), transcript.language)
+                };
+                // One write on both paths, so the stop check at the bottom of the
+                // loop still runs on every iteration — there is no `continue` here.
+                // Never log `text` itself: transcripts are recordings of speech
+                // near the user and are treated as PII.
+                if let Err(e) = storage
+                    .update_transcript_full(
+                        job.row_id,
+                        stored,
+                        engine.variant().to_string(),
+                        language,
+                    )
+                    .await
+                {
+                    log::error!(
+                        "failed to record transcription result for segment {}: {e}",
+                        job.row_id
+                    );
                 }
             }
             Ok(Err(e)) => log::warn!("transcription failed for segment {}: {e}", job.row_id),
@@ -1471,7 +1497,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transcribe_loop_skips_empty_transcript() {
+    async fn transcribe_loop_records_attempt_when_no_speech() {
         let (storage, row_id, opus_path, _dir) = persist_segment_with_opus().await;
         let engine = handle_with(base_engine(""));
         let (tx, rx) = mpsc::channel(4);
@@ -1485,7 +1511,21 @@ mod tests {
         transcribe_loop(engine, storage.clone(), rx, never_stop()).await;
 
         let seg = storage.get_audio_segment(row_id).await.unwrap();
-        assert!(seg.transcript.is_none());
+        assert!(
+            seg.transcript.is_none(),
+            "no speech means no transcript text — a blank row must never reach audio_fts"
+        );
+        assert_eq!(
+            seg.whisper_model.as_deref(),
+            Some("base"),
+            "but the attempt IS recorded; without this a backfill scheduler \
+             re-queues silent segments forever (HEU-620)"
+        );
+        assert!(
+            seg.language.is_none(),
+            "whisper detects a language even on silence, from noise — the row \
+             must not carry a fabricated one"
+        );
     }
 
     #[tokio::test]
@@ -1622,11 +1662,12 @@ mod tests {
         );
     }
 
-    /// An empty transcript must not bypass the stop check. This is why the skip path
-    /// is `if/else` rather than `continue`: end-of-session tails are frequently
-    /// silent, so a realistic shutdown yields a *run* of empty results, and a
-    /// `continue` would jump straight back to `recv` past the flag — defeating the
-    /// grace bound in precisely the case it exists for.
+    /// The no-speech path must not bypass the stop check: end-of-session tails
+    /// are frequently silent, so a realistic shutdown yields a *run* of
+    /// no-speech results, and a `continue` there would jump straight back to
+    /// `recv` past the flag — defeating the grace bound in precisely the case
+    /// it exists for. Since HEU-620 that path writes a NULL transcript rather
+    /// than skipping, which is what the per-segment assertions below pin.
     #[tokio::test]
     async fn transcribe_loop_stops_after_empty_transcript() {
         let (storage, row_id, opus_path, _dir) = persist_segment_with_opus().await;
@@ -1642,7 +1683,8 @@ mod tests {
             })
             .await
             .unwrap();
-        // Whitespace only — trims to empty, so every job takes the skip path.
+        // Whitespace only — trims to empty, so every job takes the no-speech
+        // path (a NULL-transcript write since HEU-620, not a skip).
         let engine = handle_with(base_engine("   "));
         let (tx, rx) = mpsc::channel(4);
         for id in [row_id, queued_id] {
@@ -1663,12 +1705,27 @@ mod tests {
         .await
         .expect("empty transcript must not bypass stop_after_current");
 
-        for id in [row_id, queued_id] {
-            let seg = storage.get_audio_segment(id).await.unwrap();
-            assert!(
-                seg.transcript.is_none(),
-                "empty transcripts are never written (segment {id})"
-            );
-        }
+        // `stop` is true from the start, so iteration 1 records `row_id` and
+        // breaks, leaving `queued_id` untouched. Asserting the two SEPARATELY is
+        // what pins the ordering at the bottom of the loop ("checked *after* the
+        // write, never before it"). A shared `transcript.is_none()` assertion
+        // would hold for both and could no longer tell "wrote, then stopped"
+        // from "skipped, then stopped".
+        let done = storage.get_audio_segment(row_id).await.unwrap();
+        assert!(
+            done.transcript.is_none(),
+            "no speech, so no transcript text"
+        );
+        assert_eq!(
+            done.whisper_model.as_deref(),
+            Some("base"),
+            "the in-flight silent segment is recorded before the stop check"
+        );
+
+        let abandoned = storage.get_audio_segment(queued_id).await.unwrap();
+        assert!(
+            abandoned.whisper_model.is_none(),
+            "jobs past the stop point stay untranscribed, so backfill still picks them up"
+        );
     }
 }

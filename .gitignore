@@ -37,8 +37,12 @@ CLAUDE.md
 .claude/sop.md
 .claude/active-plan/
 .claude/scheduled_tasks.lock
+.claude/settings.json
 .claude/settings.local.json
 chronicle-daemon/.claude/settings.local.json
+
+# S.O.P. scratch — finish-branch writes the review diff here each run
+.sop-tmp/
 
 docs/plans/
 docs/development/

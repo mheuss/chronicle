@@ -177,14 +177,81 @@ pub enum TranscriptionError {
     Whisper(String),
 }
 
-/// Concatenate whisper sub-segment texts and trim. An empty result means "no
-/// usable speech" and the caller must skip the DB write so blank rows never reach
-/// `audio_fts`. whisper-rs 0.14.4 exposes no per-segment `no_speech_prob`, so
-/// probability filtering of music/noise is deferred (see the design §4); the
-/// `suppress_blank` whisper param plus this empty check is the 472 guard.
+/// True when `s` is entirely one bracketed whisper marker — `[BLANK_AUDIO]`,
+/// `[Motor]`, `[_BEG_]`. whisper.cpp emits these as ordinary segment text, so
+/// without this check they are indistinguishable from speech to every layer
+/// above and land in `audio_fts` as searchable words (FTS5 tokenizes
+/// `[BLANK_AUDIO]` into `blank` and `audio`).
+///
+/// **This is a heuristic biased toward keeping text, not a definition of what a
+/// marker is.** It is structural rather than an allow-list because whisper's
+/// marker vocabulary is not stable across models — but it does not follow that
+/// every marker fits this shape, and rows this pipeline itself wrote prove
+/// otherwise: `[ Inaudible ]`, `[sad music]`, `[Distant by the wind]`,
+/// `[報告 ]`. Every one is a single segment of pure marker text that this
+/// function deliberately keeps.
+///
+/// (The live database also holds `[silence] [silence]` and `[Music] [Music]
+/// [Music]`. Those are weaker evidence, not stronger: whether whisper ever hands
+/// this function a whole multi-marker string as ONE segment is not recoverable
+/// from a stored transcript. Either way the outcome is the same — split across
+/// segments each `[silence]` is dropped individually, and packed into one
+/// segment the internal space spares it here. The four rows above need no such
+/// assumption. See `003_null_marker_transcripts.sql`, GRANULARITY.)
+///
+/// It errs in both directions, knowingly:
+///
+/// - **Misses** markers with internal whitespace or non-ASCII content (the rows
+///   above). They survive into `transcript` and `audio_fts`. Widening the rule
+///   to catch them would put real speech at risk — live row 1501 is
+///   `[ Background noise ]` wrapped around ordinary conversation, and any rule
+///   loose enough to catch `[silence] [silence]` also catches that.
+/// - **Over-matches** a bracketed ASCII token that is genuinely speech, when
+///   whisper isolates it in its own segment. `["the ", "[sic]", " answer"]`
+///   yields `"the  answer"` — pinned by
+///   `concat_segment_text_drops_bracketed_token_split_into_own_segment`, which
+///   asserts the loss rather than hiding it. Nothing structural distinguishes
+///   `[sic]` from `[Motor]`; see HEU-622.
+///
+/// Given that, each inner condition rules out a different false positive:
+///
+/// - **non-empty** — `[]` is not a marker.
+/// - **ASCII** — this is the one that keeps the guard honest in spaceless
+///   scripts. `set_language(None)` means any language can come back, and a
+///   bracketed Chinese, Japanese, or Thai phrase is a single whitespace-free
+///   token, so whitespace alone cannot tell it from a marker. Requiring ASCII
+///   inside the brackets keeps `[这是一个完整的句子]` as speech while still
+///   dropping `[BLANK_AUDIO]`. Without it this function silently deletes real
+///   transcript text, and only for non-English users.
+/// - **whitespace-free** — a bracketed aside survives *when whisper keeps it in
+///   one segment with its surrounding words*. That caveat is load-bearing: the
+///   filter runs per segment, so this condition cannot protect a token whisper
+///   split out on its own.
+fn is_whisper_marker(s: &str) -> bool {
+    let Some(inner) = s
+        .trim()
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+    else {
+        return false;
+    };
+    !inner.is_empty() && inner.is_ascii() && !inner.contains(char::is_whitespace)
+}
+
+/// Concatenate whisper sub-segment texts and trim, dropping whisper's own
+/// markers, so a segment whisper filled with `[BLANK_AUDIO]` reads as empty
+/// here. An empty result means "no usable speech"; what the caller persists for
+/// that is the caller's business — see `pipeline::transcribe_loop`.
+///
+/// whisper-rs 0.14.4 exposes no per-segment `no_speech_prob`, so probability
+/// filtering of music/noise is deferred (HEU-472); the `suppress_blank` whisper
+/// param, this marker filter, and the empty check are the combined guard.
 pub fn concat_segment_text<'a>(segments: impl IntoIterator<Item = &'a str>) -> String {
     let mut out = String::new();
     for text in segments {
+        if is_whisper_marker(text) {
+            continue;
+        }
         out.push_str(text);
     }
     out.trim().to_string()
@@ -289,6 +356,34 @@ pub fn decode_opus_16k_mono(path: &Path) -> Result<Vec<f32>, TranscriptionError>
 
 /// A type that can turn 16 kHz mono PCM into a [`Transcript`]. The trait makes
 /// the transcribe loop testable with a fake — the real impl needs a model file.
+///
+/// # Contract
+///
+/// Implementations return **speech text only**, with engine-specific markers
+/// already removed — `TranscriptionEngine` does this via
+/// [`concat_segment_text`], which drops whisper.cpp's `[BLANK_AUDIO]` and
+/// friends. Content-level filtering is the implementation's job, not the
+/// caller's: the rule for what counts as a marker is engine-specific, and a
+/// caller applying one engine's rule to every implementation would corrupt
+/// output from the others.
+///
+/// An empty or whitespace-only result means **no usable speech was found**.
+/// That is a meaningful answer rather than a failure, and callers act on it:
+/// `pipeline::transcribe_loop` records it as an attempt with a NULL transcript
+/// (HEU-620). Return `Err` only when transcription could not be performed.
+///
+/// `language` on such a result is **not** required to be `None`, and
+/// `TranscriptionEngine`'s is not — whisper reports a detection even for
+/// silence, derived from noise. Implementations need not suppress it, because
+/// `Storage::update_transcript_full` clears `language` whenever the transcript
+/// collapses to nothing, so a language fabricated on THAT result cannot reach
+/// the database.
+///
+/// Scoped deliberately: it is not a storage-wide invariant (see that method's
+/// own docs). A row whose text does not collapse keeps whatever language it was
+/// given — which is why the six pure-marker rows migration 003 knowingly spares
+/// still carry a noise-derived one. Stated here because this trait doc is where
+/// a second implementor would look for the rule.
 pub trait Transcriber: Send + Sync {
     fn transcribe(&self, pcm_16k_mono: &[f32]) -> Result<Transcript, TranscriptionError>;
     /// The resolved model variant, written to the transcript row.
@@ -361,7 +456,8 @@ impl Transcriber for TranscriptionEngine {
             );
         }
 
-        // Empty-text guard (whisper-rs 0.14.4 has no per-segment no_speech_prob).
+        // Marker filter + empty-text guard (whisper-rs 0.14.4 has no
+        // per-segment no_speech_prob).
         let text = concat_segment_text(texts.iter().map(String::as_str));
         let language = state
             .full_lang_id_from_state()
@@ -511,6 +607,155 @@ mod tests {
     fn concat_segment_text_empty_for_whitespace_only() {
         let segs = ["   ", "\n\t"];
         assert_eq!(concat_segment_text(segs.iter().copied()), "");
+    }
+
+    #[test]
+    fn concat_segment_text_drops_blank_audio_marker() {
+        let segs = ["[BLANK_AUDIO]"];
+        assert_eq!(concat_segment_text(segs.iter().copied()), "");
+    }
+
+    #[test]
+    fn concat_segment_text_drops_marker_but_keeps_speech() {
+        let segs = ["hello ", "[BLANK_AUDIO]", " world"];
+        assert_eq!(concat_segment_text(segs.iter().copied()), "hello  world");
+    }
+
+    #[test]
+    fn concat_segment_text_drops_other_bracketed_markers() {
+        // `[Motor]` appears 3 times in the live database; `[_BEG_]` is another
+        // whisper.cpp emission. The rule is structural, not an allow-list.
+        let segs = ["[Motor]", "[_BEG_]"];
+        assert_eq!(concat_segment_text(segs.iter().copied()), "");
+    }
+
+    #[test]
+    fn concat_segment_text_keeps_brackets_inside_prose() {
+        // A bracketed aside in real speech keeps its spaces, so the whitespace
+        // check leaves it alone. Losing this would silently truncate transcripts.
+        // NOTE the single segment: that is what makes this pass. See the
+        // split-segment test below for the case where it does not.
+        let segs = ["the [sic] answer"];
+        assert_eq!(
+            concat_segment_text(segs.iter().copied()),
+            "the [sic] answer"
+        );
+    }
+
+    /// Pins a KNOWN LOSS rather than a guarantee.
+    ///
+    /// `is_whisper_marker` runs per segment, and whisper's boundaries are
+    /// timing-dependent. When it isolates a bracketed ASCII token, that token is
+    /// dropped whether it is a marker or genuine speech — nothing structural
+    /// separates `[sic]` from `[Motor]`. The sibling test above passes only
+    /// because it puts the whole sentence in one segment, which was giving false
+    /// confidence in a case it never exercised.
+    ///
+    /// Asserted so the limitation is visible in the suite. If a future change
+    /// makes this return `"the [sic] answer"`, that is an improvement — update
+    /// the test and close HEU-622.
+    ///
+    /// One caveat before drawing that conclusion: the expected `"the  answer"`
+    /// has a DOUBLE space, an artifact of both neighbours keeping their own
+    /// spacing across the dropped segment. A change to how the join handles
+    /// whitespace runs would also fail this test, and that has nothing to do
+    /// with HEU-622. Check which of the two moved before deciding.
+    #[test]
+    fn concat_segment_text_drops_bracketed_token_split_into_own_segment() {
+        let segs = ["the ", "[sic]", " answer"];
+        assert_eq!(
+            concat_segment_text(segs.iter().copied()),
+            "the  answer",
+            "a bracketed token in its own segment is dropped — known limitation, HEU-622"
+        );
+    }
+
+    /// The other side of the same mechanism, and the reason it is worth having:
+    /// a marker whisper splits out is removed cleanly while the speech beside it
+    /// survives. This is the common real-world shape — live rows 1082 and 1396,
+    /// whose text is captured audio and so is not reproduced here. The fixture
+    /// below mirrors their shape (leading marker, then `>>`-prefixed speech)
+    /// with invented words; nothing in the assertion depends on which words.
+    #[test]
+    fn concat_segment_text_drops_split_marker_but_keeps_neighbouring_speech() {
+        let segs = ["[BLANK_AUDIO]", " >> and the second thing we tried."];
+        assert_eq!(
+            concat_segment_text(segs.iter().copied()),
+            ">> and the second thing we tried."
+        );
+    }
+
+    #[test]
+    fn concat_segment_text_keeps_multiword_bracketed_text() {
+        // Isolates the whitespace condition: this string satisfies both the
+        // bracket-shape and ASCII checks, so only the whitespace check can
+        // spare it. A fixture that two conditions can each independently spare
+        // proves nothing about either.
+        let segs = ["[hello world]"];
+        assert_eq!(concat_segment_text(segs.iter().copied()), "[hello world]");
+    }
+
+    #[test]
+    fn concat_segment_text_keeps_bracketed_text_in_spaceless_scripts() {
+        // Isolates the ASCII condition. CJK and Thai have no inter-word
+        // spaces, so a bracketed phrase is a single whitespace-free token and
+        // the whitespace check cannot spare it — only the ASCII check can.
+        // Dropping these would be silent transcript loss for exactly the
+        // users the auto-detect path exists to serve.
+        for s in ["[这是一个完整的句子]", "[こんにちは世界]", "[สวัสดีชาวโลก]"]
+        {
+            let segs = [s];
+            assert_eq!(
+                concat_segment_text(segs.iter().copied()),
+                s,
+                "spaceless-script speech must survive the marker filter"
+            );
+        }
+    }
+
+    #[test]
+    fn concat_segment_text_keeps_unclosed_bracket() {
+        // Isolates the closing-bracket condition: nothing else in the test set
+        // fails without it.
+        let segs = ["[unclosed"];
+        assert_eq!(concat_segment_text(segs.iter().copied()), "[unclosed");
+    }
+
+    #[test]
+    fn concat_segment_text_keeps_empty_brackets() {
+        // Isolates the non-empty condition. `[]` carries no marker name, so it
+        // is punctuation, not a whisper emission.
+        let segs = ["[]"];
+        assert_eq!(concat_segment_text(segs.iter().copied()), "[]");
+    }
+
+    #[test]
+    fn concat_segment_text_keeps_trailing_bracket_alone() {
+        // Isolates the OPENING-bracket condition, the mirror of
+        // `concat_segment_text_keeps_unclosed_bracket`. Without this, relaxing
+        // `strip_prefix('[')` away changes nothing in the suite and the leading
+        // bracket ships untested. The migration fixture pins the SQL half of the
+        // same guard with row 14; this is the Rust half.
+        let segs = ["sic]"];
+        assert_eq!(concat_segment_text(segs.iter().copied()), "sic]");
+    }
+
+    #[test]
+    fn concat_segment_text_drops_a_marker_carrying_a_leading_space() {
+        // Pins the `trim()` INSIDE `is_whisper_marker`, which nothing else does.
+        // whisper emits a leading space per segment, so the marker arrives as
+        // `" [BLANK_AUDIO]"` — without the trim it is not recognised, survives
+        // as text, and lands in the transcript. Delete that trim and this is the
+        // only assertion in the suite that fails. The migration fixture pins the
+        // SQL side's `trim()` with row 12; this is the Rust side.
+        //
+        // It also shows the words staying apart across the dropped segment, but
+        // that alone is already covered three times over — by `_joins_and_trims`,
+        // `_drops_marker_but_keeps_speech`, and
+        // `_drops_bracketed_token_split_into_own_segment`. Each puts a word on
+        // either side of a boundary and asserts the spaces survive.
+        let segs = ["hello", " [BLANK_AUDIO]", " world"];
+        assert_eq!(concat_segment_text(segs.iter().copied()), "hello world");
     }
 
     #[test]

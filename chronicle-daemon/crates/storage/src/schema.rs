@@ -5,6 +5,7 @@ use crate::error::Result;
 const MIGRATIONS: &[&str] = &[
     include_str!("migrations/001_initial_schema.sql"),
     include_str!("migrations/002_path_indexes.sql"),
+    include_str!("migrations/003_null_marker_transcripts.sql"),
 ];
 
 /// Configure connection-level PRAGMAs. Call on every new connection.
@@ -14,6 +15,20 @@ pub(crate) fn setup_connection(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "busy_timeout", 5000)?;
     Ok(())
+}
+
+/// Count rows currently holding transcript text, for the migration log line.
+///
+/// Returns `None` rather than erroring when the table does not exist yet — on a
+/// fresh database, migration 001 is what creates it, so this is called before
+/// there is anything to count. A failure here must never fail a migration.
+fn rows_with_transcript(conn: &Connection) -> Option<i64> {
+    conn.query_row(
+        "SELECT count(*) FROM audio_segments WHERE transcript IS NOT NULL",
+        [],
+        |r| r.get(0),
+    )
+    .ok()
 }
 
 /// Run pending migrations. Uses PRAGMA user_version to track progress.
@@ -26,13 +41,102 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             // The migration and its version stamp must land together. As two
             // separate autocommit statements, a crash between them leaves the
             // schema at version N stamped N-1, and the replay re-runs the whole
-            // migration. That is harmless today because 001 and 002 are entirely
-            // `IF NOT EXISTS` / `INSERT OR IGNORE`, but the next migration need
-            // not be — `ALTER TABLE ADD COLUMN` has no idempotent form.
+            // migration. That is harmless today, but by two different
+            // mechanisms: 001 and 002 are entirely `IF NOT EXISTS` /
+            // `INSERT OR IGNORE`, while 003 is a data UPDATE that cannot
+            // re-touch a row it already cleared — every clause of its WHERE
+            // propagates NULL, so a cleared (NULL) transcript makes the whole
+            // predicate NULL (asserted by
+            // `migration_003_nulls_marker_transcripts_only`).
+            // Do not assume `IF NOT EXISTS` is the only pattern in play — the
+            // next migration need not be idempotent at all, and
+            // `ALTER TABLE ADD COLUMN` has no idempotent form.
+            //
+            // Announce before running. 003 is the first migration that mutates
+            // existing user data rather than only shaping the schema, and it
+            // cannot be undone from inside the app — so "when did my transcripts
+            // change?" has to be answerable from the daemon log.
+            //
+            // `execute_batch` returns `Result<()>`, so it hands back no
+            // per-statement counts. `Connection::changes()` is still callable
+            // and would be correct for 003 as it stands — one UPDATE, and the
+            // `user_version` PRAGMA that follows modifies no rows — but it
+            // reports only the most recent INSERT/UPDATE/DELETE, so it would
+            // silently start reporting the wrong statement the moment a
+            // migration contains two. The count is taken by measuring the
+            // affected shape either side of the batch instead, which does not
+            // depend on how many statements the migration has.
+            log::info!("applying storage migration {version}");
+            // `rows_with_transcript` ends in `.ok()`, so a `None` from it means
+            // "the read failed" for any reason — missing table, SQLITE_BUSY, I/O
+            // error. Capture the table's existence separately, before the
+            // migration that may create it, so the fresh-database arm below
+            // rests on a fact instead of inferring one from an absent count.
+            //
+            // `count(*)` rather than `SELECT 1`: an aggregate with no `GROUP BY`
+            // always returns exactly one row — that missing `GROUP BY` is the
+            // load-bearing part — so an `Err` here means the read itself failed
+            // and can never mean "the table is absent". `SELECT 1` returns zero rows
+            // in the absent case, which rusqlite reports as
+            // `Err(QueryReturnedNoRows)` — collapsing the two states back into
+            // one and rebuilding the exact conflation this guard removes.
+            let had_table: Option<bool> = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master \
+                     WHERE type='table' AND name='audio_segments'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|n| n > 0)
+                .ok();
+            let before = rows_with_transcript(conn);
+
             let tx = conn.unchecked_transaction()?;
             tx.execute_batch(migration)?;
             tx.pragma_update(None, "user_version", version)?;
             tx.commit()?;
+
+            // Report "nothing cleared" ONLY when that is measured. A count we
+            // could not read is not a count of zero, and on an irreversible
+            // migration a confidently wrong "no transcripts cleared" is worse
+            // than saying nothing.
+            match (before, rows_with_transcript(conn)) {
+                (Some(b), Some(a)) if b > a => log::info!(
+                    "migration {version} cleared {} transcript(s); \
+                     {a} row(s) still hold text",
+                    b - a
+                ),
+                (Some(b), Some(a)) if b < a => log::info!(
+                    "migration {version} added {} transcript(s); \
+                     {a} row(s) now hold text",
+                    a - b
+                ),
+                (Some(_), Some(_)) => {
+                    log::info!("migration {version} applied (no transcripts cleared)")
+                }
+                // No count beforehand, and the table provably did not exist
+                // before this migration ran: a fresh database, where migration
+                // 001 creates it. Nothing could have been cleared. A `None`
+                // that is NOT explained by a missing table is a failed read,
+                // and falls through to the catch-all below rather than being
+                // reported as zero. So does an unreadable probe, which arrives
+                // here as `had_table == None`.
+                //
+                // Deliberately not pinned by a test: this arm selects a log
+                // message and nothing else, and the crate has no log-capture
+                // harness. Deleting the guard leaves the suite green — do not
+                // read that as a test covering it.
+                (None, Some(a)) if had_table == Some(false) => log::info!(
+                    "migration {version} applied (no prior transcripts; {a} row(s) hold text)"
+                ),
+                // Everything else: `(None, Some(_))` whose guard failed,
+                // `(Some(_), None)`, and `(None, None)`. These differ in WHICH
+                // count is missing — the before-count is available in the second
+                // — so the message says only what is true of all three: no delta
+                // can be stated. It deliberately does not claim both counts were
+                // unreadable.
+                _ => log::info!("migration {version} applied (transcript delta unavailable)"),
+            }
         }
     }
 
@@ -43,6 +147,279 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    /// Migration 003 clears whisper's own markers from persisted transcripts.
+    /// Stops at version 2 first, so `migrate` below runs only 003.
+    ///
+    /// The fixture is built so that removing any single element of the
+    /// predicate changes the outcome. The principle: when two clauses can each
+    /// independently spare a fixture row, a test aimed at one of them proves
+    /// nothing — so every clause needs a row that only it spares.
+    ///
+    /// Verified by mutation. Dropping `trim()` spares row 12; dropping the
+    /// provenance, length, space, tab, newline, CR, or ASCII clause pulls in
+    /// row 15, 8, 5, 9, 10, 11, or 6 respectively. The bracket clause is two
+    /// conditions in one, so it takes two rows: relaxing it to `LIKE '%]'`
+    /// pulls in row 14, relaxing it to `LIKE '[%'` pulls in row 7, and dropping
+    /// it outright pulls in both. The full predicate clears exactly rows 1, 2
+    /// and 12.
+    ///
+    /// `transcript IS NOT NULL` is the one element that is genuinely redundant:
+    /// dropping it leaves the cleared set identical, because every other clause
+    /// that READS `transcript` propagates NULL, so a NULL transcript makes the
+    /// whole WHERE evaluate to NULL and the row is never touched. Two caveats
+    /// on that wording, both measured: the clause itself yields *false* rather
+    /// than NULL, and so does `whisper_model IS NOT NULL` — which is true for a
+    /// cleared row, since the model survives, and so never rescues one either.
+    /// The clause stays because it states the intent at a glance, but NULL
+    /// propagation through the transcript-reading clauses — not this clause —
+    /// is what actually makes a replay harmless. Row 13 documents the case; it
+    /// does not pin it.
+    #[test]
+    fn migration_003_nulls_marker_transcripts_only() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_connection(&conn).unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.execute_batch(MIGRATIONS[1]).unwrap();
+        conn.pragma_update(None, "user_version", 2u32).unwrap();
+
+        // Seed a language on every row. Without it the "language is cleared"
+        // assertion below passes vacuously, since the column would be NULL
+        // already.
+        let insert = |id: i64, transcript: &str| {
+            conn.execute(
+                "INSERT INTO audio_segments
+                   (id, start_timestamp, end_timestamp, source, audio_path, transcript, whisper_model, language)
+                 VALUES (?1, 1, 2, 'mic', '/tmp/x.opus', ?2, 'base', 'nn')",
+                rusqlite::params![id, transcript],
+            )
+            .unwrap();
+        };
+        insert(1, "[BLANK_AUDIO]");
+        insert(2, "[Motor]");
+        insert(3, "the quick brown fox");
+        insert(4, "the [sic] answer");
+        insert(5, "[hello world]");
+        // Spaceless script: no internal whitespace, so ONLY the ASCII clause
+        // can spare it. Deleting this row would be irreversible loss of real
+        // speech, and only for non-English users.
+        insert(6, "[这是一个完整的句子]");
+        // Only the closing-bracket half of `LIKE '[%]'` spares this one.
+        insert(7, "[unclosed");
+        // ...and only the OPENING-bracket half spares this one. Without it,
+        // mutating the clause to `LIKE '%]'` changes nothing and the leading
+        // bracket goes untested.
+        insert(14, "sic]");
+        // Only the length clause spares this one.
+        insert(8, "[]");
+        // The Rust rule rejects ANY whitespace; SQL has to name each kind, so
+        // these two pin the tab and newline clauses. Without them those clauses
+        // could be deleted and every assertion would still pass.
+        insert(9, "[tab\there]");
+        insert(10, "[nl\nhere]");
+        insert(11, "[cr\rhere]");
+        // Pins `trim()` itself. Every other fixture row is already
+        // whitespace-clean, so every trim() call in the migration is a no-op
+        // across them — delete `trim(` throughout and they all still pass.
+        // This row is a marker ONLY after trimming, so it is cleared only if
+        // trim() is doing its job.
+        insert(12, "  [BLANK_AUDIO]  ");
+        // Pins the provenance clause, and ONLY that clause: a perfect marker
+        // by shape, with no whisper_model. Every look-alike test above would
+        // still pass with `whisper_model IS NOT NULL` deleted, so without this
+        // row the clause ships unpinned — the exact trap the rest of this
+        // fixture is built to avoid.
+        conn.execute(
+            "INSERT INTO audio_segments
+               (id, start_timestamp, end_timestamp, source, audio_path, transcript, whisper_model, language)
+             VALUES (15, 1, 2, 'mic', '/tmp/x.opus', '[BLANK_AUDIO]', NULL, 'nn')",
+            [],
+        )
+        .unwrap();
+        // A row that was never transcribed. `transcript IS NOT NULL` must skip
+        // it, so the audio_au trigger never hands a NULL OLD.transcript to the
+        // FTS5 'delete' command — which is what the integrity-check below would
+        // catch.
+        conn.execute(
+            "INSERT INTO audio_segments
+               (id, start_timestamp, end_timestamp, source, audio_path, transcript, whisper_model, language)
+             VALUES (13, 1, 2, 'mic', '/tmp/x.opus', NULL, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let col = |id: i64, c: &str| -> Option<String> {
+            conn.query_row(
+                &format!("SELECT {c} FROM audio_segments WHERE id = ?1"),
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(col(1, "transcript"), None, "[BLANK_AUDIO] is cleared");
+        assert_eq!(
+            col(2, "transcript"),
+            None,
+            "any bracketed ASCII token is cleared"
+        );
+
+        // language is cleared with the transcript, so a migrated legacy row
+        // matches what the pipeline now writes for the same state (HEU-620).
+        assert_eq!(
+            col(1, "language"),
+            None,
+            "a cleared row keeps no detected language"
+        );
+        // whisper_model survives — it is what still marks the row as attempted.
+        assert_eq!(
+            col(1, "whisper_model").as_deref(),
+            Some("base"),
+            "whisper_model survives — the row still reads as attempted, not untranscribed"
+        );
+
+        assert_eq!(
+            col(3, "transcript").as_deref(),
+            Some("the quick brown fox"),
+            "speech survives"
+        );
+        assert_eq!(
+            col(4, "transcript").as_deref(),
+            Some("the [sic] answer"),
+            "bracketed aside in prose survives (whitespace clause)"
+        );
+        assert_eq!(
+            col(5, "transcript").as_deref(),
+            Some("[hello world]"),
+            "multi-word bracket survives (whitespace clause)"
+        );
+        assert_eq!(
+            col(6, "transcript").as_deref(),
+            Some("[这是一个完整的句子]"),
+            "spaceless-script speech survives — only the ASCII clause spares this"
+        );
+        assert_eq!(
+            col(7, "transcript").as_deref(),
+            Some("[unclosed"),
+            "unclosed bracket survives (closing-bracket half of LIKE)"
+        );
+        assert_eq!(
+            col(14, "transcript").as_deref(),
+            Some("sic]"),
+            "a trailing bracket alone survives (opening-bracket half of LIKE)"
+        );
+        assert_eq!(
+            col(15, "transcript").as_deref(),
+            Some("[BLANK_AUDIO]"),
+            "a marker-shaped transcript with no whisper_model survives \
+             — only the provenance clause spares this"
+        );
+        assert_eq!(
+            col(15, "language").as_deref(),
+            Some("nn"),
+            "a spared row keeps its language — the UPDATE never touched it"
+        );
+        assert_eq!(
+            col(8, "transcript").as_deref(),
+            Some("[]"),
+            "empty brackets survive (length clause)"
+        );
+        assert_eq!(
+            col(9, "transcript").as_deref(),
+            Some("[tab\there]"),
+            "an internal tab survives (tab clause)"
+        );
+        assert_eq!(
+            col(10, "transcript").as_deref(),
+            Some("[nl\nhere]"),
+            "an internal newline survives (newline clause)"
+        );
+        assert_eq!(
+            col(11, "transcript").as_deref(),
+            Some("[cr\rhere]"),
+            "an internal carriage return survives (CR clause)"
+        );
+        assert_eq!(
+            col(12, "transcript"),
+            None,
+            "a marker padded with whitespace is still a marker (trim clause)"
+        );
+        assert_eq!(
+            col(13, "transcript"),
+            None,
+            "an untranscribed row is untouched — it was already NULL"
+        );
+        assert_eq!(
+            col(13, "whisper_model"),
+            None,
+            "and it stays untranscribed: the migration must not stamp it"
+        );
+        // A spared row keeps every column, not just its text.
+        assert_eq!(
+            col(3, "language").as_deref(),
+            Some("nn"),
+            "rows the migration does not touch are left entirely alone"
+        );
+
+        // The whole point of clearing them: the trigger reindexes audio_fts,
+        // so the marker's tokens stop matching. Without this the migration
+        // could pass while leaving the search pollution in place.
+        //
+        // Row 15 is the deliberate exception, and asserting the exact rowid
+        // rather than a count of zero is what keeps that honest. The provenance
+        // clause is not free: text that LOOKS like a marker but carries no
+        // model stays in the index and stays searchable. That is the trade —
+        // pollution we cannot attribute to whisper is left alone rather than
+        // destroyed — and this assertion is where it is visible.
+        let hits: Vec<i64> = conn
+            .prepare("SELECT rowid FROM audio_fts WHERE audio_fts MATCH 'blank' ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            hits,
+            vec![15],
+            "clearing a transcript must clear the FTS index too; only the \
+             provenance-spared row 15 may still match"
+        );
+
+        // External-content FTS5 desyncs silently; ask SQLite directly.
+        conn.execute_batch("INSERT INTO audio_fts(audio_fts) VALUES('integrity-check')")
+            .expect("audio_fts must stay consistent with audio_segments");
+
+        // Replay safety. `migrate` is version-gated, so running it again is a
+        // no-op and proves nothing — apply the migration body directly instead.
+        // A crash between `execute_batch` and the `user_version` stamp replays
+        // exactly this, and NULL propagation through the transcript-reading
+        // clauses is what makes it harmless — not `transcript IS NOT NULL`,
+        // which yields false rather than NULL. See this test's doc comment.
+        // Count rows rather than read `changes()`: in a batch that only
+        // reflects the LAST DML statement, so if 003 ever grows a second one
+        // the assertion would silently stop covering the UPDATE.
+        let with_text = || -> i64 {
+            conn.query_row(
+                "SELECT count(*) FROM audio_segments WHERE transcript IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let before = with_text();
+        conn.execute_batch(MIGRATIONS[2]).unwrap();
+        assert_eq!(
+            with_text(),
+            before,
+            "replaying 003 must clear nothing further — every clause that READS \
+             transcript propagates NULL, so an already-cleared row can never \
+             match again"
+        );
+        conn.execute_batch("INSERT INTO audio_fts(audio_fts) VALUES('integrity-check')")
+            .expect("audio_fts must survive a replay too");
+    }
 
     #[test]
     fn migration_creates_all_tables() {

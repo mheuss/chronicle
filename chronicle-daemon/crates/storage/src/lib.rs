@@ -214,6 +214,27 @@ impl Storage {
     /// This narrower setter is retained for the transcript-only case (e.g. a
     /// future backfill that has no model metadata to record) and currently has no
     /// production caller.
+    ///
+    /// It can write two rows HEU-620's three-state contract has no room for, and
+    /// the second is the worse one:
+    ///
+    /// 1. **It cannot express "transcribed, no speech found."** Taking `String`,
+    ///    the closest it can do is `""` — a fourth state that is neither NULL nor
+    ///    speech, and that nothing queries for.
+    /// 2. **It writes text without a model.** This setter never touches
+    ///    `whisper_model`, so any non-empty text it writes lands in a row that is
+    ///    simultaneously "has speech" (non-NULL `transcript`) and "needs
+    ///    transcription" (`whisper_model IS NULL`). A backfill using the
+    ///    sanctioned predicate would re-queue that row and overwrite real
+    ///    text — a worse outcome than the looping HEU-620 set out to fix.
+    ///    [`Storage::insert_audio_segment`] can produce the same shape, since
+    ///    `AudioSegmentMetadata` takes the two fields independently.
+    ///
+    /// Migration 003 will not clear such a row — its `whisper_model IS NOT NULL`
+    /// clause exists for exactly this — but nothing stops one being written.
+    /// To record a silent segment, call [`Storage::update_transcript_full`] with
+    /// `transcript: None` (HEU-620), whose docs also carry the backfill-predicate
+    /// guidance.
     pub async fn update_transcript(&self, id: i64, transcript: String) -> Result<()> {
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {
@@ -226,20 +247,82 @@ impl Storage {
     /// Attach transcript + model variant + detected language in one update.
     /// Reuses the `audio_fts` reindex trigger that fires on any audio_segments
     /// update, so writing the transcript indexes it for search.
+    ///
+    /// `transcript: None` records that transcription ran and found no speech.
+    /// That is a different state from an untranscribed row, which has no
+    /// `whisper_model` — see HEU-620. Passing `None` also clears any previous
+    /// transcript from `audio_fts` via the same trigger.
+    ///
+    /// Transcript text is trimmed, and an all-whitespace `Some` normalizes to
+    /// `None`, so the three-state encoding cannot be broken from here:
+    /// `Some("")` would otherwise persist a fourth state that is neither NULL
+    /// nor speech and that nothing queries for. Callers need not trim first —
+    /// padding is stripped rather than stored, so a sloppy `Some("  hi  ")`
+    /// cannot land a padded row in `audio_fts` either (BR-4).
+    ///
+    /// **`language` is cleared with it.** A `transcript NULL` row that still
+    /// carries a language is precisely the shape migration 003 exists to remove:
+    /// whisper reports a detection even for silence, derived from noise, and
+    /// `search.rs` hands that column back to callers. `pipeline::transcribe_loop`
+    /// already pairs them; this makes the pairing hold for every caller of *this
+    /// function*.
+    ///
+    /// It is **not** a storage-wide invariant, and do not read it as one.
+    /// [`Storage::insert_audio_segment`] takes `transcript` and `language` as
+    /// independent fields of [`AudioSegmentMetadata`] and inserts them
+    /// unguarded, so that path can still create the shape this one prevents. No
+    /// caller does today — every production insert passes both as `None` — but
+    /// an insert path that starts recording transcripts would need the pairing
+    /// applied there too.
+    ///
+    /// # Backfill guidance
+    ///
+    /// `whisper_model IS NULL` is the right predicate for routine work and
+    /// `transcript IS NULL` is not — the latter re-queues every silent segment
+    /// forever. But note what that costs: before HEU-620 a segment that produced
+    /// no text stayed NULL and was retried on the next pass, so an engine-side
+    /// regression healed itself. Now such a row is stamped with `whisper_model`
+    /// and routine backfill will never revisit it. That is not hypothetical —
+    /// `set_detect_language(true)` once returned empty text for every segment of
+    /// real speech — it is detect-only, and transcribing needs
+    /// `set_language(None)` (HEU-472).
+    ///
+    /// Recovering from that class of bug needs something wider than the routine
+    /// predicate — but not necessarily a destructive one. `transcript IS NULL AND
+    /// whisper_model IS NOT NULL` selects exactly the affected rows read-only, at
+    /// the cost of re-transcribing genuinely silent segments; re-NULLing
+    /// `whisper_model` first is the alternative, and it mutates. Reach for the
+    /// widened `SELECT` before the `UPDATE`.
+    ///
+    /// Separately, because `whisper_model` records the *variant*, the column
+    /// makes a variant-targeted re-run expressible without mutating anything
+    /// first (`whisper_model != 'large-v3'`). That is a property of the column,
+    /// not of the `whisper_model IS NULL` predicate, which by construction skips
+    /// every already-stamped row.
     pub async fn update_transcript_full(
         &self,
         id: i64,
-        transcript: String,
+        transcript: Option<String>,
         whisper_model: String,
         language: Option<String>,
     ) -> Result<()> {
+        // Collapse the fourth state at the boundary — see the note above. Trim
+        // rather than merely test, and clear `language` alongside, so no caller
+        // can write a row shape the migration would have to clean up later.
+        let (transcript, language) = match transcript
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+        {
+            text @ Some(_) => (text, language),
+            None => (None, None),
+        };
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             audio::update_transcript_full(
                 &conn,
                 id,
-                &transcript,
+                transcript.as_deref(),
                 &whisper_model,
                 language.as_deref(),
             )
@@ -460,6 +543,106 @@ impl r2d2::CustomizeConnection<rusqlite::Connection, rusqlite::Error> for Connec
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// The three-state encoding must not be breakable through
+    /// `update_transcript_full`. `Some("")` and `Some("   ")` would each persist
+    /// a fourth state — neither NULL nor speech, and queried by nothing — so
+    /// they collapse to NULL here, taking `language` with them.
+    ///
+    /// Scoped deliberately: [`Storage::update_transcript`] is also public, takes
+    /// `String`, and CAN still write `""`. Its own docs say so. It has no
+    /// production caller, which is why the hole is documented rather than closed.
+    ///
+    /// Today's only `update_transcript_full` caller trims first, which is exactly
+    /// why this needs its own test: the guard is unreachable from production and
+    /// would rot unnoticed.
+    #[tokio::test]
+    async fn update_transcript_full_normalizes_blank_transcript_to_null() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::open(StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        })
+        .await
+        .unwrap();
+
+        for blank in ["", "   ", "\n\t"] {
+            let id = storage
+                .insert_audio_segment(crate::models::AudioSegmentMetadata {
+                    start_timestamp: 1_700_000_000_000,
+                    end_timestamp: 1_700_000_030_000,
+                    source: "mic".into(),
+                    audio_path: "/data/audio/seg.opus".into(),
+                    transcript: Some("prior text".into()),
+                    whisper_model: None,
+                    language: None,
+                })
+                .await
+                .unwrap();
+
+            storage
+                .update_transcript_full(id, Some(blank.into()), "base".into(), Some("en".into()))
+                .await
+                .unwrap();
+
+            let seg = storage.get_audio_segment(id).await.unwrap();
+            assert!(
+                seg.transcript.is_none(),
+                "a blank transcript ({blank:?}) must collapse to NULL, not persist a fourth state"
+            );
+            assert!(
+                seg.language.is_none(),
+                "language is cleared with the transcript ({blank:?}) — a NULL-transcript row \
+                 carrying a language is the shape migration 003 exists to remove"
+            );
+            assert_eq!(
+                seg.whisper_model.as_deref(),
+                Some("base"),
+                "the attempt is still recorded"
+            );
+        }
+    }
+
+    /// The trim is real, not just a test: padding is stripped rather than
+    /// stored, so a caller that skips its own trim cannot land a padded row in
+    /// `audio_fts` (BR-4). `language` survives here — the pairing only fires
+    /// when the transcript collapses to nothing.
+    #[tokio::test]
+    async fn update_transcript_full_trims_stored_transcript() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::open(StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        })
+        .await
+        .unwrap();
+
+        let id = storage
+            .insert_audio_segment(crate::models::AudioSegmentMetadata {
+                start_timestamp: 1_700_000_000_000,
+                end_timestamp: 1_700_000_030_000,
+                source: "mic".into(),
+                audio_path: "/data/audio/seg.opus".into(),
+                transcript: None,
+                whisper_model: None,
+                language: None,
+            })
+            .await
+            .unwrap();
+
+        storage
+            .update_transcript_full(id, Some("  hi  ".into()), "base".into(), Some("en".into()))
+            .await
+            .unwrap();
+
+        let seg = storage.get_audio_segment(id).await.unwrap();
+        assert_eq!(seg.transcript.as_deref(), Some("hi"), "padding is stripped");
+        assert_eq!(
+            seg.language.as_deref(),
+            Some("en"),
+            "language survives when there IS speech"
+        );
+    }
 
     #[tokio::test]
     async fn open_creates_database_file() {
