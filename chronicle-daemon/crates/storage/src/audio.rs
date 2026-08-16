@@ -310,8 +310,8 @@ mod tests {
 
         // The audio_au trigger issues the FTS5 'delete' with the OLD value,
         // so nulling the transcript must remove its terms from the index.
-        // This is what makes the Task 4 migration clear search pollution as a
-        // side effect rather than needing to touch audio_fts directly.
+        // This is what makes migration 003 clear search pollution as a side
+        // effect rather than needing to touch audio_fts directly.
         let after: i64 = conn
             .query_row(
                 "SELECT count(*) FROM audio_fts WHERE audio_fts MATCH 'timeline'",

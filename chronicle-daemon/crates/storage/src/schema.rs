@@ -55,10 +55,17 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             // Announce before running. 003 is the first migration that mutates
             // existing user data rather than only shaping the schema, and it
             // cannot be undone from inside the app — so "when did my transcripts
-            // change?" has to be answerable from the daemon log. `execute_batch`
-            // discards `changes()`, so the count is reported by counting the
-            // affected shape either side of the batch rather than by restructuring
-            // the migration into single statements.
+            // change?" has to be answerable from the daemon log.
+            //
+            // `execute_batch` returns `Result<()>`, so it hands back no
+            // per-statement counts. `Connection::changes()` is still callable
+            // and would be correct for 003 as it stands — one UPDATE, and the
+            // `user_version` PRAGMA that follows modifies no rows — but it
+            // reports only the most recent INSERT/UPDATE/DELETE, so it would
+            // silently start reporting the wrong statement the moment a
+            // migration contains two. The count is taken by measuring the
+            // affected shape either side of the batch instead, which does not
+            // depend on how many statements the migration has.
             log::info!("applying storage migration {version}");
             // `rows_with_transcript` ends in `.ok()`, so a `None` from it means
             // "the read failed" for any reason — missing table, SQLITE_BUSY, I/O
