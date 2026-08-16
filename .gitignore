@@ -37,6 +37,7 @@ CLAUDE.md
 .claude/sop.md
 .claude/active-plan/
 .claude/scheduled_tasks.lock
+.claude/settings.json
 .claude/settings.local.json
 chronicle-daemon/.claude/settings.local.json
 
