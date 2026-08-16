@@ -15,21 +15,27 @@
 --
 -- GRANULARITY: `is_whisper_marker` runs per whisper SEGMENT, before
 -- concatenation. This predicate runs on the whole CONCATENATED transcript.
--- whisper emits each marker as its own segment, so a row like `[Music] [Music]
--- [Music]` (live row 1404) reaches the database as three segments the runtime
--- rule drops individually, joined into one string this rule spares because of
--- the spaces between them. (Segment boundaries are not recoverable from a
--- stored transcript, so that is the mechanism, not a claim about that row's
--- history.)
+-- The two rules therefore see different strings, and can disagree in both
+-- directions. Conservative: a stored string holding several markers, such as
+-- row 1404 `[Music] [Music] [Music]`, is spared here because the whole string
+-- is not one bracketed token. That row predates the runtime filter -- with the
+-- filter in place each `[Music]` segment is dropped before concatenation, so
+-- nothing of that shape is written today. Aggressive: if whisper splits one
+-- marker across segments -- `" [Motor"` then `"]"` -- neither fragment is a
+-- marker on its own, so the runtime rule keeps both; `concat_segment_text`
+-- joins them with NO separator and trims, and the resulting `[Motor]` is
+-- cleared here. (Segment boundaries are not recoverable from a stored
+-- transcript, so both of these are mechanisms derived from the two predicates,
+-- not claims about how any one row was produced.)
 --
--- That accounts for exactly TWO of the six pure-marker rows the migration
--- leaves behind -- 1060 `[silence] [silence]` and 1404 `[Music] [Music]
--- [Music]`. The other four (`[ Inaudible ]`, `[Distant by the wind]`,
--- `[sad music]`, `[報告 ]`) are single markers whose internal whitespace or
--- non-ASCII content spares them under BOTH rules, at any granularity -- see
--- HEU-622. `audio_fts` keeps matching all six on their words: `music`
--- (1404, 1453), `silence` (1060), `inaudible` (1147), `distant` and `wind`
--- (1326).
+-- The conservative direction accounts for exactly TWO of the six pure-marker
+-- rows the migration leaves behind -- 1060 `[silence] [silence]` and 1404
+-- `[Music] [Music] [Music]`. The other four (`[ Inaudible ]`,
+-- `[Distant by the wind]`, `[sad music]`, `[報告 ]`) are single markers whose
+-- internal whitespace or non-ASCII content spares them under BOTH rules, at
+-- any granularity -- see HEU-622. `audio_fts` keeps matching all six on their
+-- words: `music` (1404, 1453), `silence` (1060), `inaudible` (1147), `distant`
+-- and `wind` (1326), `報告` (1427).
 --
 -- Not closable here either way: a rule loose enough to catch them also catches
 -- live row 1501, `[ Background noise ] Kind of a family for some time. ...`.
@@ -40,8 +46,9 @@
 -- exactly vertical tab and form feed unnamed, and non-ASCII whitespace is
 -- already excluded by the ASCII clause. So a transcript that is one bracketed
 -- ASCII token whose ONLY internal whitespace is a form feed would be cleared
--- here and spared by the Rust rule. That is the one divergence running in the
--- aggressive direction. No such row exists in the live database and whisper
+-- here and spared by the Rust rule. That is the only aggressive divergence the
+-- whitespace clauses introduce -- the granularity split above is the other one,
+-- from a different cause. No such row exists in the live database and whisper
 -- has no path to producing one, so it is recorded rather than closed.
 --
 -- LEADING/TRAILING whitespace: SQLite's `trim(X)` with no second argument
