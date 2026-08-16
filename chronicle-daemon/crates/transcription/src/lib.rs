@@ -203,8 +203,8 @@ pub enum TranscriptionError {
 ///
 /// - **Misses** markers with internal whitespace or non-ASCII content (the rows
 ///   above). They survive into `transcript` and `audio_fts`. Widening the rule
-///   to catch them would put real speech at risk — live row 1501 reads
-///   `[ Background noise ] Kind of a family for some time. …`, and any rule
+///   to catch them would put real speech at risk — live row 1501 is
+///   `[ Background noise ]` wrapped around ordinary conversation, and any rule
 ///   loose enough to catch `[silence] [silence]` also catches that.
 /// - **Over-matches** a bracketed ASCII token that is genuinely speech, when
 ///   whisper isolates it in its own segment. `["the ", "[sic]", " answer"]`
@@ -672,13 +672,16 @@ mod tests {
 
     /// The other side of the same mechanism, and the reason it is worth having:
     /// a marker whisper splits out is removed cleanly while the speech beside it
-    /// survives. This is the common real-world shape — live rows 1082 and 1396.
+    /// survives. This is the common real-world shape — live rows 1082 and 1396,
+    /// whose text is captured audio and so is not reproduced here. The fixture
+    /// below mirrors their shape (leading marker, then `>>`-prefixed speech)
+    /// with invented words; nothing in the assertion depends on which words.
     #[test]
     fn concat_segment_text_drops_split_marker_but_keeps_neighbouring_speech() {
-        let segs = ["[BLANK_AUDIO]", " >> I haven't got anybody to hold."];
+        let segs = ["[BLANK_AUDIO]", " >> and the second thing we tried."];
         assert_eq!(
             concat_segment_text(segs.iter().copied()),
-            ">> I haven't got anybody to hold."
+            ">> and the second thing we tried."
         );
     }
 

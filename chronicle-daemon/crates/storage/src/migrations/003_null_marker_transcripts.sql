@@ -38,7 +38,9 @@
 -- and `wind` (1326), `報告` (1427).
 --
 -- Not closable here either way: a rule loose enough to catch them also catches
--- live row 1501, `[ Background noise ] Kind of a family for some time. ...`.
+-- live row 1501, which is `[ Background noise ]` wrapped around ordinary
+-- conversation. (Transcript text is captured audio, so rows are cited by id and
+-- shape here, never quoted.)
 --
 -- INTERNAL whitespace: the Rust rule rejects any `char::is_whitespace`; SQL
 -- has no such predicate, so the clauses below name the four characters
@@ -73,12 +75,14 @@
 --                      carry a model, so the clause spares none of them.
 --   length >= 3        '[]' is punctuation, not a marker.
 --   no space/tab/nl    A bracketed aside in prose survives. This is what
---                      spares the live row (id 1501) that begins
---                      "[ Background noise ] Kind of a family for some
---                      time. ..." -- markers wrapped around genuine
+--                      spares the live row (id 1501), which begins with
+--                      "[ Background noise ]" and continues into ordinary
+--                      conversation -- markers wrapped around genuine
 --                      speech. That row is 115 characters and repeats
 --                      "[ Background noise ]" four times in all; the
 --                      speech between them is what must not be lost.
+--                      Verify it with: SELECT length(transcript) FROM
+--                      audio_segments WHERE id = 1501;
 --   char len = byte    THE ASCII TEST, and the one that is easy to omit.
 --   len                Chinese, Japanese and Thai have no inter-word spaces,
 --                      so a bracketed phrase in those scripts is a single
