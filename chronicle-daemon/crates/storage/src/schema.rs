@@ -66,9 +66,10 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             // migration that may create it, so the fresh-database arm below
             // rests on a fact instead of inferring one from an absent count.
             //
-            // `count(*)` rather than `SELECT 1`: an aggregate always returns
-            // exactly one row, so an `Err` here means the read itself failed and
-            // can never mean "the table is absent". `SELECT 1` returns zero rows
+            // `count(*)` rather than `SELECT 1`: an aggregate with no `GROUP BY`
+            // always returns exactly one row — that missing `GROUP BY` is the
+            // load-bearing part — so an `Err` here means the read itself failed
+            // and can never mean "the table is absent". `SELECT 1` returns zero rows
             // in the absent case, which rusqlite reports as
             // `Err(QueryReturnedNoRows)` — collapsing the two states back into
             // one and rebuilding the exact conflation this guard removes.
@@ -121,7 +122,13 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
                 (None, Some(a)) if had_table == Some(false) => log::info!(
                     "migration {version} applied (no prior transcripts; {a} row(s) hold text)"
                 ),
-                _ => log::info!("migration {version} applied (transcript count unavailable)"),
+                // Everything else: `(None, Some(_))` whose guard failed,
+                // `(Some(_), None)`, and `(None, None)`. These differ in WHICH
+                // count is missing — the before-count is available in the second
+                // — so the message says only what is true of all three: no delta
+                // can be stated. It deliberately does not claim both counts were
+                // unreadable.
+                _ => log::info!("migration {version} applied (transcript delta unavailable)"),
             }
         }
     }
