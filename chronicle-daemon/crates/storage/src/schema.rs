@@ -145,19 +145,29 @@ mod tests {
     /// Stops at version 2 first, so `migrate` below runs only 003.
     ///
     /// The fixture is built so that removing any single element of the
-    /// predicate changes the outcome for exactly one row — see
-    /// `docs/development/storage.md`, "Testing a guard?": when two guards can
-    /// each independently spare a fixture, a test targeting one of them proves
-    /// nothing. Verified by mutation: dropping `trim()` spares row 12, and
-    /// dropping the length, bracket, space, tab, newline, CR, or ASCII clause
-    /// pulls in row 8, 7, 5, 9, 10, 11, or 6 respectively.
+    /// predicate changes the outcome. The principle: when two clauses can each
+    /// independently spare a fixture row, a test aimed at one of them proves
+    /// nothing — so every clause needs a row that only it spares.
+    ///
+    /// Verified by mutation. Dropping `trim()` spares row 12; dropping the
+    /// provenance, length, space, tab, newline, CR, or ASCII clause pulls in
+    /// row 15, 8, 5, 9, 10, 11, or 6 respectively. The bracket clause is two
+    /// conditions in one, so it takes two rows: relaxing it to `LIKE '%]'`
+    /// pulls in row 14, relaxing it to `LIKE '[%'` pulls in row 7, and dropping
+    /// it outright pulls in both. The full predicate clears exactly rows 1, 2
+    /// and 12.
     ///
     /// `transcript IS NOT NULL` is the one element that is genuinely redundant:
     /// dropping it leaves the cleared set identical, because every other clause
-    /// propagates NULL, so a NULL transcript makes the whole WHERE evaluate to
-    /// NULL and the row is never touched. It stays because it states the intent
-    /// at a glance, but NULL propagation — not that clause — is what actually
-    /// makes a replay harmless. Row 13 documents the case; it does not pin it.
+    /// that READS `transcript` propagates NULL, so a NULL transcript makes the
+    /// whole WHERE evaluate to NULL and the row is never touched. Two caveats
+    /// on that wording, both measured: the clause itself yields *false* rather
+    /// than NULL, and so does `whisper_model IS NOT NULL` — which is true for a
+    /// cleared row, since the model survives, and so never rescues one either.
+    /// The clause stays because it states the intent at a glance, but NULL
+    /// propagation through the transcript-reading clauses — not this clause —
+    /// is what actually makes a replay harmless. Row 13 documents the case; it
+    /// does not pin it.
     #[test]
     fn migration_003_nulls_marker_transcripts_only() {
         let conn = Connection::open_in_memory().unwrap();
@@ -197,8 +207,7 @@ mod tests {
         insert(8, "[]");
         // The Rust rule rejects ANY whitespace; SQL has to name each kind, so
         // these two pin the tab and newline clauses. Without them those clauses
-        // could be deleted and every assertion would still pass — the exact
-        // trap docs/development/storage.md warns about.
+        // could be deleted and every assertion would still pass.
         insert(9, "[tab\there]");
         insert(10, "[nl\nhere]");
         insert(11, "[cr\rhere]");
@@ -208,6 +217,18 @@ mod tests {
         // This row is a marker ONLY after trimming, so it is cleared only if
         // trim() is doing its job.
         insert(12, "  [BLANK_AUDIO]  ");
+        // Pins the provenance clause, and ONLY that clause: a perfect marker
+        // by shape, with no whisper_model. Every look-alike test above would
+        // still pass with `whisper_model IS NOT NULL` deleted, so without this
+        // row the clause ships unpinned — the exact trap the rest of this
+        // fixture is built to avoid.
+        conn.execute(
+            "INSERT INTO audio_segments
+               (id, start_timestamp, end_timestamp, source, audio_path, transcript, whisper_model, language)
+             VALUES (15, 1, 2, 'mic', '/tmp/x.opus', '[BLANK_AUDIO]', NULL, 'nn')",
+            [],
+        )
+        .unwrap();
         // A row that was never transcribed. `transcript IS NOT NULL` must skip
         // it, so the audio_au trigger never hands a NULL OLD.transcript to the
         // FTS5 'delete' command — which is what the integrity-check below would
@@ -283,6 +304,17 @@ mod tests {
             "a trailing bracket alone survives (opening-bracket half of LIKE)"
         );
         assert_eq!(
+            col(15, "transcript").as_deref(),
+            Some("[BLANK_AUDIO]"),
+            "a marker-shaped transcript with no whisper_model survives \
+             — only the provenance clause spares this"
+        );
+        assert_eq!(
+            col(15, "language").as_deref(),
+            Some("nn"),
+            "a spared row keeps its language — the UPDATE never touched it"
+        );
+        assert_eq!(
             col(8, "transcript").as_deref(),
             Some("[]"),
             "empty brackets survive (length clause)"
@@ -327,16 +359,25 @@ mod tests {
         // The whole point of clearing them: the trigger reindexes audio_fts,
         // so the marker's tokens stop matching. Without this the migration
         // could pass while leaving the search pollution in place.
-        let hits: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM audio_fts WHERE audio_fts MATCH 'blank'",
-                [],
-                |r| r.get(0),
-            )
+        //
+        // Row 15 is the deliberate exception, and asserting the exact rowid
+        // rather than a count of zero is what keeps that honest. The provenance
+        // clause is not free: text that LOOKS like a marker but carries no
+        // model stays in the index and stays searchable. That is the trade —
+        // pollution we cannot attribute to whisper is left alone rather than
+        // destroyed — and this assertion is where it is visible.
+        let hits: Vec<i64> = conn
+            .prepare("SELECT rowid FROM audio_fts WHERE audio_fts MATCH 'blank' ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
             .unwrap();
         assert_eq!(
-            hits, 0,
-            "clearing the transcript must clear the FTS index too"
+            hits,
+            vec![15],
+            "clearing a transcript must clear the FTS index too; only the \
+             provenance-spared row 15 may still match"
         );
 
         // External-content FTS5 desyncs silently; ask SQLite directly.

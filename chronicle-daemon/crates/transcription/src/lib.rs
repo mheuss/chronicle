@@ -188,8 +188,14 @@ pub enum TranscriptionError {
 /// marker vocabulary is not stable across models — but it does not follow that
 /// every marker fits this shape, and rows this pipeline itself wrote prove
 /// otherwise: `[ Inaudible ]`, `[sad music]`, `[Distant by the wind]`,
-/// `[silence] [silence]`, `[報告 ]`. Every one is pure marker text that this
+/// `[報告 ]`. Every one is a single segment of pure marker text that this
 /// function deliberately keeps.
+///
+/// (The live database also holds `[silence] [silence]` and `[Music] [Music]
+/// [Music]`, but those are not examples of this: they are multi-marker strings,
+/// and this function runs per segment, so it never receives one as input. They
+/// predate the filter — with it in place each `[silence]` segment is dropped
+/// before concatenation. See `003_null_marker_transcripts.sql`, GRANULARITY.)
 ///
 /// It errs in both directions, knowingly:
 ///
@@ -363,6 +369,14 @@ pub fn decode_opus_16k_mono(path: &Path) -> Result<Vec<f32>, TranscriptionError>
 /// That is a meaningful answer rather than a failure, and callers act on it:
 /// `pipeline::transcribe_loop` records it as an attempt with a NULL transcript
 /// (HEU-620). Return `Err` only when transcription could not be performed.
+///
+/// `language` on such a result is **not** required to be `None`, and
+/// `TranscriptionEngine`'s is not — whisper reports a detection even for
+/// silence, derived from noise. Implementations need not suppress it, because
+/// no caller is permitted to trust it: `Storage::update_transcript_full` clears
+/// `language` whenever the transcript collapses to nothing, so a fabricated
+/// value can never reach the database. Stated here because this trait doc is
+/// where a second implementor would look for the rule.
 pub trait Transcriber: Send + Sync {
     fn transcribe(&self, pcm_16k_mono: &[f32]) -> Result<Transcript, TranscriptionError>;
     /// The resolved model variant, written to the transcript row.
@@ -665,7 +679,8 @@ mod tests {
     fn concat_segment_text_keeps_multiword_bracketed_text() {
         // Isolates the whitespace condition: this string satisfies both the
         // bracket-shape and ASCII checks, so only the whitespace check can
-        // spare it (docs/development/storage.md, "Testing a guard?").
+        // spare it. A fixture that two conditions can each independently spare
+        // proves nothing about either.
         let segs = ["[hello world]"];
         assert_eq!(concat_segment_text(segs.iter().copied()), "[hello world]");
     }
@@ -702,6 +717,28 @@ mod tests {
         // is punctuation, not a whisper emission.
         let segs = ["[]"];
         assert_eq!(concat_segment_text(segs.iter().copied()), "[]");
+    }
+
+    #[test]
+    fn concat_segment_text_keeps_trailing_bracket_alone() {
+        // Isolates the OPENING-bracket condition, the mirror of
+        // `concat_segment_text_keeps_unclosed_bracket`. Without this, relaxing
+        // `strip_prefix('[')` away changes nothing in the suite and the leading
+        // bracket ships untested. The migration fixture pins the SQL half of the
+        // same guard with row 14; this is the Rust half.
+        let segs = ["sic]"];
+        assert_eq!(concat_segment_text(segs.iter().copied()), "sic]");
+    }
+
+    #[test]
+    fn concat_segment_text_does_not_glue_words_across_a_dropped_marker() {
+        // Dropping a segment drops its whitespace too. whisper emits a leading
+        // space per segment, so the surviving neighbour carries its own
+        // separator and the words stay apart. If that ever stops being true this
+        // silently corrupts speech into "helloworld", which no other assertion
+        // would catch.
+        let segs = ["hello", " [BLANK_AUDIO]", " world"];
+        assert_eq!(concat_segment_text(segs.iter().copied()), "hello world");
     }
 
     #[test]

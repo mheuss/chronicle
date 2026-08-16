@@ -58,6 +58,19 @@
 --
 -- Each clause rules out a different way of destroying real speech:
 --
+--   whisper_model      PROVENANCE. Every clause below asks "does this LOOK
+--   IS NOT NULL        like a marker?", and a bracketed ASCII token is not
+--                      proof whisper wrote it. Only the pipeline stamps
+--                      whisper_model, so a NULL model means some other path
+--                      produced this text and there is no evidence a marker
+--                      is what it is. Without this clause a hand-written
+--                      '[sic]' is destroyed AND its row is left reading
+--                      "never transcribed" (transcript NULL, model NULL),
+--                      which is the exact ambiguity HEU-620 exists to remove
+--                      -- so the migration would manufacture the state it is
+--                      meant to eliminate. Costs nothing on the database this
+--                      was written against: all 169 rows the predicate clears
+--                      carry a model, so the clause spares none of them.
 --   length >= 3        '[]' is punctuation, not a marker.
 --   no space/tab/nl    A bracketed aside in prose survives. This is what
 --                      spares the live row (id 1501) that begins
@@ -82,7 +95,10 @@
 --
 -- language IS cleared, alongside the transcript. The pipeline stopped writing
 -- a language on no-speech rows because whisper's detection there is made on
--- noise (live silent rows carry 'nn', Nynorsk) and search.rs reads the column
+-- noise -- of the live database's 169 no-speech rows, 166 carry 'en' and 3
+-- carry 'nn' (Nynorsk), and neither means anything; 'en' is the more
+-- misleading of the two precisely because it looks plausible. search.rs reads
+-- the column
 -- back out to callers. Leaving it populated here would make a migrated legacy
 -- row disagree with a freshly written one about the same state, which is
 -- exactly the ambiguity this ticket exists to remove.
@@ -94,6 +110,7 @@ UPDATE audio_segments
 SET transcript = NULL,
     language   = NULL
 WHERE transcript IS NOT NULL
+  AND whisper_model IS NOT NULL
   AND length(trim(transcript)) >= 3
   AND trim(transcript) LIKE '[%]'
   AND instr(trim(transcript), ' ') = 0

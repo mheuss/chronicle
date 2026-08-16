@@ -215,11 +215,26 @@ impl Storage {
     /// future backfill that has no model metadata to record) and currently has no
     /// production caller.
     ///
-    /// **It cannot express "transcribed, no speech found."** Taking `String`, the
-    /// closest it can do is `""` — a fourth state that is neither NULL nor
-    /// speech, and that nothing queries for. To record a silent segment, call
-    /// [`Storage::update_transcript_full`] with `transcript: None` (HEU-620),
-    /// whose docs also carry the backfill-predicate guidance.
+    /// It can write two rows HEU-620's three-state contract has no room for, and
+    /// the second is the worse one:
+    ///
+    /// 1. **It cannot express "transcribed, no speech found."** Taking `String`,
+    ///    the closest it can do is `""` — a fourth state that is neither NULL nor
+    ///    speech, and that nothing queries for.
+    /// 2. **It writes text without a model.** This setter never touches
+    ///    `whisper_model`, so any non-empty text it writes lands in a row that is
+    ///    simultaneously "has speech" (non-NULL `transcript`) and "needs
+    ///    transcription" (`whisper_model IS NULL`). A backfill using the
+    ///    sanctioned predicate would re-queue that row and overwrite real
+    ///    text — a worse outcome than the looping HEU-620 set out to fix.
+    ///    [`Storage::insert_audio_segment`] can produce the same shape, since
+    ///    `AudioSegmentMetadata` takes the two fields independently.
+    ///
+    /// Migration 003 will not clear such a row — its `whisper_model IS NOT NULL`
+    /// clause exists for exactly this — but nothing stops one being written.
+    /// To record a silent segment, call [`Storage::update_transcript_full`] with
+    /// `transcript: None` (HEU-620), whose docs also carry the backfill-predicate
+    /// guidance.
     pub async fn update_transcript(&self, id: i64, transcript: String) -> Result<()> {
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {
@@ -269,7 +284,8 @@ impl Storage {
     /// regression healed itself. Now such a row is stamped with `whisper_model`
     /// and routine backfill will never revisit it. That is not hypothetical —
     /// `set_detect_language(true)` once returned empty text for every segment of
-    /// real speech (see the whisper-rs notes).
+    /// real speech — it is detect-only, and transcribing needs
+    /// `set_language(None)` (HEU-472).
     ///
     /// Recovering from that class of bug needs something wider than the routine
     /// predicate — but not necessarily a destructive one. `transcript IS NULL AND
