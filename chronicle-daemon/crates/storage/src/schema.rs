@@ -60,6 +60,18 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             // affected shape either side of the batch rather than by restructuring
             // the migration into single statements.
             log::info!("applying storage migration {version}");
+            // `rows_with_transcript` ends in `.ok()`, so a `None` from it means
+            // "the read failed" for any reason — missing table, SQLITE_BUSY, I/O
+            // error. Capture the table's existence separately, before the
+            // migration that may create it, so the fresh-database arm below
+            // rests on a fact instead of inferring one from an absent count.
+            let had_table = conn
+                .query_row(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='audio_segments'",
+                    [],
+                    |_| Ok(()),
+                )
+                .is_ok();
             let before = rows_with_transcript(conn);
 
             let tx = conn.unchecked_transaction()?;
@@ -85,11 +97,13 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
                 (Some(_), Some(_)) => {
                     log::info!("migration {version} applied (no transcripts cleared)")
                 }
-                // No count beforehand but one after: a fresh database, where the
-                // table did not exist until this migration created it. Nothing
-                // could have been cleared, and saying "unavailable" would
-                // contradict `rows_with_transcript`'s own contract.
-                (None, Some(a)) => log::info!(
+                // No count beforehand, and the table provably did not exist
+                // before this migration ran: a fresh database, where migration
+                // 001 creates it. Nothing could have been cleared. A `None`
+                // that is NOT explained by a missing table is a failed read,
+                // and falls through to the catch-all below rather than being
+                // reported as zero.
+                (None, Some(a)) if !had_table => log::info!(
                     "migration {version} applied (no prior transcripts; {a} row(s) hold text)"
                 ),
                 _ => log::info!("migration {version} applied (transcript count unavailable)"),
