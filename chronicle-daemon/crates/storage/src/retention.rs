@@ -1098,8 +1098,8 @@ mod tests {
 
     #[test]
     fn cleanup_keeps_only_rows_inside_the_window() {
-        // Deliberately does NOT pin the ordering, despite sitting next to the
-        // clause that adds it: 4 rows against a batch size of 500 all arrive in
+        // Deliberately does NOT pin the ordering, despite sitting in the
+        // batch-ordering section: 4 rows against a batch size of 500 all arrive in
         // one batch, so this passes with `ORDER BY` deleted, reversed, or
         // pointed at another column. `the_batch_select_orders_oldest_first` is
         // the only thing holding the ordering.
@@ -1214,7 +1214,7 @@ mod tests {
         );
         assert_eq!(surviving_shots(&conn), 1, "and the fresh row must remain");
 
-        // Row counts only. Every row here shares one `/tmp/aged_100.heif`,
+        // Row counts only. Every *deleted* row shares one `/tmp/aged_100.heif`,
         // outside `dummy_media_mgr`'s base, so every `delete_file` fails
         // `validate_path` and is swallowed by the warn in `cleanup_media`.
         // `bytes_freed` accumulating across batches is therefore still
