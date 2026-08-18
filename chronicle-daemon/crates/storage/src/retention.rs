@@ -361,6 +361,20 @@ mod tests {
         HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Every statement executed while `capture_stmt` is registered. Used by
+    /// `the_batch_select_orders_oldest_first` to assert on the SQL that really
+    /// ran rather than on a copy rebuilt in the test.
+    static CAPTURED_SQL: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    fn capture_stmt(evt: TraceEvent<'_>) {
+        if let TraceEvent::Stmt(_, sql) = evt {
+            CAPTURED_SQL
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(sql.to_string());
+        }
+    }
+
     static SWEEP_QUERY_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     fn count_stmt(evt: TraceEvent<'_>) {
@@ -1082,20 +1096,13 @@ mod tests {
 
     // --- batch ordering (HEU-629) ---
 
-    /// Every statement executed while `capture_stmt` is registered.
-    static CAPTURED_SQL: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-    fn capture_stmt(evt: TraceEvent<'_>) {
-        if let TraceEvent::Stmt(_, sql) = evt {
-            CAPTURED_SQL
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(sql.to_string());
-        }
-    }
-
     #[test]
-    fn cleanup_removes_the_oldest_rows_first() {
+    fn cleanup_keeps_only_rows_inside_the_window() {
+        // Deliberately does NOT pin the ordering, despite sitting next to the
+        // clause that adds it: 4 rows against a batch size of 500 all arrive in
+        // one batch, so this passes with `ORDER BY` deleted, reversed, or
+        // pointed at another column. `the_batch_select_orders_oldest_first` is
+        // the only thing holding the ordering.
         let conn = setup_db();
         let media_mgr = dummy_media_mgr();
         for days in [100, 90, 80, 10] {
@@ -1135,8 +1142,11 @@ mod tests {
         insert_aged_audio(&conn, 100);
 
         conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(capture_stmt));
-        run_cleanup(&conn, &media_mgr, 30).unwrap();
+        let cleaned = run_cleanup(&conn, &media_mgr, 30);
         conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+        // Unwrap after deregistering, as the other hook tests here do — a panic
+        // inside the hook window leaves the hook installed on a live handle.
+        cleaned.unwrap();
 
         let captured = CAPTURED_SQL
             .lock()
@@ -1147,7 +1157,7 @@ mod tests {
         // accept `ORDER BY id DESC`, the wrong column, or a dropped tiebreak.
         let shot_selects: Vec<&String> = captured
             .iter()
-            .filter(|sql| sql.contains("SELECT id,") && sql.contains("FROM screenshots"))
+            .filter(|sql| sql.contains("SELECT id,") && sql.contains("FROM screenshots WHERE"))
             .collect();
         assert!(
             !shot_selects.is_empty(),
@@ -1164,7 +1174,7 @@ mod tests {
         // only checking one table would let a hand-edit to AUDIO_TABLE through.
         let audio_selects: Vec<&String> = captured
             .iter()
-            .filter(|sql| sql.contains("SELECT id,") && sql.contains("FROM audio_segments"))
+            .filter(|sql| sql.contains("SELECT id,") && sql.contains("FROM audio_segments WHERE"))
             .collect();
         assert!(
             !audio_selects.is_empty(),
@@ -1176,6 +1186,11 @@ mod tests {
                 .all(|sql| sql.contains("ORDER BY start_timestamp, id")),
             "audio batches must order by start_timestamp then id, got: {audio_selects:?}"
         );
+
+        CAPTURED_SQL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     #[test]
@@ -1198,6 +1213,13 @@ mod tests {
             "every expired row must go, across all three batches"
         );
         assert_eq!(surviving_shots(&conn), 1, "and the fresh row must remain");
+
+        // Row counts only. Every row here shares one `/tmp/aged_100.heif`,
+        // outside `dummy_media_mgr`'s base, so every `delete_file` fails
+        // `validate_path` and is swallowed by the warn in `cleanup_media`.
+        // `bytes_freed` accumulating across batches is therefore still
+        // uncovered — stats are HEU-631's, don't read this as covering them.
+        assert_eq!(stats.bytes_freed, 0, "no file here is actually reclaimable");
     }
 
     #[test]
