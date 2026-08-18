@@ -1103,9 +1103,9 @@ mod tests {
     fn a_disabled_retention_reports_disabled() {
         // `0` and negative are two separate conditions of the `<= 0` guard, and
         // both mean "keep forever". Neither examined anything, so neither may
-        // report Completed — Completed is what persists last_cleanup_ms, and
-        // persisting one here would suppress the first real cleanup for a whole
-        // period after retention is switched on.
+        // report Completed — the scheduled task will checkpoint only on
+        // Completed, and a checkpoint here would suppress the first real
+        // cleanup for a whole period after retention is switched on.
         let conn = setup_db();
         let media_mgr = dummy_media_mgr();
         insert_aged_shot(&conn, 100);

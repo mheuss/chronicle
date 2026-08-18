@@ -159,10 +159,13 @@ pub struct SearchResult {
 /// How a cleanup run ended.
 ///
 /// `Completed` is the `Default` so `..CleanupStats::default()` keeps compiling —
-/// `Storage::sweep_orphans` builds its stats that way. It is also the only
-/// outcome that persists `last_cleanup_ms`: a run that examined nothing has no
-/// checkpoint to record, and recording one would delay the first real cleanup by
-/// up to a period after retention is switched back on.
+/// `Storage::sweep_orphans` builds its stats that way.
+///
+/// Nothing reads this field yet. The scheduled cleanup task (HEU-629) will
+/// persist a checkpoint only on `Completed`: a run that examined nothing has
+/// none to record, and recording one would delay the first real cleanup by up
+/// to a period after retention is switched back on. That is the reason this
+/// enum exists rather than a bare success/failure.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum CleanupOutcome {
     /// Ran to exhaustion — no expired records remain.
