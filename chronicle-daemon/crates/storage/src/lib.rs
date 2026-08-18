@@ -24,8 +24,8 @@ pub(crate) mod search;
 
 pub use error::{Result, StorageError};
 pub use models::{
-    AudioSegment, AudioSegmentMetadata, CleanupStats, Screenshot, ScreenshotMetadata, SearchFilter,
-    SearchResult, SearchSource, StorageConfig, StorageStatus,
+    AudioSegment, AudioSegmentMetadata, CleanupOutcome, CleanupStats, Screenshot,
+    ScreenshotMetadata, SearchFilter, SearchResult, SearchSource, StorageConfig, StorageStatus,
 };
 
 /// SQLite-backed storage engine for screenshots, audio, and full-text search.

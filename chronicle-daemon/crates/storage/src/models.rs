@@ -156,6 +156,22 @@ pub struct SearchResult {
 
 // --- Operational types ---
 
+/// How a cleanup run ended.
+///
+/// `Completed` is the `Default` so `..CleanupStats::default()` keeps compiling —
+/// `Storage::sweep_orphans` builds its stats that way. It is also the only
+/// outcome that persists `last_cleanup_ms`: a run that examined nothing has no
+/// checkpoint to record, and recording one would delay the first real cleanup by
+/// up to a period after retention is switched back on.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupOutcome {
+    /// Ran to exhaustion — no expired records remain.
+    #[default]
+    Completed,
+    /// `retention_days` was zero or negative, so nothing was examined.
+    Disabled,
+}
+
 /// Summary of what a cleanup or orphan-sweep operation removed.
 #[derive(Debug, Default)]
 pub struct CleanupStats {
@@ -165,6 +181,8 @@ pub struct CleanupStats {
     pub audio_segments_deleted: usize,
     /// Total bytes freed from disk.
     pub bytes_freed: u64,
+    /// How the run ended.
+    pub outcome: CleanupOutcome,
 }
 
 /// Aggregate statistics about the storage database and media files.

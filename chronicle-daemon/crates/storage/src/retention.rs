@@ -5,7 +5,7 @@ use rusqlite::{Connection, params};
 
 use crate::error::{Result, StorageError};
 use crate::media::MediaManager;
-use crate::models::CleanupStats;
+use crate::models::{CleanupOutcome, CleanupStats};
 
 const CLEANUP_BATCH_SIZE: usize = 500;
 
@@ -80,7 +80,10 @@ pub(crate) fn run_cleanup(
     retention_days: i64,
 ) -> Result<CleanupStats> {
     if retention_days <= 0 {
-        return Ok(CleanupStats::default());
+        return Ok(CleanupStats {
+            outcome: CleanupOutcome::Disabled,
+            ..CleanupStats::default()
+        });
     }
     if retention_days > MAX_RETENTION_DAYS {
         // This log line is defence in depth; the `Err` below is the primary
@@ -1092,6 +1095,42 @@ mod tests {
             language: None,
         };
         audio::insert(conn, &meta).unwrap();
+    }
+
+    // --- cleanup outcome (HEU-629) ---
+
+    #[test]
+    fn a_disabled_retention_reports_disabled() {
+        // `0` and negative are two separate conditions of the `<= 0` guard, and
+        // both mean "keep forever". Neither examined anything, so neither may
+        // report Completed — Completed is what persists last_cleanup_ms, and
+        // persisting one here would suppress the first real cleanup for a whole
+        // period after retention is switched on.
+        let conn = setup_db();
+        let media_mgr = dummy_media_mgr();
+        insert_aged_shot(&conn, 100);
+
+        for days in [0, -1] {
+            let stats = run_cleanup(&conn, &media_mgr, days).unwrap();
+            assert_eq!(
+                stats.outcome,
+                CleanupOutcome::Disabled,
+                "retention_days {days} is disabled, not completed"
+            );
+        }
+        assert_eq!(surviving_shots(&conn), 1, "a disabled run deletes nothing");
+    }
+
+    #[test]
+    fn an_ordinary_run_reports_completed() {
+        let conn = setup_db();
+        let media_mgr = dummy_media_mgr();
+        insert_aged_shot(&conn, 100);
+
+        let stats = run_cleanup(&conn, &media_mgr, 30).unwrap();
+
+        assert_eq!(stats.outcome, CleanupOutcome::Completed);
+        assert_eq!(stats.screenshots_deleted, 1);
     }
 
     // --- batch ordering (HEU-629) ---
