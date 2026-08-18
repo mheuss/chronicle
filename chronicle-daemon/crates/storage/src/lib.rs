@@ -395,6 +395,14 @@ impl Storage {
                             "retention_days must be non-negative".into(),
                         ));
                     }
+                    // One enforcement point, pinned where it lives: the upper
+                    // bound is deliberately NOT re-checked here.
+                    // `retention::run_cleanup` rejects anything above
+                    // `MAX_RETENTION_DAYS` and that error propagates through
+                    // this call, so a second check would be *indistinguishable*
+                    // from the inner guard by any behavioural assertion —
+                    // reachable, but delete it and nothing fails. See
+                    // `run_cleanup_rejects_a_retention_beyond_the_bound` below.
                     days
                 }
                 Err(rusqlite::Error::QueryReturnedNoRows) => 30,
@@ -699,6 +707,90 @@ mod tests {
 
         let value = storage.get_config("retention_days").await.unwrap();
         assert_eq!(value, Some("30".to_string()));
+    }
+
+    #[tokio::test]
+    async fn run_cleanup_rejects_a_retention_beyond_the_bound() {
+        // The bound is enforced in `retention::run_cleanup`; this asserts the
+        // error propagates out through the public boundary. See the comment at
+        // the validation block above for why it is not re-checked here.
+        //
+        // Pins that the *stored config value* reaches the guard: stub the
+        // config read to a constant and this fails.
+        // `run_cleanup_accepts_the_bound_itself` pins the same wiring from the
+        // accepting side.
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Storage::open(config).await.unwrap();
+
+        storage
+            .set_config(
+                "retention_days",
+                &(retention::MAX_RETENTION_DAYS + 1).to_string(),
+            )
+            .await
+            .unwrap();
+
+        assert!(storage.run_cleanup().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_cleanup_accepts_the_bound_itself() {
+        // The invariant: a row aged half the bound survives a retention of the
+        // full bound.
+        //
+        // The aged row is load-bearing. Remove it and the test passes for any
+        // substituted retention value that is merely *valid* — verified by
+        // stubbing the config read to 10 — because with no rows in the table
+        // `screenshots_deleted == 0` holds trivially. The row is what ties the
+        // assertion to which cutoff actually ran.
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Storage::open(config).await.unwrap();
+
+        let aged_days = retention::MAX_RETENTION_DAYS / 2;
+        let aged_id = storage
+            .insert_screenshot(ScreenshotMetadata {
+                timestamp: chrono::Utc::now().timestamp_millis() - aged_days * 86_400 * 1000,
+                display_id: "display1".into(),
+                app_name: None,
+                app_bundle_id: None,
+                window_title: None,
+                image_path: dir
+                    .path()
+                    .join("bound_test_aged.heif")
+                    .to_string_lossy()
+                    .into_owned(),
+                ocr_text: None,
+                phash: None,
+                resolution: None,
+            })
+            .await
+            .unwrap();
+
+        storage
+            .set_config("retention_days", &retention::MAX_RETENTION_DAYS.to_string())
+            .await
+            .unwrap();
+
+        let stats = storage.run_cleanup().await.unwrap();
+        assert_eq!(
+            stats.screenshots_deleted, 0,
+            "a row aged half the bound must survive a retention of the full bound"
+        );
+        // The count alone would pass if cleanup deleted the row and miscounted,
+        // so check the row itself — same standard as `retention.rs`'s tests,
+        // which assert on surviving rows rather than on `CleanupStats`.
+        assert!(
+            storage.get_screenshot_opt(aged_id).await.unwrap().is_some(),
+            "the aged row must still be in the table after cleanup"
+        );
     }
 
     #[tokio::test]

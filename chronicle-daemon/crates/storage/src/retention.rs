@@ -3,7 +3,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, params};
 
-use crate::error::Result;
+use crate::error::{Result, StorageError};
 use crate::media::MediaManager;
 use crate::models::CleanupStats;
 
@@ -31,8 +31,49 @@ const AUDIO_TABLE: MediaTable = MediaTable {
     subdir: "audio",
 };
 
+/// Largest accepted retention window: 100 years (`100 * 365`).
+///
+/// Past this a value is a configuration error rather than a policy — and left
+/// unchecked, a large enough one wraps the cutoff into the *future* and expires
+/// the entire database. Note that `0` already means "keep forever", so the
+/// intuitive way to ask for that is not a large number.
+///
+/// The exact figure is a policy ceiling, not a numeric limit: 36,500 days is
+/// ~3.15e12 ms against an `i64` ceiling of ~9.2e18, so it leaves six orders of
+/// magnitude of headroom. It is set where it is because a century is already
+/// past any real retention policy, not because larger values stop fitting.
+pub(crate) const MAX_RETENTION_DAYS: i64 = 36_500;
+
+/// Timestamp before which records are expired, or an error if the window does
+/// not fit in an `i64`.
+///
+/// Its error branch is unreachable from its only production caller:
+/// `run_cleanup` rejects everything that could overflow before calling here. The arithmetic stays
+/// checked anyway, because a future caller that skips the bound must not be
+/// able to turn a wrap into data loss. It is a separate `fn` so that guard can
+/// be called — and therefore pinned — directly; see
+/// `compute_cutoff_rejects_a_window_that_overflows`.
+fn compute_cutoff(now_millis: i64, retention_days: i64) -> Result<i64> {
+    retention_days
+        .checked_mul(86_400 * 1000)
+        .and_then(|window| now_millis.checked_sub(window))
+        .ok_or_else(|| {
+            StorageError::Other(format!(
+                "retention cutoff overflows i64: now_millis {now_millis}, \
+                 retention_days {retention_days}"
+            ))
+        })
+}
+
 /// Delete expired records and their media files in batches.
 /// Order: delete files first, then DB rows (crash-safe — see design doc).
+///
+/// `retention_days` of `0` or less is "keep forever" and returns an empty
+/// result; above [`MAX_RETENTION_DAYS`] is an error. Note the asymmetry with
+/// `Storage::run_cleanup`, which rejects a *negative* value outright: `0` is a
+/// legitimate setting, so it cannot be an error here, while a negative one can
+/// only arrive from a caller that skipped the public boundary's validation.
+/// Both layers refuse to delete; they differ only in how loudly.
 pub(crate) fn run_cleanup(
     conn: &Connection,
     media_mgr: &MediaManager,
@@ -41,9 +82,26 @@ pub(crate) fn run_cleanup(
     if retention_days <= 0 {
         return Ok(CleanupStats::default());
     }
+    if retention_days > MAX_RETENTION_DAYS {
+        // This log line is defence in depth; the `Err` below is the primary
+        // signal. Kept because a caller that swallows the `Err` would otherwise
+        // leave retention silently never running while disk grows. HEU-629 has
+        // the scheduled tick log the error itself, so once that lands the
+        // condition is reported twice per period rather than once.
+        //
+        // Note `main.rs` calls `env_logger::init()` with no default filter, so
+        // with `RUST_LOG` unset this line does not print — same as every other
+        // warn in this crate.
+        log::warn!(
+            "retention_days {retention_days} exceeds maximum {MAX_RETENTION_DAYS}; \
+             skipping cleanup"
+        );
+        return Err(StorageError::Other(format!(
+            "retention_days {retention_days} exceeds maximum {MAX_RETENTION_DAYS}"
+        )));
+    }
 
-    let now_millis = chrono::Utc::now().timestamp_millis();
-    let cutoff = now_millis - retention_days * 86_400 * 1000;
+    let cutoff = compute_cutoff(chrono::Utc::now().timestamp_millis(), retention_days)?;
 
     let mut stats = CleanupStats::default();
 
@@ -62,9 +120,10 @@ pub(crate) fn run_cleanup(
 ///
 /// **Single-caller assumption:** This function is not safe for concurrent
 /// execution. The SELECT runs outside the transaction, so a concurrent call
-/// could select the same batch. The daemon calls `run_cleanup` from a single
-/// async task — if that changes, wrap SELECT + file deletion + DB DELETE in
-/// a broader transaction or add row-level locking.
+/// could select the same batch. Nothing in the daemon calls `run_cleanup` at
+/// all today — HEU-629 adds a single scheduled task, and the assumption holds
+/// only so long as that stays the sole caller. If it changes, wrap SELECT +
+/// file deletion + DB DELETE in a broader transaction or add row-level locking.
 fn cleanup_media(
     conn: &Connection,
     media: &MediaTable,
@@ -976,5 +1035,152 @@ mod tests {
         );
         assert!(!shot_path.exists(), "screenshot file should be deleted");
         assert!(!audio_path.exists(), "audio file should be deleted");
+    }
+
+    // --- retention_days bounds (HEU-628) ---
+
+    /// Insert one screenshot `age_days` old.
+    fn insert_aged_shot(conn: &Connection, age_days: i64) {
+        let meta = ScreenshotMetadata {
+            timestamp: now_millis() - age_days * 86_400 * 1000,
+            display_id: "display1".into(),
+            app_name: None,
+            app_bundle_id: None,
+            window_title: None,
+            image_path: format!("/tmp/aged_{age_days}.heif"),
+            ocr_text: None,
+            phash: None,
+            resolution: None,
+        };
+        screenshots::insert(conn, &meta).unwrap();
+    }
+
+    fn surviving_shots(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM screenshots", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn an_absurd_retention_never_deletes_anything() {
+        // Unchecked, `i64::MAX * 86_400 * 1000` wraps to -86_400_000, putting
+        // the cutoff a day in the FUTURE — every row then qualifies for
+        // deletion. Release builds wrap silently (no overflow-checks set).
+        //
+        // This is the end-to-end guard on that outcome, not on the arithmetic:
+        // `MAX_RETENTION_DAYS` now rejects the value before the multiply is
+        // reached, so either layer alone satisfies this test. The arithmetic
+        // itself is pinned by `compute_cutoff_rejects_a_window_that_overflows`.
+        let conn = setup_db();
+        insert_aged_shot(&conn, 1); // yesterday — must survive
+        let media_mgr = dummy_media_mgr();
+
+        // An error or a no-op are both acceptable. Deleting is not — and the
+        // row count is the assertion that matters, since a broken counter
+        // could report zero either way.
+        let _ = run_cleanup(&conn, &media_mgr, i64::MAX);
+
+        assert_eq!(
+            surviving_shots(&conn),
+            1,
+            "an absurd retention must never delete"
+        );
+    }
+
+    #[test]
+    fn a_value_just_over_the_bound_is_rejected() {
+        // Pins the bound, not the arithmetic: this value is far too small to
+        // overflow, so only the `> MAX_RETENTION_DAYS` clause can reject it.
+        let conn = setup_db();
+        insert_aged_shot(&conn, 1);
+        let media_mgr = dummy_media_mgr();
+
+        assert!(run_cleanup(&conn, &media_mgr, MAX_RETENTION_DAYS + 1).is_err());
+        assert_eq!(
+            surviving_shots(&conn),
+            1,
+            "a rejected value must not delete first"
+        );
+    }
+
+    #[test]
+    fn the_bound_itself_is_accepted() {
+        // The `>` vs `>=` half. A 100-year retention is valid and deletes
+        // nothing, which is the whole point of allowing it.
+        let conn = setup_db();
+        insert_aged_shot(&conn, 1);
+        let media_mgr = dummy_media_mgr();
+
+        let stats = run_cleanup(&conn, &media_mgr, MAX_RETENTION_DAYS).unwrap();
+        assert_eq!(stats.screenshots_deleted, 0);
+        assert_eq!(surviving_shots(&conn), 1);
+    }
+
+    #[test]
+    fn zero_retention_days_deletes_nothing() {
+        let conn = setup_db();
+        insert_aged_shot(&conn, 100);
+        let media_mgr = dummy_media_mgr();
+
+        let stats = run_cleanup(&conn, &media_mgr, 0).unwrap();
+
+        assert_eq!(stats.screenshots_deleted, 0);
+        assert_eq!(
+            surviving_shots(&conn),
+            1,
+            "assert rows, not just the counter"
+        );
+    }
+
+    #[test]
+    fn a_negative_retention_also_deletes_nothing() {
+        // Other half of `<= 0`. Relax it to `== 0` and only this fails.
+        let conn = setup_db();
+        insert_aged_shot(&conn, 100);
+        let media_mgr = dummy_media_mgr();
+
+        let stats = run_cleanup(&conn, &media_mgr, -1).unwrap();
+        assert_eq!(stats.screenshots_deleted, 0);
+        assert_eq!(surviving_shots(&conn), 1);
+    }
+
+    #[test]
+    fn compute_cutoff_rejects_a_window_that_overflows() {
+        // The only tests that reach the checked arithmetic's error branches:
+        // `run_cleanup` rejects anything above MAX_RETENTION_DAYS first, so
+        // through the public path both guards are unreachable and swapping
+        // either for wrapping arithmetic changes no observable behaviour.
+        //
+        // `checked_mul` and `checked_sub` are SEPARATE clauses and need
+        // separate cases — a value large enough to overflow the multiply
+        // short-circuits there and never exercises the subtract.
+        assert!(
+            compute_cutoff(now_millis(), i64::MAX).is_err(),
+            "overflows checked_mul"
+        );
+        assert!(
+            compute_cutoff(i64::MAX, -1).is_err(),
+            "negative window makes the subtraction run off the top of i64 — \
+             the only case here that overflows checked_sub"
+        );
+    }
+
+    #[test]
+    fn compute_cutoff_subtracts_the_window() {
+        let now = 10_000_000_000i64;
+        let one_day = 86_400 * 1000;
+        assert_eq!(compute_cutoff(now, 1).unwrap(), now - one_day);
+        assert_eq!(compute_cutoff(now, 30).unwrap(), now - 30 * one_day);
+    }
+
+    #[test]
+    fn an_ordinary_retention_still_deletes() {
+        // Guards against "fixing" the bug by disabling cleanup outright.
+        let conn = setup_db();
+        insert_aged_shot(&conn, 100);
+        let media_mgr = dummy_media_mgr();
+
+        let stats = run_cleanup(&conn, &media_mgr, 30).unwrap();
+        assert_eq!(stats.screenshots_deleted, 1);
+        assert_eq!(surviving_shots(&conn), 0);
     }
 }
