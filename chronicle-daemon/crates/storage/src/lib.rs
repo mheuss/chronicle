@@ -522,6 +522,10 @@ impl Storage {
     /// `retention::run_cleanup`: that one still has to stand, because a
     /// database written by an earlier build — or by hand — can already hold an
     /// out-of-range value that no write path ever saw.
+    ///
+    /// Delete this guard and `set_config_rejects_an_out_of_range_retention`
+    /// fails — on the `get_config` assertion, not just the `is_err`. That is
+    /// what makes it load-bearing where HEU-628's proposed outer bound was not.
     pub async fn set_config(&self, key: &str, value: &str) -> Result<()> {
         if key == "retention_days" {
             let days = value
@@ -853,9 +857,9 @@ mod tests {
         {
             let conn = storage.pool.get().unwrap();
             conn.execute(
-                "INSERT INTO config (key, value) VALUES ('retention_days', '-1')
+                "INSERT INTO config (key, value) VALUES ('retention_days', ?1)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                [],
+                rusqlite::params!["-1"],
             )
             .unwrap();
         }
