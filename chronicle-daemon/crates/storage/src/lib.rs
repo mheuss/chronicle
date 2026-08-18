@@ -27,6 +27,10 @@ pub use models::{
     AudioSegment, AudioSegmentMetadata, CleanupOutcome, CleanupStats, Screenshot,
     ScreenshotMetadata, SearchFilter, SearchResult, SearchSource, StorageConfig, StorageStatus,
 };
+/// Largest accepted `retention_days`. Exposed so a caller can validate or
+/// render the limit without hardcoding the number or scraping an error string —
+/// `set_config` rejects anything above it.
+pub use retention::MAX_RETENTION_DAYS;
 
 /// SQLite-backed storage engine for screenshots, audio, and full-text search.
 pub struct Storage {
@@ -518,14 +522,16 @@ impl Storage {
     /// user who set it. Every other key keeps the untyped passthrough
     /// behaviour.
     ///
-    /// Note this does NOT duplicate the read-time bound in
-    /// `retention::run_cleanup`: that one still has to stand, because a
-    /// database written by an earlier build — or by hand — can already hold an
-    /// out-of-range value that no write path ever saw.
+    /// This repeats the read-time comparison in `retention::run_cleanup`, and
+    /// deliberately does not make it redundant: a database written by an
+    /// earlier build — or by hand — can already hold an out-of-range value that
+    /// no write path ever saw, and only the read-time bound catches that.
     ///
     /// Delete this guard and `set_config_rejects_an_out_of_range_retention`
-    /// fails — on the `get_config` assertion, not just the `is_err`. That is
-    /// what makes it load-bearing where HEU-628's proposed outer bound was not.
+    /// fails on its `is_err` assertion — which is what makes it load-bearing
+    /// where HEU-628's proposed outer bound was not. The `get_config`
+    /// assertion beside it catches a different mutation: a guard that returns
+    /// `Err` *after* writing, which `is_err` alone would wave through.
     pub async fn set_config(&self, key: &str, value: &str) -> Result<()> {
         if key == "retention_days" {
             let days = value
@@ -741,6 +747,22 @@ mod tests {
         assert_eq!(value, Some("30".to_string()));
     }
 
+    /// Write a config value straight through the pool, bypassing
+    /// `set_config`'s validation.
+    ///
+    /// Needed because the write guard now rejects the very values these tests
+    /// have to get into the table — they cover what happens when a database
+    /// *already* holds one, which a hand edit or an older build can produce.
+    fn seed_config(storage: &Storage, key: &str, value: &str) {
+        let conn = storage.pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO config (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![key, value],
+        )
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn run_cleanup_rejects_a_retention_beyond_the_bound() {
         // The bound is enforced in `retention::run_cleanup`; this asserts the
@@ -758,21 +780,15 @@ mod tests {
         };
         let storage = Storage::open(config).await.unwrap();
 
-        // Seeded through the connection, NOT `set_config` — the write-time
-        // guard added for HEU-629 now rejects this value, and bypassing it is
-        // the point. This test covers the READ-time guard, which is what
-        // protects a database that already holds an out-of-range value from an
-        // earlier build or a hand edit. Do not "simplify" this back to
-        // `set_config`: that would delete the only coverage of that path.
-        {
-            let conn = storage.pool.get().unwrap();
-            conn.execute(
-                "INSERT INTO config (key, value) VALUES ('retention_days', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                rusqlite::params![(retention::MAX_RETENTION_DAYS + 1).to_string()],
-            )
-            .unwrap();
-        }
+        // Seeded past `set_config`, whose guard now rejects this value. This
+        // test covers the READ-time guard — what protects a database that
+        // already holds an out-of-range value. Do not "simplify" it back to
+        // `set_config`: that deletes the only coverage of that path.
+        seed_config(
+            &storage,
+            "retention_days",
+            &(retention::MAX_RETENTION_DAYS + 1).to_string(),
+        );
 
         assert!(storage.run_cleanup().await.is_err());
     }
@@ -853,16 +869,7 @@ mod tests {
         };
         let storage = Storage::open(config).await.unwrap();
 
-        // Through the pool, since `set_config` now rejects this.
-        {
-            let conn = storage.pool.get().unwrap();
-            conn.execute(
-                "INSERT INTO config (key, value) VALUES ('retention_days', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                rusqlite::params!["-1"],
-            )
-            .unwrap();
-        }
+        seed_config(&storage, "retention_days", "-1");
 
         assert!(
             storage.run_cleanup().await.is_err(),
@@ -893,13 +900,16 @@ mod tests {
         // Above the bound: rejected, and — the half that matters — not stored.
         // A guard that returned Err after writing would pass an error-only
         // assertion while leaving the bad value in the table.
+        // Assert on the message, not just `is_err`: three structurally different
+        // rejections would otherwise all be satisfied by a single overly-broad
+        // guard that refused every `retention_days` write.
         let too_big = (retention::MAX_RETENTION_DAYS + 1).to_string();
-        assert!(
-            storage
-                .set_config("retention_days", &too_big)
-                .await
-                .is_err()
-        );
+        let err = storage
+            .set_config("retention_days", &too_big)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exceeds maximum"), "wrong clause fired: {err}");
         assert_eq!(
             storage.get_config("retention_days").await.unwrap(),
             Some("30".to_string()),
@@ -908,11 +918,24 @@ mod tests {
 
         // Negative is a separate clause from the upper bound — relax one and
         // only its own case fails.
-        assert!(storage.set_config("retention_days", "-1").await.is_err());
+        let err = storage
+            .set_config("retention_days", "-1")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("non-negative"), "wrong clause fired: {err}");
 
         // Unparseable, rather than stored as a string every later read must cope
         // with.
-        assert!(storage.set_config("retention_days", "soon").await.is_err());
+        let err = storage
+            .set_config("retention_days", "soon")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("invalid retention_days value"),
+            "wrong clause fired: {err}"
+        );
 
         // The bound itself is valid, and 0 stays valid — it means "keep
         // forever", a legitimate setting rather than an error.

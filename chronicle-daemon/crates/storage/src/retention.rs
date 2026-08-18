@@ -42,7 +42,7 @@ const AUDIO_TABLE: MediaTable = MediaTable {
 /// ~3.15e12 ms against an `i64` ceiling of ~9.2e18, so it leaves six orders of
 /// magnitude of headroom. It is set where it is because a century is already
 /// past any real retention policy, not because larger values stop fitting.
-pub(crate) const MAX_RETENTION_DAYS: i64 = 36_500;
+pub const MAX_RETENTION_DAYS: i64 = 36_500;
 
 /// Timestamp before which records are expired, or an error if the window does
 /// not fit in an `i64`.
