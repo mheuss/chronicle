@@ -30,6 +30,10 @@ pub use models::{
 /// Largest accepted `retention_days`. Exposed so a caller can validate or
 /// render the limit without hardcoding the number or scraping an error string —
 /// `set_config` rejects anything above it.
+///
+/// In-crate code keeps spelling this `retention::MAX_RETENTION_DAYS`, which is
+/// the more precise path and says where the bound is enforced. This re-export
+/// exists for callers outside the crate, which cannot see that module.
 pub use retention::MAX_RETENTION_DAYS;
 
 /// SQLite-backed storage engine for screenshots, audio, and full-text search.
@@ -528,10 +532,10 @@ impl Storage {
     /// no write path ever saw, and only the read-time bound catches that.
     ///
     /// Delete this guard and `set_config_rejects_an_out_of_range_retention`
-    /// fails on its `is_err` assertion — which is what makes it load-bearing
-    /// where HEU-628's proposed outer bound was not. The `get_config`
-    /// assertion beside it catches a different mutation: a guard that returns
-    /// `Err` *after* writing, which `is_err` alone would wave through.
+    /// fails at its `unwrap_err` — which is what makes it load-bearing where
+    /// HEU-628's proposed outer bound was not. The `get_config` assertion
+    /// beside it catches a different mutation: a guard that returns `Err`
+    /// *after* writing, which asserting the error alone would wave through.
     pub async fn set_config(&self, key: &str, value: &str) -> Result<()> {
         if key == "retention_days" {
             let days = value
