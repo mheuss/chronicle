@@ -135,9 +135,13 @@ fn cleanup_media(
 
     loop {
         // 1. Select batch of expired rows
+        // `ORDER BY` so an interrupted run removes the oldest data first; the
+        // `id` tiebreak makes the order total, so rows sharing a timestamp
+        // cannot alternate between batches. Every identifier here is a
+        // compile-time constant from `MediaTable` — no user input reaches this.
         let select_sql = format!(
-            "SELECT id, {} FROM {} WHERE {} < ?1 LIMIT ?2",
-            media.path_col, media.table, media.timestamp_col
+            "SELECT id, {} FROM {} WHERE {} < ?1 ORDER BY {}, id LIMIT ?2",
+            media.path_col, media.table, media.timestamp_col, media.timestamp_col
         );
         let batch: Vec<(i64, String)> = {
             let mut stmt = conn.prepare(&select_sql)?;
@@ -1058,6 +1062,142 @@ mod tests {
     fn surviving_shots(conn: &Connection) -> i64 {
         conn.query_row("SELECT COUNT(*) FROM screenshots", [], |r| r.get(0))
             .unwrap()
+    }
+
+    /// Insert one audio segment `age_days` old. Mirrors `insert_aged_shot` for
+    /// the second media table, whose timestamp column is `start_timestamp`.
+    fn insert_aged_audio(conn: &Connection, age_days: i64) {
+        let start = now_millis() - age_days * 86_400 * 1000;
+        let meta = AudioSegmentMetadata {
+            start_timestamp: start,
+            end_timestamp: start + 30_000,
+            source: "mic".into(),
+            audio_path: format!("/tmp/aged_{age_days}.opus"),
+            transcript: None,
+            whisper_model: None,
+            language: None,
+        };
+        audio::insert(conn, &meta).unwrap();
+    }
+
+    // --- batch ordering (HEU-629) ---
+
+    /// Every statement executed while `capture_stmt` is registered.
+    static CAPTURED_SQL: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    fn capture_stmt(evt: TraceEvent<'_>) {
+        if let TraceEvent::Stmt(_, sql) = evt {
+            CAPTURED_SQL
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(sql.to_string());
+        }
+    }
+
+    #[test]
+    fn cleanup_removes_the_oldest_rows_first() {
+        let conn = setup_db();
+        let media_mgr = dummy_media_mgr();
+        for days in [100, 90, 80, 10] {
+            insert_aged_shot(&conn, days);
+        }
+
+        let stats = run_cleanup(&conn, &media_mgr, 30).unwrap();
+
+        assert_eq!(stats.screenshots_deleted, 3);
+        assert_eq!(surviving_shots(&conn), 1);
+
+        let oldest: i64 = conn
+            .query_row("SELECT MIN(timestamp) FROM screenshots", [], |r| r.get(0))
+            .unwrap();
+        let cutoff = now_millis() - 30 * 86_400 * 1000;
+        assert!(
+            oldest >= cutoff,
+            "the only survivor must be inside the window"
+        );
+    }
+
+    #[test]
+    fn the_batch_select_orders_oldest_first() {
+        // The behavioural test above cannot distinguish an ordered SELECT from
+        // an unordered one on a small table — SQLite happens to return rowid
+        // order anyway. This pins the clause against the statement that really
+        // executed, so it cannot pass by agreeing with a copy of itself.
+        let _guard = lock_hooks();
+        CAPTURED_SQL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+
+        let conn = setup_db();
+        let media_mgr = dummy_media_mgr();
+        insert_aged_shot(&conn, 100);
+        insert_aged_audio(&conn, 100);
+
+        conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(capture_stmt));
+        run_cleanup(&conn, &media_mgr, 30).unwrap();
+        conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+
+        let captured = CAPTURED_SQL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+
+        // The exact clause, not just the substring "ORDER BY" — that would
+        // accept `ORDER BY id DESC`, the wrong column, or a dropped tiebreak.
+        let shot_selects: Vec<&String> = captured
+            .iter()
+            .filter(|sql| sql.contains("SELECT id,") && sql.contains("FROM screenshots"))
+            .collect();
+        assert!(
+            !shot_selects.is_empty(),
+            "the screenshot batch SELECT must have run, got: {captured:?}"
+        );
+        assert!(
+            shot_selects
+                .iter()
+                .all(|sql| sql.contains("ORDER BY timestamp, id")),
+            "screenshot batches must order by timestamp then id, got: {shot_selects:?}"
+        );
+
+        // The audio table's timestamp column differs, so assert it separately —
+        // only checking one table would let a hand-edit to AUDIO_TABLE through.
+        let audio_selects: Vec<&String> = captured
+            .iter()
+            .filter(|sql| sql.contains("SELECT id,") && sql.contains("FROM audio_segments"))
+            .collect();
+        assert!(
+            !audio_selects.is_empty(),
+            "the audio batch SELECT must have run, got: {captured:?}"
+        );
+        assert!(
+            audio_selects
+                .iter()
+                .all(|sql| sql.contains("ORDER BY start_timestamp, id")),
+            "audio batches must order by start_timestamp then id, got: {audio_selects:?}"
+        );
+    }
+
+    #[test]
+    fn cleanup_deletes_across_multiple_batches() {
+        // No existing cleanup test crosses CLEANUP_BATCH_SIZE, so the loop that
+        // repeats until a batch comes back short has never been exercised.
+        // Three passes: two full batches and a short one that ends the loop.
+        let conn = setup_db();
+        let media_mgr = dummy_media_mgr();
+        let expired = CLEANUP_BATCH_SIZE * 2 + 37;
+        for _ in 0..expired {
+            insert_aged_shot(&conn, 100);
+        }
+        insert_aged_shot(&conn, 1); // inside the window — must survive
+
+        let stats = run_cleanup(&conn, &media_mgr, 30).unwrap();
+
+        assert_eq!(
+            stats.screenshots_deleted, expired,
+            "every expired row must go, across all three batches"
+        );
+        assert_eq!(surviving_shots(&conn), 1, "and the fresh row must remain");
     }
 
     #[test]
