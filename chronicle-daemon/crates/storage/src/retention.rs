@@ -59,7 +59,8 @@ fn compute_cutoff(now_millis: i64, retention_days: i64) -> Result<i64> {
         .and_then(|window| now_millis.checked_sub(window))
         .ok_or_else(|| {
             StorageError::Other(format!(
-                "retention window overflows the cutoff: retention_days {retention_days}"
+                "retention cutoff overflows i64: now_millis {now_millis}, \
+                 retention_days {retention_days}"
             ))
         })
 }
@@ -82,11 +83,11 @@ pub(crate) fn run_cleanup(
         return Ok(CleanupStats::default());
     }
     if retention_days > MAX_RETENTION_DAYS {
-        // Defence in depth, not the primary signal. HEU-629 requires the
-        // scheduled tick to log this error itself, so once that lands the
-        // condition is reported twice per period rather than once. Kept anyway
-        // because a caller that swallows the `Err` would otherwise leave
-        // retention silently never running while disk grows.
+        // This log line is defence in depth; the `Err` below is the primary
+        // signal. Kept because a caller that swallows the `Err` would otherwise
+        // leave retention silently never running while disk grows. HEU-629 has
+        // the scheduled tick log the error itself, so once that lands the
+        // condition is reported twice per period rather than once.
         //
         // Note `main.rs` calls `env_logger::init()` with no default filter, so
         // with `RUST_LOG` unset this line does not print — same as every other

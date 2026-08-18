@@ -755,7 +755,7 @@ mod tests {
         let storage = Storage::open(config).await.unwrap();
 
         let aged_days = retention::MAX_RETENTION_DAYS / 2;
-        storage
+        let aged_id = storage
             .insert_screenshot(ScreenshotMetadata {
                 timestamp: chrono::Utc::now().timestamp_millis() - aged_days * 86_400 * 1000,
                 display_id: "display1".into(),
@@ -783,6 +783,13 @@ mod tests {
         assert_eq!(
             stats.screenshots_deleted, 0,
             "a row aged half the bound must survive a retention of the full bound"
+        );
+        // The count alone would pass if cleanup deleted the row and miscounted,
+        // so check the row itself — same standard as `retention.rs`'s tests,
+        // which assert on surviving rows rather than on `CleanupStats`.
+        assert!(
+            storage.get_screenshot_opt(aged_id).await.unwrap().is_some(),
+            "the aged row must still be in the table after cleanup"
         );
     }
 
