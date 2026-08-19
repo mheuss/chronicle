@@ -113,9 +113,12 @@ impl CleanupOps for StorageCleanupOps {
     }
 }
 
-/// True if this error is a panic in the blocking cleanup worker.
+/// True if this error is a panic in a blocking storage worker.
 ///
-/// `JoinError` also covers cancellation, which is not a panic and not fatal.
+/// Classifies the cleanup run and both checkpoint calls — they all cross the
+/// same `spawn_blocking` boundary. `JoinError` also covers cancellation, which
+/// is not a panic and not fatal; `a_cancelled_join_is_not_a_worker_panic` pins
+/// that half.
 fn is_worker_panic(e: &StorageError) -> bool {
     matches!(e, StorageError::Join(j) if j.is_panic())
 }
@@ -178,8 +181,10 @@ where
 
         // One clock read, used for both the next deadline and the persisted
         // checkpoint. Two separate `now_ms()` calls would drift apart if the
-        // wall clock moved between them, making in-process cadence and
-        // restart cadence disagree for no reason.
+        // wall clock moved between them, making in-process cadence and restart
+        // cadence disagree for no reason. No test pins this: under paused time
+        // two adjacent reads return the same value, so splitting them is an
+        // invisible mutant.
         let completed_at = ops.now_ms();
 
         // Rescheduled unconditionally, BEFORE inspecting the result. Without
@@ -589,21 +594,35 @@ mod loop_tests {
         // arrange that deterministically. A test that pretended to would be
         // flaky rather than useful.
         //
-        // What this test DOES pin: cancelling mid-run makes the loop exit
-        // after the in-flight run returns, rather than sleeping on to the next
-        // deadline.
+        // What this test pins: cancelling mid-run makes the loop exit after the
+        // in-flight run returns rather than sleeping on to the next deadline.
+        // It isolates no clause of its own — `cancellation_while_sleeping_exits_
+        // without_running` kills every mutant it does — so it earns its place by
+        // covering the mid-run entry point, not by discriminating a guard.
         //
         // What it does NOT pin, verified by mutation: neither `biased;` nor the
         // `is_cancelled()` recheck. Delete either, or both, and this suite stays
-        // green — because by the time the loop reaches the next select the
-        // deadline is a period out, so the cancel branch is the only ready one
-        // and wins whatever the poll order. Both guards exist for the case where
-        // `wait` is already zero and both branches are ready in the SAME poll,
-        // and that race cannot be constructed deterministically under paused
-        // time. Per `docs/development/storage.md` ("two guards on one invariant
-        // means the outer one is untestable"), this comment is the substitute
-        // for the test that cannot exist — do not read the green suite as
-        // evidence either guard is load-bearing here.
+        // green, because by the time the loop reaches the next select the
+        // deadline is a period out and the cancel branch is the only ready one.
+        //
+        // The two guards are not interchangeable. The recheck is load-bearing:
+        // it closes a window `biased;` cannot reach, where cancel lands after
+        // the select resolves on the sleep branch but before `run_cleanup()` is
+        // entered. `biased;` is redundant given the recheck — if the deadline
+        // branch ever won the coin flip, the recheck breaks immediately — and is
+        // kept only because the design names it as a required property.
+        //
+        // The reachable race is a deschedule, not a zero `wait`: `wait` is
+        // floored at the start delay and every reschedule is a full period out,
+        // so zero would need the wall clock to jump hours between two adjacent
+        // statements. The real window is the loop going unpolled while the timer
+        // fires and `cancel()` lands in the same gap.
+        //
+        // `docs/development/storage.md` ("two guards on one invariant means the
+        // outer one is untestable") prescribes deleting the redundant guard, not
+        // documenting it. That rule is consciously overridden here because the
+        // design names `biased;` by hand. Do not read the green suite as
+        // evidence `biased;` does anything.
         let mut fake = FakeOps::new();
         fake.run_duration = Duration::from_secs(60);
         let ops = Arc::new(fake);
@@ -689,6 +708,22 @@ mod loop_tests {
 
         cancel.cancel();
         task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_join_is_not_a_worker_panic() {
+        // The other half of `is_worker_panic`. A `JoinError` from an aborted
+        // task is not a panic and must not be fatal: at shutdown the runtime
+        // can abort a queued blocking task, and classifying that as a panic
+        // would turn an orderly exit into a nonzero exit code once HEU-630
+        // joins this loop.
+        let handle = tokio::spawn(async { std::future::pending::<()>().await });
+        handle.abort();
+        let e = StorageError::Join(handle.await.unwrap_err());
+        assert!(
+            !is_worker_panic(&e),
+            "a cancelled join is not a worker panic"
+        );
     }
 
     #[tokio::test(start_paused = true)]
