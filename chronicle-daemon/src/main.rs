@@ -5,6 +5,7 @@ mod permissions;
 mod pipeline;
 mod power;
 mod provisioning;
+mod retention_task;
 mod settings;
 
 use std::sync::Arc;
