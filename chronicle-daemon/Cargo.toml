@@ -60,8 +60,9 @@ reqwest = { version = "0.12.16", default-features = false, features = [
 # statvfs for the pre-download free-space check.
 libc = "0.2"
 # Matches the storage crate verbatim so both resolve to one version. The
-# scheduler's checkpoint is compared against timestamps storage writes, and
-# those come from chrono::Utc::now().timestamp_millis().
+# checkpoint has to sit on the same epoch and units as storage's own clock:
+# retention.rs computes its cutoff from chrono::Utc::now().timestamp_millis(),
+# so a period measured here means the same thing there.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [features]
