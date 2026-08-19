@@ -3,7 +3,7 @@
 //! One deadline governs the loop: sleep until it, run, recompute. There is no
 //! `tokio::time::interval` and no separate due check, and adding either back
 //! would reintroduce a scheduling bug — three earlier designs did exactly that.
-//! See HEU-629 and the design doc's §2.1 before changing the shape here.
+//! See HEU-629 before changing the shape here.
 
 use std::time::Duration;
 
@@ -80,7 +80,7 @@ mod tests {
     }
 
     #[test]
-    fn an_extreme_timestamp_does_not_overflow() {
+    fn an_i64_max_timestamp_takes_the_future_branch() {
         // i64::MAX is in the future, so the future branch catches it before the
         // addition runs. The saturating_add behind it is defence for a caller
         // that ever reorders these branches — an overflow here would panic in
@@ -115,6 +115,28 @@ mod tests {
         assert!(
             got > NOW + DELAY,
             "and the remainder must outlast the start delay here"
+        );
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_tolerated() {
+        // Pins the trim. Without it the value reads as unparseable, and the
+        // run lands at the start delay instead of one period after the
+        // stored time.
+        let last = NOW - (5 * 60 + 56) * 60 * 1000;
+        let got = initial_deadline_ms(NOW, Some(format!("  {last}\n")), DELAY, PERIOD);
+        assert_eq!(got, last + PERIOD);
+    }
+
+    #[test]
+    fn a_timestamp_equal_to_now_still_waits_a_full_period() {
+        // Pins the `>` in the future guard. Relaxed to `>=`, a restart inside
+        // the same millisecond as the last run would clean again after the
+        // start delay rather than a full period, so a crash-restart loop
+        // would clean repeatedly.
+        assert_eq!(
+            initial_deadline_ms(NOW, Some(NOW.to_string()), DELAY, PERIOD),
+            NOW + PERIOD
         );
     }
 
