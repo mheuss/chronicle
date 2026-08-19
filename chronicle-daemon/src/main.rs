@@ -539,7 +539,8 @@ async fn main() -> Result<()> {
     //    the process lifetime with one log line as the only signal.
     //
     // HEU-630 closes the first with a stop flag that lets an in-flight run end
-    // between batches, plus the join below.
+    // between batches, plus a join it adds at the end of teardown. There is no
+    // join today.
     let cleanup_ops = Arc::new(retention_task::StorageCleanupOps::new(Arc::clone(&storage)));
     let cleanup_cancel = cancel.clone();
     // The loop returns `Result`, and dropping the handle discards it. That is
