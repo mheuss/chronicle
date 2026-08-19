@@ -520,10 +520,26 @@ async fn main() -> Result<()> {
     // Retention cleanup. Spawned, never awaited on the startup path: HEU-547
     // was a 249-second startup stall and that shape must not come back.
     //
-    // The handle is deliberately dropped. HEU-630 adds the shutdown join and
-    // the stop flag that lets an in-flight run end between batches; until then
-    // `cancel` only stops the loop between runs, so quitting during a long run
-    // waits for that run to finish.
+    // The handle is deliberately dropped, and three consequences follow. They
+    // are spelled out here because this comment is the only record of them that
+    // ships — the documents analysing them are gitignored.
+    //
+    // 1. `cancel` is observed only between runs, so quitting during a long run
+    //    waits for that run. The continuation after it is then dropped unpolled
+    //    at runtime drop, so the run deletes and commits but never records
+    //    `last_cleanup_ms` and never logs. The next process starts from an
+    //    older timestamp and cleans once more than it needed to — idempotent,
+    //    but a shutdown that silently removes thousands of rows is alarming to
+    //    meet without this note.
+    // 2. The `process::exit(3)` on a poisoned capture engine runs no
+    //    destructors, so none of that waiting happens at all. A run in flight
+    //    there dies after its unlinks and before its commit: files gone, rows
+    //    left pointing at nothing. Repairing that is HEU-624's job.
+    // 3. A worker panic ends the loop, so retention stays off for the rest of
+    //    the process lifetime with one log line as the only signal.
+    //
+    // HEU-630 closes the first with a stop flag that lets an in-flight run end
+    // between batches, plus the join below.
     let cleanup_ops = Arc::new(retention_task::StorageCleanupOps::new(Arc::clone(&storage)));
     let cleanup_cancel = cancel.clone();
     // The loop returns `Result`, and dropping the handle discards it. That is
