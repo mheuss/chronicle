@@ -166,10 +166,10 @@ where
 
     loop {
         // Both terms are wall-clock, but the sleep below is monotonic, so a
-        // backwards step in the wall clock is slept out and parks retention
-        // until the next restart. `initial_deadline_ms` guards that hazard at
-        // task start and this path does not — the asymmetry is deferred to
-        // HEU-630 with the fix and its test, not overlooked.
+        // backwards step in the wall clock is slept out in full before the next
+        // run. `initial_deadline_ms` guards that hazard at task start and this
+        // path does not — the asymmetry is deferred to HEU-630 with the fix and
+        // its test, not overlooked.
         let wait = Duration::from_millis(next_attempt.saturating_sub(ops.now_ms()).max(0) as u64);
         tokio::select! {
             // `biased` so a ready cancellation is never passed over in favour
@@ -602,8 +602,9 @@ mod loop_tests {
         // What this test pins: cancelling mid-run makes the loop exit after the
         // in-flight run returns rather than sleeping on to the next deadline.
         // It isolates no clause of its own — `cancellation_while_sleeping_exits_
-        // without_running` kills every mutant it does — so it earns its place by
-        // covering the mid-run entry point, not by discriminating a guard.
+        // without_running` kills both mutants below that this one does — so it
+        // earns its place by covering the mid-run entry point, not by
+        // discriminating a guard.
         //
         // What it does NOT pin, verified by mutation: neither `biased;` nor the
         // `is_cancelled()` recheck. Delete either, or both, and this suite stays
@@ -611,21 +612,24 @@ mod loop_tests {
         // deadline is a period out and the cancel branch is the only ready one.
         //
         // The two guards are not interchangeable. The recheck is load-bearing:
-        // it closes a window `biased;` cannot reach, where cancel lands after
-        // the select resolves on the sleep branch but before `run_cleanup()` is
-        // entered. `biased;` is redundant given the recheck — if the deadline
-        // branch ever won the coin flip, the recheck breaks immediately — and is
-        // kept only because the design names it as a required property.
+        // it reads the token later than the select structurally can, narrowing
+        // the window where cancel lands after the select resolves on the sleep
+        // branch but before `run_cleanup()` is entered. It cannot close that
+        // window — nothing observes the token once a run is under way, which is
+        // HEU-630's stop flag. `biased;` is redundant given the recheck — if the
+        // deadline branch ever won the coin flip, the recheck breaks
+        // immediately — and is kept only because the design names it as a
+        // required property.
         //
         // The reachable race is a deschedule, not a zero `wait`: `wait` is
         // floored at the start delay and every reschedule is a full period out,
-        // so zero would need the wall clock to jump hours between two adjacent
-        // statements. The real window is the loop going unpolled while the timer
+        // so zero would need the wall clock to jump minutes on the first
+        // iteration, hours on every one after, between two adjacent statements. The real window is the loop going unpolled while the timer
         // fires and `cancel()` lands in the same gap.
         //
         // `docs/development/storage.md` ("two guards on one invariant means the
-        // outer one is untestable") prescribes deleting the redundant guard, not
-        // documenting it. That rule is consciously overridden here because the
+        // outer one is untestable") prescribes deleting the redundant guard and
+        // commenting on its absence, not keeping it with a comment. That rule is consciously overridden here because the
         // design names `biased;` by hand. Do not read the green suite as
         // evidence `biased;` does anything.
         let mut fake = FakeOps::new();
