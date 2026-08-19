@@ -517,6 +517,24 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Retention cleanup. Spawned, never awaited on the startup path: HEU-547
+    // was a 249-second startup stall and that shape must not come back.
+    //
+    // The handle is deliberately dropped. HEU-630 adds the shutdown join and
+    // the stop flag that lets an in-flight run end between batches; until then
+    // `cancel` only stops the loop between runs, so quitting during a long run
+    // waits for that run to finish.
+    let cleanup_ops = Arc::new(retention_task::StorageCleanupOps::new(Arc::clone(&storage)));
+    let cleanup_cancel = cancel.clone();
+    // The loop returns `Result`, and dropping the handle discards it. That is
+    // intentional for now — HEU-630 keeps the handle, joins it at the end of
+    // teardown, and sets `shutdown_failed` on an Err. Do not "simplify" the
+    // return type away in the meantime.
+    tokio::spawn(retention_task::run_cleanup_loop(
+        cleanup_ops,
+        cleanup_cancel,
+    ));
+
     // --- Event loop: serve mic toggles until a shutdown signal arrives ---
     // Toggles are handled inline, one per iteration.
     //
