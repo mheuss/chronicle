@@ -5,7 +5,11 @@
 //! would reintroduce a scheduling bug — three earlier designs did exactly that.
 //! See HEU-629 before changing the shape here.
 
+use std::sync::Arc;
 use std::time::Duration;
+
+use async_trait::async_trait;
+use chronicle_storage::{CleanupStats, Storage, StorageError};
 
 /// How long after startup the first run may fire.
 ///
@@ -48,6 +52,56 @@ pub(crate) fn initial_deadline_ms(
         Some(last) => last.saturating_add(period_ms),
     };
     std::cmp::max(start_delay_end, due)
+}
+
+/// The scheduler's four dependencies, behind one seam.
+///
+/// Production uses [`StorageCleanupOps`]. Tests supply a fake with a
+/// controllable run duration, a panicking variant, and a clock that tracks
+/// tokio's paused timer.
+#[async_trait]
+pub(crate) trait CleanupOps: Send + Sync {
+    /// Wall-clock now, in ms. Injected so paused-time tests move it with the
+    /// timer.
+    fn now_ms(&self) -> i64;
+    /// Run one cleanup pass.
+    async fn run_cleanup(&self) -> Result<CleanupStats, StorageError>;
+    /// Read the stored `last_cleanup_ms`, exactly as stored.
+    async fn read_last_cleanup(&self) -> Result<Option<String>, StorageError>;
+    /// Record a completed run's finish time.
+    async fn write_last_cleanup(&self, value_ms: i64) -> Result<(), StorageError>;
+}
+
+/// The production implementation, over the real [`Storage`].
+pub(crate) struct StorageCleanupOps {
+    storage: Arc<Storage>,
+}
+
+impl StorageCleanupOps {
+    pub(crate) fn new(storage: Arc<Storage>) -> Self {
+        Self { storage }
+    }
+}
+
+#[async_trait]
+impl CleanupOps for StorageCleanupOps {
+    fn now_ms(&self) -> i64 {
+        chrono::Utc::now().timestamp_millis()
+    }
+
+    async fn run_cleanup(&self) -> Result<CleanupStats, StorageError> {
+        self.storage.run_cleanup().await
+    }
+
+    async fn read_last_cleanup(&self) -> Result<Option<String>, StorageError> {
+        self.storage.get_config(LAST_CLEANUP_KEY).await
+    }
+
+    async fn write_last_cleanup(&self, value_ms: i64) -> Result<(), StorageError> {
+        self.storage
+            .set_config(LAST_CLEANUP_KEY, &value_ms.to_string())
+            .await
+    }
 }
 
 #[cfg(test)]
