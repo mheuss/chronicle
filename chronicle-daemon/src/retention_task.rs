@@ -165,6 +165,11 @@ where
     );
 
     loop {
+        // Both terms are wall-clock, but the sleep below is monotonic, so a
+        // backwards step in the wall clock is slept out and parks retention
+        // until the next restart. `initial_deadline_ms` guards that hazard at
+        // task start and this path does not — the asymmetry is deferred to
+        // HEU-630 with the fix and its test, not overlooked.
         let wait = Duration::from_millis(next_attempt.saturating_sub(ops.now_ms()).max(0) as u64);
         tokio::select! {
             // `biased` so a ready cancellation is never passed over in favour
