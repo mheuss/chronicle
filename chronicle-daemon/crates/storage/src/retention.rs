@@ -123,9 +123,9 @@ pub(crate) fn run_cleanup(
 ///
 /// **Single-caller assumption:** This function is not safe for concurrent
 /// execution. The SELECT runs outside the transaction, so a concurrent call
-/// could select the same batch. Nothing in the daemon calls `run_cleanup` at
-/// all today — HEU-629 adds a single scheduled task, and the assumption holds
-/// only so long as that stays the sole caller. If it changes, wrap SELECT +
+/// could select the same batch. The daemon calls `run_cleanup` from one
+/// scheduled task (`chronicle-daemon/src/retention_task.rs`), and the assumption
+/// holds only so long as that stays the sole caller. If it changes, wrap SELECT +
 /// file deletion + DB DELETE in a broader transaction or add row-level locking.
 fn cleanup_media(
     conn: &Connection,
