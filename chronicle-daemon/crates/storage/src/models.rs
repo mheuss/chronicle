@@ -158,8 +158,14 @@ pub struct SearchResult {
 
 /// How a cleanup run ended.
 ///
-/// `Completed` is the `Default` so `..CleanupStats::default()` keeps compiling —
-/// `Storage::sweep_orphans` builds its stats that way.
+/// `Completed` is the `Default`, and that attribute is load-bearing. Two paths
+/// build their stats with `..CleanupStats::default()` and never assign
+/// `outcome`: `Storage::sweep_orphans`, and — the one that matters —
+/// `retention::run_cleanup`'s success path. Move `#[default]` to `Disabled` and
+/// every ordinary cleanup run reports `Disabled`, so the scheduled task stops
+/// writing checkpoints and each restart re-runs cleanup immediately instead of
+/// honouring the period. `an_ordinary_run_reports_completed` in `retention.rs`
+/// pins this end to end.
 ///
 /// The scheduled cleanup task (`chronicle-daemon/src/retention_task.rs`) reads
 /// this and persists a checkpoint only on `Completed`: a run that examined
