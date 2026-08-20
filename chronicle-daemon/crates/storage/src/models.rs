@@ -156,6 +156,31 @@ pub struct SearchResult {
 
 // --- Operational types ---
 
+/// How a cleanup run ended.
+///
+/// `Completed` is the `Default`, and that attribute is load-bearing. Two paths
+/// build their stats with `..CleanupStats::default()` and never assign
+/// `outcome`: `Storage::sweep_orphans`, and — the one that matters —
+/// `retention::run_cleanup`'s success path. Move `#[default]` to `Disabled` and
+/// every ordinary cleanup run reports `Disabled`, so the scheduled task stops
+/// writing checkpoints and each restart re-runs cleanup immediately instead of
+/// honouring the period. `an_ordinary_run_reports_completed` in `retention.rs`
+/// pins this end to end.
+///
+/// The scheduled cleanup task (`chronicle-daemon/src/retention_task.rs`) reads
+/// this and persists a checkpoint only on `Completed`: a run that examined
+/// nothing has none to record, and recording one would delay the first real
+/// cleanup by up to a period after retention is switched back on. That is the
+/// reason this enum exists rather than a bare success/failure.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupOutcome {
+    /// Ran to exhaustion — no expired records remain.
+    #[default]
+    Completed,
+    /// `retention_days` was zero or negative, so nothing was examined.
+    Disabled,
+}
+
 /// Summary of what a cleanup or orphan-sweep operation removed.
 #[derive(Debug, Default)]
 pub struct CleanupStats {
@@ -165,6 +190,8 @@ pub struct CleanupStats {
     pub audio_segments_deleted: usize,
     /// Total bytes freed from disk.
     pub bytes_freed: u64,
+    /// How the run ended.
+    pub outcome: CleanupOutcome,
 }
 
 /// Aggregate statistics about the storage database and media files.

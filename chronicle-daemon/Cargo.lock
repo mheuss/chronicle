@@ -283,6 +283,7 @@ dependencies = [
  "chronicle-ocr",
  "chronicle-storage",
  "chronicle-transcription",
+ "chrono",
  "env_logger",
  "libc",
  "log",

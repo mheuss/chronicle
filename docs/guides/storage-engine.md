@@ -136,28 +136,54 @@ Say you want to add `browser_url` to screenshots.
 
 ## How cleanup works
 
-Retention cleanup runs in two phases inside `retention.rs`.
+Retention cleanup and orphan sweeping are two independent operations in
+`retention.rs`, with different callers. They are not two phases of one pass.
 
-### Phase 1: Expire old rows (`run_cleanup`)
+### Scheduled cleanup (`run_cleanup`)
 
-1. Read `retention_days` from the `config` table (default 30).
-2. Compute the cutoff timestamp: `now - retention_days * 86400 * 1000`.
-3. For screenshots: select up to 500 rows older than cutoff, DELETE them, then
-   delete each associated file from disk. Repeat until no more expired rows.
+A background task runs this at least 3 minutes after startup, then every 6
+hours after each run finishes. The last completed run's time is stored in the
+`config` table as `last_cleanup_ms`, so a restarted daemon resumes the schedule
+rather than restarting it.
+
+1. Read `retention_days` from the `config` table. The key is seeded at 30, and
+   an absent key also falls back to 30. `0` disables cleanup entirely; a
+   negative or unparseable stored value is an error and the run fails rather
+   than deleting anything.
+2. Reject a stored value above 36,500 days as an error, before any arithmetic.
+   Then compute the cutoff: `now - retention_days * 86400 * 1000`, with checked
+   arithmetic so a large value cannot wrap it into the future.
+3. For screenshots: select up to 500 rows older than the cutoff, oldest first,
+   delete each associated file from disk, then DELETE the rows in one
+   transaction. Repeat until no expired rows remain.
 4. Same loop for audio segments.
 
-Batching at 500 rows keeps SQLite transactions short. The DELETE triggers
-automatically clean up FTS entries. DB rows are deleted first so that if the
-file delete fails, the row is still gone and the file becomes an orphan (caught
-by phase 2).
+Batching at 500 rows keeps SQLite transactions short, and the DELETE triggers
+clean up FTS entries automatically. **Files are deleted before rows.** The two
+ways a batch can fail leave different wreckage, and it is worth being precise
+about which:
 
-### Phase 2: Sweep orphan files (`sweep_orphans`)
+- **An unlink fails and the rows are deleted anyway** — the file survives with
+  no row pointing at it. That is a plain orphan, and the startup sweep below
+  reclaims it.
+- **The unlinks succeed and the transaction then fails, or the process dies** —
+  the rows survive with no files behind them. Nothing currently repairs that;
+  the sweep only walks the filesystem looking for untracked files, never rows
+  looking for missing ones. HEU-624 covers it.
+
+So files-first does not make a batch atomic, and calling it "crash-safe" would
+overstate it. What it buys is that the *common* failure — one bad unlink — lands
+in the recoverable direction instead of the permanent one.
+
+### Startup orphan sweep (`sweep_orphans`)
 
 `sweep_orphans` calls `sweep_media_orphans` once per media table. For each, it
 walks that table's directory (`screenshots/` or `audio/`) recursively, then reads
-all tracked paths for the matching table in a single query into a `HashSet`. Any walked file whose
-canonical path is not in that set gets deleted. This catches files left behind by
-crashes or interrupted cleanup. An empty walk returns early without querying.
+all tracked paths for the matching table in a single query into a `HashSet`. A
+walked file is deleted only if it clears both tests: its canonical path is not in
+that set, *and* its last write predates the start of the sweep. This runs once at
+startup and catches files left behind by crashes or interrupted cleanup. An empty
+walk returns early without querying.
 
 The walk runs before the query, not after — the pipeline writes a file before
 inserting its row, so reading the set first would delete a capture whose file

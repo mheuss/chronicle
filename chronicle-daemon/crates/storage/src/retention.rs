@@ -5,7 +5,7 @@ use rusqlite::{Connection, params};
 
 use crate::error::{Result, StorageError};
 use crate::media::MediaManager;
-use crate::models::CleanupStats;
+use crate::models::{CleanupOutcome, CleanupStats};
 
 const CLEANUP_BATCH_SIZE: usize = 500;
 
@@ -42,7 +42,7 @@ const AUDIO_TABLE: MediaTable = MediaTable {
 /// ~3.15e12 ms against an `i64` ceiling of ~9.2e18, so it leaves six orders of
 /// magnitude of headroom. It is set where it is because a century is already
 /// past any real retention policy, not because larger values stop fitting.
-pub(crate) const MAX_RETENTION_DAYS: i64 = 36_500;
+pub const MAX_RETENTION_DAYS: i64 = 36_500;
 
 /// Timestamp before which records are expired, or an error if the window does
 /// not fit in an `i64`.
@@ -80,14 +80,17 @@ pub(crate) fn run_cleanup(
     retention_days: i64,
 ) -> Result<CleanupStats> {
     if retention_days <= 0 {
-        return Ok(CleanupStats::default());
+        return Ok(CleanupStats {
+            outcome: CleanupOutcome::Disabled,
+            ..CleanupStats::default()
+        });
     }
     if retention_days > MAX_RETENTION_DAYS {
         // This log line is defence in depth; the `Err` below is the primary
         // signal. Kept because a caller that swallows the `Err` would otherwise
-        // leave retention silently never running while disk grows. HEU-629 has
-        // the scheduled tick log the error itself, so once that lands the
-        // condition is reported twice per period rather than once.
+        // leave retention silently never running while disk grows. The
+        // scheduled tick logs the error itself too, so the condition is
+        // reported twice per period rather than once.
         //
         // Note `main.rs` calls `env_logger::init()` with no default filter, so
         // with `RUST_LOG` unset this line does not print — same as every other
@@ -120,10 +123,12 @@ pub(crate) fn run_cleanup(
 ///
 /// **Single-caller assumption:** This function is not safe for concurrent
 /// execution. The SELECT runs outside the transaction, so a concurrent call
-/// could select the same batch. Nothing in the daemon calls `run_cleanup` at
-/// all today — HEU-629 adds a single scheduled task, and the assumption holds
-/// only so long as that stays the sole caller. If it changes, wrap SELECT +
-/// file deletion + DB DELETE in a broader transaction or add row-level locking.
+/// could select the same batch. The daemon calls `run_cleanup` from one
+/// scheduled task (`chronicle-daemon/src/retention_task.rs`) — one task per
+/// *process*, which is the dimension that matters now that a caller exists: two
+/// daemons against one database violate this even though each runs a single
+/// task. If it changes, wrap SELECT + file deletion + DB DELETE in a broader
+/// transaction or add row-level locking.
 fn cleanup_media(
     conn: &Connection,
     media: &MediaTable,
@@ -135,9 +140,13 @@ fn cleanup_media(
 
     loop {
         // 1. Select batch of expired rows
+        // `ORDER BY` so an interrupted run removes the oldest data first; the
+        // `id` tiebreak makes the order total, so rows sharing a timestamp
+        // cannot alternate between batches. Every identifier here is a
+        // compile-time constant from `MediaTable` — no user input reaches this.
         let select_sql = format!(
-            "SELECT id, {} FROM {} WHERE {} < ?1 LIMIT ?2",
-            media.path_col, media.table, media.timestamp_col
+            "SELECT id, {} FROM {} WHERE {} < ?1 ORDER BY {}, id LIMIT ?2",
+            media.path_col, media.table, media.timestamp_col, media.timestamp_col
         );
         let batch: Vec<(i64, String)> = {
             let mut stmt = conn.prepare(&select_sql)?;
@@ -355,6 +364,20 @@ mod tests {
 
     fn lock_hooks() -> HookGuard {
         HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Every statement executed while `capture_stmt` is registered. Used by
+    /// `the_batch_select_orders_oldest_first` to assert on the SQL that really
+    /// ran rather than on a copy rebuilt in the test.
+    static CAPTURED_SQL: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    fn capture_stmt(evt: TraceEvent<'_>) {
+        if let TraceEvent::Stmt(_, sql) = evt {
+            CAPTURED_SQL
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(sql.to_string());
+        }
     }
 
     static SWEEP_QUERY_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -1058,6 +1081,186 @@ mod tests {
     fn surviving_shots(conn: &Connection) -> i64 {
         conn.query_row("SELECT COUNT(*) FROM screenshots", [], |r| r.get(0))
             .unwrap()
+    }
+
+    /// Insert one audio segment `age_days` old. Mirrors `insert_aged_shot` for
+    /// the second media table, whose timestamp column is `start_timestamp`.
+    fn insert_aged_audio(conn: &Connection, age_days: i64) {
+        let start = now_millis() - age_days * 86_400 * 1000;
+        let meta = AudioSegmentMetadata {
+            start_timestamp: start,
+            end_timestamp: start + 30_000,
+            source: "mic".into(),
+            audio_path: format!("/tmp/aged_{age_days}.opus"),
+            transcript: None,
+            whisper_model: None,
+            language: None,
+        };
+        audio::insert(conn, &meta).unwrap();
+    }
+
+    // --- cleanup outcome (HEU-629) ---
+
+    #[test]
+    fn a_disabled_retention_reports_disabled() {
+        // `0` and negative are two separate conditions of the `<= 0` guard, and
+        // both mean "keep forever". Neither examined anything, so neither may
+        // report Completed — the scheduled task will checkpoint only on
+        // Completed, and a checkpoint here would suppress the first real
+        // cleanup for a whole period after retention is switched on.
+        let conn = setup_db();
+        let media_mgr = dummy_media_mgr();
+        insert_aged_shot(&conn, 100);
+
+        for days in [0, -1] {
+            let stats = run_cleanup(&conn, &media_mgr, days).unwrap();
+            assert_eq!(
+                stats.outcome,
+                CleanupOutcome::Disabled,
+                "retention_days {days} is disabled, not completed"
+            );
+        }
+        assert_eq!(surviving_shots(&conn), 1, "a disabled run deletes nothing");
+    }
+
+    #[test]
+    fn an_ordinary_run_reports_completed() {
+        let conn = setup_db();
+        let media_mgr = dummy_media_mgr();
+        insert_aged_shot(&conn, 100);
+
+        let stats = run_cleanup(&conn, &media_mgr, 30).unwrap();
+
+        assert_eq!(stats.outcome, CleanupOutcome::Completed);
+        assert_eq!(stats.screenshots_deleted, 1);
+    }
+
+    // --- batch ordering (HEU-629) ---
+
+    #[test]
+    fn cleanup_keeps_only_rows_inside_the_window() {
+        // Deliberately does NOT pin the ordering, despite sitting in the
+        // batch-ordering section: 4 rows against a batch size of 500 all arrive in
+        // one batch, so this passes with `ORDER BY` deleted, reversed, or
+        // pointed at another column. `the_batch_select_orders_oldest_first` is
+        // the only thing holding the ordering.
+        let conn = setup_db();
+        let media_mgr = dummy_media_mgr();
+        for days in [100, 90, 80, 10] {
+            insert_aged_shot(&conn, days);
+        }
+
+        let stats = run_cleanup(&conn, &media_mgr, 30).unwrap();
+
+        assert_eq!(stats.screenshots_deleted, 3);
+        assert_eq!(surviving_shots(&conn), 1);
+
+        let oldest: i64 = conn
+            .query_row("SELECT MIN(timestamp) FROM screenshots", [], |r| r.get(0))
+            .unwrap();
+        let cutoff = now_millis() - 30 * 86_400 * 1000;
+        assert!(
+            oldest >= cutoff,
+            "the only survivor must be inside the window"
+        );
+    }
+
+    #[test]
+    fn the_batch_select_orders_oldest_first() {
+        // The behavioural test above cannot distinguish an ordered SELECT from
+        // an unordered one on a small table — SQLite happens to return rowid
+        // order anyway. This pins the clause against the statement that really
+        // executed, so it cannot pass by agreeing with a copy of itself.
+        let _guard = lock_hooks();
+        CAPTURED_SQL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+
+        let conn = setup_db();
+        let media_mgr = dummy_media_mgr();
+        insert_aged_shot(&conn, 100);
+        insert_aged_audio(&conn, 100);
+
+        conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(capture_stmt));
+        let cleaned = run_cleanup(&conn, &media_mgr, 30);
+        conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+        // Unwrap after deregistering, as the other hook tests here do — a panic
+        // inside the hook window leaves the hook installed on a live handle.
+        cleaned.unwrap();
+
+        let captured = CAPTURED_SQL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+
+        // The exact clause, not just the substring "ORDER BY" — that would
+        // accept `ORDER BY id DESC`, the wrong column, or a dropped tiebreak.
+        let shot_selects: Vec<&String> = captured
+            .iter()
+            .filter(|sql| sql.contains("SELECT id,") && sql.contains("FROM screenshots WHERE"))
+            .collect();
+        assert!(
+            !shot_selects.is_empty(),
+            "the screenshot batch SELECT must have run, got: {captured:?}"
+        );
+        assert!(
+            shot_selects
+                .iter()
+                .all(|sql| sql.contains("ORDER BY timestamp, id")),
+            "screenshot batches must order by timestamp then id, got: {shot_selects:?}"
+        );
+
+        // The audio table's timestamp column differs, so assert it separately —
+        // only checking one table would let a hand-edit to AUDIO_TABLE through.
+        let audio_selects: Vec<&String> = captured
+            .iter()
+            .filter(|sql| sql.contains("SELECT id,") && sql.contains("FROM audio_segments WHERE"))
+            .collect();
+        assert!(
+            !audio_selects.is_empty(),
+            "the audio batch SELECT must have run, got: {captured:?}"
+        );
+        assert!(
+            audio_selects
+                .iter()
+                .all(|sql| sql.contains("ORDER BY start_timestamp, id")),
+            "audio batches must order by start_timestamp then id, got: {audio_selects:?}"
+        );
+
+        CAPTURED_SQL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
+    #[test]
+    fn cleanup_deletes_across_multiple_batches() {
+        // No existing cleanup test crosses CLEANUP_BATCH_SIZE, so the loop that
+        // repeats until a batch comes back short has never been exercised.
+        // Three passes: two full batches and a short one that ends the loop.
+        let conn = setup_db();
+        let media_mgr = dummy_media_mgr();
+        let expired = CLEANUP_BATCH_SIZE * 2 + 37;
+        for _ in 0..expired {
+            insert_aged_shot(&conn, 100);
+        }
+        insert_aged_shot(&conn, 1); // inside the window — must survive
+
+        let stats = run_cleanup(&conn, &media_mgr, 30).unwrap();
+
+        assert_eq!(
+            stats.screenshots_deleted, expired,
+            "every expired row must go, across all three batches"
+        );
+        assert_eq!(surviving_shots(&conn), 1, "and the fresh row must remain");
+
+        // Row counts only. Every *deleted* row shares one `/tmp/aged_100.heif`,
+        // outside `dummy_media_mgr`'s base, so every `delete_file` fails
+        // `validate_path` and is swallowed by the warn in `cleanup_media`.
+        // `bytes_freed` accumulating across batches is therefore still
+        // uncovered — stats are HEU-631's, don't read this as covering them.
+        assert_eq!(stats.bytes_freed, 0, "no file here is actually reclaimable");
     }
 
     #[test]

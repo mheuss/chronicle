@@ -24,9 +24,17 @@ pub(crate) mod search;
 
 pub use error::{Result, StorageError};
 pub use models::{
-    AudioSegment, AudioSegmentMetadata, CleanupStats, Screenshot, ScreenshotMetadata, SearchFilter,
-    SearchResult, SearchSource, StorageConfig, StorageStatus,
+    AudioSegment, AudioSegmentMetadata, CleanupOutcome, CleanupStats, Screenshot,
+    ScreenshotMetadata, SearchFilter, SearchResult, SearchSource, StorageConfig, StorageStatus,
 };
+/// Largest accepted `retention_days`. Exposed so a caller can validate or
+/// render the limit without hardcoding the number or scraping an error string —
+/// `set_config` rejects anything above it.
+///
+/// In-crate code keeps spelling this `retention::MAX_RETENTION_DAYS`, which is
+/// the more precise path and says where the bound is enforced. This re-export
+/// exists for callers outside the crate, which cannot see that module.
+pub use retention::MAX_RETENTION_DAYS;
 
 /// SQLite-backed storage engine for screenshots, audio, and full-text search.
 pub struct Storage {
@@ -510,7 +518,41 @@ impl Storage {
     }
 
     /// Write a configuration value, creating or replacing the key.
+    ///
+    /// `retention_days` is validated here and nowhere else on the write path.
+    /// This is the only writer, so an out-of-range value cannot reach the table
+    /// — which matters because the scheduled cleanup task would otherwise fail
+    /// identically every period, and a value nothing reads is invisible to the
+    /// user who set it. Every other key keeps the untyped passthrough
+    /// behaviour.
+    ///
+    /// This repeats the read-time comparison in `retention::run_cleanup`, and
+    /// deliberately does not make it redundant: a database written by an
+    /// earlier build — or by hand — can already hold an out-of-range value that
+    /// no write path ever saw, and only the read-time bound catches that.
+    ///
+    /// Delete this guard and `set_config_rejects_an_out_of_range_retention`
+    /// fails at its `unwrap_err` — which is what makes it load-bearing where
+    /// HEU-628's proposed outer bound was not. The `get_config` assertion
+    /// beside it catches a different mutation: a guard that returns `Err`
+    /// *after* writing, which asserting the error alone would wave through.
     pub async fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        if key == "retention_days" {
+            let days = value
+                .parse::<i64>()
+                .map_err(|e| StorageError::Other(format!("invalid retention_days value: {e}")))?;
+            if days < 0 {
+                return Err(StorageError::Other(
+                    "retention_days must be non-negative".into(),
+                ));
+            }
+            if days > retention::MAX_RETENTION_DAYS {
+                return Err(StorageError::Other(format!(
+                    "retention_days {days} exceeds maximum {}",
+                    retention::MAX_RETENTION_DAYS
+                )));
+            }
+        }
         let pool = self.pool.clone();
         let key = key.to_string();
         let value = value.to_string();
@@ -709,6 +751,22 @@ mod tests {
         assert_eq!(value, Some("30".to_string()));
     }
 
+    /// Write a config value straight through the pool, bypassing
+    /// `set_config`'s validation.
+    ///
+    /// Needed because the write guard now rejects the very values these tests
+    /// have to get into the table — they cover what happens when a database
+    /// *already* holds one, which a hand edit or an older build can produce.
+    fn seed_config(storage: &Storage, key: &str, value: &str) {
+        let conn = storage.pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO config (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![key, value],
+        )
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn run_cleanup_rejects_a_retention_beyond_the_bound() {
         // The bound is enforced in `retention::run_cleanup`; this asserts the
@@ -726,13 +784,15 @@ mod tests {
         };
         let storage = Storage::open(config).await.unwrap();
 
-        storage
-            .set_config(
-                "retention_days",
-                &(retention::MAX_RETENTION_DAYS + 1).to_string(),
-            )
-            .await
-            .unwrap();
+        // Seeded past `set_config`, whose guard now rejects this value. This
+        // test covers the READ-time guard — what protects a database that
+        // already holds an out-of-range value. Do not "simplify" it back to
+        // `set_config`: that deletes the only coverage of that path.
+        seed_config(
+            &storage,
+            "retention_days",
+            &(retention::MAX_RETENTION_DAYS + 1).to_string(),
+        );
 
         assert!(storage.run_cleanup().await.is_err());
     }
@@ -790,6 +850,131 @@ mod tests {
         assert!(
             storage.get_screenshot_opt(aged_id).await.unwrap().is_some(),
             "the aged row must still be in the table after cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_cleanup_errors_on_a_negative_stored_retention() {
+        // Pins the read-path negative check, which had no test of its own:
+        // relaxing `days < 0` in `run_cleanup`'s validation left the whole
+        // suite green, because the inner `<= 0` guard makes a negative a no-op
+        // either way. The two layers differ only in how loudly they refuse —
+        // Err here, `Disabled` there — and that difference is the thing this
+        // asserts.
+        //
+        // Added with the write-time guard because the write guard makes this
+        // MORE fragile, not less: negatives can no longer be stored through
+        // `set_config`, so the read check now looks like dead code to anyone
+        // who does not know a hand-edited database can still contain one.
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Storage::open(config).await.unwrap();
+
+        seed_config(&storage, "retention_days", "-1");
+
+        assert!(
+            storage.run_cleanup().await.is_err(),
+            "a negative stored value must error at the public boundary, not \
+             quietly no-op"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_config_rejects_an_out_of_range_retention() {
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Storage::open(config).await.unwrap();
+
+        // `retention_days` is SEEDED at 30 by migration 001, so the key always
+        // exists after `open`. A rejected write must leave that prior value
+        // intact — asserting `None` here would be wrong, and would pass only if
+        // the guard had also wiped the row.
+        assert_eq!(
+            storage.get_config("retention_days").await.unwrap(),
+            Some("30".to_string()),
+            "sanity: the seeded default is what a rejected write must preserve"
+        );
+
+        // Above the bound: rejected, and — the half that matters — not stored.
+        // A guard that returned Err after writing would pass an error-only
+        // assertion while leaving the bad value in the table.
+        // Assert on the message, not just `is_err`: three structurally different
+        // rejections would otherwise all be satisfied by a single overly-broad
+        // guard that refused every `retention_days` write.
+        let too_big = (retention::MAX_RETENTION_DAYS + 1).to_string();
+        let err = storage
+            .set_config("retention_days", &too_big)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exceeds maximum"), "wrong clause fired: {err}");
+        assert_eq!(
+            storage.get_config("retention_days").await.unwrap(),
+            Some("30".to_string()),
+            "a rejected value must not overwrite the stored one"
+        );
+
+        // Negative is a separate clause from the upper bound — relax one and
+        // only its own case fails.
+        let err = storage
+            .set_config("retention_days", "-1")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("non-negative"), "wrong clause fired: {err}");
+
+        // Unparseable, rather than stored as a string every later read must cope
+        // with.
+        let err = storage
+            .set_config("retention_days", "soon")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("invalid retention_days value"),
+            "wrong clause fired: {err}"
+        );
+
+        // The bound itself is valid, and 0 stays valid — it means "keep
+        // forever", a legitimate setting rather than an error.
+        assert!(
+            storage
+                .set_config("retention_days", &retention::MAX_RETENTION_DAYS.to_string())
+                .await
+                .is_ok()
+        );
+        assert!(storage.set_config("retention_days", "0").await.is_ok());
+        assert_eq!(
+            storage.get_config("retention_days").await.unwrap(),
+            Some("0".to_string()),
+            "an accepted value must actually be stored"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_config_does_not_validate_other_keys() {
+        // The guard keys off the name. Every other key keeps the untyped
+        // passthrough behaviour, so this must not become a general validator.
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Storage::open(config).await.unwrap();
+
+        storage
+            .set_config("some_other_key", "-99999")
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.get_config("some_other_key").await.unwrap(),
+            Some("-99999".to_string())
         );
     }
 
