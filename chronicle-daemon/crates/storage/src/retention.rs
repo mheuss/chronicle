@@ -88,9 +88,9 @@ pub(crate) fn run_cleanup(
     if retention_days > MAX_RETENTION_DAYS {
         // This log line is defence in depth; the `Err` below is the primary
         // signal. Kept because a caller that swallows the `Err` would otherwise
-        // leave retention silently never running while disk grows. HEU-629 has
-        // the scheduled tick log the error itself, so once that lands the
-        // condition is reported twice per period rather than once.
+        // leave retention silently never running while disk grows. The
+        // scheduled tick logs the error itself too, so the condition is
+        // reported twice per period rather than once.
         //
         // Note `main.rs` calls `env_logger::init()` with no default filter, so
         // with `RUST_LOG` unset this line does not print — same as every other
@@ -124,9 +124,11 @@ pub(crate) fn run_cleanup(
 /// **Single-caller assumption:** This function is not safe for concurrent
 /// execution. The SELECT runs outside the transaction, so a concurrent call
 /// could select the same batch. The daemon calls `run_cleanup` from one
-/// scheduled task (`chronicle-daemon/src/retention_task.rs`), and the assumption
-/// holds only so long as that stays the sole caller. If it changes, wrap SELECT +
-/// file deletion + DB DELETE in a broader transaction or add row-level locking.
+/// scheduled task (`chronicle-daemon/src/retention_task.rs`) — one task per
+/// *process*, which is the dimension that matters now that a caller exists: two
+/// daemons against one database violate this even though each runs a single
+/// task. If it changes, wrap SELECT + file deletion + DB DELETE in a broader
+/// transaction or add row-level locking.
 fn cleanup_media(
     conn: &Connection,
     media: &MediaTable,

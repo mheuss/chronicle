@@ -520,7 +520,7 @@ async fn main() -> Result<()> {
     // Retention cleanup. Spawned, never awaited on the startup path: HEU-547
     // was a 249-second startup stall and that shape must not come back.
     //
-    // The handle is deliberately dropped, and three consequences follow. They
+    // The handle is deliberately dropped, and four consequences follow. They
     // are spelled out here because this comment is the only record of them that
     // ships — the documents analysing them are gitignored.
     //
@@ -537,6 +537,13 @@ async fn main() -> Result<()> {
     //    left pointing at nothing. Repairing that is HEU-624's job.
     // 3. A worker panic ends the loop, so retention stays off for the rest of
     //    the process lifetime with one log line as the only signal.
+    // 4. A run holds one of the four pooled connections for its whole duration,
+    //    not per batch. Steady state is seconds; the first enforcement run took
+    //    minutes. An exhausted pool surfaces as `StorageError::Pool` after
+    //    r2d2's 30s default — survivable for the loop, which reschedules, but a
+    //    pipeline writer that loses a connection drops a capture. Note it does
+    //    NOT log "database is locked" or "busy", so a grep for those does not
+    //    rule it out.
     //
     // HEU-630 closes the first with a stop flag that lets an in-flight run end
     // between batches, plus a join it adds at the end of teardown. There is no

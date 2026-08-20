@@ -170,6 +170,13 @@ where
         // run. `initial_deadline_ms` guards that hazard at task start and this
         // path does not — the asymmetry is deferred to HEU-630 with the fix and
         // its test, not overlooked.
+        //
+        // The `.max(0)` is a real guard, and like `biased;` below it is
+        // unpinned: no test drives `next_attempt` under `now_ms()`, because the
+        // first deadline is floored at the start delay and every later one is a
+        // period out with only the checkpoint write between the two clock
+        // reads. Delete it and a negative i64 becomes a ~u64::MAX millisecond
+        // sleep — retention off until restart.
         let wait = Duration::from_millis(next_attempt.saturating_sub(ops.now_ms()).max(0) as u64);
         tokio::select! {
             // `biased` so a ready cancellation is never passed over in favour
