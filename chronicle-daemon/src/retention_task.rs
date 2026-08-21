@@ -367,8 +367,8 @@ mod loop_tests {
     /// tokio's clock has advanced, plus an optional wall-clock offset. The
     /// first two are what let a test assert the *next* deadline against a run
     /// of nonzero duration; the offset is what lets a test move the wall clock
-    /// independently of the monotonic timer, which is the whole hazard
-    /// `run_cleanup_loop`'s clamp exists to bound.
+    /// independently of the monotonic timer, which is the hazard HEU-636's
+    /// clamp will bound.
     struct FakeOps {
         origin: tokio::time::Instant,
         runs: AtomicUsize,
@@ -391,11 +391,14 @@ mod loop_tests {
         /// Added to every `now_ms()` reading. Lets a test move the wall clock
         /// independently of tokio's monotonic timer.
         clock_offset_ms: AtomicI64,
-        /// Milliseconds to step the wall clock BACKWARDS, applied once inside
-        /// `write_last_cleanup`. Consumed on use — see the comment there.
+        /// Milliseconds to step the wall clock BACKWARDS, applied on the first
+        /// write that reaches `Ok(())` — not once per test, and never on a
+        /// write that fails or panics. Consumed on use; see the comment there.
         step_back_on_write_ms: AtomicI64,
         /// Monotonic time at the START of each run. Lets a test assert the gap
-        /// between two runs exactly, rather than straddling it with a margin.
+        /// between two run starts exactly, rather than straddling it with a
+        /// margin. That gap is `run_duration + CLEANUP_PERIOD`, so a test
+        /// wanting a bare period must leave `run_duration` at zero.
         run_times: Mutex<Vec<Duration>>,
     }
 
