@@ -343,7 +343,7 @@ mod tests {
 mod loop_tests {
     use super::*;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
     use chronicle_ipc::CancellationToken;
     use chronicle_storage::{CleanupOutcome, CleanupStats};
@@ -363,9 +363,12 @@ mod loop_tests {
 
     /// A fake whose clock tracks tokio's paused timer.
     ///
-    /// `now_ms` is NOT a stored constant — it is the base plus however much
-    /// tokio's clock has advanced. That is what lets a test assert the *next*
-    /// deadline against a run of nonzero duration.
+    /// `now_ms` is NOT a stored constant — it is the base, plus however much
+    /// tokio's clock has advanced, plus an optional wall-clock offset. The
+    /// first two are what let a test assert the *next* deadline against a run
+    /// of nonzero duration; the offset is what lets a test move the wall clock
+    /// independently of the monotonic timer, which is the whole hazard
+    /// `run_cleanup_loop`'s clamp exists to bound.
     struct FakeOps {
         origin: tokio::time::Instant,
         runs: AtomicUsize,
@@ -385,6 +388,15 @@ mod loop_tests {
         write_panics: bool,
         stored: Mutex<Option<String>>,
         writes: Mutex<Vec<i64>>,
+        /// Added to every `now_ms()` reading. Lets a test move the wall clock
+        /// independently of tokio's monotonic timer.
+        clock_offset_ms: AtomicI64,
+        /// Milliseconds to step the wall clock BACKWARDS, applied once inside
+        /// `write_last_cleanup`. Consumed on use — see the comment there.
+        step_back_on_write_ms: AtomicI64,
+        /// Monotonic time at the START of each run. Lets a test assert the gap
+        /// between two runs exactly, rather than straddling it with a margin.
+        run_times: Mutex<Vec<Duration>>,
     }
 
     impl FakeOps {
@@ -402,6 +414,9 @@ mod loop_tests {
                 write_panics: false,
                 stored: Mutex::new(None),
                 writes: Mutex::new(Vec::new()),
+                clock_offset_ms: AtomicI64::new(0),
+                step_back_on_write_ms: AtomicI64::new(0),
+                run_times: Mutex::new(Vec::new()),
             }
         }
         fn run_count(&self) -> usize {
@@ -413,9 +428,11 @@ mod loop_tests {
     impl CleanupOps for FakeOps {
         fn now_ms(&self) -> i64 {
             NOW + self.origin.elapsed().as_millis() as i64
+                + self.clock_offset_ms.load(Ordering::SeqCst)
         }
         async fn run_cleanup(&self) -> Result<CleanupStats, StorageError> {
             self.runs.fetch_add(1, Ordering::SeqCst);
+            self.run_times.lock().unwrap().push(self.origin.elapsed());
             tokio::time::sleep(self.run_duration).await;
             if self.panic_on_run {
                 return Err(StorageError::Join(join_error_from_panic().await));
@@ -448,6 +465,16 @@ mod loop_tests {
             }
             self.writes.lock().unwrap().push(value_ms);
             *self.stored.lock().unwrap() = Some(value_ms.to_string());
+            // Consumed with `swap`, so the step fires exactly once no matter how
+            // many runs complete. `write_last_cleanup` takes `&self`, so a plain
+            // `i64` could not be cleared and would step the clock on every write.
+            // Deriving the one-shot from `runs` or `writes` instead would couple
+            // the fake to call counts, which is exactly what the injection point
+            // was chosen to avoid.
+            let step = self.step_back_on_write_ms.swap(0, Ordering::SeqCst);
+            if step != 0 {
+                self.clock_offset_ms.fetch_sub(step, Ordering::SeqCst);
+            }
             Ok(())
         }
     }
