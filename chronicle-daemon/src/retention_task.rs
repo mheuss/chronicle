@@ -192,12 +192,16 @@ where
         // unpinned: no test drives `next_attempt` under `now_ms()`, because the
         // first deadline is floored at the start delay and every later one is a
         // period out, with only result handling and the checkpoint write
-        // between the two clock reads. Delete it and a negative i64 becomes a
-        // ~u64::MAX millisecond sleep — which the clamp below then truncates to
-        // one period, so the already-due run is delayed by one full period
-        // rather than the scheduler being wedged until restart. It stays
-        // because running now is the right response to a deadline already in
-        // the past.
+        // between the two clock reads — and the one test that steps the clock
+        // there steps it backwards, which only inflates the wait. Delete the
+        // guard and a negative i64 becomes a ~u64::MAX millisecond sleep, which
+        // the clamp below then truncates to one period, so the already-due run
+        // is delayed by one full period rather than the scheduler being wedged
+        // until restart. It stays for two reasons: running now is the right
+        // response to a deadline already in the past, and that mildness is
+        // borrowed from a clamp that exists for an unrelated hazard — remove
+        // the clamp and the sign-cast is exposed again with nothing to catch
+        // it.
         let wait = Duration::from_millis(next_attempt.saturating_sub(ops.now_ms()).max(0) as u64)
             .min(CLEANUP_PERIOD);
         tokio::select! {
