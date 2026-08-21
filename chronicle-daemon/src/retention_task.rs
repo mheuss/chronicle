@@ -166,18 +166,24 @@ where
 
     loop {
         // Both terms are wall-clock, but the sleep below is monotonic, so a
-        // backwards step in the wall clock is slept out in full before the next
-        // run. `initial_deadline_ms` guards that hazard at task start and this
-        // path does not — the asymmetry is deferred to HEU-630 with the fix and
-        // its test, not overlooked.
+        // backwards step in the wall clock inflates the computed wait. The
+        // `.min(CLEANUP_PERIOD)` is a BOUND, not a re-derivation: a backwards
+        // step costs at most one period here, where `initial_deadline_ms` says
+        // "due now". That asymmetry is deliberate, and it is reachable only
+        // between a deadline being derived and the wait being computed from it —
+        // a step during the monotonic sleep does not delay that run at all.
+        // Re-deriving instead would need loop state, which is too high a price
+        // for a window that small; see the module docs before reshaping this
+        // loop.
         //
         // The `.max(0)` is a real guard, and like `biased;` below it is
         // unpinned: no test drives `next_attempt` under `now_ms()`, because the
         // first deadline is floored at the start delay and every later one is a
-        // period out with only the checkpoint write between the two clock
-        // reads. Delete it and a negative i64 becomes a ~u64::MAX millisecond
-        // sleep — retention off until restart.
-        let wait = Duration::from_millis(next_attempt.saturating_sub(ops.now_ms()).max(0) as u64);
+        // period out, with only result handling and the checkpoint write
+        // between the two clock reads. Delete it and a negative i64 becomes a
+        // ~u64::MAX millisecond sleep — retention off until restart.
+        let wait = Duration::from_millis(next_attempt.saturating_sub(ops.now_ms()).max(0) as u64)
+            .min(CLEANUP_PERIOD);
         tokio::select! {
             // `biased` so a ready cancellation is never passed over in favour
             // of a simultaneously-ready deadline.
@@ -392,13 +398,14 @@ mod loop_tests {
         /// independently of tokio's monotonic timer.
         clock_offset_ms: AtomicI64,
         /// Milliseconds to step the wall clock BACKWARDS, applied on the first
-        /// write that reaches `Ok(())` — not once per test, and never on a
+        /// write that reaches `Ok(())` — not once per write, and never on a
         /// write that fails or panics. Consumed on use; see the comment there.
         step_back_on_write_ms: AtomicI64,
         /// Monotonic time at the START of each run. Lets a test assert the gap
         /// between two run starts exactly, rather than straddling it with a
-        /// margin. That gap is `run_duration + CLEANUP_PERIOD`, so a test
-        /// wanting a bare period must leave `run_duration` at zero.
+        /// margin. With the wall clock untouched, that gap is
+        /// `run_duration + CLEANUP_PERIOD`, so a test wanting a bare period
+        /// must leave `run_duration` at zero.
         run_times: Mutex<Vec<Duration>>,
     }
 
@@ -526,6 +533,53 @@ mod loop_tests {
             ops.run_count(),
             2,
             "the second run must fire one period after the first finished"
+        );
+
+        cancel.cancel();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_backwards_clock_step_delays_the_next_run_by_at_most_one_period() {
+        // The wait is computed from the wall clock but slept on tokio's
+        // monotonic timer, so a backwards step inflates it. The step is injected
+        // inside the checkpoint write because that is the real production
+        // window: `next_attempt` is assigned, the write runs, and only then does
+        // the loop re-read the clock. A step during the sleep is harmless — the
+        // sleep is monotonic and the next deadline is derived from the already-
+        // stepped clock.
+        const TEN_HOURS_MS: i64 = 10 * 60 * 60 * 1000;
+
+        let mut fake = FakeOps::new();
+        fake.step_back_on_write_ms = AtomicI64::new(TEN_HOURS_MS);
+        let ops = Arc::new(fake);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run_cleanup_loop(Arc::clone(&ops), cancel.clone()));
+
+        // Run 1 fires at the start delay and its checkpoint write steps the wall
+        // clock back ten hours, so the loop computes a wait of PERIOD + 10h.
+        // Clamped, run 2 lands one period after run 1; unclamped it is 16h out
+        // and never happens inside this window.
+        tokio::time::sleep(Duration::from_secs(3 * 60 + 6 * 60 * 60 + 60)).await;
+        assert_eq!(
+            ops.run_count(),
+            2,
+            "the clamp must cap the wait at one period"
+        );
+
+        // Asserted exactly rather than straddled with a margin. A margin wide
+        // enough to be safe is also wide enough for a miscalibrated clamp
+        // (PERIOD ± a little) to pass, which would leave the bound itself
+        // unpinned. Paused time makes the exact value deterministic, and
+        // `run_duration` is zero here so the run-start gap is the bare wait.
+        // Copied out rather than asserted under the guard: a `MutexGuard` alive
+        // across the `task.await` below makes this future non-Send.
+        let times = ops.run_times.lock().unwrap().clone();
+        assert_eq!(times.len(), 2, "expected exactly two runs in this window");
+        assert_eq!(
+            times[1] - times[0],
+            CLEANUP_PERIOD,
+            "the clamped wait must be exactly one period"
         );
 
         cancel.cancel();
