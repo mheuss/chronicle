@@ -30,6 +30,14 @@ pub(crate) const CLEANUP_START_DELAY: Duration = Duration::from_secs(3 * 60);
 /// Time from one run finishing to the next starting.
 pub(crate) const CLEANUP_PERIOD: Duration = Duration::from_secs(6 * 60 * 60);
 
+/// The clamp in `run_cleanup_loop` is a no-op in normal operation only while the
+/// start delay fits inside one period. Raise `CLEANUP_START_DELAY` past
+/// `CLEANUP_PERIOD` and the clamp would truncate the first wait, firing the
+/// first run one period after start instead of waiting out the full delay —
+/// earlier than configured, and only incidentally caught by tests that hardcode
+/// the current offsets.
+const _: () = assert!(CLEANUP_START_DELAY.as_millis() <= CLEANUP_PERIOD.as_millis());
+
 /// Config key holding the last completed run's wall-clock time, in ms.
 pub(crate) const LAST_CLEANUP_KEY: &str = "last_cleanup_ms";
 
@@ -166,18 +174,36 @@ where
 
     loop {
         // Both terms are wall-clock, but the sleep below is monotonic, so a
-        // backwards step in the wall clock is slept out in full before the next
-        // run. `initial_deadline_ms` guards that hazard at task start and this
-        // path does not — the asymmetry is deferred to HEU-630 with the fix and
-        // its test, not overlooked.
+        // backwards step in the wall clock inflates the computed wait. The
+        // `.min(CLEANUP_PERIOD)` is a BOUND, not a re-derivation: a backwards
+        // step costs at most one period here, where `initial_deadline_ms` says
+        // "due now". That asymmetry is deliberate, and it is reachable only
+        // between a deadline being derived and the wait being computed from it —
+        // a step during the monotonic sleep does not delay that run at all.
+        // Re-deriving instead would need loop state, which is too high a price
+        // for a window that small; see the module docs before reshaping this
+        // loop.
+        //
+        // The clamp is a no-op in normal operation only while
+        // CLEANUP_START_DELAY <= CLEANUP_PERIOD, which the const assert beside
+        // those constants enforces.
         //
         // The `.max(0)` is a real guard, and like `biased;` below it is
         // unpinned: no test drives `next_attempt` under `now_ms()`, because the
         // first deadline is floored at the start delay and every later one is a
-        // period out with only the checkpoint write between the two clock
-        // reads. Delete it and a negative i64 becomes a ~u64::MAX millisecond
-        // sleep — retention off until restart.
-        let wait = Duration::from_millis(next_attempt.saturating_sub(ops.now_ms()).max(0) as u64);
+        // period out, with only result handling and the checkpoint write
+        // between the two clock reads — and the one test that steps the clock
+        // there steps it backwards, which only inflates the wait. Delete the
+        // guard and a negative i64 becomes a ~u64::MAX millisecond sleep, which
+        // the clamp below then truncates to one period, so the already-due run
+        // is delayed by one full period rather than the scheduler being wedged
+        // until restart. It stays for two reasons: running now is the right
+        // response to a deadline already in the past, and that mildness is
+        // borrowed from a clamp that exists for an unrelated hazard — remove
+        // the clamp and the sign-cast is exposed again with nothing to catch
+        // it.
+        let wait = Duration::from_millis(next_attempt.saturating_sub(ops.now_ms()).max(0) as u64)
+            .min(CLEANUP_PERIOD);
         tokio::select! {
             // `biased` so a ready cancellation is never passed over in favour
             // of a simultaneously-ready deadline.
@@ -343,7 +369,7 @@ mod tests {
 mod loop_tests {
     use super::*;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
     use chronicle_ipc::CancellationToken;
     use chronicle_storage::{CleanupOutcome, CleanupStats};
@@ -363,9 +389,12 @@ mod loop_tests {
 
     /// A fake whose clock tracks tokio's paused timer.
     ///
-    /// `now_ms` is NOT a stored constant — it is the base plus however much
-    /// tokio's clock has advanced. That is what lets a test assert the *next*
-    /// deadline against a run of nonzero duration.
+    /// `now_ms` is NOT a stored constant — it is the base, plus however much
+    /// tokio's clock has advanced, plus an optional wall-clock offset. The
+    /// first two are what let a test assert the *next* deadline against a run
+    /// of nonzero duration; the offset is what lets a test move the wall clock
+    /// independently of the monotonic timer, which is the hazard the
+    /// `.min(CLEANUP_PERIOD)` clamp in `run_cleanup_loop` bounds.
     struct FakeOps {
         origin: tokio::time::Instant,
         runs: AtomicUsize,
@@ -385,6 +414,19 @@ mod loop_tests {
         write_panics: bool,
         stored: Mutex<Option<String>>,
         writes: Mutex<Vec<i64>>,
+        /// Added to every `now_ms()` reading. Lets a test move the wall clock
+        /// independently of tokio's monotonic timer.
+        clock_offset_ms: AtomicI64,
+        /// Milliseconds to step the wall clock BACKWARDS, applied on the first
+        /// write that reaches `Ok(())` — not once per write, and never on a
+        /// write that fails or panics. Consumed on use; see the comment there.
+        step_back_on_write_ms: AtomicI64,
+        /// Monotonic time at the START of each run. Lets a test assert the gap
+        /// between two run starts exactly, rather than straddling it with a
+        /// margin. With the wall clock untouched, that gap is
+        /// `run_duration + CLEANUP_PERIOD`, so a test wanting a bare period
+        /// must leave `run_duration` at zero.
+        run_times: Mutex<Vec<Duration>>,
     }
 
     impl FakeOps {
@@ -402,6 +444,9 @@ mod loop_tests {
                 write_panics: false,
                 stored: Mutex::new(None),
                 writes: Mutex::new(Vec::new()),
+                clock_offset_ms: AtomicI64::new(0),
+                step_back_on_write_ms: AtomicI64::new(0),
+                run_times: Mutex::new(Vec::new()),
             }
         }
         fn run_count(&self) -> usize {
@@ -413,9 +458,11 @@ mod loop_tests {
     impl CleanupOps for FakeOps {
         fn now_ms(&self) -> i64 {
             NOW + self.origin.elapsed().as_millis() as i64
+                + self.clock_offset_ms.load(Ordering::SeqCst)
         }
         async fn run_cleanup(&self) -> Result<CleanupStats, StorageError> {
             self.runs.fetch_add(1, Ordering::SeqCst);
+            self.run_times.lock().unwrap().push(self.origin.elapsed());
             tokio::time::sleep(self.run_duration).await;
             if self.panic_on_run {
                 return Err(StorageError::Join(join_error_from_panic().await));
@@ -448,6 +495,16 @@ mod loop_tests {
             }
             self.writes.lock().unwrap().push(value_ms);
             *self.stored.lock().unwrap() = Some(value_ms.to_string());
+            // Consumed with `swap`, so the step fires exactly once no matter how
+            // many runs complete. `write_last_cleanup` takes `&self`, so a plain
+            // `i64` could not be cleared and would step the clock on every write.
+            // Deriving the one-shot from `runs` or `writes` instead would couple
+            // the fake to call counts, which is exactly what the injection point
+            // was chosen to avoid.
+            let step = self.step_back_on_write_ms.swap(0, Ordering::SeqCst);
+            if step != 0 {
+                self.clock_offset_ms.fetch_sub(step, Ordering::SeqCst);
+            }
             Ok(())
         }
     }
@@ -496,6 +553,55 @@ mod loop_tests {
             ops.run_count(),
             2,
             "the second run must fire one period after the first finished"
+        );
+
+        cancel.cancel();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_backwards_clock_step_delays_the_next_run_by_at_most_one_period() {
+        // The wait is computed from the wall clock but slept on tokio's
+        // monotonic timer, so a backwards step inflates it. The step is injected
+        // inside the checkpoint write because that is the real production
+        // window: `next_attempt` is assigned, the write runs, and only then does
+        // the loop re-read the clock. A step during the sleep is harmless — the
+        // sleep is monotonic and the next deadline is derived from the already-
+        // stepped clock.
+        const TEN_HOURS_MS: i64 = 10 * 60 * 60 * 1000;
+
+        let mut fake = FakeOps::new();
+        fake.step_back_on_write_ms = AtomicI64::new(TEN_HOURS_MS);
+        let ops = Arc::new(fake);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run_cleanup_loop(Arc::clone(&ops), cancel.clone()));
+
+        // Run 1 fires at the start delay and its checkpoint write steps the wall
+        // clock back ten hours, so the loop computes a wait of PERIOD + 10h.
+        // Clamped, run 2 lands one period after run 1; unclamped it is 16h out
+        // and never happens inside this window.
+        tokio::time::sleep(Duration::from_secs(3 * 60 + 6 * 60 * 60 + 60)).await;
+        assert_eq!(
+            ops.run_count(),
+            2,
+            "the clamp must cap the wait at one period"
+        );
+
+        // Asserted exactly rather than straddled with a margin. A margin wide
+        // enough to be safe is also wide enough for a miscalibrated clamp
+        // (PERIOD ± a little) to pass, which would leave the bound itself
+        // unpinned. Paused time makes the exact value deterministic, and
+        // `run_duration` is zero here so the run-start gap is the bare wait.
+        // Copied out rather than asserted under the guard: `await_holding_lock`
+        // fires on a guard alive across the `task.await` below, and an explicit
+        // `drop` does not silence it — the lint is scope-based, not flow-based.
+        // Clippy's own help text suggests the `drop`, so do not take that route.
+        let times = ops.run_times.lock().unwrap().clone();
+        assert_eq!(times.len(), 2, "expected exactly two runs in this window");
+        assert_eq!(
+            times[1] - times[0],
+            CLEANUP_PERIOD,
+            "the clamped wait must be exactly one period"
         );
 
         cancel.cancel();
