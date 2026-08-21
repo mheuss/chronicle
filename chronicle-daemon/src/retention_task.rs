@@ -385,8 +385,8 @@ mod loop_tests {
     /// tokio's clock has advanced, plus an optional wall-clock offset. The
     /// first two are what let a test assert the *next* deadline against a run
     /// of nonzero duration; the offset is what lets a test move the wall clock
-    /// independently of the monotonic timer, which is the hazard HEU-636's
-    /// clamp will bound.
+    /// independently of the monotonic timer, which is the hazard the
+    /// `.min(CLEANUP_PERIOD)` clamp in `run_cleanup_loop` bounds.
     struct FakeOps {
         origin: tokio::time::Instant,
         runs: AtomicUsize,
