@@ -194,9 +194,10 @@ where
         // period out, with only result handling and the checkpoint write
         // between the two clock reads. Delete it and a negative i64 becomes a
         // ~u64::MAX millisecond sleep — which the clamp below then truncates to
-        // one period, so the cost is a missed immediate run rather than a
-        // wedged scheduler. It stays because running now is the right response
-        // to a deadline already in the past.
+        // one period, so the already-due run is delayed by one full period
+        // rather than the scheduler being wedged until restart. It stays
+        // because running now is the right response to a deadline already in
+        // the past.
         let wait = Duration::from_millis(next_attempt.saturating_sub(ops.now_ms()).max(0) as u64)
             .min(CLEANUP_PERIOD);
         tokio::select! {
