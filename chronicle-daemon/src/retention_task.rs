@@ -176,6 +176,11 @@ where
         // for a window that small; see the module docs before reshaping this
         // loop.
         //
+        // The clamp is a no-op in normal operation only while
+        // CLEANUP_START_DELAY <= CLEANUP_PERIOD — otherwise it truncates the
+        // first wait and the first run fires a period late instead of at the
+        // start delay. That relationship is pinned next to the constants.
+        //
         // The `.max(0)` is a real guard, and like `biased;` below it is
         // unpinned: no test drives `next_attempt` under `now_ms()`, because the
         // first deadline is floored at the start delay and every later one is a
@@ -572,8 +577,10 @@ mod loop_tests {
         // (PERIOD ± a little) to pass, which would leave the bound itself
         // unpinned. Paused time makes the exact value deterministic, and
         // `run_duration` is zero here so the run-start gap is the bare wait.
-        // Copied out rather than asserted under the guard: a `MutexGuard` alive
-        // across the `task.await` below makes this future non-Send.
+        // Copied out rather than asserted under the guard: `await_holding_lock`
+        // fires on a guard alive across the `task.await` below, and an explicit
+        // `drop` does not silence it — the lint is scope-based, not flow-based.
+        // Clippy's own help text suggests the `drop`, so do not take that route.
         let times = ops.run_times.lock().unwrap().clone();
         assert_eq!(times.len(), 2, "expected exactly two runs in this window");
         assert_eq!(
