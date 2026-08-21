@@ -34,7 +34,8 @@ pub(crate) const CLEANUP_PERIOD: Duration = Duration::from_secs(6 * 60 * 60);
 /// start delay fits inside one period. Raise `CLEANUP_START_DELAY` past
 /// `CLEANUP_PERIOD` and the clamp would truncate the first wait, firing the
 /// first run one period after start instead of waiting out the full delay —
-/// earlier than configured, and with no test to say so.
+/// earlier than configured, and only incidentally caught by tests that hardcode
+/// the current offsets.
 const _: () = assert!(CLEANUP_START_DELAY.as_millis() <= CLEANUP_PERIOD.as_millis());
 
 /// Config key holding the last completed run's wall-clock time, in ms.
@@ -183,7 +184,7 @@ where
         // for a window that small; see the module docs before reshaping this
         // loop.
         //
-        // Being a no-op in normal operation depends on
+        // The clamp is a no-op in normal operation only while
         // CLEANUP_START_DELAY <= CLEANUP_PERIOD, which the const assert beside
         // those constants enforces.
         //
