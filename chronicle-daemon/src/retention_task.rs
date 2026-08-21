@@ -179,9 +179,10 @@ where
         // The clamp is a no-op in normal operation only while
         // CLEANUP_START_DELAY <= CLEANUP_PERIOD — otherwise it truncates the
         // first wait and the first run fires a period late instead of at the
-        // start delay. That relationship is NOT pinned: raising the start delay
-        // above one period silently changes the first run's timing and no test
-        // fails, because every test uses the 3min/6h values.
+        // start delay. Nothing tests that relationship directly. Raising the
+        // start delay past one period would break several tests below, but only
+        // incidentally — they hardcode offsets derived from the 3min/6h values,
+        // so they would fail without diagnosing the truncation.
         //
         // The `.max(0)` is a real guard, and like `biased;` below it is
         // unpinned: no test drives `next_attempt` under `now_ms()`, because the
