@@ -420,9 +420,6 @@ fn convert_to_mono_samples(
 /// `planes.len()` channels of equal length**. It is never a partial set. A
 /// caller that indexes `result[1]` must check for the empty case first — a
 /// zero-frame buffer yields no channels at all, not N empty ones.
-// Wired into the tap block by HEU-650; until then only the tests call it.
-// The `allow` comes off when that caller lands.
-#[allow(dead_code)]
 fn extract_channels_from_planes(planes: &[&[f32]], frames: usize, stride: usize) -> Vec<Vec<f32>> {
     if planes.is_empty() || frames == 0 || stride == 0 {
         return Vec::new();
@@ -455,9 +452,100 @@ fn extract_channels_from_planes(planes: &[&[f32]], frames: usize, stride: usize)
         .collect()
 }
 
+/// Extract every channel of `buffer` as owned `f32` samples.
+///
+/// Returns `None` when the buffer cannot be read as f32 channel data:
+///
+/// - the format is not 32-bit float (`floatChannelData` is nil for every
+///   other format, and dereferencing it would be undefined behaviour),
+/// - the buffer has zero valid frames, zero channels, or a zero stride, or
+/// - the plane length required to cover `frames` at `stride` overflows
+///   `usize`.
+///
+/// Returning `None` **silently** is deliberate: this runs on the audio
+/// callback, which must never touch the logger (ADR-013). The diagnostic for
+/// a non-f32 device is the one-time classification log at tap install, not a
+/// per-buffer warning.
+///
+/// When it returns `Some`, the result always carries **exactly `channelCount`
+/// channels of exactly `frameLength` samples each** — never a partial or empty
+/// set. The empty-result path documented on [`extract_channels_from_planes`] is
+/// unreachable from here, because the guards below reject every input that
+/// could produce it. Callers do not need a defensive empty check.
+///
+/// **Callers must supply an `autoreleasepool`.** This makes ObjC property
+/// calls and does not open a pool of its own; HEU-650's call site is inside the
+/// tap block's existing pool.
+// Wired into the tap block by HEU-650; until then only the tests call it.
+// The `allow` comes off when that caller lands.
+#[allow(dead_code)]
+fn extract_channels(buffer: &AVAudioPCMBuffer) -> Option<Vec<Vec<f32>>> {
+    // SAFETY: each of these four is a plain property read with no
+    // preconditions, sound in any buffer state. `format` is bound to a local
+    // so its `Retained` outlives the `channelCount` read.
+    let frames = unsafe { buffer.frameLength() } as usize;
+    let format = unsafe { buffer.format() };
+    let channels = unsafe { format.channelCount() } as usize;
+    let stride = unsafe { buffer.stride() };
+
+    // SAFETY: also a plain property read.
+    let data = unsafe { buffer.floatChannelData() };
+
+    // A nil return is how AVFoundation reports "not 32-bit float" — that is
+    // the value's meaning, not the reason the call above is sound.
+    if data.is_null() || frames == 0 || channels == 0 || stride == 0 {
+        return None;
+    }
+
+    // `floatChannelData` returns `channelCount` pointers, each addressing
+    // `frameLength` valid samples spaced by `stride` samples. The last sample
+    // of a channel therefore sits at `(frames - 1) * stride`, and the readable
+    // run behind each pointer is that index plus one.
+    //
+    // The `- 1` is load-bearing, not defensive rounding: `frames * stride`
+    // would over-read by `stride - 1` elements past the last channel.
+    let plane_len = (frames - 1).checked_mul(stride)?.checked_add(1)?;
+
+    let mut planes: Vec<&[f32]> = Vec::with_capacity(channels);
+    for ch in 0..channels {
+        // SAFETY: three preconditions, and the interleaved case is the
+        // non-obvious one.
+        //
+        // 1. `data` is non-null (checked above) and points to exactly
+        //    `channelCount` pointers — `format.channelCount()` is the same
+        //    value AVFoundation sized that array with.
+        //
+        // 2. Each pointer has at least `plane_len` readable f32s behind it.
+        //    Deinterleaved: every channel is its own allocation, `stride == 1`,
+        //    and `plane_len == frames`. Interleaved: all `channelCount` slices
+        //    alias ONE allocation of `frames * channelCount` samples, and
+        //    channel `c`'s pointer starts at offset `c`. The highest channel
+        //    therefore ends at `(channelCount - 1) + (frames - 1) * stride`,
+        //    which for `stride == channelCount` is exactly the final element —
+        //    an exact fit with zero slack, verified against the real allocator
+        //    for both layouts. Widening `plane_len` breaks this.
+        //
+        // 3. The slices deliberately alias each other in the interleaved case.
+        //    That is sound only because every one of them is a shared `&[f32]`
+        //    and nothing holds a `&mut` to the buffer for their lifetime — the
+        //    buffer is borrowed immutably by this function's signature and
+        //    outlives every slice built here.
+        //
+        // `frames <= frameCapacity` is guaranteed by AVFoundation, which
+        // rejects an out-of-range `setFrameLength:`.
+        let ptr = unsafe { *data.add(ch) };
+        planes.push(unsafe { std::slice::from_raw_parts(ptr.as_ptr(), plane_len) });
+    }
+
+    Some(extract_channels_from_planes(&planes, frames, stride))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the tests need this until HEU-649's Task 4 classifies formats in
+    // production code; importing it at module scope now would warn as unused.
+    use objc2_avf_audio::AVAudioCommonFormat;
 
     #[test]
     fn extract_channels_deinterleaved_splits_both_channels() {
@@ -592,6 +680,217 @@ mod tests {
             extract_channels_from_planes(&mixed, 4, 1).is_empty(),
             "one empty plane among non-empty"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn extract_channels_reads_a_real_deinterleaved_buffer() {
+        autoreleasepool(|_| {
+            let format = unsafe {
+                AVAudioFormat::initStandardFormatWithSampleRate_channels(
+                    AVAudioFormat::alloc(),
+                    48_000.0,
+                    2,
+                )
+            }
+            .expect("stereo format should build");
+
+            let buffer = unsafe {
+                AVAudioPCMBuffer::initWithPCMFormat_frameCapacity(
+                    AVAudioPCMBuffer::alloc(),
+                    &format,
+                    4,
+                )
+            }
+            .expect("buffer should allocate");
+
+            // frameLength FIRST — floatChannelData points at `frameLength`
+            // valid samples, so on a fresh buffer (frameLength == 0) there is
+            // nothing valid to write into yet.
+            unsafe { buffer.setFrameLength(4) };
+
+            // The name claims deinterleaved; assert it rather than assume it,
+            // so a layout surprise fails with "stride was 2" instead of a
+            // confusing value mismatch below.
+            assert_eq!(
+                unsafe { buffer.stride() },
+                1,
+                "standard format should be deinterleaved"
+            );
+
+            let channels = unsafe { buffer.floatChannelData() };
+            for ch in 0..2usize {
+                let plane = unsafe { *channels.add(ch) };
+                for f in 0..4usize {
+                    unsafe { plane.as_ptr().add(f).write(ch as f32 * 10.0 + f as f32) };
+                }
+            }
+
+            let result = extract_channels(&buffer).expect("f32 buffer should extract");
+
+            assert_eq!(
+                result,
+                vec![vec![0.0, 1.0, 2.0, 3.0], vec![10.0, 11.0, 12.0, 13.0]]
+            );
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn extract_channels_honours_frame_length_not_capacity() {
+        // Every real tap buffer has frameLength < frameCapacity — the engine
+        // hands back a buffer sized to a hint and fills part of it. Nothing
+        // else in this suite pins that extraction reads frameLength rather
+        // than capacity, so a capacity-based implementation would return
+        // stale samples past the valid region and go unnoticed.
+        autoreleasepool(|_| {
+            let format = unsafe {
+                AVAudioFormat::initStandardFormatWithSampleRate_channels(
+                    AVAudioFormat::alloc(),
+                    48_000.0,
+                    2,
+                )
+            }
+            .expect("stereo format should build");
+
+            let buffer = unsafe {
+                AVAudioPCMBuffer::initWithPCMFormat_frameCapacity(
+                    AVAudioPCMBuffer::alloc(),
+                    &format,
+                    8,
+                )
+            }
+            .expect("buffer should allocate");
+
+            // Fill all 8 frames, then declare only the first 4 valid.
+            unsafe { buffer.setFrameLength(8) };
+            let channels = unsafe { buffer.floatChannelData() };
+            for ch in 0..2usize {
+                let plane = unsafe { *channels.add(ch) };
+                for f in 0..8usize {
+                    unsafe { plane.as_ptr().add(f).write(ch as f32 * 100.0 + f as f32) };
+                }
+            }
+            unsafe { buffer.setFrameLength(4) };
+
+            let result = extract_channels(&buffer).expect("f32 buffer should extract");
+
+            // Only the first 4 of each channel — never the tail 4.
+            assert_eq!(
+                result,
+                vec![vec![0.0, 1.0, 2.0, 3.0], vec![100.0, 101.0, 102.0, 103.0]]
+            );
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn extract_channels_is_identical_across_layouts() {
+        // Same signal, both layouts, identical output. Writing through the
+        // same (pointer, stride) access pattern extraction uses would let a
+        // wrong-but-self-consistent interpretation pass, so the physical
+        // layout is asserted explicitly before anything is written.
+        fn build_and_extract(interleaved: bool) -> Vec<Vec<f32>> {
+            autoreleasepool(|_| {
+                let format = unsafe {
+                    AVAudioFormat::initWithCommonFormat_sampleRate_channels_interleaved(
+                        AVAudioFormat::alloc(),
+                        AVAudioCommonFormat::PCMFormatFloat32,
+                        48_000.0,
+                        2,
+                        interleaved,
+                    )
+                }
+                .expect("stereo f32 format should build");
+
+                let buffer = unsafe {
+                    AVAudioPCMBuffer::initWithPCMFormat_frameCapacity(
+                        AVAudioPCMBuffer::alloc(),
+                        &format,
+                        4,
+                    )
+                }
+                .expect("buffer should allocate");
+
+                // frameLength FIRST — see the deinterleaved test above.
+                unsafe { buffer.setFrameLength(4) };
+
+                let stride = unsafe { buffer.stride() };
+                let data = unsafe { buffer.floatChannelData() };
+                assert!(!data.is_null(), "f32 buffer must expose float channel data");
+
+                // Verify the physical interpretation BEFORE writing through it.
+                assert_eq!(
+                    stride,
+                    if interleaved { 2 } else { 1 },
+                    "stride for interleaved={interleaved}"
+                );
+                let p0 = unsafe { *data.add(0) }.as_ptr();
+                let p1 = unsafe { *data.add(1) }.as_ptr();
+                let gap = unsafe { p1.offset_from(p0) };
+                if interleaved {
+                    // One shared plane: channel 1 starts one f32 after channel 0.
+                    assert_eq!(gap, 1, "interleaved channel pointers must be adjacent");
+                } else {
+                    // Separate planes: channel 1 starts past all of channel 0.
+                    assert!(gap >= 4, "deinterleaved planes must not overlap, gap={gap}");
+                }
+
+                for ch in 0..2usize {
+                    let plane = unsafe { *data.add(ch) };
+                    for f in 0..4usize {
+                        let value = ch as f32 * 10.0 + f as f32;
+                        unsafe { plane.as_ptr().add(f * stride).write(value) };
+                    }
+                }
+
+                extract_channels(&buffer).expect("f32 buffer should extract")
+            })
+        }
+
+        let deinterleaved = build_and_extract(false);
+        let interleaved = build_and_extract(true);
+
+        let expected = vec![
+            vec![0.0_f32, 1.0, 2.0, 3.0],
+            vec![10.0_f32, 11.0, 12.0, 13.0],
+        ];
+
+        assert_eq!(deinterleaved, expected, "deinterleaved layout");
+        assert_eq!(interleaved, expected, "interleaved layout");
+        assert_eq!(deinterleaved, interleaved, "layouts must agree");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn extract_channels_returns_none_for_non_f32() {
+        autoreleasepool(|_| {
+            // Int16 has no float channel data; extraction must decline rather
+            // than dereference nil. It must also stay silent — this runs per
+            // callback.
+            let format = unsafe {
+                AVAudioFormat::initWithCommonFormat_sampleRate_channels_interleaved(
+                    AVAudioFormat::alloc(),
+                    AVAudioCommonFormat::PCMFormatInt16,
+                    48_000.0,
+                    2,
+                    true,
+                )
+            }
+            .expect("int16 format should build");
+
+            let buffer = unsafe {
+                AVAudioPCMBuffer::initWithPCMFormat_frameCapacity(
+                    AVAudioPCMBuffer::alloc(),
+                    &format,
+                    4,
+                )
+            }
+            .expect("buffer should allocate");
+            unsafe { buffer.setFrameLength(4) };
+
+            assert!(extract_channels(&buffer).is_none());
+        });
     }
 
     #[test]
