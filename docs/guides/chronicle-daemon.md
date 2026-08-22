@@ -115,7 +115,7 @@ Start here when a microphone records silence, near-silence, or empty
 transcripts. The daemon logs the device's native input format once, when it
 installs the tap:
 
-```
+```text
 [2026-08-22T22:02:06Z INFO  chronicle_audio::microphone] microphone tap installed (capture starts on mic-on): 2 ch, 48000 Hz, interleaved=false, format=f32, mix_eligibility=stereo
 ```
 
@@ -128,15 +128,22 @@ sample format, and whether the device is eligible for the explicit downmix.
 
 ```bash
 cd chronicle-daemon
-RUST_LOG=chronicle_audio=info cargo run --bin chronicle-daemon 2>&1 \
+RUST_LOG=error,chronicle_audio=info cargo run --bin chronicle-daemon 2>&1 \
   | grep -m1 -E "tap installed|microphone capture unavailable"
 ```
 
-The second pattern matters. When `MicrophoneCapture::new` fails there is no tap
-install at all — `engine.rs` logs `microphone capture unavailable: {e}` instead.
-Grepping only for `tap installed` in that case prints nothing and keeps waiting,
-which looks identical to "the log is missing" while the actual explanation
-scrolls past. If you want to see everything, drop the `grep`.
+The leading `error,` matters as much as the rest. `RUST_LOG=chronicle_audio=info`
+on its own is **not** additive — `env_filter` returns false for any target no
+directive matches, whatever its level, so a lone crate directive silences every
+*other* crate's errors too. `chronicle_daemon`'s own failures would vanish.
+`error,chronicle_audio=info` keeps errors everywhere and raises just this crate.
+
+The second grep pattern matters for the same reason. When `MicrophoneCapture::new`
+fails there is no tap install at all — `engine.rs` logs
+`microphone capture unavailable: {e}` instead. Grepping only for `tap installed`
+in that case prints nothing and keeps waiting, which looks identical to "the log
+is missing" while the actual explanation scrolls past. Drop the `grep` to see
+everything the filter admits.
 
 Either way the command does not exit on its own: the shell waits on `cargo`, so
 Ctrl-C once you have the line.
@@ -165,9 +172,11 @@ Cross-check the numbers against **Audio MIDI Setup** (`open -a "Audio MIDI
 Setup"`), which shows each device's format. System Settings → Sound → Input only
 tells you which device is selected.
 
-`mix_eligibility` describes what a future explicit downmix will do with the
-device: `stereo` and `mono` are eligible; `ineligible` covers non-f32 input,
-zero channels, and more than two channels.
+`mix_eligibility` names which of three routes a future explicit downmix will
+send the device down: `stereo` takes the measured mix, `mono` takes a fast
+passthrough that skips the mixing machinery entirely, and `ineligible` — non-f32
+input, zero channels, or more than two channels — stays on today's converter,
+unchanged and unmeasured.
 
 Because `ineligible` collapses those causes into one word, **read `format=` and
 the channel count to find out which one applies** — that is what separates an

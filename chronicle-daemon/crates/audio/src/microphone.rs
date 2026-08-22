@@ -55,40 +55,6 @@ fn mono_samples(channel: &[f32], frame_count: usize) -> Vec<f32> {
     channel[..frame_count.min(channel.len())].to_vec()
 }
 
-/// Whether the device active at tap install is **eligible** for the explicit
-/// downmix HEU-652 will add.
-///
-/// This is deliberately *not* called a "path". As of HEU-649 nothing branches
-/// on it: `AVAudioConverter` still performs every downmix, for every device.
-/// Naming it a path and logging `downmix_path=explicit-mix` would make the
-/// diagnostic assert a route that is not taken — worse than no diagnostic,
-/// because the next person debugging a silent microphone would believe it.
-///
-/// It is also not a claim about resampling. The converter handles sample rate
-/// for every device before and after HEU-652, so even an eligible device still
-/// goes through it.
-///
-/// **Contract for callers:** classify from the native format once, at tap
-/// install, and never re-evaluate. `MicrophoneCapture` and its converter are
-/// built once when the pipeline is created, so a default-input change leaves
-/// any classification stale until the daemon restarts. That is pre-existing
-/// behaviour, not something this branch changes.
-///
-/// The rule in one sentence: **the explicit mix will apply only to input the
-/// measurement covers; everything else keeps the path it already uses.**
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MixEligibility {
-    /// One f32 channel. Nothing to mix.
-    Mono,
-    /// Two f32 channels. The case HEU-549 is about; HEU-652 applies the
-    /// measured policy here.
-    Stereo,
-    /// Everything else — non-f32 at any channel count, zero channels, or
-    /// more than two. Not eligible for the explicit mix; the converter keeps
-    /// doing what it does today, which for these devices is already correct.
-    Ineligible,
-}
-
 /// Name an `AVAudioCommonFormat` for the tap-install log.
 ///
 /// `AVAudioCommonFormat`'s derived `Debug` prints the raw discriminant —
@@ -111,6 +77,50 @@ fn common_format_name(format: AVAudioCommonFormat) -> String {
         AVAudioCommonFormat::PCMFormatInt32 => "i32".into(),
         other => format!("unknown({})", other.0),
     }
+}
+
+/// Whether the device active at tap install is **eligible** for the explicit
+/// downmix HEU-652 will add.
+///
+/// This is deliberately *not* called a "path". As of HEU-649 nothing branches
+/// on it: `AVAudioConverter` still performs every downmix, for every device.
+/// Naming it a path and logging `downmix_path=explicit-mix` would make the
+/// diagnostic assert a route that is not taken — worse than no diagnostic,
+/// because the next person debugging a silent microphone would believe it.
+///
+/// It is also not a claim about resampling. The converter handles sample rate
+/// for every device before and after HEU-652, so even an eligible device still
+/// goes through it.
+///
+/// **Contract for callers:** classify from the native format once, at tap
+/// install, and never re-evaluate. `MicrophoneCapture` and its converter are
+/// built once when the pipeline is created, so a default-input change leaves
+/// any classification stale until the daemon restarts. That is pre-existing
+/// behaviour, not something this branch changes.
+///
+/// Three routes, not two: `Mono` takes a fast passthrough, `Stereo` takes the
+/// measured explicit mix, and `Ineligible` stays on today's converter.
+///
+/// The rule in one sentence: **the explicit mix will apply only to input the
+/// measurement covers; everything else keeps the path it already uses.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MixEligibility {
+    /// One f32 channel. **A distinct route, not the stereo one.** HEU-652
+    /// gives mono a fast path that skips extraction, the intermediate `Vec`,
+    /// and the second PCM buffer entirely — it does not enter the explicit-mix
+    /// machinery, it bypasses it. Grouped under "eligibility" only because the
+    /// classification is what selects the route.
+    Mono,
+    /// Two f32 channels. The case HEU-549 is about; HEU-652 applies the
+    /// measured policy here.
+    Stereo,
+    /// Everything else — non-f32 at any channel count, zero channels, or
+    /// more than two. Not eligible for the explicit mix; these keep today's
+    /// converter behaviour **unchanged and unmeasured**. That is a
+    /// no-regression guarantee, not a claim that the current behaviour is
+    /// correct for them — nothing has measured a non-f32 or multi-channel
+    /// device.
+    Ineligible,
 }
 
 impl MixEligibility {
@@ -587,10 +597,13 @@ fn extract_channels_from_planes(planes: &[&[f32]], frames: usize, stride: usize)
 /// could produce it. Callers do not need a defensive empty check.
 ///
 /// **Callers must supply an `autoreleasepool`.** This makes ObjC property
-/// calls and does not open a pool of its own; HEU-650's call site is inside the
-/// tap block's existing pool.
-// Wired into the tap block by HEU-650; until then only the tests call it.
-// The `allow` comes off when that caller lands.
+/// calls and does not open a pool of its own; the tap block already runs inside
+/// one, so both HEU-650's feature-gated characterization path and HEU-652's
+/// production path are covered.
+// No production caller yet. HEU-650 adds the first one, but it sits behind the
+// `characterize` Cargo feature (off by default), so a default build still sees
+// this as dead — the `allow` must survive that ticket. It comes off at HEU-652,
+// which wires the production tap block unconditionally.
 #[allow(dead_code)]
 fn extract_channels(buffer: &AVAudioPCMBuffer) -> Option<Vec<Vec<f32>>> {
     // SAFETY: each of these four is a plain property read with no
@@ -937,13 +950,22 @@ mod tests {
                 );
                 let p0 = unsafe { *data.add(0) }.as_ptr();
                 let p1 = unsafe { *data.add(1) }.as_ptr();
-                let gap = unsafe { p1.offset_from(p0) };
                 if interleaved {
-                    // One shared plane: channel 1 starts one f32 after channel 0.
+                    // One shared allocation, so `offset_from` is defined here:
+                    // channel 1 starts one f32 after channel 0.
+                    //
+                    // SAFETY: both pointers are into the same interleaved
+                    // buffer, which is what `offset_from` requires.
+                    let gap = unsafe { p1.offset_from(p0) };
                     assert_eq!(gap, 1, "interleaved channel pointers must be adjacent");
                 } else {
-                    // Separate planes: channel 1 starts past all of channel 0.
-                    assert!(gap >= 4, "deinterleaved planes must not overlap, gap={gap}");
+                    // Deinterleaved planes may be *separate* allocations —
+                    // AVFoundation guarantees only distinct chunks, not one
+                    // block. `offset_from` across two allocations is undefined
+                    // behaviour, so compare addresses as integers instead.
+                    assert_ne!(p0, p1, "deinterleaved planes must be distinct");
+                    let d = (p0 as usize).abs_diff(p1 as usize) / size_of::<f32>();
+                    assert!(d >= 4, "deinterleaved planes must not overlap, gap={d}");
                 }
 
                 for ch in 0..2usize {
@@ -969,6 +991,42 @@ mod tests {
         assert_eq!(deinterleaved, expected, "deinterleaved layout");
         assert_eq!(interleaved, expected, "interleaved layout");
         assert_eq!(deinterleaved, interleaved, "layouts must agree");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn extract_channels_returns_none_for_a_zero_frame_buffer() {
+        // Not hypothetical: a freshly allocated AVAudioPCMBuffer has
+        // frameLength == 0, and HEU-650 calls this on every tap callback.
+        //
+        // This guard is load-bearing. Without it, `(frames - 1)` panics with
+        // "attempt to subtract with overflow" in a debug build. The suite's
+        // other zero-frames coverage exercises `extract_channels_from_planes`,
+        // which is a different function with its own separate guard — deleting
+        // this one leaves all of those green.
+        autoreleasepool(|_| {
+            let format = unsafe {
+                AVAudioFormat::initStandardFormatWithSampleRate_channels(
+                    AVAudioFormat::alloc(),
+                    48_000.0,
+                    2,
+                )
+            }
+            .expect("stereo format should build");
+
+            let buffer = unsafe {
+                AVAudioPCMBuffer::initWithPCMFormat_frameCapacity(
+                    AVAudioPCMBuffer::alloc(),
+                    &format,
+                    4,
+                )
+            }
+            .expect("buffer should allocate");
+
+            // Deliberately no setFrameLength — frameLength is 0.
+            assert_eq!(unsafe { buffer.frameLength() }, 0);
+            assert!(extract_channels(&buffer).is_none());
+        });
     }
 
     #[cfg(target_os = "macos")]
@@ -1067,6 +1125,42 @@ mod tests {
             MixEligibility::classify(AVAudioCommonFormat::PCMFormatFloat32, 0),
             MixEligibility::Ineligible
         );
+    }
+
+    #[test]
+    fn common_format_names_are_distinct_and_stable() {
+        // Same reasoning as the eligibility labels below, and it matters more
+        // here: `Ineligible` collapses "not f32" and "more than two channels",
+        // so this name is the only field in the log line that separates an
+        // Int16 stereo microphone from a four-channel f32 array. A swapped arm
+        // would ship silently and corrupt exactly the evidence HEU-651 reads.
+        assert_eq!(
+            common_format_name(AVAudioCommonFormat::PCMFormatFloat32),
+            "f32"
+        );
+        assert_eq!(
+            common_format_name(AVAudioCommonFormat::PCMFormatFloat64),
+            "f64"
+        );
+        assert_eq!(
+            common_format_name(AVAudioCommonFormat::PCMFormatInt16),
+            "i16"
+        );
+        assert_eq!(
+            common_format_name(AVAudioCommonFormat::PCMFormatInt32),
+            "i32"
+        );
+        assert_eq!(
+            common_format_name(AVAudioCommonFormat::OtherFormat),
+            "other"
+        );
+    }
+
+    #[test]
+    fn common_format_name_surfaces_unknown_values() {
+        // A format AVFoundation adds later is the case worth seeing, so it
+        // prints the discriminant rather than being folded into "other".
+        assert_eq!(common_format_name(AVAudioCommonFormat(99)), "unknown(99)");
     }
 
     #[test]
