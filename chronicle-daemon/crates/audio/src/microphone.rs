@@ -89,10 +89,30 @@ enum MixEligibility {
     Ineligible,
 }
 
-// Nothing calls these yet. The tap-install log will be the first caller, and
-// the `allow` comes off when it lands. Scoped to the impl, not the enum, so
-// unused-variant warnings stay live as HEU-652 grows this type.
-#[allow(dead_code)]
+/// Name an `AVAudioCommonFormat` for the tap-install log.
+///
+/// `AVAudioCommonFormat`'s derived `Debug` prints the raw discriminant —
+/// `AVAudioCommonFormat(1)` — which makes the one line this ticket exists to
+/// provide require a lookup table to read. It matters more than it looks:
+/// [`MixEligibility::Ineligible`] collapses "not f32" and "more than two
+/// channels" into a single label, so the format name is the only thing in the
+/// line that tells an Int16 stereo microphone apart from a four-channel f32
+/// array.
+///
+/// Values from `objc2-avf-audio`'s `AVAudioFormat.rs`. An unrecognized value
+/// prints as `unknown(N)` rather than being silently dropped — a format
+/// AVFoundation adds later is exactly the case worth seeing.
+fn common_format_name(format: AVAudioCommonFormat) -> String {
+    match format {
+        AVAudioCommonFormat::OtherFormat => "other".into(),
+        AVAudioCommonFormat::PCMFormatFloat32 => "f32".into(),
+        AVAudioCommonFormat::PCMFormatFloat64 => "f64".into(),
+        AVAudioCommonFormat::PCMFormatInt16 => "i16".into(),
+        AVAudioCommonFormat::PCMFormatInt32 => "i32".into(),
+        other => format!("unknown({})", other.0),
+    }
+}
+
 impl MixEligibility {
     fn classify(format: AVAudioCommonFormat, channels: u32) -> Self {
         match (format, channels) {
@@ -102,9 +122,9 @@ impl MixEligibility {
         }
     }
 
-    /// The label HEU-650 will write to the tap-install log. Kept short and
-    /// greppable — it is what someone diagnosing a silent microphone searches
-    /// for, so it should stay stable once it ships.
+    /// The label written to the tap-install log. Kept short and greppable —
+    /// it is what someone diagnosing a silent microphone searches for, so it
+    /// should stay stable.
     fn as_str(self) -> &'static str {
         match self {
             Self::Mono => "mono",
@@ -165,6 +185,19 @@ impl MicrophoneCapture {
             // SAFETY: bus 0 is the input node's sole output bus.
             let native_format = unsafe { input.outputFormatForBus(0) };
 
+            // Read what the device actually delivers. Logged once, after the
+            // tap is installed (below), rather than per callback: the tap
+            // block runs on a real-time audio thread, and ADR-013 wants no
+            // logger there at all. (That path already carries pre-existing
+            // per-buffer warnings this branch does not touch — logging the
+            // format per callback would make it worse, not better.)
+            // SAFETY: all four are plain property reads on a valid format.
+            let native_channels = unsafe { native_format.channelCount() };
+            let native_rate = unsafe { native_format.sampleRate() };
+            let native_common = unsafe { native_format.commonFormat() };
+            let native_interleaved = unsafe { native_format.isInterleaved() };
+            let mix_eligibility = MixEligibility::classify(native_common, native_channels);
+
             // The format the encoder requires: 48 kHz, mono, f32. The
             // "standard" initializer yields deinterleaved f32, so channel
             // zero of a converted buffer is the whole mono signal.
@@ -221,6 +254,27 @@ impl MicrophoneCapture {
             // Allocate hardware-render resources up front so `start` is fast.
             // SAFETY: no preconditions.
             unsafe { engine.prepare() };
+
+            // The tap is installed and the engine prepared, so this really is
+            // a tap-install record. Logged here rather than where the format
+            // was read because the converter (above) and the tap install can
+            // both fail — a line emitted earlier would claim an install that
+            // never happened.
+            //
+            // `mix_eligibility` describes what HEU-652 will do with this
+            // device. Today `AVAudioConverter` performs every downmix
+            // regardless, which is why it is not called a path.
+            //
+            // This is `info!`, and the daemon's `env_logger::init()` has no
+            // default filter, so it is error-only unless `RUST_LOG` is set:
+            //     RUST_LOG=chronicle_audio=info cargo run --bin chronicle-daemon
+            log::info!(
+                "microphone tap installed (capture starts on mic-on): \
+                 {native_channels} ch, {native_rate} Hz, \
+                 interleaved={native_interleaved}, format={}, mix_eligibility={}",
+                common_format_name(native_common),
+                mix_eligibility.as_str()
+            );
 
             Ok(Self {
                 engine,
