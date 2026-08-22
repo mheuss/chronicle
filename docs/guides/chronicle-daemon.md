@@ -1,6 +1,6 @@
 # Developer Guide — Chronicle Daemon
 
-**Last updated:** 2026-04-06
+**Last updated:** 2026-08-22
 **Component path:** chronicle-daemon/
 
 ## Overview
@@ -54,7 +54,8 @@ flowchart TD
 3. `Storage::open()` — opens/migrates SQLite database
 4. `IpcServer::start()` — starts the Unix-socket status server
 5. `AudioPipeline::create()` — prepares the audio handler, dispatch queue, and
-   encoding thread used by ScreenCaptureKit audio callbacks
+   encoding thread used by ScreenCaptureKit audio callbacks, and builds the
+   microphone tap (installed eagerly; capture starts only on mic-on)
 6. `CaptureEngine::start()` — enumerates displays, starts one SCStream per
    display, registers the audio handler on the primary display, and returns a
    frame receiver channel
@@ -107,6 +108,74 @@ transcription work should follow the same pattern.
 **Permission preflight:** Screen Recording is required for all ScreenCaptureKit
 functionality (both screen capture and audio). Microphone is optional — mic
 capture is off by default and toggled from the UI.
+
+## Diagnosing a Microphone
+
+Start here when a microphone records silence, near-silence, or empty
+transcripts. The daemon logs the device's native input format once, when it
+installs the tap:
+
+```
+[2026-08-22T22:02:06Z INFO  chronicle_audio::microphone] microphone tap installed (capture starts on mic-on): 2 ch, 48000 Hz, interleaved=false, format=f32, mix_eligibility=stereo
+```
+
+It reports channel count, sample rate, whether samples are interleaved, the
+sample format, and whether the device is eligible for the explicit downmix.
+
+**You will not see it in a normal run.** It is an `info!` line, and
+`env_logger::init()` has no default filter, so the daemon is error-only unless
+`RUST_LOG` is set:
+
+```bash
+cd chronicle-daemon
+RUST_LOG=chronicle_audio=info cargo run --bin chronicle-daemon 2>&1 \
+  | grep -m1 -E "tap installed|microphone capture unavailable"
+```
+
+The second pattern matters. When `MicrophoneCapture::new` fails there is no tap
+install at all — `engine.rs` logs `microphone capture unavailable: {e}` instead.
+Grepping only for `tap installed` in that case prints nothing and keeps waiting,
+which looks identical to "the log is missing" while the actual explanation
+scrolls past. If you want to see everything, drop the `grep`.
+
+Either way the command does not exit on its own: the shell waits on `cargo`, so
+Ctrl-C once you have the line.
+
+Four things to know before you trust what you read:
+
+- **A second daemon on the same data directory will not start.** `IpcServer`
+  finds the existing socket and connects to it, and the newcomer exits with
+  "another daemon is already listening" *before* it reaches the tap install — so
+  you get no line at all, not an error about the microphone. Stop the running
+  daemon first. (The check is socket-based, not a global lock: a different data
+  directory has its own socket and its own daemon.)
+- **Restart between devices.** `MicrophoneCapture` and its converter are built
+  once when the pipeline is created, so changing the default input while the
+  daemon runs leaves the converter built for the previous device.
+- **The line does not name the device.** Nothing in it identifies which
+  microphone it describes, and two different devices can produce byte-identical
+  output. Confirm the default input in Audio MIDI Setup *before* you read the
+  line, and label it yourself when you record it — otherwise a second
+  measurement is indistinguishable from the first one repeated.
+- **The line appears with the mic off.** The tap is installed eagerly at
+  startup; capture begins only when the mic is enabled. Seeing this line is not
+  evidence the microphone was live.
+
+Cross-check the numbers against **Audio MIDI Setup** (`open -a "Audio MIDI
+Setup"`), which shows each device's format. System Settings → Sound → Input only
+tells you which device is selected.
+
+`mix_eligibility` describes what a future explicit downmix will do with the
+device: `stereo` and `mono` are eligible; `ineligible` covers non-f32 input,
+zero channels, and more than two channels.
+
+Because `ineligible` collapses those causes into one word, **read `format=` and
+the channel count to find out which one applies** — that is what separates an
+Int16 stereo microphone from a four-channel f32 array.
+
+It is not a claim about the current audio path: as of HEU-649,
+`AVAudioConverter` performs every downmix, for every device. HEU-652 is what
+changes that, and this paragraph with it.
 
 ## How to Modify
 
