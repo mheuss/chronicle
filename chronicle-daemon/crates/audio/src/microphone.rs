@@ -473,6 +473,128 @@ mod tests {
     }
 
     #[test]
+    fn extract_channels_interleaved_splits_both_channels() {
+        // stride == 2 with one shared allocation: L R L R L R. Each channel's
+        // plane pointer already starts at that channel's first sample, so
+        // channel 1 begins one sample in.
+        let interleaved = [1.0_f32, -1.0, 2.0, -2.0, 3.0, -3.0];
+        let planes: Vec<&[f32]> = vec![&interleaved[0..], &interleaved[1..]];
+
+        let result = extract_channels_from_planes(&planes, 3, 2);
+
+        assert_eq!(result, vec![vec![1.0, 2.0, 3.0], vec![-1.0, -2.0, -3.0]]);
+    }
+
+    #[test]
+    fn extract_channels_handles_more_than_two_channels() {
+        let a = [1.0_f32, 2.0];
+        let b = [3.0_f32, 4.0];
+        let c = [5.0_f32, 6.0];
+        let d = [7.0_f32, 8.0];
+        let planes: Vec<&[f32]> = vec![&a, &b, &c, &d];
+
+        let result = extract_channels_from_planes(&planes, 2, 1);
+
+        assert_eq!(
+            result,
+            vec![
+                vec![1.0, 2.0],
+                vec![3.0, 4.0],
+                vec![5.0, 6.0],
+                vec![7.0, 8.0]
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_channels_mono_is_an_identity_copy() {
+        let only = [0.5_f32, -0.5];
+        let planes: Vec<&[f32]> = vec![&only];
+
+        let result = extract_channels_from_planes(&planes, 2, 1);
+
+        assert_eq!(result, vec![vec![0.5, -0.5]]);
+    }
+
+    #[test]
+    fn extract_channels_clamps_overlong_frame_count() {
+        // A frame count past the end of the plane truncates; it must not panic
+        // and must not read past the slice.
+        let short = [1.0_f32, 2.0];
+        let planes: Vec<&[f32]> = vec![&short];
+
+        let result = extract_channels_from_planes(&planes, 99, 1);
+
+        assert_eq!(result, vec![vec![1.0, 2.0]]);
+    }
+
+    #[test]
+    fn extract_channels_clamps_overlong_frame_count_when_interleaved() {
+        // The stride == 1 case above cannot protect the clamp arithmetic:
+        // `(len - 1) / stride + 1` collapses to `len` there, so the divide is a
+        // no-op and a naive `plane.len()` bound survives it. At stride > 1 the
+        // permissive version reads past the plane and panics, which is the
+        // failure this test exists to prevent.
+        //
+        // Channel 0's plane is deliberately one sample short of the full run.
+        let interleaved = [1.0_f32, -1.0, 2.0, -2.0, 3.0, -3.0];
+        let planes: Vec<&[f32]> = vec![&interleaved[0..5], &interleaved[1..]];
+
+        let result = extract_channels_from_planes(&planes, 99, 2);
+
+        assert_eq!(result, vec![vec![1.0, 2.0, 3.0], vec![-1.0, -2.0, -3.0]]);
+    }
+
+    #[test]
+    fn extract_channels_keeps_every_channel_the_same_length() {
+        // One short plane truncates ALL channels, not just itself. HEU-652's
+        // mix_to_mono treats equal channel lengths as an extraction invariant;
+        // ragged output here would break it two tickets away.
+        let long = [1.0_f32, 2.0, 3.0, 4.0];
+        let short = [9.0_f32, 8.0];
+        let planes: Vec<&[f32]> = vec![&long, &short];
+
+        let result = extract_channels_from_planes(&planes, 4, 1);
+
+        assert_eq!(result, vec![vec![1.0, 2.0], vec![9.0, 8.0]]);
+        assert_eq!(
+            result[0].len(),
+            result[1].len(),
+            "channels must be equal length"
+        );
+    }
+
+    #[test]
+    fn extract_channels_degenerate_inputs_give_empty() {
+        // Named for all four cases, not just two: zero stride is what kills a
+        // missing divide-by-zero guard, and an empty plane among non-empty ones
+        // is what kills a missing `is_empty` check inside the `supplied` fold
+        // (its `plane.len() - 1` would underflow).
+        let plane = [1.0_f32];
+        let planes: Vec<&[f32]> = vec![&plane];
+
+        assert!(
+            extract_channels_from_planes(&planes, 0, 1).is_empty(),
+            "zero frames"
+        );
+        assert!(
+            extract_channels_from_planes(&[], 4, 1).is_empty(),
+            "no planes"
+        );
+        assert!(
+            extract_channels_from_planes(&planes, 4, 0).is_empty(),
+            "zero stride"
+        );
+
+        let empty: [f32; 0] = [];
+        let mixed: Vec<&[f32]> = vec![&plane, &empty];
+        assert!(
+            extract_channels_from_planes(&mixed, 4, 1).is_empty(),
+            "one empty plane among non-empty"
+        );
+    }
+
+    #[test]
     fn mono_samples_copies_channel_zero() {
         let channel = [0.1_f32, -0.2, 0.3, -0.4, 0.5];
         let result = mono_samples(&channel, 5);
