@@ -397,9 +397,80 @@ fn convert_to_mono_samples(
     Some(mono_samples(channel_slice, output_frames))
 }
 
+/// Copy `frames` samples out of each channel plane, honouring `stride`.
+///
+/// This is the pure, testable core of channel extraction. `planes[c]` is the
+/// slice `AVAudioPCMBuffer::floatChannelData` exposes for channel `c`, and
+/// `stride` is `AVAudioPCMBuffer::stride` — the sample spacing between
+/// consecutive frames of one channel.
+///
+/// - Deinterleaved buffers report `stride == 1`: each plane is that channel's
+///   own contiguous run.
+/// - Interleaved buffers report `stride == channelCount` and share one
+///   allocation; frame `f` of channel `c` lives at `plane[f * stride]`, where
+///   the plane pointer already starts at channel `c`'s first sample.
+///
+/// **Every returned channel has the same length.** A short plane truncates
+/// *all* channels to a common safe frame count rather than truncating itself
+/// alone. That matters downstream: HEU-652's `mix_to_mono` treats equal channel
+/// lengths as an extraction invariant and asserts on it, so returning ragged
+/// channels here would break an invariant two tickets away.
+///
+/// The result is therefore one of two shapes: **empty**, or **exactly
+/// `planes.len()` channels of equal length**. It is never a partial set. A
+/// caller that indexes `result[1]` must check for the empty case first — a
+/// zero-frame buffer yields no channels at all, not N empty ones.
+// Wired into the tap block by HEU-650; until then only the tests call it.
+// The `allow` comes off when that caller lands.
+#[allow(dead_code)]
+fn extract_channels_from_planes(planes: &[&[f32]], frames: usize, stride: usize) -> Vec<Vec<f32>> {
+    if planes.is_empty() || frames == 0 || stride == 0 {
+        return Vec::new();
+    }
+
+    // Frame `f` of a channel lives at index `f * stride`, so a plane of length
+    // `len` can supply `(len - 1) / stride + 1` frames. The smallest across all
+    // planes bounds every channel.
+    let supplied = planes
+        .iter()
+        .map(|plane| {
+            if plane.is_empty() {
+                0
+            } else {
+                (plane.len() - 1) / stride + 1
+            }
+        })
+        .min()
+        // The `planes.is_empty()` guard above is what makes this infallible.
+        .expect("planes is non-empty");
+
+    let usable = frames.min(supplied);
+    if usable == 0 {
+        return Vec::new();
+    }
+
+    planes
+        .iter()
+        .map(|plane| (0..usable).map(|f| plane[f * stride]).collect())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_channels_deinterleaved_splits_both_channels() {
+        // stride == 1 is the deinterleaved layout: each channel pointer walks
+        // its own contiguous run of samples.
+        let left = [1.0_f32, 2.0, 3.0];
+        let right = [-1.0_f32, -2.0, -3.0];
+        let planes: Vec<&[f32]> = vec![&left, &right];
+
+        let result = extract_channels_from_planes(&planes, 3, 1);
+
+        assert_eq!(result, vec![vec![1.0, 2.0, 3.0], vec![-1.0, -2.0, -3.0]]);
+    }
 
     #[test]
     fn mono_samples_copies_channel_zero() {
