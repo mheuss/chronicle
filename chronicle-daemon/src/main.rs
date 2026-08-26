@@ -170,7 +170,18 @@ fn note_reconcile_outcome(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
+    // `chronicle` is a prefix match, not a crate name: env_filter compares
+    // with `target.starts_with(directive)`, so one directive covers
+    // chronicle_daemon, chronicle_audio, chronicle_capture and every future
+    // chronicle_* crate without enumerating them. Dependencies stay at warn,
+    // so a model download does not narrate itself.
+    //
+    // `Env::default()` still reads RUST_LOG; `default_filter_or` only supplies
+    // the fallback, so RUST_LOG keeps overriding in both directions.
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("warn,chronicle=info"),
+    )
+    .init();
     log::info!("chronicle-daemon starting");
 
     // --- Permission preflight ---
