@@ -206,6 +206,7 @@ impl<'a> CaptureEngine<'a> {
                 scale_factor,
                 Arc::clone(&frames_captured),
                 Arc::clone(&frames_dropped),
+                Arc::clone(&config.drop_counters),
             );
 
             // Create the SCStream.
