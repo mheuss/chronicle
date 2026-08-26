@@ -390,8 +390,11 @@ impl RequestHandler for DaemonHandler {
                 //
                 // That window widened in HEU-624: it now spans the query, the
                 // row->hit mapping, and one `stat` per returned hit (up to the
-                // 200 clamped above). Measured at 0.25-2.4 ms for a full 200-hit
-                // page, against NFR-1's 200 ms p95 budget — about 1%. The
+                // 200 clamped above). Measured on a warm local SSD: a full
+                // 200-hit page costs 0.2-0.65 ms of stats, against NFR-1's
+                // 200 ms p95 budget — well under 1%. A cold cache is slower;
+                // 13k paths across many directories measured 268 ms, so treat
+                // this as an order of magnitude, not a guarantee. The
                 // sampled INFO line below therefore reports end-to-end search
                 // latency, which is what a user actually experiences, not the
                 // storage query alone.
