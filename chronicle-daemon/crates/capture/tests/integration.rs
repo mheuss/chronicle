@@ -16,6 +16,7 @@ async fn capture_engine_delivers_frames() {
         frame_interval_secs: 0.5,
         channel_buffer_size: 16,
         audio: None,
+        ..Default::default()
     };
 
     let (mut engine, mut receiver) = CaptureEngine::start(config)
@@ -72,6 +73,7 @@ async fn encode_captured_frame_as_heif() {
         frame_interval_secs: 0.5,
         channel_buffer_size: 16,
         audio: None,
+        ..Default::default()
     };
     let (engine, mut receiver) =
         CaptureEngine::start(config).expect("failed to start capture engine");

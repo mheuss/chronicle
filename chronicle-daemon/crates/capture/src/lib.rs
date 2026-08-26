@@ -4,11 +4,14 @@
 //! frame rates based on screen activity and input events.
 
 use std::fmt;
+use std::sync::Arc;
 
 use objc2::rc::Retained;
 use objc2_core_media::CMSampleBuffer;
 
 /// Error types for capture operations.
+mod drops;
+
 pub mod error;
 
 pub(crate) mod deps;
@@ -28,6 +31,7 @@ pub mod metadata;
 /// CoreVideo pixel buffer FFI.
 pub(crate) mod pixel_buffer;
 
+pub use drops::{CaptureDropCounters, CaptureDropSnapshot};
 pub use encoder::encode_heif;
 pub use engine::{CaptureEngine, EngineState, EngineStatusProbe, EngineStatusSnapshot};
 pub use error::{CaptureError, Result};
@@ -68,6 +72,12 @@ pub struct CaptureConfig<'a> {
     /// `AudioPipeline` cannot be mutably borrowed. The borrow ends when
     /// `CaptureEngine::start` returns.
     pub audio: Option<chronicle_audio::AudioHandlerToken<'a>>,
+    /// Drop counters shared across every engine the daemon builds.
+    ///
+    /// `Default` hands out a fresh set, which is what tests want; the daemon
+    /// passes its own so counts survive the engine rebuild that pause/resume
+    /// performs.
+    pub drop_counters: Arc<CaptureDropCounters>,
 }
 
 impl<'a> Default for CaptureConfig<'a> {
@@ -76,6 +86,7 @@ impl<'a> Default for CaptureConfig<'a> {
             frame_interval_secs: 2.0,
             channel_buffer_size: 32,
             audio: None,
+            drop_counters: Arc::new(CaptureDropCounters::default()),
         }
     }
 }
@@ -86,6 +97,7 @@ impl fmt::Debug for CaptureConfig<'_> {
             .field("frame_interval_secs", &self.frame_interval_secs)
             .field("channel_buffer_size", &self.channel_buffer_size)
             .field("audio", &self.audio.as_ref().map(|_| "Some(token)"))
+            .field("drop_counters", &self.drop_counters.snapshot())
             .finish()
     }
 }
