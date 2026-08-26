@@ -7,3 +7,17 @@ rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]
 
 [target.x86_64-apple-darwin]
 rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]
+
+# audiopus_sys 0.2.2 vendors an Opus tree whose CMakeLists.txt declares
+# cmake_minimum_required(VERSION 3.1). CMake 4 removed support for minimums
+# below 3.5, so configure aborts and no build — debug or release — gets past
+# it. The crate is unmaintained (RUSTSEC-2026-0150), so no upstream fix is
+# coming; HEU-500 tracks moving off it.
+#
+# Cargo looks for config by walking up from the directory it is invoked in, so
+# this applies from chronicle-daemon/ or anywhere below it. It does not apply
+# from the repo root, and cargo does not follow --manifest-path. That matters
+# because a repo-root build misses the rustflags above too, and the binary it
+# produces crashes at launch.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
