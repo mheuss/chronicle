@@ -176,10 +176,15 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         &self,
         audio: Option<chronicle_audio::AudioHandlerToken<'t>>,
     ) -> CaptureConfig<'t> {
+        // Every field spelled out rather than `..Default::default()`: the
+        // default hands out a *fresh* counter set, so a future field added
+        // above would quietly reintroduce the per-engine reset this method
+        // exists to prevent — and the discarded allocation is pure waste.
         CaptureConfig {
+            frame_interval_secs: CaptureConfig::default().frame_interval_secs,
+            channel_buffer_size: CaptureConfig::default().channel_buffer_size,
             audio,
             drop_counters: Arc::clone(&self.capture_drops),
-            ..Default::default()
         }
     }
 
@@ -448,7 +453,8 @@ mod tests {
         first.drop_counters.full.fetch_add(3, Ordering::Relaxed);
         second.drop_counters.closed.fetch_add(4, Ordering::Relaxed);
 
-        // A rebuilt engine keeps accumulating rather than restarting at zero.
+        // Two configs share one allocation, so a rebuilt engine keeps
+        // accumulating rather than restarting at zero.
         // Drop the explicit `drop_counters` line from `capture_config` and the
         // `..Default::default()` hands each config a fresh set, so these read
         // zero — which is the whole failure this task exists to prevent.

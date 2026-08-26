@@ -9,9 +9,10 @@ use std::sync::Arc;
 use objc2::rc::Retained;
 use objc2_core_media::CMSampleBuffer;
 
-/// Error types for capture operations.
+/// Frame-drop counters, shared across every engine the daemon builds.
 mod drops;
 
+/// Error types for capture operations.
 pub mod error;
 
 pub(crate) mod deps;

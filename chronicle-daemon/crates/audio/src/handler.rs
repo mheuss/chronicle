@@ -371,10 +371,7 @@ mod tests {
         // classification is the part that would invert silently.
         let (full_tx, _full_rx) = std::sync::mpsc::sync_channel::<AudioMessage>(0);
         let full_err = full_tx.try_send(silent_buffer()).unwrap_err();
-        assert!(matches!(
-            full_err,
-            std::sync::mpsc::TrySendError::Full(_)
-        ));
+        assert!(matches!(full_err, std::sync::mpsc::TrySendError::Full(_)));
 
         let (closed_tx, closed_rx) = std::sync::mpsc::sync_channel::<AudioMessage>(1);
         drop(closed_rx);

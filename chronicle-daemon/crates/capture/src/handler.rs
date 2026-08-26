@@ -156,6 +156,32 @@ impl CaptureOutputHandler {
         unsafe { objc2::msg_send![super(this), init] }
     }
 
+    /// Build the handler for one display, taking the drop counters from the
+    /// config.
+    ///
+    /// The `Arc::clone` of `config.drop_counters` lives here rather than at
+    /// the `engine.rs` call site so a plain unit test can reach it: that call
+    /// site sits past `SCShareableContent`, which needs Screen Recording TCC,
+    /// so everything downstream of it is `#[ignore]`d. A one-token slip there
+    /// — `Arc::clone` to `Arc::new` — used to pass the entire suite.
+    pub(crate) fn for_display(
+        config: &crate::CaptureConfig<'_>,
+        sender: mpsc::Sender<CapturedFrame>,
+        display_id: u32,
+        scale_factor: f64,
+        frames_captured: Arc<AtomicU64>,
+        frames_dropped: Arc<AtomicU64>,
+    ) -> Retained<Self> {
+        Self::new(
+            sender,
+            display_id,
+            scale_factor,
+            frames_captured,
+            frames_dropped,
+            Arc::clone(&config.drop_counters),
+        )
+    }
+
     /// Get a reference suitable for passing to `SCStream::addStreamOutput`.
     pub(crate) fn as_protocol_object(&self) -> &ProtocolObject<dyn SCStreamOutput> {
         ProtocolObject::from_ref(self)
@@ -202,9 +228,28 @@ mod tests {
             Arc::clone(&drops),
         );
 
-        drops.full.fetch_add(1, Ordering::Relaxed);
-        assert_eq!(handler.ivars().drop_counters.snapshot().full, 1);
         assert!(Arc::ptr_eq(&drops, &handler.ivars().drop_counters));
+    }
+
+    #[test]
+    fn for_display_takes_the_counters_from_the_config() {
+        // Covers the hop that engine.rs used to own, where a fresh set
+        // instead of a clone passed the whole workspace suite.
+        let (tx, _rx) = mpsc::channel(4);
+        let config = crate::CaptureConfig::default();
+        let handler = CaptureOutputHandler::for_display(
+            &config,
+            tx,
+            7,
+            1.0,
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        );
+
+        assert!(
+            Arc::ptr_eq(&config.drop_counters, &handler.ivars().drop_counters),
+            "handler must share the config's counters, not a fresh set"
+        );
     }
 
     #[test]
