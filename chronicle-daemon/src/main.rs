@@ -1,6 +1,7 @@
 mod capture_runtime;
 mod capture_supervisor;
 mod ipc_handler;
+mod media_presence;
 mod permissions;
 mod pipeline;
 mod power;

@@ -19,6 +19,10 @@ pub struct PipelineCounters {
     pub audio_segments_persisted: AtomicU64,
     pub transcription_enqueued: AtomicU64,
     pub transcription_dropped: AtomicU64,
+    /// Media rows handed out over IPC with a path.
+    pub media_served: AtomicU64,
+    /// Of those, how many had no file. Always anomalous; see HEU-624.
+    pub media_absent: AtomicU64,
 }
 
 impl PipelineCounters {
@@ -35,6 +39,8 @@ impl PipelineCounters {
             audio_segments_persisted: self.audio_segments_persisted.load(Ordering::Relaxed),
             transcription_enqueued: self.transcription_enqueued.load(Ordering::Relaxed),
             transcription_dropped: self.transcription_dropped.load(Ordering::Relaxed),
+            media_served: self.media_served.load(Ordering::Relaxed),
+            media_absent: self.media_absent.load(Ordering::Relaxed),
         }
     }
 }
@@ -49,4 +55,6 @@ pub struct CountersSnapshot {
     pub audio_segments_persisted: u64,
     pub transcription_enqueued: u64,
     pub transcription_dropped: u64,
+    pub media_served: u64,
+    pub media_absent: u64,
 }
