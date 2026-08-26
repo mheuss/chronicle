@@ -187,8 +187,12 @@ ones.
 
 The exceptions are settings where cleanup never re-selects the row:
 
-- `retention_days <= 0` ("keep forever", and any negative value) — `run_cleanup`
-  returns `Disabled` before examining anything.
+- `retention_days = 0` ("keep forever") — `retention::run_cleanup` returns
+  `Disabled` before examining anything. Its guard is actually `<= 0`, but a
+  negative value never reaches it on the scheduled path: `parse_retention_days`
+  returns a `u32`, and `Storage::run_cleanup` rejects `< 0` as an error at the
+  public boundary. The inner `<= 0` is defence against a caller that skipped
+  that boundary, not a second way to disable cleanup.
 - `retention_days > MAX_RETENTION_DAYS` (36,500) — `run_cleanup` returns `Err`,
   so no cleanup runs at all until the config is corrected.
 - **Raising `retention_days` after a row is stranded.** This is the one you are
