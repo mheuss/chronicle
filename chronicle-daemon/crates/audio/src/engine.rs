@@ -55,9 +55,9 @@ pub struct AudioPipeline {
     /// A clone of the encoding-channel sender, kept so a disable can send
     /// `AudioMessage::FlushMic`. `None` after `stop()`.
     flush_tx: Option<mpsc::SyncSender<AudioMessage>>,
-    /// Buffers the real-time callbacks discarded, shared with the handler and
-    /// the microphone tap. Created here and never rebuilt, so the counts are
-    /// monotonic for the life of the process.
+    /// Buffers the SCK audio handler discarded. Created here and never
+    /// rebuilt, so the counts are monotonic for the life of the process.
+    /// The microphone tap starts sharing this in HEU-653's next task.
     drop_counters: Arc<AudioDropCounters>,
 }
 
@@ -109,11 +109,11 @@ impl AudioPipeline {
 
         let encoding_thread = spawn_encoding_thread(buffer_rx, segment_tx, config);
 
+        let drop_counters = Arc::new(AudioDropCounters::default());
+
         // The encoding channel now has three senders: the ObjC handler, the
         // microphone tap, and `flush_tx`. Clone for the first two; keep the
         // original as `flush_tx`.
-        let drop_counters = Arc::new(AudioDropCounters::default());
-
         let handler = AudioOutputHandler::new(buffer_tx.clone(), Arc::clone(&drop_counters));
 
         // Build the microphone path eagerly. AVAudioEngine setup is plain-
@@ -377,6 +377,14 @@ mod tests {
             .fetch_add(2, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(pipeline.drop_counters().snapshot().system_full, 2);
         assert!(Arc::ptr_eq(&counters, &pipeline.drop_counters()));
+
+        // And the handler must be writing into that same allocation — handing
+        // it a fresh set compiles fine and counts somewhere nobody reads.
+        let handler_counters = pipeline.handler.as_ref().unwrap().counters();
+        assert!(
+            Arc::ptr_eq(&counters, handler_counters),
+            "handler must share the pipeline's counters, not its own"
+        );
     }
 
     #[test]
