@@ -386,22 +386,32 @@ impl RequestHandler for DaemonHandler {
                 // NFR-5: capture the start time BEFORE the blocking call so the
                 // elapsed time we log reflects the actual query duration.
                 let started = Instant::now();
+                let counters = Arc::clone(&self.counters);
                 let result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        storage
-                            .search(
-                                &query,
-                                chronicle_storage::SearchFilter::ScreenOnly,
-                                limit,
-                                offset,
-                            )
-                            .await
-                    })
+                    tokio::runtime::Handle::current()
+                        .block_on(async {
+                            storage
+                                .search(
+                                    &query,
+                                    chronicle_storage::SearchFilter::ScreenOnly,
+                                    limit,
+                                    offset,
+                                )
+                                .await
+                        })
+                        .map(|rows| {
+                            let hits: Vec<chronicle_ipc::SearchHit> =
+                                rows.into_iter().map(search_hit_from_storage).collect();
+                            for h in &hits {
+                                count_media_presence(&counters, &h.image_path);
+                            }
+                            hits
+                        })
                 });
                 match result {
-                    Ok(rows) => {
+                    Ok(hits) => {
                         let elapsed = started.elapsed();
-                        let hits = rows.len();
+                        let hit_count = hits.len();
                         // [Security] Log the query LENGTH, not the query content.
                         // The query is whatever the user typed and may contain PII
                         // or other sensitive context they were searching for. The
@@ -409,7 +419,7 @@ impl RequestHandler for DaemonHandler {
                         // O(n) char count is skipped on the common path — DEBUG off and
                         // no sample this round.
                         log::debug!(
-                            "search q_len={} limit={limit} offset={offset} -> {hits} hits in {elapsed:?}",
+                            "search q_len={} limit={limit} offset={offset} -> {hit_count} hits in {elapsed:?}",
                             query.chars().count()
                         );
                         // HEU-484: DEBUG is off by default, so NFR-1 (search p95 <
@@ -428,14 +438,11 @@ impl RequestHandler for DaemonHandler {
                         if should_sample_search(n) {
                             let latency_us = elapsed.as_micros();
                             log::info!(
-                                "search latency sample: q_len={} hits={hits} latency_us={latency_us}",
+                                "search latency sample: q_len={} hits={hit_count} latency_us={latency_us}",
                                 query.chars().count()
                             );
                         }
-                        Response::Search {
-                            ok: true,
-                            hits: rows.into_iter().map(search_hit_from_storage).collect(),
-                        }
+                        Response::Search { ok: true, hits }
                     }
                     Err(e) => Response::Error {
                         ok: false,
@@ -448,9 +455,14 @@ impl RequestHandler for DaemonHandler {
             }
             Request::GetScreenshot { id } => {
                 let storage = Arc::clone(&self.storage);
+                let counters = Arc::clone(&self.counters);
                 let result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(async { storage.get_screenshot_opt(id).await })
+                    let got = tokio::runtime::Handle::current()
+                        .block_on(async { storage.get_screenshot_opt(id).await });
+                    if let Ok(Some(s)) = &got {
+                        count_media_presence(&counters, &s.image_path);
+                    }
+                    got
                 });
                 match result {
                     Ok(Some(s)) => Response::GetScreenshot {
@@ -521,6 +533,23 @@ impl RequestHandler for DaemonHandler {
             }
             Request::SetWhisperModel { variant } => self.set_whisper_model(&variant),
         }
+    }
+}
+
+/// Record one served media path and whether its file was absent.
+///
+/// Call only from inside a `block_in_place` closure — this does blocking
+/// filesystem I/O, and `handler.handle` runs synchronously on a tokio worker
+/// (see `crates/ipc/src/server.rs:223`), so a stat placed after a closure
+/// returns would block the runtime thread.
+///
+/// [Security] Counts only. The path is never logged: it embeds capture
+/// timestamps and app identifiers, the same reason the search handler logs
+/// query length rather than content.
+fn count_media_presence(counters: &PipelineCounters, path: &str) {
+    counters.media_served.fetch_add(1, Ordering::Relaxed);
+    if crate::media_presence::media_is_absent(std::path::Path::new(path)) {
+        counters.media_absent.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -1201,6 +1230,90 @@ mod tests {
             }
             other => panic!("expected GetScreenshot response, got {other:?}"),
         }
+    }
+
+    /// Insert one screenshot row with a chosen path. Returns its id.
+    async fn insert_screenshot_at(handler: &DaemonHandler, image_path: &str) -> i64 {
+        handler
+            .storage_for_test()
+            .insert_screenshot(chronicle_storage::ScreenshotMetadata {
+                timestamp: 1_700_000_000_000,
+                display_id: "display1".into(),
+                app_name: None,
+                app_bundle_id: None,
+                window_title: None,
+                image_path: image_path.into(),
+                ocr_text: Some("findable marker text".into()),
+                phash: None,
+                resolution: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_screenshot_counts_an_absent_media_file() {
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
+            handler_with_full_channels(8, true).await;
+        let media = tempfile::tempdir().unwrap();
+        let missing = media.path().join("gone.heif");
+        let id = insert_screenshot_at(&handler, missing.to_str().unwrap()).await;
+
+        let _ = handler.handle(Request::GetScreenshot { id });
+
+        let c = handler.counters.snapshot();
+        assert_eq!(c.media_served, 1);
+        assert_eq!(c.media_absent, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_screenshot_counts_a_present_file_as_served_only() {
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
+            handler_with_full_channels(8, true).await;
+        let media = tempfile::tempdir().unwrap();
+        let present = media.path().join("present.heif");
+        std::fs::write(&present, b"x").unwrap();
+        let id = insert_screenshot_at(&handler, present.to_str().unwrap()).await;
+
+        let _ = handler.handle(Request::GetScreenshot { id });
+
+        let c = handler.counters.snapshot();
+        assert_eq!(c.media_served, 1);
+        assert_eq!(
+            c.media_absent, 0,
+            "a present file must never count as absent"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_counts_every_hit_it_returns() {
+        // Without this test, Search counting can be omitted entirely and the
+        // suite stays green — the GetScreenshot tests never touch that path.
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
+            handler_with_full_channels(8, true).await;
+        let media = tempfile::tempdir().unwrap();
+        let present = media.path().join("here.heif");
+        std::fs::write(&present, b"x").unwrap();
+        insert_screenshot_at(&handler, present.to_str().unwrap()).await;
+        insert_screenshot_at(&handler, media.path().join("gone.heif").to_str().unwrap()).await;
+
+        let resp = handler.handle(Request::Search {
+            query: "findable".into(),
+            limit: 50,
+            offset: 0,
+        });
+        let hits = match resp {
+            Response::Search { hits, .. } => hits.len(),
+            other => panic!("expected Search response, got {other:?}"),
+        };
+        assert_eq!(
+            hits, 2,
+            "fixture must match, or the counts below prove nothing"
+        );
+
+        let c = handler.counters.snapshot();
+        assert_eq!(c.media_served, 2);
+        assert_eq!(c.media_absent, 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
