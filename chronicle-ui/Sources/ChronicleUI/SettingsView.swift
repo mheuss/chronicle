@@ -326,6 +326,42 @@ struct SettingsView: View {
         return !TranscriptionBannerCopy(transcription).showsProgress
     }
 
+    /// The disk-usage row, including the missing-media fact when there is one.
+    ///
+    /// `nonisolated` and closure-free by design — see
+    /// docs/development/swiftui-concurrency.md. Conforming to `View` makes the
+    /// whole type `@MainActor`, and a helper that inherits that isolation dies
+    /// with SIGTRAP and no error message when a test calls it off the main
+    /// actor. Measured: removing `nonisolated` here does NOT currently trap,
+    /// because this body contains no closure — which is exactly the difference
+    /// the note says not to rely on. It stays as prophylaxis for the next edit
+    /// that adds one, not because a test enforces it.
+    ///
+    /// [A11y] The missing-media fact is words, never colour or an icon.
+    /// Shown only when non-zero, so a healthy install reads exactly as before.
+    ///
+    /// The two counters are sampled independently under `Ordering::Relaxed`,
+    /// so `absent` can briefly exceed `served`. That renders as a bare count
+    /// rather than a ratio above 1.0.
+    nonisolated static func diskUsageDescription(
+        totalBytes: UInt64,
+        screenshots: UInt64,
+        audioSegments: UInt64,
+        mediaServed: UInt64?,
+        mediaAbsent: UInt64?
+    ) -> String {
+        var text = "\(byteLabel(totalBytes)) (\(screenshots) screenshots, "
+            + "\(audioSegments) audio segments)"
+        if let absent = mediaAbsent, absent > 0 {
+            if let served = mediaServed, served >= absent {
+                text += " — \(absent) of \(served) served had missing files"
+            } else {
+                text += " — \(absent) with missing files"
+            }
+        }
+        return text
+    }
+
     nonisolated private static func byteLabel(_ bytes: UInt64) -> String {
         // clamping, not the trapping initializer: a wrong label beats a crash
         // if a future field ever carries a sentinel above Int64.max.
@@ -384,9 +420,12 @@ struct SettingsView: View {
 
     private var diskUsageText: String {
         guard let storage = connection.lastStatus?.data.storage else { return "—" }
-        let bcf = ByteCountFormatter()
-        let total = bcf.string(fromByteCount: Int64(storage.totalDiskUsageBytes))
-        return "\(total) (\(storage.screenshotCount) screenshots, \(storage.audioSegmentCount) audio segments)"
+        return SettingsView.diskUsageDescription(
+            totalBytes: storage.totalDiskUsageBytes,
+            screenshots: storage.screenshotCount,
+            audioSegments: storage.audioSegmentCount,
+            mediaServed: storage.mediaServed,
+            mediaAbsent: storage.mediaAbsent)
     }
 
     private var retentionText: String {
