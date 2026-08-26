@@ -411,27 +411,20 @@ async fn main() -> Result<()> {
     // late reporter would still eventually report the burst — what a late
     // spawn costs is promptness, while an operator is watching the terminal.
     //
-    // It takes its own shutdown channel rather than the shared `cancel` token,
-    // which fires at :816 while both callbacks are still live. That is the
-    // same reasoning `transcribe_loop` already follows — see "Graceful
-    // Multi-Stage Shutdown" in docs/use-cases/pipeline.md.
-    let audio_drops = audio_pipeline.drop_counters();
+    // It takes its own shutdown channel rather than the shared `cancel` token:
+    // `cancel.cancel()` fires at the top of the shutdown block, while both
+    // callbacks are still live. That is the same reasoning `transcribe_loop`
+    // already follows — see "Graceful Multi-Stage Shutdown" in
+    // docs/use-cases/pipeline.md.
     let (drop_report_tx, drop_report_rx) = tokio::sync::oneshot::channel();
-    let reporter_audio = Arc::clone(&audio_drops);
+    let reporter_audio = audio_pipeline.drop_counters();
     let reporter_capture = Arc::clone(&capture_drops);
     let drop_reporter_handle = tokio::spawn(crate::drop_reporter::run_reporter(
         move || {
-            let a = reporter_audio.snapshot();
-            let c = reporter_capture.snapshot();
-            crate::drop_reporter::DropTotals {
-                mic_full: a.mic_full,
-                mic_closed: a.mic_closed,
-                mic_convert_failed: a.mic_convert_failed,
-                system_full: a.system_full,
-                system_closed: a.system_closed,
-                frames_full: c.full,
-                frames_closed: c.closed,
-            }
+            crate::drop_reporter::totals_from(
+                reporter_audio.snapshot(),
+                reporter_capture.snapshot(),
+            )
         },
         drop_report_rx,
         crate::drop_reporter::REPORT_PERIOD,
@@ -898,9 +891,13 @@ async fn main() -> Result<()> {
     // atomic loads, a format, and at most one log line. `tokio::time::timeout`
     // would consume the handle and detach the task, which is the trap
     // docs/development/tokio-shutdown.md documents.
+    // `Err` here means the receiver is already gone, which today can only mean
+    // the task panicked — the `await` on the next line reports that, so the
+    // discard is deliberate rather than indifferent.
     let _ = drop_report_tx.send(());
     if let Err(e) = drop_reporter_handle.await {
         log::error!("drop reporter task panicked: {e}");
+        shutdown_failed = true;
     }
 
     // Wait for bridge thread to finish

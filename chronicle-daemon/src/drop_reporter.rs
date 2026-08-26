@@ -96,6 +96,27 @@ impl ReporterState {
     }
 }
 
+/// Flatten the two crates' snapshots into one reading.
+///
+/// The only place two field vocabularies meet: audio's `mic_*`/`system_*` and
+/// capture's bare `full`/`closed`. Lives here rather than inline in `main` so
+/// it can be tested — a swapped pair here mislabels counters in every log line
+/// for the life of the process, and nothing downstream would notice.
+pub(crate) fn totals_from(
+    audio: chronicle_audio::AudioDropSnapshot,
+    capture: chronicle_capture::CaptureDropSnapshot,
+) -> DropTotals {
+    DropTotals {
+        mic_full: audio.mic_full,
+        mic_closed: audio.mic_closed,
+        mic_convert_failed: audio.mic_convert_failed,
+        system_full: audio.system_full,
+        system_closed: audio.system_closed,
+        frames_full: capture.full,
+        frames_closed: capture.closed,
+    }
+}
+
 /// Run until signalled, logging at most one line per period.
 ///
 /// `read_totals` is a closure rather than the counter `Arc`s directly so the
@@ -130,6 +151,9 @@ pub(crate) async fn run_reporter_with_sink<F, S>(
     // costs nothing and catches a burst that predates the task.
     loop {
         tokio::select! {
+            // Signalled and sender-dropped collapse to the same arm on
+            // purpose: either way nothing will signal us again, so the right
+            // move is to flush and exit rather than tick on unreachable.
             _ = &mut shutdown => break,
             _ = ticker.tick() => {
                 if let Some(line) = state.observe(read_totals()) {
@@ -167,7 +191,7 @@ mod tests {
 
     /// Test-only holder so the reporter's read closure can be driven.
     #[derive(Default)]
-    pub(crate) struct TestTotals(std::sync::Mutex<DropTotals>);
+    struct TestTotals(std::sync::Mutex<DropTotals>);
 
     impl TestTotals {
         fn get(&self) -> DropTotals {
@@ -176,6 +200,82 @@ mod tests {
         fn set(&self, t: DropTotals) {
             *self.0.lock().unwrap() = t;
         }
+    }
+
+    #[test]
+    fn totals_from_maps_every_field_to_its_own_name() {
+        // Seven distinct values: any swapped pair must fail. Same reasoning as
+        // the snapshot tests in each crate, one layer up — this is the layer
+        // where the two field vocabularies get translated.
+        let audio = chronicle_audio::AudioDropSnapshot {
+            mic_full: 1,
+            mic_closed: 2,
+            mic_convert_failed: 3,
+            system_full: 4,
+            system_closed: 5,
+        };
+        let capture = chronicle_capture::CaptureDropSnapshot { full: 6, closed: 7 };
+
+        let t = totals_from(audio, capture);
+
+        assert_eq!(t.mic_full, 1);
+        assert_eq!(t.mic_closed, 2);
+        assert_eq!(t.mic_convert_failed, 3);
+        assert_eq!(t.system_full, 4);
+        assert_eq!(t.system_closed, 5);
+        assert_eq!(t.frames_full, 6);
+        assert_eq!(t.frames_closed, 7);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tick_emits_without_waiting_for_shutdown() {
+        // Deleting `emit(line)` from the tick arm leaves the state advancing,
+        // so the shutdown test alone still passes and the reporter goes mute
+        // for the whole process. This is the test that notices.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let counters = std::sync::Arc::new(TestTotals::default());
+        let read = std::sync::Arc::clone(&counters);
+        let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = std::sync::Arc::clone(&lines);
+
+        let handle = tokio::spawn(run_reporter_with_sink(
+            move || read.get(),
+            rx,
+            REPORT_PERIOD,
+            move |line| sink.lock().unwrap().push(line),
+        ));
+
+        // The immediate first tick reads zeroes and stays silent.
+        tokio::task::yield_now().await;
+        assert!(lines.lock().unwrap().is_empty(), "zero must be silent");
+
+        counters.set(DropTotals {
+            frames_full: 4,
+            ..Default::default()
+        });
+
+        // `sleep`, never `advance` — an idle runtime auto-advances to the
+        // earliest deadline, which is what makes this deterministic. See
+        // docs/development/paused-time-testing.md.
+        tokio::time::sleep(REPORT_PERIOD + std::time::Duration::from_millis(1)).await;
+
+        {
+            let seen = lines.lock().unwrap();
+            assert_eq!(seen.len(), 1, "a tick must emit; got {seen:?}");
+            assert!(seen[0].contains("frames_full=4"), "{}", seen[0]);
+        }
+
+        // And the final flush adds nothing when nothing grew since.
+        tx.send(()).unwrap();
+        handle.await.unwrap();
+        assert_eq!(lines.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn report_period_is_thirty_seconds() {
+        // Pinned deliberately: the design argues 30 s is right because burst
+        // timing inside a drop storm is HEU-548's scope, not this ticket's.
+        assert_eq!(REPORT_PERIOD, std::time::Duration::from_secs(30));
     }
 
     #[tokio::test(start_paused = true)]
