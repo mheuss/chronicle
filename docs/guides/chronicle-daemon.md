@@ -237,9 +237,11 @@ cargo build            # debug
 cargo build --release  # release
 ```
 
-Run cargo from `chronicle-daemon/`, not from the repo root. Cargo finds
-`.cargo/config.toml` relative to the directory you invoke it from, and that
-file carries two things the binary needs:
+Run cargo from `chronicle-daemon/`, not from the repo root. Cargo looks for
+`.cargo/config.toml` by walking up from the directory it is invoked in, so
+`chronicle-daemon/` and anything below it work, and the repo root doesn't.
+Cargo does not follow `--manifest-path` when doing this. That file carries two
+things the binary needs:
 
 - the `/usr/lib/swift` rpath, without which any binary touching
   ScreenCaptureKit crashes at launch with "no LC_RPATH's found"

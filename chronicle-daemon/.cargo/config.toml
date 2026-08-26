@@ -14,8 +14,10 @@ rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]
 # it. The crate is unmaintained (RUSTSEC-2026-0150), so no upstream fix is
 # coming; HEU-500 tracks moving off it.
 #
-# This applies only when cargo runs from this directory, since cargo discovers
-# config relative to the invocation cwd. That is what the README documents and
-# it is the only path that also picks up the rustflags above.
+# Cargo looks for config by walking up from the directory it is invoked in, so
+# this applies from chronicle-daemon/ or anywhere below it. It does not apply
+# from the repo root, and cargo does not follow --manifest-path. That matters
+# because a repo-root build misses the rustflags above too, and the binary it
+# produces crashes at launch.
 [env]
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
