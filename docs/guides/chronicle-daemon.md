@@ -229,6 +229,26 @@ workspace member kept as a placeholder for future speech-to-text work.
 The Swift UI (`chronicle-ui`) communicates with the daemon over a Unix socket.
 It does not depend on the daemon as a library — only on the IPC protocol.
 
+## Building
+
+```bash
+cd chronicle-daemon && cargo build            # debug
+cd chronicle-daemon && cargo build --release  # release
+```
+
+Run cargo from `chronicle-daemon/`, not from the repo root. Cargo finds
+`.cargo/config.toml` relative to the directory you invoke it from, and that
+file carries two things the binary needs:
+
+- the `/usr/lib/swift` rpath, without which any binary touching
+  ScreenCaptureKit crashes at launch with "no LC_RPATH's found"
+- `CMAKE_POLICY_VERSION_MINIMUM=3.5`, without which the vendored Opus build in
+  `audiopus_sys` fails to configure under CMake 4
+
+Building with `--manifest-path` from the repo root reads neither. Today that
+fails on the CMake error rather than producing a bad binary, but do not rely on
+that — it is a side effect of the Opus problem, not a guard anyone built.
+
 ## Testing
 
 ### Unit tests
