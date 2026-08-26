@@ -24,8 +24,8 @@ use block2::RcBlock;
 use objc2::AnyThread;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2_avf_audio::{
-    AVAudioBuffer, AVAudioConverter, AVAudioConverterInputStatus, AVAudioConverterOutputStatus,
-    AVAudioEngine, AVAudioFormat, AVAudioPCMBuffer, AVAudioTime,
+    AVAudioBuffer, AVAudioCommonFormat, AVAudioConverter, AVAudioConverterInputStatus,
+    AVAudioConverterOutputStatus, AVAudioEngine, AVAudioFormat, AVAudioPCMBuffer, AVAudioTime,
 };
 
 use crate::handler::{AudioBuffer, AudioMessage};
@@ -53,6 +53,95 @@ const RESAMPLER_HEADROOM_FRAMES: u32 = 4096;
 /// whole signal — no downmix happens here.
 fn mono_samples(channel: &[f32], frame_count: usize) -> Vec<f32> {
     channel[..frame_count.min(channel.len())].to_vec()
+}
+
+/// Name an `AVAudioCommonFormat` for the tap-install log.
+///
+/// `AVAudioCommonFormat`'s derived `Debug` prints the raw discriminant —
+/// `AVAudioCommonFormat(1)` — which makes the one line this ticket exists to
+/// provide require a lookup table to read. It matters more than it looks:
+/// [`MixEligibility::Ineligible`] collapses "not f32" and "more than two
+/// channels" into a single label, so the format name is the only thing in the
+/// line that tells an Int16 stereo microphone apart from a four-channel f32
+/// array.
+///
+/// Values from `objc2-avf-audio`'s `AVAudioFormat.rs`. An unrecognized value
+/// prints as `unknown(N)` rather than being silently dropped — a format
+/// AVFoundation adds later is exactly the case worth seeing.
+fn common_format_name(format: AVAudioCommonFormat) -> String {
+    match format {
+        AVAudioCommonFormat::OtherFormat => "other".into(),
+        AVAudioCommonFormat::PCMFormatFloat32 => "f32".into(),
+        AVAudioCommonFormat::PCMFormatFloat64 => "f64".into(),
+        AVAudioCommonFormat::PCMFormatInt16 => "i16".into(),
+        AVAudioCommonFormat::PCMFormatInt32 => "i32".into(),
+        other => format!("unknown({})", other.0),
+    }
+}
+
+/// Whether the device active at tap install is **eligible** for the explicit
+/// downmix HEU-652 will add.
+///
+/// This is deliberately *not* called a "path". As of HEU-649 nothing branches
+/// on it: `AVAudioConverter` still performs every downmix, for every device.
+/// Naming it a path and logging `downmix_path=explicit-mix` would make the
+/// diagnostic assert a route that is not taken — worse than no diagnostic,
+/// because the next person debugging a silent microphone would believe it.
+///
+/// It is also not a claim about resampling. The converter handles sample rate
+/// for every device before and after HEU-652, so even an eligible device still
+/// goes through it.
+///
+/// **Contract for callers:** classify from the native format once, at tap
+/// install, and never re-evaluate. `MicrophoneCapture` and its converter are
+/// built once when the pipeline is created, so a default-input change leaves
+/// any classification stale until the daemon restarts. That is pre-existing
+/// behaviour, not something this branch changes.
+///
+/// Three routes, not two: `Mono` takes a fast passthrough, `Stereo` takes the
+/// measured explicit mix, and `Ineligible` stays on today's converter.
+///
+/// The rule in one sentence: **the explicit mix will apply only to input the
+/// measurement covers; everything else keeps the path it already uses.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MixEligibility {
+    /// One f32 channel. **A distinct route, not the stereo one.** HEU-652
+    /// gives mono a fast path that skips extraction, the intermediate `Vec`,
+    /// and the second PCM buffer entirely — it does not enter the explicit-mix
+    /// machinery, it bypasses it. Grouped under "eligibility" only because the
+    /// classification is what selects the route.
+    Mono,
+    /// Two f32 channels. The case HEU-549 is about; HEU-652 applies the
+    /// measured policy here.
+    Stereo,
+    /// Everything else — non-f32 at any channel count, zero channels, or
+    /// more than two. Not eligible for the explicit mix; these keep today's
+    /// converter behaviour **unchanged and unmeasured**. That is a
+    /// no-regression guarantee, not a claim that the current behaviour is
+    /// correct for them — nothing has measured a non-f32 or multi-channel
+    /// device.
+    Ineligible,
+}
+
+impl MixEligibility {
+    fn classify(format: AVAudioCommonFormat, channels: u32) -> Self {
+        match (format, channels) {
+            (AVAudioCommonFormat::PCMFormatFloat32, 1) => Self::Mono,
+            (AVAudioCommonFormat::PCMFormatFloat32, 2) => Self::Stereo,
+            _ => Self::Ineligible,
+        }
+    }
+
+    /// The label written to the tap-install log. Kept short and greppable —
+    /// it is what someone diagnosing a silent microphone searches for, so it
+    /// should stay stable.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Mono => "mono",
+            Self::Stereo => "stereo",
+            Self::Ineligible => "ineligible",
+        }
+    }
 }
 
 /// Microphone capture driven by an `AVAudioEngine` input-node tap.
@@ -105,6 +194,19 @@ impl MicrophoneCapture {
             // 44.1 kHz, may be multi-channel.
             // SAFETY: bus 0 is the input node's sole output bus.
             let native_format = unsafe { input.outputFormatForBus(0) };
+
+            // Read what the device actually delivers. Logged once, after the
+            // tap is installed (below), rather than per callback: the tap
+            // block runs on a real-time audio thread, and ADR-013 wants no
+            // logger there at all. (That path already carries pre-existing
+            // per-buffer warnings this branch does not touch — logging the
+            // format per callback would make it worse, not better.)
+            // SAFETY: all four are plain property reads on a valid format.
+            let native_channels = unsafe { native_format.channelCount() };
+            let native_rate = unsafe { native_format.sampleRate() };
+            let native_common = unsafe { native_format.commonFormat() };
+            let native_interleaved = unsafe { native_format.isInterleaved() };
+            let mix_eligibility = MixEligibility::classify(native_common, native_channels);
 
             // The format the encoder requires: 48 kHz, mono, f32. The
             // "standard" initializer yields deinterleaved f32, so channel
@@ -162,6 +264,31 @@ impl MicrophoneCapture {
             // Allocate hardware-render resources up front so `start` is fast.
             // SAFETY: no preconditions.
             unsafe { engine.prepare() };
+
+            // The tap is installed and the engine prepared, so this really is
+            // a tap-install record. Logged here rather than where the format
+            // was read because the converter (above) and the tap install can
+            // both fail — a line emitted earlier would claim an install that
+            // never happened.
+            //
+            // `mix_eligibility` describes what HEU-652 will do with this
+            // device. Today `AVAudioConverter` performs every downmix
+            // regardless, which is why it is not called a path.
+            //
+            // This is `info!`, and the daemon's `env_logger::init()` has no
+            // default filter, so it is error-only unless `RUST_LOG` is set:
+            //     RUST_LOG=error,chronicle_audio=info cargo run --bin chronicle-daemon
+            //
+            // Keep the leading `error,`. `env_filter` returns false for any
+            // target no directive matches, so a lone `chronicle_audio=info`
+            // would silence every other crate's errors too.
+            log::info!(
+                "microphone tap installed (capture starts on mic-on): \
+                 {native_channels} ch, {native_rate} Hz, \
+                 interleaved={native_interleaved}, format={}, mix_eligibility={}",
+                common_format_name(native_common),
+                mix_eligibility.as_str()
+            );
 
             Ok(Self {
                 engine,
@@ -397,9 +524,657 @@ fn convert_to_mono_samples(
     Some(mono_samples(channel_slice, output_frames))
 }
 
+/// Copy `frames` samples out of each channel plane, honouring `stride`.
+///
+/// This is the pure, testable core of channel extraction. `planes[c]` is the
+/// slice `AVAudioPCMBuffer::floatChannelData` exposes for channel `c`, and
+/// `stride` is `AVAudioPCMBuffer::stride` — the sample spacing between
+/// consecutive frames of one channel.
+///
+/// - Deinterleaved buffers report `stride == 1`: each plane is that channel's
+///   own contiguous run.
+/// - Interleaved buffers report `stride == channelCount` and share one
+///   allocation; frame `f` of channel `c` lives at `plane[f * stride]`, where
+///   the plane pointer already starts at channel `c`'s first sample.
+///
+/// **Every returned channel has the same length.** A short plane truncates
+/// *all* channels to a common safe frame count rather than truncating itself
+/// alone. That matters downstream: HEU-652's `mix_to_mono` treats equal channel
+/// lengths as an extraction invariant and asserts on it, so returning ragged
+/// channels here would break an invariant two tickets away.
+///
+/// The result is therefore one of two shapes: **empty**, or **exactly
+/// `planes.len()` channels of equal length**. It is never a partial set. A
+/// caller that indexes `result[1]` must check for the empty case first — a
+/// zero-frame buffer yields no channels at all, not N empty ones.
+fn extract_channels_from_planes(planes: &[&[f32]], frames: usize, stride: usize) -> Vec<Vec<f32>> {
+    if planes.is_empty() || frames == 0 || stride == 0 {
+        return Vec::new();
+    }
+
+    // Frame `f` of a channel lives at index `f * stride`, so a plane of length
+    // `len` can supply `(len - 1) / stride + 1` frames. The smallest across all
+    // planes bounds every channel.
+    let supplied = planes
+        .iter()
+        .map(|plane| {
+            if plane.is_empty() {
+                0
+            } else {
+                (plane.len() - 1) / stride + 1
+            }
+        })
+        .min()
+        // The `planes.is_empty()` guard above is what makes this infallible.
+        .expect("planes is non-empty");
+
+    let usable = frames.min(supplied);
+    if usable == 0 {
+        return Vec::new();
+    }
+
+    planes
+        .iter()
+        .map(|plane| (0..usable).map(|f| plane[f * stride]).collect())
+        .collect()
+}
+
+/// Extract every channel of `buffer` as owned `f32` samples.
+///
+/// Returns `None` when the buffer cannot be read as f32 channel data:
+///
+/// - the format is not 32-bit float (`floatChannelData` is nil for every
+///   other format, and dereferencing it would be undefined behaviour),
+/// - the buffer has zero valid frames, zero channels, or a zero stride, or
+/// - the plane length required to cover `frames` at `stride` overflows
+///   `usize`.
+///
+/// Returning `None` **silently** is deliberate: this runs on the audio
+/// callback, which must never touch the logger (ADR-013). The diagnostic for
+/// a non-f32 device is the one-time classification log at tap install, not a
+/// per-buffer warning.
+///
+/// When it returns `Some`, the result always carries **exactly `channelCount`
+/// channels of exactly `frameLength` samples each** — never a partial or empty
+/// set. The empty-result path documented on [`extract_channels_from_planes`] is
+/// unreachable from here, because the guards below reject every input that
+/// could produce it. Callers do not need a defensive empty check.
+///
+/// **Callers must supply an `autoreleasepool`.** This makes ObjC property
+/// calls and does not open a pool of its own; the tap block already runs inside
+/// one, so both HEU-650's feature-gated characterization path and HEU-652's
+/// production path are covered.
+// No production caller yet. HEU-650 adds the first one, but it sits behind the
+// `characterize` Cargo feature (off by default), so a default build still sees
+// this as dead — the `allow` must survive that ticket. It comes off at HEU-652,
+// which wires the production tap block unconditionally.
+#[allow(dead_code)]
+fn extract_channels(buffer: &AVAudioPCMBuffer) -> Option<Vec<Vec<f32>>> {
+    // SAFETY: each of these four is a plain property read with no
+    // preconditions, sound in any buffer state. `format` is bound to a local
+    // so its `Retained` outlives the `channelCount` read.
+    let frames = unsafe { buffer.frameLength() } as usize;
+    let format = unsafe { buffer.format() };
+    let channels = unsafe { format.channelCount() } as usize;
+    let stride = unsafe { buffer.stride() };
+
+    // SAFETY: also a plain property read.
+    let data = unsafe { buffer.floatChannelData() };
+
+    // A nil return is how AVFoundation reports "not 32-bit float" — that is
+    // the value's meaning, not the reason the call above is sound.
+    if data.is_null() || frames == 0 || channels == 0 || stride == 0 {
+        return None;
+    }
+
+    // `floatChannelData` returns `channelCount` pointers, each addressing
+    // `frameLength` valid samples spaced by `stride` samples. The last sample
+    // of a channel therefore sits at `(frames - 1) * stride`, and the readable
+    // run behind each pointer is that index plus one.
+    //
+    // The `- 1` is load-bearing, not defensive rounding: `frames * stride`
+    // would over-read by `stride - 1` elements past the last channel.
+    let plane_len = (frames - 1).checked_mul(stride)?.checked_add(1)?;
+
+    let mut planes: Vec<&[f32]> = Vec::with_capacity(channels);
+    for ch in 0..channels {
+        // SAFETY: three preconditions, and the interleaved case is the
+        // non-obvious one.
+        //
+        // 1. `data` is non-null (checked above) and points to exactly
+        //    `channelCount` pointers — `format.channelCount()` is the same
+        //    value AVFoundation sized that array with.
+        //
+        // 2. Each pointer has at least `plane_len` readable f32s behind it.
+        //    Deinterleaved: every channel is its own allocation, `stride == 1`,
+        //    and `plane_len == frames`. Interleaved: all `channelCount` slices
+        //    alias ONE allocation of `frames * channelCount` samples, and
+        //    channel `c`'s pointer starts at offset `c`. The highest channel
+        //    therefore ends at `(channelCount - 1) + (frames - 1) * stride`,
+        //    which for `stride == channelCount` is exactly the final element —
+        //    an exact fit with zero slack, verified against the real allocator
+        //    for both layouts. Widening `plane_len` breaks this.
+        //
+        // 3. The slices deliberately alias each other in the interleaved case.
+        //    That is sound only because every one of them is a shared `&[f32]`
+        //    and nothing holds a `&mut` to the buffer for their lifetime — the
+        //    buffer is borrowed immutably by this function's signature and
+        //    outlives every slice built here.
+        //
+        // `frames <= frameCapacity` is guaranteed by AVFoundation, which
+        // rejects an out-of-range `setFrameLength:`.
+        let ptr = unsafe { *data.add(ch) };
+        planes.push(unsafe { std::slice::from_raw_parts(ptr.as_ptr(), plane_len) });
+    }
+
+    Some(extract_channels_from_planes(&planes, frames, stride))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_channels_deinterleaved_splits_both_channels() {
+        // stride == 1 is the deinterleaved layout: each channel pointer walks
+        // its own contiguous run of samples.
+        let left = [1.0_f32, 2.0, 3.0];
+        let right = [-1.0_f32, -2.0, -3.0];
+        let planes: Vec<&[f32]> = vec![&left, &right];
+
+        let result = extract_channels_from_planes(&planes, 3, 1);
+
+        assert_eq!(result, vec![vec![1.0, 2.0, 3.0], vec![-1.0, -2.0, -3.0]]);
+    }
+
+    #[test]
+    fn extract_channels_interleaved_splits_both_channels() {
+        // stride == 2 with one shared allocation: L R L R L R. Each channel's
+        // plane pointer already starts at that channel's first sample, so
+        // channel 1 begins one sample in.
+        let interleaved = [1.0_f32, -1.0, 2.0, -2.0, 3.0, -3.0];
+        let planes: Vec<&[f32]> = vec![&interleaved[0..], &interleaved[1..]];
+
+        let result = extract_channels_from_planes(&planes, 3, 2);
+
+        assert_eq!(result, vec![vec![1.0, 2.0, 3.0], vec![-1.0, -2.0, -3.0]]);
+    }
+
+    #[test]
+    fn extract_channels_handles_more_than_two_channels() {
+        let a = [1.0_f32, 2.0];
+        let b = [3.0_f32, 4.0];
+        let c = [5.0_f32, 6.0];
+        let d = [7.0_f32, 8.0];
+        let planes: Vec<&[f32]> = vec![&a, &b, &c, &d];
+
+        let result = extract_channels_from_planes(&planes, 2, 1);
+
+        assert_eq!(
+            result,
+            vec![
+                vec![1.0, 2.0],
+                vec![3.0, 4.0],
+                vec![5.0, 6.0],
+                vec![7.0, 8.0]
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_channels_mono_is_an_identity_copy() {
+        let only = [0.5_f32, -0.5];
+        let planes: Vec<&[f32]> = vec![&only];
+
+        let result = extract_channels_from_planes(&planes, 2, 1);
+
+        assert_eq!(result, vec![vec![0.5, -0.5]]);
+    }
+
+    #[test]
+    fn extract_channels_clamps_overlong_frame_count() {
+        // A frame count past the end of the plane truncates; it must not panic
+        // and must not read past the slice.
+        let short = [1.0_f32, 2.0];
+        let planes: Vec<&[f32]> = vec![&short];
+
+        let result = extract_channels_from_planes(&planes, 99, 1);
+
+        assert_eq!(result, vec![vec![1.0, 2.0]]);
+    }
+
+    #[test]
+    fn extract_channels_clamps_overlong_frame_count_when_interleaved() {
+        // The stride == 1 case above cannot protect the clamp arithmetic:
+        // `(len - 1) / stride + 1` collapses to `len` there, so the divide is a
+        // no-op and a naive `plane.len()` bound survives it. At stride > 1 the
+        // permissive version reads past the plane and panics, which is the
+        // failure this test exists to prevent.
+        //
+        // Channel 0's plane is deliberately one sample short of the full run.
+        let interleaved = [1.0_f32, -1.0, 2.0, -2.0, 3.0, -3.0];
+        let planes: Vec<&[f32]> = vec![&interleaved[0..5], &interleaved[1..]];
+
+        let result = extract_channels_from_planes(&planes, 99, 2);
+
+        assert_eq!(result, vec![vec![1.0, 2.0, 3.0], vec![-1.0, -2.0, -3.0]]);
+    }
+
+    #[test]
+    fn extract_channels_keeps_every_channel_the_same_length() {
+        // One short plane truncates ALL channels, not just itself. HEU-652's
+        // mix_to_mono treats equal channel lengths as an extraction invariant;
+        // ragged output here would break it two tickets away.
+        let long = [1.0_f32, 2.0, 3.0, 4.0];
+        let short = [9.0_f32, 8.0];
+        let planes: Vec<&[f32]> = vec![&long, &short];
+
+        let result = extract_channels_from_planes(&planes, 4, 1);
+
+        assert_eq!(result, vec![vec![1.0, 2.0], vec![9.0, 8.0]]);
+        assert_eq!(
+            result[0].len(),
+            result[1].len(),
+            "channels must be equal length"
+        );
+    }
+
+    #[test]
+    fn extract_channels_degenerate_inputs_give_empty() {
+        // Named for all four cases, not just two: zero stride is what kills a
+        // missing divide-by-zero guard, and an empty plane among non-empty ones
+        // is what kills a missing `is_empty` check inside the `supplied` fold
+        // (its `plane.len() - 1` would underflow).
+        let plane = [1.0_f32];
+        let planes: Vec<&[f32]> = vec![&plane];
+
+        assert!(
+            extract_channels_from_planes(&planes, 0, 1).is_empty(),
+            "zero frames"
+        );
+        assert!(
+            extract_channels_from_planes(&[], 4, 1).is_empty(),
+            "no planes"
+        );
+        assert!(
+            extract_channels_from_planes(&planes, 4, 0).is_empty(),
+            "zero stride"
+        );
+
+        let empty: [f32; 0] = [];
+        let mixed: Vec<&[f32]> = vec![&plane, &empty];
+        assert!(
+            extract_channels_from_planes(&mixed, 4, 1).is_empty(),
+            "one empty plane among non-empty"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn extract_channels_reads_a_real_deinterleaved_buffer() {
+        autoreleasepool(|_| {
+            let format = unsafe {
+                AVAudioFormat::initStandardFormatWithSampleRate_channels(
+                    AVAudioFormat::alloc(),
+                    48_000.0,
+                    2,
+                )
+            }
+            .expect("stereo format should build");
+
+            let buffer = unsafe {
+                AVAudioPCMBuffer::initWithPCMFormat_frameCapacity(
+                    AVAudioPCMBuffer::alloc(),
+                    &format,
+                    4,
+                )
+            }
+            .expect("buffer should allocate");
+
+            // frameLength FIRST — floatChannelData points at `frameLength`
+            // valid samples, so on a fresh buffer (frameLength == 0) there is
+            // nothing valid to write into yet.
+            unsafe { buffer.setFrameLength(4) };
+
+            // The name claims deinterleaved; assert it rather than assume it,
+            // so a layout surprise fails with "stride was 2" instead of a
+            // confusing value mismatch below.
+            assert_eq!(
+                unsafe { buffer.stride() },
+                1,
+                "standard format should be deinterleaved"
+            );
+
+            let channels = unsafe { buffer.floatChannelData() };
+            for ch in 0..2usize {
+                let plane = unsafe { *channels.add(ch) };
+                for f in 0..4usize {
+                    unsafe { plane.as_ptr().add(f).write(ch as f32 * 10.0 + f as f32) };
+                }
+            }
+
+            let result = extract_channels(&buffer).expect("f32 buffer should extract");
+
+            assert_eq!(
+                result,
+                vec![vec![0.0, 1.0, 2.0, 3.0], vec![10.0, 11.0, 12.0, 13.0]]
+            );
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn extract_channels_honours_frame_length_not_capacity() {
+        // Every real tap buffer has frameLength < frameCapacity — the engine
+        // hands back a buffer sized to a hint and fills part of it. Nothing
+        // else in this suite pins that extraction reads frameLength rather
+        // than capacity, so a capacity-based implementation would return
+        // stale samples past the valid region and go unnoticed.
+        autoreleasepool(|_| {
+            let format = unsafe {
+                AVAudioFormat::initStandardFormatWithSampleRate_channels(
+                    AVAudioFormat::alloc(),
+                    48_000.0,
+                    2,
+                )
+            }
+            .expect("stereo format should build");
+
+            let buffer = unsafe {
+                AVAudioPCMBuffer::initWithPCMFormat_frameCapacity(
+                    AVAudioPCMBuffer::alloc(),
+                    &format,
+                    8,
+                )
+            }
+            .expect("buffer should allocate");
+
+            // Fill all 8 frames, then declare only the first 4 valid.
+            unsafe { buffer.setFrameLength(8) };
+            let channels = unsafe { buffer.floatChannelData() };
+            for ch in 0..2usize {
+                let plane = unsafe { *channels.add(ch) };
+                for f in 0..8usize {
+                    unsafe { plane.as_ptr().add(f).write(ch as f32 * 100.0 + f as f32) };
+                }
+            }
+            unsafe { buffer.setFrameLength(4) };
+
+            let result = extract_channels(&buffer).expect("f32 buffer should extract");
+
+            // Only the first 4 of each channel — never the tail 4.
+            assert_eq!(
+                result,
+                vec![vec![0.0, 1.0, 2.0, 3.0], vec![100.0, 101.0, 102.0, 103.0]]
+            );
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn extract_channels_is_identical_across_layouts() {
+        // Same signal, both layouts, identical output. Writing through the
+        // same (pointer, stride) access pattern extraction uses would let a
+        // wrong-but-self-consistent interpretation pass, so the physical
+        // layout is asserted explicitly before anything is written.
+        fn build_and_extract(interleaved: bool) -> Vec<Vec<f32>> {
+            autoreleasepool(|_| {
+                let format = unsafe {
+                    AVAudioFormat::initWithCommonFormat_sampleRate_channels_interleaved(
+                        AVAudioFormat::alloc(),
+                        AVAudioCommonFormat::PCMFormatFloat32,
+                        48_000.0,
+                        2,
+                        interleaved,
+                    )
+                }
+                .expect("stereo f32 format should build");
+
+                let buffer = unsafe {
+                    AVAudioPCMBuffer::initWithPCMFormat_frameCapacity(
+                        AVAudioPCMBuffer::alloc(),
+                        &format,
+                        4,
+                    )
+                }
+                .expect("buffer should allocate");
+
+                // frameLength FIRST — see the deinterleaved test above.
+                unsafe { buffer.setFrameLength(4) };
+
+                let stride = unsafe { buffer.stride() };
+                let data = unsafe { buffer.floatChannelData() };
+                assert!(!data.is_null(), "f32 buffer must expose float channel data");
+
+                // Verify the physical interpretation BEFORE writing through it.
+                assert_eq!(
+                    stride,
+                    if interleaved { 2 } else { 1 },
+                    "stride for interleaved={interleaved}"
+                );
+                let p0 = unsafe { *data.add(0) }.as_ptr();
+                let p1 = unsafe { *data.add(1) }.as_ptr();
+                if interleaved {
+                    // One shared allocation, so `offset_from` is defined here:
+                    // channel 1 starts one f32 after channel 0.
+                    //
+                    // SAFETY: both pointers are into the same interleaved
+                    // buffer, which is what `offset_from` requires.
+                    let gap = unsafe { p1.offset_from(p0) };
+                    assert_eq!(gap, 1, "interleaved channel pointers must be adjacent");
+                } else {
+                    // Deinterleaved planes may be *separate* allocations —
+                    // AVFoundation guarantees only distinct chunks, not one
+                    // block. `offset_from` across two allocations is undefined
+                    // behaviour, so compare addresses as integers instead.
+                    assert_ne!(p0, p1, "deinterleaved planes must be distinct");
+                    let d = (p0 as usize).abs_diff(p1 as usize) / size_of::<f32>();
+                    assert!(d >= 4, "deinterleaved planes must not overlap, gap={d}");
+                }
+
+                for ch in 0..2usize {
+                    let plane = unsafe { *data.add(ch) };
+                    for f in 0..4usize {
+                        let value = ch as f32 * 10.0 + f as f32;
+                        unsafe { plane.as_ptr().add(f * stride).write(value) };
+                    }
+                }
+
+                extract_channels(&buffer).expect("f32 buffer should extract")
+            })
+        }
+
+        let deinterleaved = build_and_extract(false);
+        let interleaved = build_and_extract(true);
+
+        let expected = vec![
+            vec![0.0_f32, 1.0, 2.0, 3.0],
+            vec![10.0_f32, 11.0, 12.0, 13.0],
+        ];
+
+        assert_eq!(deinterleaved, expected, "deinterleaved layout");
+        assert_eq!(interleaved, expected, "interleaved layout");
+        assert_eq!(deinterleaved, interleaved, "layouts must agree");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn extract_channels_returns_none_for_a_zero_frame_buffer() {
+        // Not hypothetical: a freshly allocated AVAudioPCMBuffer has
+        // frameLength == 0, and HEU-650 calls this on every tap callback.
+        //
+        // This guard is load-bearing. Without it, `(frames - 1)` panics with
+        // "attempt to subtract with overflow" in a debug build. The suite's
+        // other zero-frames coverage exercises `extract_channels_from_planes`,
+        // which is a different function with its own separate guard — deleting
+        // this one leaves all of those green.
+        autoreleasepool(|_| {
+            let format = unsafe {
+                AVAudioFormat::initStandardFormatWithSampleRate_channels(
+                    AVAudioFormat::alloc(),
+                    48_000.0,
+                    2,
+                )
+            }
+            .expect("stereo format should build");
+
+            let buffer = unsafe {
+                AVAudioPCMBuffer::initWithPCMFormat_frameCapacity(
+                    AVAudioPCMBuffer::alloc(),
+                    &format,
+                    4,
+                )
+            }
+            .expect("buffer should allocate");
+
+            // Deliberately no setFrameLength — frameLength is 0.
+            assert_eq!(unsafe { buffer.frameLength() }, 0);
+            assert!(extract_channels(&buffer).is_none());
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn extract_channels_returns_none_for_non_f32() {
+        autoreleasepool(|_| {
+            // Int16 has no float channel data; extraction must decline rather
+            // than dereference nil. It must also stay silent — this runs per
+            // callback.
+            let format = unsafe {
+                AVAudioFormat::initWithCommonFormat_sampleRate_channels_interleaved(
+                    AVAudioFormat::alloc(),
+                    AVAudioCommonFormat::PCMFormatInt16,
+                    48_000.0,
+                    2,
+                    true,
+                )
+            }
+            .expect("int16 format should build");
+
+            let buffer = unsafe {
+                AVAudioPCMBuffer::initWithPCMFormat_frameCapacity(
+                    AVAudioPCMBuffer::alloc(),
+                    &format,
+                    4,
+                )
+            }
+            .expect("buffer should allocate");
+            unsafe { buffer.setFrameLength(4) };
+
+            assert!(extract_channels(&buffer).is_none());
+        });
+    }
+
+    #[test]
+    fn mix_eligibility_is_stereo_for_f32_two_channels() {
+        assert_eq!(
+            MixEligibility::classify(AVAudioCommonFormat::PCMFormatFloat32, 2),
+            MixEligibility::Stereo
+        );
+    }
+
+    #[test]
+    fn mix_eligibility_is_mono_for_f32_one_channel() {
+        assert_eq!(
+            MixEligibility::classify(AVAudioCommonFormat::PCMFormatFloat32, 1),
+            MixEligibility::Mono
+        );
+    }
+
+    #[test]
+    fn mix_eligibility_is_ineligible_above_two_channels() {
+        // No measurement covers arrays. Whatever such a device does today, it
+        // keeps doing — the explicit mix will simply not be applied.
+        //
+        // 3 is the load-bearing case: it is the first value past the boundary,
+        // and an arm that wrongly admitted it would be invisible to a test
+        // that only checks 4. Both are asserted for that reason.
+        for channels in [3, 4, 8] {
+            assert_eq!(
+                MixEligibility::classify(AVAudioCommonFormat::PCMFormatFloat32, channels),
+                MixEligibility::Ineligible,
+                "{channels} channels must not be eligible"
+            );
+        }
+    }
+
+    #[test]
+    fn mix_eligibility_is_ineligible_for_non_f32() {
+        // AVAudioConverter normalizes non-f32 today. Rejecting here would take
+        // a working device to a hard failure, which HEU-649 explicitly forbids:
+        // input the measurement does not cover keeps the path it already uses.
+        //
+        // Every non-f32 format is checked at BOTH channel counts that would
+        // otherwise be eligible. Checking only stereo leaves an arm like
+        // `(PCMFormatInt16, 1) => Mono` undetectable.
+        for format in [
+            AVAudioCommonFormat::PCMFormatInt16,
+            AVAudioCommonFormat::PCMFormatInt32,
+            AVAudioCommonFormat::PCMFormatFloat64,
+            AVAudioCommonFormat::OtherFormat,
+        ] {
+            for channels in [1, 2] {
+                assert_eq!(
+                    MixEligibility::classify(format, channels),
+                    MixEligibility::Ineligible,
+                    "format {format:?} at {channels} ch must not be eligible"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mix_eligibility_is_ineligible_for_zero_channels() {
+        assert_eq!(
+            MixEligibility::classify(AVAudioCommonFormat::PCMFormatFloat32, 0),
+            MixEligibility::Ineligible
+        );
+    }
+
+    #[test]
+    fn common_format_names_are_distinct_and_stable() {
+        // Same reasoning as the eligibility labels below, and it matters more
+        // here: `Ineligible` collapses "not f32" and "more than two channels",
+        // so this name is the only field in the log line that separates an
+        // Int16 stereo microphone from a four-channel f32 array. A swapped arm
+        // would ship silently and corrupt exactly the evidence HEU-651 reads.
+        assert_eq!(
+            common_format_name(AVAudioCommonFormat::PCMFormatFloat32),
+            "f32"
+        );
+        assert_eq!(
+            common_format_name(AVAudioCommonFormat::PCMFormatFloat64),
+            "f64"
+        );
+        assert_eq!(
+            common_format_name(AVAudioCommonFormat::PCMFormatInt16),
+            "i16"
+        );
+        assert_eq!(
+            common_format_name(AVAudioCommonFormat::PCMFormatInt32),
+            "i32"
+        );
+        assert_eq!(
+            common_format_name(AVAudioCommonFormat::OtherFormat),
+            "other"
+        );
+    }
+
+    #[test]
+    fn common_format_name_surfaces_unknown_values() {
+        // A format AVFoundation adds later is the case worth seeing, so it
+        // prints the discriminant rather than being folded into "other".
+        assert_eq!(common_format_name(AVAudioCommonFormat(99)), "unknown(99)");
+    }
+
+    #[test]
+    fn mix_eligibility_labels_are_distinct_and_stable() {
+        // The label is what lands in the log and what a future reader greps
+        // for. Classification tests do not catch a swapped or duplicated label.
+        assert_eq!(MixEligibility::Mono.as_str(), "mono");
+        assert_eq!(MixEligibility::Stereo.as_str(), "stereo");
+        assert_eq!(MixEligibility::Ineligible.as_str(), "ineligible");
+    }
 
     #[test]
     fn mono_samples_copies_channel_zero() {

@@ -106,7 +106,7 @@ impl SegmentAccumulator {
             return Ok(());
         }
 
-        let samples: Vec<f32> = self.buffer.drain(..).collect();
+        let samples = std::mem::take(&mut self.buffer);
         self.flush_segment(&samples)?;
         self.segment_start_ms = None;
         Ok(())

@@ -222,7 +222,7 @@ mod tests {
         let height = 100;
         let bytes_per_row = width * 4;
         let mut data = vec![0u8; height * bytes_per_row];
-        for pixel in data.chunks_exact_mut(4) {
+        for pixel in data.as_chunks_mut::<4>().0 {
             pixel[0] = 0; // B
             pixel[1] = 0; // G
             pixel[2] = 255; // R
@@ -284,7 +284,7 @@ mod tests {
         let h = 256;
         let bpr = w * 4;
         let mut data = vec![0u8; h * bpr];
-        for (i, pixel) in data.chunks_exact_mut(4).enumerate() {
+        for (i, pixel) in data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let x = (i % w) as u8;
             let y = (i / w) as u8;
             pixel[0] = x.wrapping_mul(31);
