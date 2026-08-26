@@ -277,7 +277,11 @@ impl MicrophoneCapture {
             //
             // This is `info!`, and the daemon's `env_logger::init()` has no
             // default filter, so it is error-only unless `RUST_LOG` is set:
-            //     RUST_LOG=chronicle_audio=info cargo run --bin chronicle-daemon
+            //     RUST_LOG=error,chronicle_audio=info cargo run --bin chronicle-daemon
+            //
+            // Keep the leading `error,`. `env_filter` returns false for any
+            // target no directive matches, so a lone `chronicle_audio=info`
+            // would silence every other crate's errors too.
             log::info!(
                 "microphone tap installed (capture starts on mic-on): \
                  {native_channels} ch, {native_rate} Hz, \
