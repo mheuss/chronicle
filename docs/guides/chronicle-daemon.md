@@ -232,8 +232,9 @@ It does not depend on the daemon as a library — only on the IPC protocol.
 ## Building
 
 ```bash
-cd chronicle-daemon && cargo build            # debug
-cd chronicle-daemon && cargo build --release  # release
+cd chronicle-daemon
+cargo build            # debug
+cargo build --release  # release
 ```
 
 Run cargo from `chronicle-daemon/`, not from the repo root. Cargo finds
