@@ -572,6 +572,15 @@ struct StorageStats: Codable, Sendable {
     let audioSegmentCount: UInt64
     let oldestEntryMs: Int64?
     let retentionDays: UInt32
+    /// Optional on the decoder, NOT on the wire — Rust sends these
+    /// non-optionally. An older daemon omits them, and a non-optional field
+    /// here would fail the decode of this entire block, taking disk usage and
+    /// retention down with it. See docs/use-cases/ipc-compat.md.
+    ///
+    /// The pair is sampled rather than read atomically, so a ratio above 1.0
+    /// is sampling skew, not data.
+    let mediaServed: UInt64?
+    let mediaAbsent: UInt64?
 }
 
 enum TranscriptionState: String, Codable, Sendable {

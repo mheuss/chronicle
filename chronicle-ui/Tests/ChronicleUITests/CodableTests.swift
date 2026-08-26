@@ -156,6 +156,63 @@ struct CodableTests {
         #expect(response.data.storage == nil)
     }
 
+    @Test("StorageStats decodes when the new media counters are absent")
+    func storageStatsDecodesWithoutMediaCounters() throws {
+        // An older daemon that predates HEU-624. The WHOLE storage block must
+        // still decode — a non-optional field here would take disk usage and
+        // retention down with it.
+        let json = """
+        {"type":"status","ok":true,"data":{"uptime_secs":42,"version":"0.1.0",
+        "storage":{"db_size_bytes":1,"total_disk_usage_bytes":2,
+        "screenshot_count":3,"audio_segment_count":4,"oldest_entry_ms":null,
+        "retention_days":30}}}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let response = try decoder.decode(StatusResponse.self, from: Data(json.utf8))
+        #expect(response.data.storage?.screenshotCount == 3)
+        #expect(response.data.storage?.mediaServed == nil)
+        #expect(response.data.storage?.mediaAbsent == nil)
+    }
+
+    @Test("StorageStats decodes the media counters when present")
+    func storageStatsDecodesMediaCounters() throws {
+        let json = """
+        {"type":"status","ok":true,"data":{"uptime_secs":42,"version":"0.1.0",
+        "storage":{"db_size_bytes":1,"total_disk_usage_bytes":2,
+        "screenshot_count":3,"audio_segment_count":4,"oldest_entry_ms":null,
+        "retention_days":30,"media_served":900,"media_absent":3}}}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let response = try decoder.decode(StatusResponse.self, from: Data(json.utf8))
+        #expect(response.data.storage?.mediaServed == 900)
+        #expect(response.data.storage?.mediaAbsent == 3)
+    }
+
+    @Test("An old UI decoder ignores the new media counters")
+    func oldUIDecoderIgnoresMediaCounters() throws {
+        // Reverse direction: a new daemon's extra keys must not break an older
+        // UI. Stub mirrors StorageStats exactly as it existed BEFORE this task.
+        struct OldStorageStats: Codable {
+            let dbSizeBytes: UInt64
+            let totalDiskUsageBytes: UInt64
+            let screenshotCount: UInt64
+            let audioSegmentCount: UInt64
+            let oldestEntryMs: Int64?
+            let retentionDays: UInt32
+        }
+        let json = """
+        {"db_size_bytes":1,"total_disk_usage_bytes":2,"screenshot_count":3,
+         "audio_segment_count":4,"oldest_entry_ms":null,"retention_days":30,
+         "media_served":900,"media_absent":3}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let old = try decoder.decode(OldStorageStats.self, from: Data(json.utf8))
+        #expect(old.screenshotCount == 3, "old decoder ignores unknown keys, no throw")
+    }
+
     @Test("MicState decodes from wire values")
     func micStateDecodesFromWireValues() throws {
         let decoder = JSONDecoder()
