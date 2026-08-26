@@ -19,9 +19,14 @@ pub struct PipelineCounters {
     pub audio_segments_persisted: AtomicU64,
     pub transcription_enqueued: AtomicU64,
     pub transcription_dropped: AtomicU64,
-    /// Media rows handed out over IPC with a path.
+    /// Media rows handed out over IPC with a path. The denominator for
+    /// `media_absent`; the two are incremented separately and `Relaxed` gives
+    /// no ordering between them, so a snapshot can briefly show absent > served.
     pub media_served: AtomicU64,
-    /// Of those, how many had no file. Always anomalous; see HEU-624.
+    /// Of those, how many had no file. A transient non-zero is normal —
+    /// `cleanup_media` deletes files before rows, so rows outlive their files
+    /// within each batch. A persistently non-zero value is the anomaly.
+    /// See HEU-624.
     pub media_absent: AtomicU64,
 }
 

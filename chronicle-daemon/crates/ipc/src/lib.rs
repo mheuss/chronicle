@@ -101,6 +101,13 @@ impl MicState {
 /// decoding is out of scope until protocol version negotiation (HEU-456).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+// `Response::Status` is inherently the fat variant: it carries the whole
+// StatusData block while most variants carry an ok flag. Boxing it would add a
+// heap allocation per response and churn every construction and match site, for
+// a warning with no runtime consequence on a type that is built once per
+// request and immediately serialized. HEU-624's two counters pushed the gap
+// from 200 to 216 bytes and tripped the default threshold.
+#[allow(clippy::large_enum_variant)]
 pub enum Response {
     Status {
         ok: bool,
@@ -266,10 +273,19 @@ pub struct StorageStats {
     pub retention_days: u32,
     /// Media rows served over IPC this process lifetime. The denominator for
     /// `media_absent` — a bare absent count cannot be interpreted without it.
+    ///
+    /// The pair is sampled, not read atomically: `snapshot()` loads the two
+    /// counters independently with `Ordering::Relaxed`, so a concurrent serve
+    /// can land between them. Treat a ratio above 1.0 as sampling skew, not as
+    /// data.
     pub media_served: u64,
-    /// Of those, how many had no file on disk. Expected 0. See HEU-624 for what
-    /// a non-zero reading means; notably a large one is evidence against
-    /// building a deleting sweep, not for it.
+    /// Of those, how many had no file on disk.
+    ///
+    /// A transient non-zero value is normal, not an alarm. `cleanup_media`
+    /// deletes files before rows within each batch, so rows legitimately
+    /// outlive their files for the length of that window — and if the process
+    /// dies mid-batch, until the next scheduled run. A *persistently* non-zero
+    /// value across restarts is the anomaly. See HEU-624.
     pub media_absent: u64,
 }
 
@@ -647,9 +663,9 @@ mod tests {
             screenshot_count: 100,
             audio_segment_count: 10,
             oldest_entry_ms: Some(1_700_000_000_000),
+            retention_days: 30,
             media_served: 900,
             media_absent: 3,
-            retention_days: 30,
         };
         let json = serde_json::to_string(&stats).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
