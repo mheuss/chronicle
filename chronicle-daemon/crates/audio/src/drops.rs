@@ -55,10 +55,12 @@ mod tests {
     #[test]
     fn snapshot_reads_every_field() {
         let c = AudioDropCounters::default();
+        // Every value distinct: a swapped pair inside snapshot() must fail
+        // this test, and two fields sharing a value would hide exactly that.
         c.mic_full.fetch_add(3, Ordering::Relaxed);
         c.mic_closed.fetch_add(1, Ordering::Relaxed);
         c.mic_convert_failed.fetch_add(4, Ordering::Relaxed);
-        c.system_full.fetch_add(1, Ordering::Relaxed);
+        c.system_full.fetch_add(2, Ordering::Relaxed);
         c.system_closed.fetch_add(5, Ordering::Relaxed);
 
         let s = c.snapshot();
@@ -66,7 +68,7 @@ mod tests {
         assert_eq!(s.mic_full, 3);
         assert_eq!(s.mic_closed, 1);
         assert_eq!(s.mic_convert_failed, 4);
-        assert_eq!(s.system_full, 1);
+        assert_eq!(s.system_full, 2);
         assert_eq!(s.system_closed, 5);
     }
 
