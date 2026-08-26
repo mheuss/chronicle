@@ -9,6 +9,7 @@
 //!
 //! [`set_microphone_enabled`]: AudioPipeline::set_microphone_enabled
 
+use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
@@ -20,7 +21,7 @@ use objc2_screen_capture_kit::SCStreamOutput;
 use crate::accumulator::SegmentAccumulator;
 use crate::handler::{AudioMessage, AudioOutputHandler};
 use crate::microphone::MicrophoneCapture;
-use crate::{AudioConfig, AudioError, AudioSource, CompletedSegment, Result};
+use crate::{AudioConfig, AudioDropCounters, AudioError, AudioSource, CompletedSegment, Result};
 
 /// Outcome of a microphone toggle. The microphone is a soft feature — a
 /// failure never breaks the encoding pipeline.
@@ -54,6 +55,10 @@ pub struct AudioPipeline {
     /// A clone of the encoding-channel sender, kept so a disable can send
     /// `AudioMessage::FlushMic`. `None` after `stop()`.
     flush_tx: Option<mpsc::SyncSender<AudioMessage>>,
+    /// Buffers the real-time callbacks discarded, shared with the handler and
+    /// the microphone tap. Created here and never rebuilt, so the counts are
+    /// monotonic for the life of the process.
+    drop_counters: Arc<AudioDropCounters>,
 }
 
 /// Borrow-based handle for registering audio output on an `SCStream`.
@@ -84,6 +89,14 @@ impl<'p> AudioHandlerToken<'p> {
 }
 
 impl AudioPipeline {
+    /// Shared handle to the real-time drop counters.
+    ///
+    /// Cloneable so the daemon's reporter can keep reading after the pipeline
+    /// is stopped and dropped — the final shutdown report depends on that.
+    pub fn drop_counters(&self) -> Arc<AudioDropCounters> {
+        Arc::clone(&self.drop_counters)
+    }
+
     /// Create a new audio pipeline.
     ///
     /// Spawns the encoding thread immediately. Returns the pipeline and
@@ -99,7 +112,9 @@ impl AudioPipeline {
         // The encoding channel now has three senders: the ObjC handler, the
         // microphone tap, and `flush_tx`. Clone for the first two; keep the
         // original as `flush_tx`.
-        let handler = AudioOutputHandler::new(buffer_tx.clone());
+        let drop_counters = Arc::new(AudioDropCounters::default());
+
+        let handler = AudioOutputHandler::new(buffer_tx.clone(), Arc::clone(&drop_counters));
 
         // Build the microphone path eagerly. AVAudioEngine setup is plain-
         // thread-safe and does not touch the microphone, so a `&self` toggle
@@ -124,6 +139,7 @@ impl AudioPipeline {
             encoding_thread: Some(encoding_thread),
             microphone,
             flush_tx: Some(buffer_tx),
+            drop_counters,
         };
 
         Ok((pipeline, segment_rx))
@@ -342,6 +358,26 @@ fn run_encoding_loop(
 mod tests {
     use super::*;
     use crate::handler::AudioBuffer;
+
+    #[test]
+    fn drop_counters_handle_shares_one_allocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = AudioConfig {
+            segment_duration_secs: 30,
+            bitrate: 64_000,
+            output_dir: dir.path().to_path_buf(),
+        };
+        let (pipeline, _rx) = AudioPipeline::create(config).unwrap();
+
+        // Every handle must reach the same counters, or the reporter would
+        // read a set nothing writes to.
+        let counters = pipeline.drop_counters();
+        counters
+            .system_full
+            .fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(pipeline.drop_counters().snapshot().system_full, 2);
+        assert!(Arc::ptr_eq(&counters, &pipeline.drop_counters()));
+    }
 
     #[test]
     fn create_returns_pipeline_and_segment_receiver() {

@@ -5,6 +5,8 @@
 //! over a bounded channel.
 
 use std::ffi::c_char;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::SyncSender;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -105,9 +107,29 @@ unsafe fn extract_pcm_bytes(sample_buffer: &CMSampleBuffer) -> Option<Vec<u8>> {
     Some(slice.to_vec())
 }
 
+/// Which side of `TrySendError` a dropped buffer came from.
+pub(crate) enum DropCause {
+    /// Channel full — downstream is slow.
+    Full,
+    /// Channel closed — downstream is gone.
+    Closed,
+}
+
+/// Record one discarded system-audio buffer.
+///
+/// Pure and callable from a test, so the full/closed mapping is verified
+/// without a real `CMSampleBuffer`. The callback does nothing but call this.
+pub(crate) fn count_system_drop(counters: &crate::AudioDropCounters, cause: DropCause) {
+    match cause {
+        DropCause::Full => counters.system_full.fetch_add(1, Ordering::Relaxed),
+        DropCause::Closed => counters.system_closed.fetch_add(1, Ordering::Relaxed),
+    };
+}
+
 /// Ivars for the `AudioOutputHandler` ObjC class.
 pub struct AudioOutputHandlerIvars {
     sender: SyncSender<AudioMessage>,
+    counters: Arc<crate::AudioDropCounters>,
 }
 
 define_class!(
@@ -162,21 +184,17 @@ define_class!(
             };
 
             // Best-effort send. Drop on full to avoid blocking the SCK callback thread.
+            //
+            // ADR-013: no logger on this thread. The daemon's drop reporter
+            // turns these counts into log lines off-thread. `source` is always
+            // System here — the microphone has its own AVAudioEngine path
+            // (ADR-010) with its own counters.
             if let Err(e) = self.ivars().sender.try_send(AudioMessage::Buffer(buffer)) {
-                match e {
-                    std::sync::mpsc::TrySendError::Full(_) => {
-                        log::warn!(
-                            "audio buffer dropped (channel full), source={}",
-                            source.as_str()
-                        );
-                    }
-                    std::sync::mpsc::TrySendError::Disconnected(_) => {
-                        log::warn!(
-                            "audio buffer dropped (channel closed), source={}",
-                            source.as_str()
-                        );
-                    }
-                }
+                let cause = match e {
+                    std::sync::mpsc::TrySendError::Full(_) => DropCause::Full,
+                    std::sync::mpsc::TrySendError::Disconnected(_) => DropCause::Closed,
+                };
+                count_system_drop(&self.ivars().counters, cause);
             }
         }
     }
@@ -184,8 +202,14 @@ define_class!(
 
 impl AudioOutputHandler {
     /// Create a new handler that sends audio buffers over the given channel.
-    pub fn new(sender: SyncSender<AudioMessage>) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(AudioOutputHandlerIvars { sender });
+    ///
+    /// `counters` is shared with the daemon's drop reporter, which does all
+    /// the logging for the drops this handler records.
+    pub fn new(
+        sender: SyncSender<AudioMessage>,
+        counters: Arc<crate::AudioDropCounters>,
+    ) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(AudioOutputHandlerIvars { sender, counters });
         unsafe { objc2::msg_send![super(this), init] }
     }
 
@@ -320,11 +344,35 @@ mod tests {
     }
 
     #[test]
+    fn try_send_error_maps_to_the_right_counter() {
+        let c = crate::AudioDropCounters::default();
+
+        count_system_drop(&c, DropCause::Full);
+        assert_eq!(c.snapshot().system_full, 1);
+        assert_eq!(c.snapshot().system_closed, 0, "full must not bump closed");
+
+        count_system_drop(&c, DropCause::Closed);
+        assert_eq!(c.snapshot().system_closed, 1);
+        assert_eq!(c.snapshot().system_full, 1, "closed must not bump full");
+    }
+
+    #[test]
+    fn handler_carries_the_shared_counters() {
+        let (tx, _rx) = std::sync::mpsc::sync_channel::<AudioMessage>(1);
+        let counters = Arc::new(crate::AudioDropCounters::default());
+        let handler = AudioOutputHandler::new(tx, Arc::clone(&counters));
+        counters
+            .system_full
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(handler.ivars().counters.snapshot().system_full, 1);
+    }
+
+    #[test]
     fn handler_class_registers_with_runtime() {
         // Verifies that the ObjC class created by define_class! is valid
         // and can be instantiated.
         let (tx, _rx) = std::sync::mpsc::sync_channel::<AudioMessage>(4);
-        let handler = AudioOutputHandler::new(tx);
+        let handler = AudioOutputHandler::new(tx, Arc::new(crate::AudioDropCounters::default()));
 
         // The handler should be usable as an SCStreamOutput protocol object.
         let _protocol_obj = handler.as_protocol_object();
