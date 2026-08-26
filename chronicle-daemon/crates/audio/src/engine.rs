@@ -55,9 +55,9 @@ pub struct AudioPipeline {
     /// A clone of the encoding-channel sender, kept so a disable can send
     /// `AudioMessage::FlushMic`. `None` after `stop()`.
     flush_tx: Option<mpsc::SyncSender<AudioMessage>>,
-    /// Buffers the SCK audio handler discarded. Created here and never
-    /// rebuilt, so the counts are monotonic for the life of the process.
-    /// The microphone tap starts sharing this in HEU-653's next task.
+    /// Buffers the SCK audio handler and the microphone tap discarded.
+    /// Created here and never rebuilt, so the counts are monotonic for the
+    /// life of the process.
     drop_counters: Arc<AudioDropCounters>,
 }
 
@@ -120,7 +120,7 @@ impl AudioPipeline {
         // thread-safe and does not touch the microphone, so a `&self` toggle
         // needs no interior mutability. A setup failure is soft: store `None`
         // and the mic stays unavailable.
-        let microphone = match MicrophoneCapture::new(buffer_tx.clone()) {
+        let microphone = match MicrophoneCapture::new(buffer_tx.clone(), Arc::clone(&drop_counters)) {
             Ok(mic) => Some(mic),
             Err(e) => {
                 log::warn!("microphone capture unavailable: {e}");
@@ -385,6 +385,16 @@ mod tests {
             Arc::ptr_eq(&counters, handler_counters),
             "handler must share the pipeline's counters, not its own"
         );
+
+        // Same for the microphone tap. Without this, a fresh set handed to
+        // MicrophoneCapture compiles and counts where nothing reads — which
+        // would silently lose exactly the mic drop burst HEU-548 reports.
+        if let Some(mic) = pipeline.microphone.as_ref() {
+            assert!(
+                Arc::ptr_eq(&counters, mic.counters()),
+                "mic tap must share the pipeline's counters, not its own"
+            );
+        }
     }
 
     #[test]

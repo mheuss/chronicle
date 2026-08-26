@@ -17,6 +17,8 @@
 
 use std::cell::Cell;
 use std::ptr::NonNull;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -28,8 +30,8 @@ use objc2_avf_audio::{
     AVAudioConverterOutputStatus, AVAudioEngine, AVAudioFormat, AVAudioPCMBuffer, AVAudioTime,
 };
 
-use crate::handler::{AudioBuffer, AudioMessage};
-use crate::{AudioError, AudioSource, CHANNEL_COUNT, Result, SAMPLE_RATE};
+use crate::handler::{AudioBuffer, AudioMessage, DropCause};
+use crate::{AudioDropCounters, AudioError, AudioSource, CHANNEL_COUNT, Result, SAMPLE_RATE};
 
 /// Extra frames added to the output buffer capacity when resampling.
 ///
@@ -169,6 +171,11 @@ pub struct MicrophoneCapture {
     /// engine owns its own retained copy; this field also keeps the Rust-side
     /// `RcBlock` alive for the struct's lifetime.
     _tap_block: RcBlock<dyn Fn(NonNull<AVAudioPCMBuffer>, NonNull<AVAudioTime>)>,
+    /// The counters the tap writes into. The tap block owns its own clone;
+    /// this one exists so the pipeline's tests can assert both reach the same
+    /// allocation — handing the tap a fresh set compiles cleanly and silently
+    /// counts where the reporter never looks.
+    counters: Arc<AudioDropCounters>,
 }
 
 impl MicrophoneCapture {
@@ -180,7 +187,14 @@ impl MicrophoneCapture {
     ///
     /// `buffer_tx` is a clone of the encoding channel's sender. The tap holds
     /// its own clone and best-effort sends each normalized buffer.
-    pub fn new(buffer_tx: SyncSender<AudioMessage>) -> Result<Self> {
+    ///
+    /// `counters` is shared with the daemon's drop reporter, which does all
+    /// the logging for the drops the tap records. ADR-013 forbids a logger on
+    /// this path, including a throttled one.
+    pub fn new(
+        buffer_tx: SyncSender<AudioMessage>,
+        counters: Arc<AudioDropCounters>,
+    ) -> Result<Self> {
         autoreleasepool(|_| {
             // SAFETY: AVAudioEngine::new builds a fresh engine connected to
             // the default audio device. No preconditions.
@@ -243,7 +257,12 @@ impl MicrophoneCapture {
             // The tap block runs the converter on every input buffer; we
             // also keep an owned reference on `Self` so `stop()` can reset
             // it. `Retained::clone` just bumps the ObjC retain count.
-            let tap_block = make_tap_block(converter.clone(), target_format, buffer_tx);
+            let tap_block = make_tap_block(
+                converter.clone(),
+                target_format,
+                buffer_tx,
+                Arc::clone(&counters),
+            );
 
             // Install a nil-format tap. nil means "deliver the native
             // hardware format" — installing an explicit non-native format on
@@ -294,6 +313,7 @@ impl MicrophoneCapture {
                 engine,
                 converter,
                 _tap_block: tap_block,
+                counters,
             })
         })
     }
@@ -347,10 +367,32 @@ impl MicrophoneCapture {
 /// encoding-channel sender. It runs on an audio thread, so it wraps its ObjC
 /// work in an `autoreleasepool` and uses `try_send` — never blocking the
 /// audio thread (the Structured Backpressure pattern).
+impl MicrophoneCapture {
+    /// The drop counters this tap writes into. See the field's doc comment.
+    #[cfg(test)]
+    pub(crate) fn counters(&self) -> &Arc<AudioDropCounters> {
+        &self.counters
+    }
+}
+
+/// Record one discarded microphone buffer.
+///
+/// Takes the error rather than a pre-classified cause so the tap callback
+/// carries no logic at all — every step from `TrySendError` to counter field
+/// sits inside something a test can call. See `count_system_drop`, which was
+/// split the other way and shipped an untestable half.
+pub(crate) fn count_mic_drop<T>(counters: &AudioDropCounters, err: &TrySendError<T>) {
+    match DropCause::from(err) {
+        DropCause::Full => counters.mic_full.fetch_add(1, Ordering::Relaxed),
+        DropCause::Closed => counters.mic_closed.fetch_add(1, Ordering::Relaxed),
+    };
+}
+
 fn make_tap_block(
     converter: Retained<AVAudioConverter>,
     target_format: Retained<AVAudioFormat>,
     buffer_tx: SyncSender<AudioMessage>,
+    counters: Arc<AudioDropCounters>,
 ) -> RcBlock<dyn Fn(NonNull<AVAudioPCMBuffer>, NonNull<AVAudioTime>)> {
     RcBlock::new(
         move |input_buffer: NonNull<AVAudioPCMBuffer>, _when: NonNull<AVAudioTime>| {
@@ -359,11 +401,15 @@ fn make_tap_block(
                 // lives for the duration of this callback.
                 let input_buffer = unsafe { input_buffer.as_ref() };
 
-                let samples =
-                    match convert_to_mono_samples(&converter, &target_format, input_buffer) {
-                        Some(s) if !s.is_empty() => s,
-                        _ => return,
-                    };
+                let samples = match convert_to_mono_samples(
+                    &converter,
+                    &target_format,
+                    input_buffer,
+                    &counters,
+                ) {
+                    Some(s) if !s.is_empty() => s,
+                    _ => return,
+                };
 
                 // Wall-clock timestamp, matching AudioOutputHandler. PTS-to-
                 // epoch conversion is fragile and unnecessary for 30-second
@@ -380,16 +426,12 @@ fn make_tap_block(
                 });
 
                 // Best-effort send. Never block the audio thread: drop the
-                // buffer and warn if the channel is full (downstream slow) or
-                // closed (downstream gone).
-                match buffer_tx.try_send(message) {
-                    Ok(()) => {}
-                    Err(TrySendError::Full(_)) => {
-                        log::warn!("microphone buffer dropped (channel full)");
-                    }
-                    Err(TrySendError::Disconnected(_)) => {
-                        log::warn!("microphone buffer dropped (channel closed)");
-                    }
+                // buffer and count it if the channel is full (downstream slow)
+                // or closed (downstream gone). ADR-013 forbids a logger here —
+                // including a throttled one — so the daemon's drop reporter
+                // does the logging off-thread.
+                if let Err(e) = buffer_tx.try_send(message) {
+                    count_mic_drop(&counters, &e);
                 }
             });
         },
@@ -423,6 +465,7 @@ fn convert_to_mono_samples(
     converter: &AVAudioConverter,
     target_format: &AVAudioFormat,
     input_buffer: &AVAudioPCMBuffer,
+    counters: &AudioDropCounters,
 ) -> Option<Vec<f32>> {
     // SAFETY: frameLength is a plain property read.
     let input_frames = unsafe { input_buffer.frameLength() };
@@ -500,7 +543,10 @@ fn convert_to_mono_samples(
     // `InputRanDry` once it has consumed the tap buffer — the expected status
     // here. Only `Error` indicates a real failure.
     if status == AVAudioConverterOutputStatus::Error {
-        log::warn!("microphone format conversion failed");
+        // Only the Error status counts. The other two `None` returns in this
+        // function — an empty input buffer, and a converter that produced no
+        // frames — are normal `InputRanDry` behaviour, not failures.
+        counters.mic_convert_failed.fetch_add(1, Ordering::Relaxed);
         return None;
     }
 
@@ -1285,7 +1331,7 @@ mod tests {
             }
             .expect("44.1 -> 48 kHz converter should build");
 
-            let out = convert_to_mono_samples(&converter, &target_format, &input_buffer)
+            let out = convert_to_mono_samples(&converter, &target_format, &input_buffer, &AudioDropCounters::default())
                 .expect("conversion should yield samples");
 
             assert!(!out.is_empty(), "converted output must not be empty");
@@ -1404,7 +1450,7 @@ mod tests {
                 )
             }
             .expect("converter should build");
-            let single = convert_to_mono_samples(&single_converter, &target_format, &full)
+            let single = convert_to_mono_samples(&single_converter, &target_format, &full, &AudioDropCounters::default())
                 .expect("single-shot conversion should yield samples");
 
             // Chunked: the same signal in two halves through ONE shared converter.
@@ -1419,10 +1465,10 @@ mod tests {
                 )
             }
             .expect("converter should build");
-            let mut chunked = convert_to_mono_samples(&chunk_converter, &target_format, &chunk0)
+            let mut chunked = convert_to_mono_samples(&chunk_converter, &target_format, &chunk0, &AudioDropCounters::default())
                 .expect("chunk 0 conversion should yield samples");
             chunked.extend(
-                convert_to_mono_samples(&chunk_converter, &target_format, &chunk1)
+                convert_to_mono_samples(&chunk_converter, &target_format, &chunk1, &AudioDropCounters::default())
                     .expect("chunk 1 conversion should yield samples"),
             );
 
@@ -1528,7 +1574,7 @@ mod tests {
             }
             .expect("identity converter should build");
 
-            let out = convert_to_mono_samples(&converter, &format, &input)
+            let out = convert_to_mono_samples(&converter, &format, &input, &AudioDropCounters::default())
                 .expect("identity conversion should yield samples");
 
             // The converter holds back its internal-block tail under NoDataNow
@@ -1559,6 +1605,41 @@ mod tests {
         });
     }
 
+    #[test]
+    fn mic_try_send_error_maps_to_the_right_counter() {
+        // Drive real TrySendError values end to end: the classification is
+        // the step that would invert silently, so it must not sit outside
+        // anything a test can call.
+        let (full_tx, _full_rx) = std::sync::mpsc::sync_channel::<AudioMessage>(0);
+        let full_err = full_tx.try_send(silent_buffer()).unwrap_err();
+        let (closed_tx, closed_rx) = std::sync::mpsc::sync_channel::<AudioMessage>(1);
+        drop(closed_rx);
+        let closed_err = closed_tx.try_send(silent_buffer()).unwrap_err();
+
+        let c = AudioDropCounters::default();
+
+        count_mic_drop(&c, &full_err);
+        assert_eq!(c.snapshot().mic_full, 1);
+        assert_eq!(c.snapshot().mic_closed, 0, "full must not bump closed");
+
+        count_mic_drop(&c, &closed_err);
+        assert_eq!(c.snapshot().mic_closed, 1);
+        assert_eq!(c.snapshot().mic_full, 1, "closed must not bump full");
+
+        // And the mic must never touch the system counters.
+        assert_eq!(c.snapshot().system_full, 0);
+        assert_eq!(c.snapshot().system_closed, 0);
+    }
+
+    /// A zero-sample buffer message, for exercising channel error paths.
+    fn silent_buffer() -> AudioMessage {
+        AudioMessage::Buffer(AudioBuffer {
+            samples: Vec::new(),
+            timestamp_ms: 0,
+            source: AudioSource::Microphone,
+        })
+    }
+
     /// Constructs `MicrophoneCapture`, starts and stops it, and checks that
     /// `is_running` tracks the engine state. Needs a real Mac microphone, so
     /// it is `#[ignore]`d — run manually with
@@ -1568,7 +1649,7 @@ mod tests {
     #[ignore = "requires a real microphone; run manually"]
     fn mic_capture_start_stop() {
         let (tx, _rx) = std::sync::mpsc::sync_channel::<AudioMessage>(64);
-        let mic = MicrophoneCapture::new(tx).expect("microphone setup should succeed");
+        let mic = MicrophoneCapture::new(tx, Arc::new(AudioDropCounters::default())).expect("microphone setup should succeed");
 
         assert!(!mic.is_running(), "engine should not run before start()");
 
