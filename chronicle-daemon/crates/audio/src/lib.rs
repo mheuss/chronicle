@@ -8,11 +8,13 @@
 //! and transcription.
 
 mod accumulator;
+mod drops;
 mod encoder;
 mod engine;
 pub mod handler;
 pub mod microphone;
 
+pub use drops::{AudioDropCounters, AudioDropSnapshot};
 pub use encoder::OggOpusEncoder;
 pub use engine::{AudioHandlerToken, AudioPipeline, MicToggleOutcome};
 pub use microphone::MicrophoneCapture;
