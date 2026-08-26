@@ -403,6 +403,40 @@ async fn main() -> Result<()> {
     // Set only when the shutdown drain grace expires; tells `transcribe_loop` to
     // stop after the segment it is already working on.
     let stop_transcription = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Drop reporter. Spawned here, BEFORE provisioning::boot() below, not
+    // beside the status refreshers further down: the microphone is restored
+    // early and a model load can take a long time, so a reporter spawned after
+    // boot() stays silent through exactly the window HEU-548 describes. The
+    // counters accumulate either way and ReporterState starts at zero, so a
+    // late reporter would still eventually report the burst — what a late
+    // spawn costs is promptness, while an operator is watching the terminal.
+    //
+    // It takes its own shutdown channel rather than the shared `cancel` token,
+    // which fires at :816 while both callbacks are still live. That is the
+    // same reasoning `transcribe_loop` already follows — see "Graceful
+    // Multi-Stage Shutdown" in docs/use-cases/pipeline.md.
+    let audio_drops = audio_pipeline.drop_counters();
+    let (drop_report_tx, drop_report_rx) = tokio::sync::oneshot::channel();
+    let reporter_audio = Arc::clone(&audio_drops);
+    let reporter_capture = Arc::clone(&capture_drops);
+    let drop_reporter_handle = tokio::spawn(crate::drop_reporter::run_reporter(
+        move || {
+            let a = reporter_audio.snapshot();
+            let c = reporter_capture.snapshot();
+            crate::drop_reporter::DropTotals {
+                mic_full: a.mic_full,
+                mic_closed: a.mic_closed,
+                mic_convert_failed: a.mic_convert_failed,
+                system_full: a.system_full,
+                system_closed: a.system_closed,
+                frames_full: c.full,
+                frames_closed: c.closed,
+            }
+        },
+        drop_report_rx,
+        crate::drop_reporter::REPORT_PERIOD,
+    ));
+
     let engine_handle = Arc::new(provisioning::EngineHandle::new());
     // Awaited here, before `audio_store_loop` spawns below, so nothing can be
     // enqueued while the engine slot is still being filled — the no-loss
@@ -850,6 +884,24 @@ async fn main() -> Result<()> {
         log::error!("Audio pipeline stop failed: {e}");
     }
     log::info!("Audio pipeline stopped");
+
+    // Drop reporter last: both producers have now stopped, so its final read
+    // sees every drop including any from teardown. The counters are held in
+    // main, so they outlive the pipeline and the supervisor.
+    //
+    // This runs on the poisoned path too. `supervisor.shutdown()` set
+    // `poisoned` above, but exit(3) does not happen until the end of main,
+    // after the drain — so suppressing the report here would only hide drops
+    // in the very run where something went wrong enough to poison the engine.
+    //
+    // The await is unbounded, deliberately: the final read is seven relaxed
+    // atomic loads, a format, and at most one log line. `tokio::time::timeout`
+    // would consume the handle and detach the task, which is the trap
+    // docs/development/tokio-shutdown.md documents.
+    let _ = drop_report_tx.send(());
+    if let Err(e) = drop_reporter_handle.await {
+        log::error!("drop reporter task panicked: {e}");
+    }
 
     // Wait for bridge thread to finish
     // Deliberately not `?`. An early return here would skip `drop(transcription_sink)`

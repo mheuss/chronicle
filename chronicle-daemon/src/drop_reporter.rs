@@ -3,11 +3,6 @@
 //! The capture and audio callbacks count; nothing else. This module turns
 //! those counts into at most one log line per period — see ADR-013.
 
-// Nothing in a non-test build calls this yet: the task that spawns the
-// reporter in `main` lands next on this branch and removes this attribute.
-// Scoped to the module rather than the crate so it cannot mask anything else.
-#![allow(dead_code)]
-
 /// One period's reading of every drop counter the daemon tracks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct DropTotals {
@@ -101,11 +96,60 @@ impl ReporterState {
     }
 }
 
+/// Run until signalled, logging at most one line per period.
+///
+/// `read_totals` is a closure rather than the counter `Arc`s directly so the
+/// shutdown contract can be tested without a capture engine or an audio
+/// pipeline.
+pub(crate) async fn run_reporter<F>(
+    read_totals: F,
+    shutdown: tokio::sync::oneshot::Receiver<()>,
+    period: std::time::Duration,
+) where
+    F: Fn() -> DropTotals,
+{
+    run_reporter_with_sink(read_totals, shutdown, period, |line| log::warn!("{line}")).await
+}
+
+/// As `run_reporter`, with the line sink injected so tests can capture output
+/// without installing a global logger.
+pub(crate) async fn run_reporter_with_sink<F, S>(
+    read_totals: F,
+    mut shutdown: tokio::sync::oneshot::Receiver<()>,
+    period: std::time::Duration,
+    emit: S,
+) where
+    F: Fn() -> DropTotals,
+    S: Fn(String),
+{
+    let mut state = ReporterState::default();
+    let mut ticker = tokio::time::interval(period);
+    // Unlike the storage refresher in main(), the immediate first tick is NOT
+    // skipped. That one skips it to avoid double-priming a snapshot; this
+    // reporter is silent when nothing was dropped, so an immediate first read
+    // costs nothing and catches a burst that predates the task.
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            _ = ticker.tick() => {
+                if let Some(line) = state.observe(read_totals()) {
+                    emit(line);
+                }
+            }
+        }
+    }
+    // Final read AFTER the producers have stopped — see the shutdown ordering
+    // in main(). Without this a drop storm during teardown would never be
+    // reported, which is the failure mode this module exists to fix.
+    if let Some(line) = state.observe(read_totals()) {
+        emit(line);
+    }
+}
+
 /// How often the reporter reads the counters.
 ///
 /// Timing resolution *inside* a drop burst is HEU-548's job, not this
 /// ticket's, so 30 s is the right granularity for what HEU-653 owns.
-#[allow(dead_code)] // read by the reporter task, which a later task adds
 pub(crate) const REPORT_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[cfg(test)]
@@ -119,6 +163,55 @@ mod tests {
             frames_full,
             ..Default::default()
         }
+    }
+
+    /// Test-only holder so the reporter's read closure can be driven.
+    #[derive(Default)]
+    pub(crate) struct TestTotals(std::sync::Mutex<DropTotals>);
+
+    impl TestTotals {
+        fn get(&self) -> DropTotals {
+            *self.0.lock().unwrap()
+        }
+        fn set(&self, t: DropTotals) {
+            *self.0.lock().unwrap() = t;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_drops_are_reported_on_shutdown() {
+        // `tokio::time::interval` fires its FIRST tick immediately, and under
+        // start_paused an idle runtime auto-advances to the earliest pending
+        // deadline — so a long period does not mean "never ticks"
+        // (docs/development/paused-time-testing.md). Assert on content, which
+        // is robust either way: a tick before the counter is set emits nothing
+        // (silent at zero); a tick after it emits the line and the final flush
+        // then emits nothing (no growth). Exactly one line either way.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let counters = std::sync::Arc::new(TestTotals::default());
+        let read = std::sync::Arc::clone(&counters);
+        let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = std::sync::Arc::clone(&lines);
+
+        let handle = tokio::spawn(run_reporter_with_sink(
+            move || read.get(),
+            rx,
+            std::time::Duration::from_secs(3600),
+            move |line| sink.lock().unwrap().push(line),
+        ));
+
+        tokio::task::yield_now().await;
+        counters.set(DropTotals {
+            mic_full: 9,
+            ..Default::default()
+        });
+
+        tx.send(()).unwrap();
+        handle.await.unwrap();
+
+        let lines = lines.lock().unwrap();
+        assert_eq!(lines.len(), 1, "exactly one line expected; got {lines:?}");
+        assert!(lines[0].contains("mic_full=9"), "{}", lines[0]);
     }
 
     #[test]
