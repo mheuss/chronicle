@@ -872,8 +872,10 @@ mod tests {
             .expect("no `data` chunk in `say` output")
             + 8; // skip the "data" tag + size
         let samples: Vec<f32> = bytes[data_pos..]
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
 
         // 3) Encode to Ogg/Opus with the production encoder at the production
