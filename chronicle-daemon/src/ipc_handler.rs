@@ -386,7 +386,15 @@ impl RequestHandler for DaemonHandler {
                 let query = trimmed.to_string();
                 let storage = Arc::clone(&self.storage);
                 // NFR-5: capture the start time BEFORE the blocking call so the
-                // elapsed time we log reflects the actual query duration.
+                // elapsed time we log covers everything the caller waits for.
+                //
+                // That window widened in HEU-624: it now spans the query, the
+                // row->hit mapping, and one `stat` per returned hit (up to the
+                // 200 clamped above). Measured at 0.25-2.4 ms for a full 200-hit
+                // page, against NFR-1's 200 ms p95 budget — about 1%. The
+                // sampled INFO line below therefore reports end-to-end search
+                // latency, which is what a user actually experiences, not the
+                // storage query alone.
                 let started = Instant::now();
                 let counters = Arc::clone(&self.counters);
                 let result = tokio::task::block_in_place(|| {
@@ -1251,6 +1259,21 @@ mod tests {
             })
             .await
             .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_screenshot_counts_nothing_when_the_row_is_missing() {
+        // Pins the `Ok(Some(_))` guard. Count unconditionally instead and a
+        // lookup for a row that does not exist inflates `media_served` with no
+        // path ever having been served — and the suite would stay green.
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
+            handler_with_full_channels(8, true).await;
+
+        let _ = handler.handle(Request::GetScreenshot { id: 999_999 });
+
+        let c = handler.counters.snapshot();
+        assert_eq!(c.media_served, 0, "no row means no path was served");
+        assert_eq!(c.media_absent, 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]

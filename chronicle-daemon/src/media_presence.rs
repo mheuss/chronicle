@@ -81,6 +81,19 @@ mod tests {
     }
 
     #[test]
+    fn a_dangling_symlink_is_absent() {
+        // Pins `metadata` over `symlink_metadata`. Every other case in this
+        // module is symlink-blind, so without this one, swapping line 28 to
+        // `symlink_metadata` silently stops counting dangling links and the
+        // whole suite stays green. The link resolves to nothing, so the UI
+        // cannot read it either — which is the alignment the doc claims.
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("link.heif");
+        std::os::unix::fs::symlink(dir.path().join("never-created.heif"), &link).unwrap();
+        assert!(media_is_absent(&link));
+    }
+
+    #[test]
     fn a_directory_is_not_absent() {
         // `metadata` succeeds on a directory. Present is present — this must
         // never count as a missing media file.
