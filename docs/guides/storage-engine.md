@@ -167,13 +167,39 @@ about which:
   no row pointing at it. That is a plain orphan, and the startup sweep below
   reclaims it.
 - **The unlinks succeed and the transaction then fails, or the process dies** —
-  the rows survive with no files behind them. Nothing currently repairs that;
-  the sweep only walks the filesystem looking for untracked files, never rows
-  looking for missing ones. HEU-624 covers it.
+  the rows survive with no files behind them. There is no dedicated reverse
+  sweep — the orphan sweep only walks the filesystem looking for untracked
+  files, never rows looking for missing ones — but these rows are not
+  permanent. See "Stranded rows repair themselves" below.
 
 So files-first does not make a batch atomic, and calling it "crash-safe" would
 overstate it. What it buys is that the *common* failure — one bad unlink — lands
 in the recoverable direction instead of the permanent one.
+
+### Stranded rows repair themselves
+
+`cleanup_media` selects `WHERE {timestamp_col} < cutoff`, and a row stranded by
+a crash is expired by definition — that is how it was selected in the first
+place. The next scheduled run re-selects it, `delete_file` returns `Ok(0)` for
+the already-missing file without erroring, and the `DELETE` commits. So the
+crash window costs at most one cleanup period of stale rows, not permanent
+ones.
+
+The exception is `retention_days = 0` ("keep forever"), where `run_cleanup`
+returns `Disabled` before examining anything. Under that setting a stranded row
+does persist indefinitely.
+
+This is why HEU-624 ships a counter rather than a repair. On the one database
+anyone had measured at the time — a single developer machine on 2026-08-26,
+13,028 rows — none were missing their file. That is a single observation, not a
+property of the system, which is precisely why the daemon now counts rather than
+repairs: the question gets answered with data from real installs before anything
+destructive is built on top of it.
+
+`StorageStats.media_served` and `media_absent` carry that count, and Settings
+renders it. Note a transient non-zero reading is normal rather than an alarm — a
+search served during a cleanup batch sees rows whose files are already gone. A
+*persistently* non-zero value across restarts is the anomaly.
 
 ### Startup orphan sweep (`sweep_orphans`)
 
