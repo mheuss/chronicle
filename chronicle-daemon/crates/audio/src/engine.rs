@@ -120,7 +120,8 @@ impl AudioPipeline {
         // thread-safe and does not touch the microphone, so a `&self` toggle
         // needs no interior mutability. A setup failure is soft: store `None`
         // and the mic stays unavailable.
-        let microphone = match MicrophoneCapture::new(buffer_tx.clone(), Arc::clone(&drop_counters)) {
+        let microphone = match MicrophoneCapture::new(buffer_tx.clone(), Arc::clone(&drop_counters))
+        {
             Ok(mic) => Some(mic),
             Err(e) => {
                 log::warn!("microphone capture unavailable: {e}");
@@ -389,12 +390,36 @@ mod tests {
         // Same for the microphone tap. Without this, a fresh set handed to
         // MicrophoneCapture compiles and counts where nothing reads — which
         // would silently lose exactly the mic drop burst HEU-548 reports.
-        if let Some(mic) = pipeline.microphone.as_ref() {
-            assert!(
-                Arc::ptr_eq(&counters, mic.counters()),
-                "mic tap must share the pipeline's counters, not its own"
-            );
-        }
+        //
+        // Hard unwrap, not `if let`: a guard against a silent-counting bug
+        // must not itself go quiet. If the mic is unavailable on this host the
+        // test fails loudly rather than passing green with the check skipped.
+        let mic = pipeline
+            .microphone
+            .as_ref()
+            .expect("microphone path must be constructible to verify counter sharing");
+        assert!(
+            Arc::ptr_eq(&counters, mic.counters()),
+            "mic tap must share the pipeline's counters, not its own"
+        );
+
+        // `ptr_eq` on the struct field says nothing about what the tap block's
+        // `move` closure captured — a fresh Arc passed to `make_tap_block`
+        // leaves the field correct and the block counting into nothing. That
+        // is the "wrong capture compiles and silently counts nothing" failure
+        // this task exists to prevent, and strong_count is the only cheap
+        // signal that reaches inside the block.
+        //
+        // Five live holders: this local, the pipeline field, the handler
+        // ivars, the MicrophoneCapture field, and the tap block's capture.
+        // If you change how many clones exist, update this number
+        // deliberately — do not just bump it until the test passes.
+        assert_eq!(
+            Arc::strong_count(&counters),
+            5,
+            "expected 5 holders of the counters; a lower count means something \
+             (most likely the tap block) was handed a different allocation"
+        );
     }
 
     #[test]

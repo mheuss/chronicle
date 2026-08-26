@@ -175,6 +175,10 @@ pub struct MicrophoneCapture {
     /// this one exists so the pipeline's tests can assert both reach the same
     /// allocation — handing the tap a fresh set compiles cleanly and silently
     /// counts where the reporter never looks.
+    ///
+    /// Only the `#[cfg(test)]` accessor reads it, so a non-test build sees a
+    /// dead field.
+    #[cfg_attr(not(test), allow(dead_code))]
     counters: Arc<AudioDropCounters>,
 }
 
@@ -191,6 +195,12 @@ impl MicrophoneCapture {
     /// `counters` is shared with the daemon's drop reporter, which does all
     /// the logging for the drops the tap records. ADR-013 forbids a logger on
     /// this path, including a throttled one.
+    /// The drop counters this tap writes into. See the field's doc comment.
+    #[cfg(test)]
+    pub(crate) fn counters(&self) -> &Arc<AudioDropCounters> {
+        &self.counters
+    }
+
     pub fn new(
         buffer_tx: SyncSender<AudioMessage>,
         counters: Arc<AudioDropCounters>,
@@ -363,24 +373,16 @@ impl MicrophoneCapture {
 
 /// Build the input-node tap block.
 ///
-/// The block captures the converter, the target format, and a clone of the
-/// encoding-channel sender. It runs on an audio thread, so it wraps its ObjC
+/// The block captures the converter, the target format, a clone of the
+/// encoding-channel sender, and a clone of the drop counters. It runs on an audio thread, so it wraps its ObjC
 /// work in an `autoreleasepool` and uses `try_send` — never blocking the
 /// audio thread (the Structured Backpressure pattern).
-impl MicrophoneCapture {
-    /// The drop counters this tap writes into. See the field's doc comment.
-    #[cfg(test)]
-    pub(crate) fn counters(&self) -> &Arc<AudioDropCounters> {
-        &self.counters
-    }
-}
-
 /// Record one discarded microphone buffer.
 ///
 /// Takes the error rather than a pre-classified cause so the tap callback
 /// carries no logic at all — every step from `TrySendError` to counter field
-/// sits inside something a test can call. See `count_system_drop`, which was
-/// split the other way and shipped an untestable half.
+/// sits inside something a test can call. `count_system_drop` in `handler.rs`
+/// has the same shape for the same reason.
 pub(crate) fn count_mic_drop<T>(counters: &AudioDropCounters, err: &TrySendError<T>) {
     match DropCause::from(err) {
         DropCause::Full => counters.mic_full.fetch_add(1, Ordering::Relaxed),
@@ -543,9 +545,14 @@ fn convert_to_mono_samples(
     // `InputRanDry` once it has consumed the tap buffer — the expected status
     // here. Only `Error` indicates a real failure.
     if status == AVAudioConverterOutputStatus::Error {
-        // Only the Error status counts. The other two `None` returns in this
-        // function — an empty input buffer, and a converter that produced no
-        // frames — are normal `InputRanDry` behaviour, not failures.
+        // Only the Error status counts as a conversion failure. Of the four
+        // other `None` exits, two are benign — an empty input buffer, and a
+        // converter that produced no frames, which is expected `InputRanDry`
+        // behaviour. The remaining two are genuine failures that go
+        // uncounted: a failed output-buffer allocation and missing float
+        // channel data, both `?` early-returns. Neither was logged before
+        // this change either, so counting them is a scope decision rather
+        // than a regression to fix here — see HEU-663.
         counters.mic_convert_failed.fetch_add(1, Ordering::Relaxed);
         return None;
     }
@@ -1331,8 +1338,13 @@ mod tests {
             }
             .expect("44.1 -> 48 kHz converter should build");
 
-            let out = convert_to_mono_samples(&converter, &target_format, &input_buffer, &AudioDropCounters::default())
-                .expect("conversion should yield samples");
+            let out = convert_to_mono_samples(
+                &converter,
+                &target_format,
+                &input_buffer,
+                &AudioDropCounters::default(),
+            )
+            .expect("conversion should yield samples");
 
             assert!(!out.is_empty(), "converted output must not be empty");
 
@@ -1450,8 +1462,13 @@ mod tests {
                 )
             }
             .expect("converter should build");
-            let single = convert_to_mono_samples(&single_converter, &target_format, &full, &AudioDropCounters::default())
-                .expect("single-shot conversion should yield samples");
+            let single = convert_to_mono_samples(
+                &single_converter,
+                &target_format,
+                &full,
+                &AudioDropCounters::default(),
+            )
+            .expect("single-shot conversion should yield samples");
 
             // Chunked: the same signal in two halves through ONE shared converter.
             let chunk0 = make_sine_buffer(&input_format, CHUNK, 0);
@@ -1465,11 +1482,21 @@ mod tests {
                 )
             }
             .expect("converter should build");
-            let mut chunked = convert_to_mono_samples(&chunk_converter, &target_format, &chunk0, &AudioDropCounters::default())
-                .expect("chunk 0 conversion should yield samples");
+            let mut chunked = convert_to_mono_samples(
+                &chunk_converter,
+                &target_format,
+                &chunk0,
+                &AudioDropCounters::default(),
+            )
+            .expect("chunk 0 conversion should yield samples");
             chunked.extend(
-                convert_to_mono_samples(&chunk_converter, &target_format, &chunk1, &AudioDropCounters::default())
-                    .expect("chunk 1 conversion should yield samples"),
+                convert_to_mono_samples(
+                    &chunk_converter,
+                    &target_format,
+                    &chunk1,
+                    &AudioDropCounters::default(),
+                )
+                .expect("chunk 1 conversion should yield samples"),
             );
 
             // Continuity at the API level means: every frame the chunked path
@@ -1574,8 +1601,9 @@ mod tests {
             }
             .expect("identity converter should build");
 
-            let out = convert_to_mono_samples(&converter, &format, &input, &AudioDropCounters::default())
-                .expect("identity conversion should yield samples");
+            let out =
+                convert_to_mono_samples(&converter, &format, &input, &AudioDropCounters::default())
+                    .expect("identity conversion should yield samples");
 
             // The converter holds back its internal-block tail under NoDataNow
             // (same behavior as the resampling case — see the continuity test).
@@ -1649,7 +1677,8 @@ mod tests {
     #[ignore = "requires a real microphone; run manually"]
     fn mic_capture_start_stop() {
         let (tx, _rx) = std::sync::mpsc::sync_channel::<AudioMessage>(64);
-        let mic = MicrophoneCapture::new(tx, Arc::new(AudioDropCounters::default())).expect("microphone setup should succeed");
+        let mic = MicrophoneCapture::new(tx, Arc::new(AudioDropCounters::default()))
+            .expect("microphone setup should succeed");
 
         assert!(!mic.is_running(), "engine should not run before start()");
 
