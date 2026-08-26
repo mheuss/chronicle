@@ -535,7 +535,11 @@ async fn main() -> Result<()> {
     // 2. The `process::exit(3)` on a poisoned capture engine runs no
     //    destructors, so none of that waiting happens at all. A run in flight
     //    there dies after its unlinks and before its commit: files gone, rows
-    //    left pointing at nothing. Repairing that is HEU-624's job.
+    //    left pointing at nothing. The next scheduled run repairs that on its
+    //    own — the row is expired by definition, so it is re-selected and
+    //    removed (see docs/guides/storage-engine.md, "Stranded rows repair
+    //    themselves"). HEU-624 added counters that make the condition visible,
+    //    not a repair.
     // 3. A worker panic ends the loop, so retention stays off for the rest of
     //    the process lifetime with one log line as the only signal.
     // 4. A run holds one of the four pooled connections for its whole duration,

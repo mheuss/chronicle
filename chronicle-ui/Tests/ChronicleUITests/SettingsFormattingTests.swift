@@ -93,6 +93,67 @@ struct SettingsFormattingTests {
             state: state, variant: "base", loadedVariant: nil, error: nil,
             downloadBytes: nil, downloadTotalBytes: nil, models: [])
     }
+
+    // MARK: - Disk usage / missing media (HEU-624)
+
+    @Test("Disk usage omits the missing clause when none are missing")
+    func diskUsageOmitsClauseWhenZero() {
+        let text = SettingsView.diskUsageDescription(
+            totalBytes: 1_000_000, screenshots: 10, audioSegments: 2,
+            mediaServed: 900, mediaAbsent: 0)
+        #expect(!text.contains("missing"))
+        // Pin the exact tail, so a future edit to the separator or the order of
+        // the parenthetical cannot slip past. Not the byte prefix —
+        // ByteCountFormatter is locale-sensitive.
+        #expect(text.hasSuffix(" (10 screenshots, 2 audio segments)"))
+    }
+
+    @Test("Disk usage reports missing media against its denominator")
+    func diskUsageReportsRatio() {
+        let text = SettingsView.diskUsageDescription(
+            totalBytes: 1_000_000, screenshots: 10, audioSegments: 2,
+            mediaServed: 900, mediaAbsent: 3)
+        #expect(text.contains("3 of 900"))
+        #expect(text.contains("missing"))
+    }
+
+    @Test("An old daemon omitting the counters reads as no missing media")
+    func diskUsageTreatsNilAsZero() {
+        let text = SettingsView.diskUsageDescription(
+            totalBytes: 1_000_000, screenshots: 10, audioSegments: 2,
+            mediaServed: nil, mediaAbsent: nil)
+        #expect(!text.contains("missing"))
+    }
+
+    @Test("A count with no denominator renders without inventing one")
+    func diskUsageHandlesAbsentWithoutServed() {
+        let text = SettingsView.diskUsageDescription(
+            totalBytes: 1_000_000, screenshots: 10, audioSegments: 2,
+            mediaServed: nil, mediaAbsent: 3)
+        #expect(text.contains("3"))
+        #expect(!text.contains(" of "))
+    }
+
+    @Test("A single missing file reads in the singular")
+    func diskUsageUsesSingularForOne() {
+        let text = SettingsView.diskUsageDescription(
+            totalBytes: 1_000_000, screenshots: 10, audioSegments: 2,
+            mediaServed: 900, mediaAbsent: 1)
+        #expect(text.contains("1 of 900 served had a missing file"))
+        #expect(!text.contains("files"))
+    }
+
+    @Test("Sampling skew never renders a ratio above one")
+    func diskUsageToleratesAbsentExceedingServed() {
+        // The two counters are incremented separately under Ordering::Relaxed,
+        // so a snapshot can observe an absent increment without the served
+        // increment that logically preceded it. Must not render "5 of 3".
+        let text = SettingsView.diskUsageDescription(
+            totalBytes: 1_000_000, screenshots: 10, audioSegments: 2,
+            mediaServed: 3, mediaAbsent: 5)
+        #expect(text.contains("missing"))
+        #expect(!text.contains("5 of 3"))
+    }
 }
 
 /// The fallback that keeps a provision visible when `setWhisperModel`'s
@@ -149,54 +210,6 @@ struct StatusTranscriptionSpliceTests {
 
         #expect(TranscriptionBannerCopy(after.data.transcription).showsProgress,
                 "without this the 1 Hz poll never starts and progress never shows")
-    }
-    // MARK: - Disk usage / missing media (HEU-624)
-
-    @Test("Disk usage omits the missing clause when none are missing")
-    func diskUsageOmitsClauseWhenZero() {
-        let text = SettingsView.diskUsageDescription(
-            totalBytes: 1_000_000, screenshots: 10, audioSegments: 2,
-            mediaServed: 900, mediaAbsent: 0)
-        #expect(!text.contains("missing"))
-        #expect(text.contains("10 screenshots"))
-    }
-
-    @Test("Disk usage reports missing media against its denominator")
-    func diskUsageReportsRatio() {
-        let text = SettingsView.diskUsageDescription(
-            totalBytes: 1_000_000, screenshots: 10, audioSegments: 2,
-            mediaServed: 900, mediaAbsent: 3)
-        #expect(text.contains("3 of 900"))
-        #expect(text.contains("missing"))
-    }
-
-    @Test("An old daemon omitting the counters reads as no missing media")
-    func diskUsageTreatsNilAsZero() {
-        let text = SettingsView.diskUsageDescription(
-            totalBytes: 1_000_000, screenshots: 10, audioSegments: 2,
-            mediaServed: nil, mediaAbsent: nil)
-        #expect(!text.contains("missing"))
-    }
-
-    @Test("A count with no denominator renders without inventing one")
-    func diskUsageHandlesAbsentWithoutServed() {
-        let text = SettingsView.diskUsageDescription(
-            totalBytes: 1_000_000, screenshots: 10, audioSegments: 2,
-            mediaServed: nil, mediaAbsent: 3)
-        #expect(text.contains("3"))
-        #expect(!text.contains(" of "))
-    }
-
-    @Test("Sampling skew never renders a ratio above one")
-    func diskUsageToleratesAbsentExceedingServed() {
-        // The two counters are incremented separately under Ordering::Relaxed,
-        // so a snapshot can observe an absent increment without the served
-        // increment that logically preceded it. Must not render "5 of 3".
-        let text = SettingsView.diskUsageDescription(
-            totalBytes: 1_000_000, screenshots: 10, audioSegments: 2,
-            mediaServed: 3, mediaAbsent: 5)
-        #expect(text.contains("missing"))
-        #expect(!text.contains("5 of 3"))
     }
 
 }

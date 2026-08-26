@@ -353,10 +353,11 @@ struct SettingsView: View {
         var text = "\(byteLabel(totalBytes)) (\(screenshots) screenshots, "
             + "\(audioSegments) audio segments)"
         if let absent = mediaAbsent, absent > 0 {
+            let noun = absent == 1 ? "a missing file" : "missing files"
             if let served = mediaServed, served >= absent {
-                text += " — \(absent) of \(served) served had missing files"
+                text += " — \(absent) of \(served) served had \(noun)"
             } else {
-                text += " — \(absent) with missing files"
+                text += " — \(absent) with \(noun)"
             }
         }
         return text

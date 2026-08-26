@@ -185,9 +185,17 @@ the already-missing file without erroring, and the `DELETE` commits. So the
 crash window costs at most one cleanup period of stale rows, not permanent
 ones.
 
-The exception is `retention_days = 0` ("keep forever"), where `run_cleanup`
-returns `Disabled` before examining anything. Under that setting a stranded row
-does persist indefinitely.
+The exceptions are settings where cleanup never re-selects the row:
+
+- `retention_days <= 0` ("keep forever", and any negative value) — `run_cleanup`
+  returns `Disabled` before examining anything.
+- `retention_days > MAX_RETENTION_DAYS` (36,500) — `run_cleanup` returns `Err`,
+  so no cleanup runs at all until the config is corrected.
+- **Raising `retention_days` after a row is stranded.** This is the one you are
+  most likely to hit. The cutoff is `now - retention_days * 86_400 * 1000`, so a
+  larger window moves it *earlier*: a row stranded at 31 days old under a 30-day
+  policy is newer than a 365-day cutoff, and is not re-selected until it is 365
+  days old.
 
 This is why HEU-624 ships a counter rather than a repair. On the one database
 anyone had measured at the time — a single developer machine on 2026-08-26,
@@ -196,8 +204,13 @@ property of the system, which is precisely why the daemon now counts rather than
 repairs: the question gets answered with data from real installs before anything
 destructive is built on top of it.
 
-`StorageStats.media_served` and `media_absent` carry that count, and Settings
-renders it. Note a transient non-zero reading is normal rather than an alarm — a
+`StorageStats.media_served` and `media_absent` carry the ongoing signal, and
+Settings renders it — but note it is a *different population* from the scan
+above. `count_media_presence` increments once per media path actually served
+over IPC, and `PipelineCounters` resets every process start. So the denominator
+is serve events in one process lifetime, sampled by whatever the user happened
+to search, and the same missing file served twice counts twice. It is not a
+database-wide scan and should not be read as one. Note a transient non-zero reading is normal rather than an alarm — a
 search served during a cleanup batch sees rows whose files are already gone. A
 *persistently* non-zero value across restarts is the anomaly.
 
