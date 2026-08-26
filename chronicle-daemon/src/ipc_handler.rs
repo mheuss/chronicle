@@ -360,6 +360,8 @@ impl RequestHandler for DaemonHandler {
                             audio_segment_count: storage.audio_segment_count,
                             oldest_entry_ms: storage.oldest_entry_ms,
                             retention_days: storage.retention_days,
+                            media_served: c.media_served,
+                            media_absent: c.media_absent,
                         },
                         transcription: self.transcription_status.stats(self.storage.base_dir()),
                     },

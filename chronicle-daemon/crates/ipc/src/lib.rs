@@ -264,6 +264,13 @@ pub struct StorageStats {
     /// Retention period from `storage::get_config("retention_days")`, defaulting
     /// to 30 if unset/invalid.
     pub retention_days: u32,
+    /// Media rows served over IPC this process lifetime. The denominator for
+    /// `media_absent` — a bare absent count cannot be interpreted without it.
+    pub media_served: u64,
+    /// Of those, how many had no file on disk. Expected 0. See HEU-624 for what
+    /// a non-zero reading means; notably a large one is evidence against
+    /// building a deleting sweep, not for it.
+    pub media_absent: u64,
 }
 
 /// One search result row. Mirrors the storage-layer `SearchResult` shape,
@@ -640,6 +647,8 @@ mod tests {
             screenshot_count: 100,
             audio_segment_count: 10,
             oldest_entry_ms: Some(1_700_000_000_000),
+            media_served: 900,
+            media_absent: 3,
             retention_days: 30,
         };
         let json = serde_json::to_string(&stats).unwrap();
@@ -650,6 +659,10 @@ mod tests {
         assert_eq!(v["audio_segment_count"], 10);
         assert_eq!(v["oldest_entry_ms"], 1_700_000_000_000_i64);
         assert_eq!(v["retention_days"], 30);
+        // Both counters ship, and ship together: an absent count with no
+        // denominator is uninterpretable. See HEU-624 BR-2.
+        assert_eq!(v["media_served"], 900);
+        assert_eq!(v["media_absent"], 3);
     }
 
     #[test]
@@ -661,6 +674,8 @@ mod tests {
             audio_segment_count: 0,
             oldest_entry_ms: None,
             retention_days: 30,
+            media_served: 0,
+            media_absent: 0,
         };
         let json = serde_json::to_string(&stats).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
