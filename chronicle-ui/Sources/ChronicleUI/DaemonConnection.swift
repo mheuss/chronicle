@@ -578,8 +578,16 @@ struct StorageStats: Codable, Sendable {
     /// retention down with it. See docs/use-cases/ipc-compat.md.
     ///
     /// The pair is sampled rather than read atomically, so a ratio above 1.0
-    /// is sampling skew, not data.
+    /// is sampling skew, not data. That is a property of the current Rust
+    /// implementation as of HEU-624, not of the wire format — the source of
+    /// truth is `PipelineCounters::snapshot` in chronicle-daemon.
     let mediaServed: UInt64?
+    /// Of `mediaServed`, how many had no file on disk.
+    ///
+    /// A transient non-zero value is NORMAL, not an alarm: retention deletes
+    /// files before rows within a batch, so rows briefly outlive their files.
+    /// Only a persistently non-zero value across restarts is an anomaly. Copy
+    /// shown to a user should not treat a non-zero reading as a fault.
     let mediaAbsent: UInt64?
 }
 

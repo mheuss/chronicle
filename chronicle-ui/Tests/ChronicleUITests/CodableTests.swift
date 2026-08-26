@@ -170,9 +170,13 @@ struct CodableTests {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let response = try decoder.decode(StatusResponse.self, from: Data(json.utf8))
-        #expect(response.data.storage?.screenshotCount == 3)
-        #expect(response.data.storage?.mediaServed == nil)
-        #expect(response.data.storage?.mediaAbsent == nil)
+        // #require, not optional chaining: `storage?.mediaServed == nil` also
+        // passes when `storage` itself is nil, which would let this succeed
+        // for exactly the wrong reason.
+        let storage = try #require(response.data.storage)
+        #expect(storage.screenshotCount == 3)
+        #expect(storage.mediaServed == nil)
+        #expect(storage.mediaAbsent == nil)
     }
 
     @Test("StorageStats decodes the media counters when present")
@@ -186,8 +190,9 @@ struct CodableTests {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let response = try decoder.decode(StatusResponse.self, from: Data(json.utf8))
-        #expect(response.data.storage?.mediaServed == 900)
-        #expect(response.data.storage?.mediaAbsent == 3)
+        let storage = try #require(response.data.storage)
+        #expect(storage.mediaServed == 900)
+        #expect(storage.mediaAbsent == 3)
     }
 
     @Test("An old UI decoder ignores the new media counters")
