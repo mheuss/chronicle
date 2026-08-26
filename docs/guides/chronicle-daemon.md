@@ -47,7 +47,8 @@ flowchart TD
 
 ### Startup Sequence
 
-1. `env_logger::init()` — logging
+1. `env_logger::Builder::from_env(...)` — logging, defaulting to
+   `warn,chronicle=info` when `RUST_LOG` is unset
 2. `permissions::preflight()` — checks Screen Recording (hard gate) and
    Microphone (informational). Exits with an actionable error if Screen
    Recording is denied.
@@ -122,31 +123,26 @@ installs the tap:
 It reports channel count, sample rate, whether samples are interleaved, the
 sample format, and whether the device is eligible for the explicit downmix.
 
-**You will not see it in a normal run.** It is an `info!` line, and
-`env_logger::init()` has no default filter, so the daemon is error-only unless
-`RUST_LOG` is set:
+You will see it in a normal run — the daemon defaults to `warn,chronicle=info`,
+so no `RUST_LOG` is needed:
 
 ```bash
 cd chronicle-daemon
-RUST_LOG=error,chronicle_audio=info cargo run --bin chronicle-daemon 2>&1 \
-  | grep -m1 -E "tap installed|microphone capture unavailable"
+cargo run --bin chronicle-daemon
 ```
 
-The leading `error,` matters as much as the rest. `RUST_LOG=chronicle_audio=info`
-on its own is **not** additive — `env_filter` returns false for any target no
-directive matches, whatever its level, so a lone crate directive silences every
-*other* crate's errors too. `chronicle_daemon`'s own failures would vanish.
-`error,chronicle_audio=info` keeps errors everywhere and raises just this crate.
-
-The second grep pattern matters for the same reason. When `MicrophoneCapture::new`
+Watch for one of two lines, not just the first. When `MicrophoneCapture::new`
 fails there is no tap install at all — `engine.rs` logs
-`microphone capture unavailable: {e}` instead. Grepping only for `tap installed`
-in that case prints nothing and keeps waiting, which looks identical to "the log
-is missing" while the actual explanation scrolls past. Drop the `grep` to see
-everything the filter admits.
+`microphone capture unavailable: {e}` instead. Waiting only for `tap installed`
+in that case looks identical to "the log is missing" while the actual
+explanation scrolls past.
 
-Either way the command does not exit on its own: the shell waits on `cargo`, so
-Ctrl-C once you have the line.
+If you do set `RUST_LOG`, it replaces the default filter wholesale rather than
+adding to it, and that catches people out. `RUST_LOG=chronicle_audio=debug` is
+**not** additive: `env_filter` returns false for any target no directive
+matches, whatever its level, so a lone crate directive silences every *other*
+crate — `chronicle_daemon`'s own failures included. Lead with a level for
+everything else, as in `RUST_LOG=warn,chronicle_audio=debug`.
 
 Four things to know before you trust what you read:
 

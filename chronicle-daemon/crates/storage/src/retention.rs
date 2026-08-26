@@ -91,10 +91,6 @@ pub(crate) fn run_cleanup(
         // leave retention silently never running while disk grows. The
         // scheduled tick logs the error itself too, so the condition is
         // reported twice per period rather than once.
-        //
-        // Note `main.rs` calls `env_logger::init()` with no default filter, so
-        // with `RUST_LOG` unset this line does not print — same as every other
-        // warn in this crate.
         log::warn!(
             "retention_days {retention_days} exceeds maximum {MAX_RETENTION_DAYS}; \
              skipping cleanup"

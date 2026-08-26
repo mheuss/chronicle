@@ -195,12 +195,6 @@ impl MicrophoneCapture {
     /// `counters` is shared with the daemon's drop reporter, which does all
     /// the logging for the drops the tap records. ADR-013 forbids a logger on
     /// this path, including a throttled one.
-    /// The drop counters this tap writes into. See the field's doc comment.
-    #[cfg(test)]
-    pub(crate) fn counters(&self) -> &Arc<AudioDropCounters> {
-        &self.counters
-    }
-
     pub fn new(
         buffer_tx: SyncSender<AudioMessage>,
         counters: Arc<AudioDropCounters>,
@@ -304,13 +298,11 @@ impl MicrophoneCapture {
             // device. Today `AVAudioConverter` performs every downmix
             // regardless, which is why it is not called a path.
             //
-            // This is `info!`, and the daemon's `env_logger::init()` has no
-            // default filter, so it is error-only unless `RUST_LOG` is set:
-            //     RUST_LOG=error,chronicle_audio=info cargo run --bin chronicle-daemon
-            //
-            // Keep the leading `error,`. `env_filter` returns false for any
-            // target no directive matches, so a lone `chronicle_audio=info`
-            // would silence every other crate's errors too.
+            // This is `info!`, which the daemon's default filter
+            // (`warn,chronicle=info`) admits — so it appears in a normal run
+            // with no `RUST_LOG` set. It fires once per tap install, not per
+            // callback, which is why a logger is allowed here at all: ADR-013
+            // forbids one on the tap block itself.
             log::info!(
                 "microphone tap installed (capture starts on mic-on): \
                  {native_channels} ch, {native_rate} Hz, \
@@ -326,6 +318,12 @@ impl MicrophoneCapture {
                 counters,
             })
         })
+    }
+
+    /// The drop counters this tap writes into. See the field's doc comment.
+    #[cfg(test)]
+    pub(crate) fn counters(&self) -> &Arc<AudioDropCounters> {
+        &self.counters
     }
 
     /// Start capture. Fast — the engine is already prepared. Microphone on.
