@@ -339,6 +339,11 @@ async fn main() -> Result<()> {
     // `set_microphone_enabled(&self)` only takes a shared borrow, so the
     // event loop below can still toggle the mic while the runtime runs;
     // the pipeline is still stopped at shutdown.
+    // Owned here, not by the supervisor or the engine: `CaptureEngine` is
+    // rebuilt on every resume, so an engine-owned counter would reset each
+    // cycle. Kept in scope past shutdown for the drop reporter's final read.
+    let capture_drops = Arc::new(chronicle_capture::CaptureDropCounters::default());
+
     let capture_probe_holder: Arc<std::sync::Mutex<Option<chronicle_capture::EngineStatusProbe>>> =
         Arc::new(std::sync::Mutex::new(None));
 
@@ -355,6 +360,7 @@ async fn main() -> Result<()> {
         Arc::clone(&capture_paused),
         Arc::clone(&mic_state_atom),
         storage.base_dir().to_path_buf(),
+        Arc::clone(&capture_drops),
     );
 
     if initial_capture_paused {

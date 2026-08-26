@@ -124,6 +124,13 @@ pub struct CaptureSupervisor<'a, M: AppMetadataProvider + 'static + ?Sized> {
     capture_paused: Arc<AtomicBool>,
     mic_state_atom: Arc<AtomicU8>,
     base_dir: PathBuf,
+    /// Drop counters handed to every engine this supervisor builds.
+    ///
+    /// Owned by `main` and cloned in here, because `start()` constructs a
+    /// fresh `CaptureEngine` on every resume. An engine-owned counter would
+    /// reset each cycle, making the reporter's deltas lossy and its totals
+    /// non-monotonic.
+    capture_drops: Arc<chronicle_capture::CaptureDropCounters>,
 }
 
 impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
@@ -141,6 +148,7 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         capture_paused: Arc<AtomicBool>,
         mic_state_atom: Arc<AtomicU8>,
         base_dir: PathBuf,
+        capture_drops: Arc<chronicle_capture::CaptureDropCounters>,
     ) -> Self {
         Self {
             user_paused,
@@ -154,6 +162,24 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
             capture_paused,
             mic_state_atom,
             base_dir,
+            capture_drops,
+        }
+    }
+
+    /// Build the config for one engine start.
+    ///
+    /// Extracted from `start` so a test can assert the counters are carried:
+    /// the `..Default::default()` below would otherwise silently hand each
+    /// rebuilt engine a fresh set, which is the exact loss this design exists
+    /// to remove.
+    fn capture_config<'t>(
+        &self,
+        audio: Option<chronicle_audio::AudioHandlerToken<'t>>,
+    ) -> CaptureConfig<'t> {
+        CaptureConfig {
+            audio,
+            drop_counters: Arc::clone(&self.capture_drops),
+            ..Default::default()
         }
     }
 
@@ -205,10 +231,7 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     /// Failures log and return `StartFailed`; this method never exits the
     /// process. The boot caller decides whether to escalate `partial_teardown`.
     fn start(&mut self, audio: &'a AudioPipeline) -> ReconcileOutcome {
-        let capture_config = CaptureConfig {
-            audio: audio.token(SAMPLE_RATE, CHANNEL_COUNT),
-            ..Default::default()
-        };
+        let capture_config = self.capture_config(audio.token(SAMPLE_RATE, CHANNEL_COUNT));
         match CaptureRuntime::start(
             capture_config,
             Arc::clone(&self.storage),
@@ -399,6 +422,42 @@ mod tests {
         assert_eq!(decide(false, false), ReconcileAction::None);
     }
 
+    #[tokio::test]
+    async fn supervisor_config_carries_its_own_counters() {
+        let (dir, _audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+        let drops = Arc::new(chronicle_capture::CaptureDropCounters::default());
+
+        let supervisor = CaptureSupervisor::new(
+            true,
+            storage,
+            metadata,
+            counters,
+            1024,
+            probe_holder,
+            capture_paused,
+            mic_atom,
+            dir.path().to_path_buf(),
+            Arc::clone(&drops),
+        );
+
+        // Two configs, as two successive starts would build.
+        let first = supervisor.capture_config(None);
+        let second = supervisor.capture_config(None);
+
+        first.drop_counters.full.fetch_add(3, Ordering::Relaxed);
+        second.drop_counters.closed.fetch_add(4, Ordering::Relaxed);
+
+        // A rebuilt engine keeps accumulating rather than restarting at zero.
+        // Drop the explicit `drop_counters` line from `capture_config` and the
+        // `..Default::default()` hands each config a fresh set, so these read
+        // zero — which is the whole failure this task exists to prevent.
+        assert_eq!(drops.snapshot().full, 3);
+        assert_eq!(drops.snapshot().closed, 4);
+        assert!(Arc::ptr_eq(&drops, &first.drop_counters));
+        assert!(Arc::ptr_eq(&drops, &second.drop_counters));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn reconcile_with_a_stop_flag_set_is_a_noop() {
         let dir = tempfile::tempdir().unwrap();
@@ -441,6 +500,7 @@ mod tests {
             capture_paused,
             mic_state_atom,
             dir.path().to_path_buf(),
+            Arc::new(chronicle_capture::CaptureDropCounters::default()),
         );
 
         // The stop flag keeps decide() returning None, so reconcile() never
@@ -528,6 +588,7 @@ mod tests {
             Arc::clone(&capture_paused),
             mic_atom,
             dir.path().to_path_buf(),
+            Arc::new(chronicle_capture::CaptureDropCounters::default()),
         );
         let _ = supervisor.set_system_asleep(true, &audio).await;
         // Sanity: persisted paused starts false (missing file => false).
@@ -571,6 +632,7 @@ mod tests {
             capture_paused,
             mic_atom,
             dir.path().to_path_buf(),
+            Arc::new(chronicle_capture::CaptureDropCounters::default()),
         );
         assert!(!settings::read_capture_paused(dir.path()));
         // Positive coverage of the run predicate: both flags clear must mean
@@ -611,6 +673,7 @@ mod tests {
             capture_paused,
             mic_atom,
             dir.path().to_path_buf(),
+            Arc::new(chronicle_capture::CaptureDropCounters::default()),
         );
         let _ = supervisor.set_system_asleep(true, &audio).await;
 
@@ -645,6 +708,7 @@ mod tests {
             capture_paused,
             mic_atom,
             dir.path().to_path_buf(),
+            Arc::new(chronicle_capture::CaptureDropCounters::default()),
         );
         assert!(supervisor.runtime.is_none());
 
