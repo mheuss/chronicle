@@ -131,6 +131,9 @@ cd chronicle-daemon
 cargo run --bin chronicle-daemon
 ```
 
+The command does not exit on its own — the shell waits on `cargo`, so Ctrl-C
+once you have the line.
+
 Watch for one of two lines, not just the first. When `MicrophoneCapture::new`
 fails there is no tap install at all — `engine.rs` logs
 `microphone capture unavailable: {e}` instead. Waiting only for `tap installed`
