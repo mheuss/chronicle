@@ -1,5 +1,6 @@
 mod capture_runtime;
 mod capture_supervisor;
+mod drop_reporter;
 mod ipc_handler;
 mod media_presence;
 mod permissions;
