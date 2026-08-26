@@ -277,15 +277,24 @@ pub struct StorageStats {
     /// The pair is sampled, not read atomically: `snapshot()` loads the two
     /// counters independently with `Ordering::Relaxed`, so a concurrent serve
     /// can land between them. Treat a ratio above 1.0 as sampling skew, not as
-    /// data.
+    /// data. (`PipelineCounters::snapshot` lives in chronicle-daemon, not this
+    /// crate.)
     pub media_served: u64,
     /// Of those, how many had no file on disk.
     ///
-    /// A transient non-zero value is normal, not an alarm. `cleanup_media`
-    /// deletes files before rows within each batch, so rows legitimately
-    /// outlive their files for the length of that window — and if the process
-    /// dies mid-batch, until the next scheduled run. A *persistently* non-zero
-    /// value across restarts is the anomaly. See HEU-624.
+    /// A non-zero value is not by itself an alarm. `cleanup_media` deletes
+    /// files before rows within each batch, so a search served during a
+    /// cleanup legitimately sees rows whose files are already gone.
+    ///
+    /// This counter cannot distinguish that from a real problem: it only ever
+    /// increments and resets at process start, so one benign hit reads the same
+    /// as a persistent fault for the rest of the process lifetime. Compare
+    /// across restarts, not within one.
+    ///
+    /// It also counts *serve events*, not distinct rows — the same missing file
+    /// served a hundred times counts a hundred times. Read a large value
+    /// against `media_served` before concluding anything from HEU-624's
+    /// interpretation table.
     pub media_absent: u64,
 }
 

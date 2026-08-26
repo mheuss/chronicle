@@ -1342,6 +1342,20 @@ mod tests {
         let c = handler.counters.snapshot();
         assert_eq!(c.media_served, 2);
         assert_eq!(c.media_absent, 1);
+
+        // The counters -> StatusData hop. Nothing else covers it: Task 2 tested
+        // the counters, Task 3 the struct's serde, Task 4 the Swift decoder —
+        // the assignment between them was the one link with no test, and
+        // hardcoding both fields to 0 left the whole suite green. The values
+        // here are deliberately distinguishable (2 vs 1), so a swapped
+        // assignment fails rather than passing on matching zeros.
+        match handler.handle(Request::Status) {
+            Response::Status { data, .. } => {
+                assert_eq!(data.storage.media_served, 2, "served must reach the wire");
+                assert_eq!(data.storage.media_absent, 1, "absent must reach the wire");
+            }
+            other => panic!("expected Status response, got {other:?}"),
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

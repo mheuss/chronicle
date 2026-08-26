@@ -23,10 +23,12 @@ pub struct PipelineCounters {
     /// `media_absent`; the two are incremented separately and `Relaxed` gives
     /// no ordering between them, so a snapshot can briefly show absent > served.
     pub media_served: AtomicU64,
-    /// Of those, how many had no file. A transient non-zero is normal —
-    /// `cleanup_media` deletes files before rows, so rows outlive their files
-    /// within each batch. A persistently non-zero value is the anomaly.
-    /// See HEU-624.
+    /// Of those, how many had no file. A non-zero value is not by itself an
+    /// alarm — `cleanup_media` deletes files before rows, so a search served
+    /// during a cleanup sees rows whose files are already gone. This counter
+    /// only increments and resets at process start, so it cannot tell that
+    /// apart from a real fault within one lifetime; compare across restarts.
+    /// It counts serve events, not distinct rows. See HEU-624.
     pub media_absent: AtomicU64,
 }
 

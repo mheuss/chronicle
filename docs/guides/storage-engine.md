@@ -189,10 +189,10 @@ The exceptions are settings where cleanup never re-selects the row:
 
 - `retention_days = 0` ("keep forever") — `retention::run_cleanup` returns
   `Disabled` before examining anything. Its guard is actually `<= 0`, but a
-  negative value never reaches it on the scheduled path: `parse_retention_days`
-  returns a `u32`, and `Storage::run_cleanup` rejects `< 0` as an error at the
-  public boundary. The inner `<= 0` is defence against a caller that skipped
-  that boundary, not a second way to disable cleanup.
+  negative value never reaches it: `Storage::run_cleanup` rejects `< 0` as an
+  error at the public boundary, which is the only way in. The inner `<= 0` is
+  defence against a caller that skipped that boundary, not a second way to
+  disable cleanup.
 - `retention_days > MAX_RETENTION_DAYS` (36,500) — `run_cleanup` returns `Err`,
   so no cleanup runs at all until the config is corrected.
 - **Raising `retention_days` after a row is stranded.** This is the one you are
@@ -209,12 +209,17 @@ repairs: the question gets answered with data from real installs before anything
 destructive is built on top of it.
 
 `StorageStats.media_served` and `media_absent` carry the ongoing signal, and
-Settings renders it — but note it is a *different population* from the scan
-above. `count_media_presence` increments once per media path actually served
+Settings renders it — but note it counts a different population from the
+one-off measurement above. `count_media_presence` increments once per media path actually served
 over IPC, and `PipelineCounters` resets every process start. So the denominator
 is serve events in one process lifetime, sampled by whatever the user happened
 to search, and the same missing file served twice counts twice. It is not a
-database-wide scan and should not be read as one. Note a transient non-zero reading is normal rather than an alarm — a
+database-wide scan and should not be read as one.
+
+Within one daemon lifetime the counter also cannot distinguish a benign hit
+from a persistent fault — it only increments, and resets at process start. So
+compare readings across restarts rather than treating any non-zero value as a
+problem. Note a transient non-zero reading is normal rather than an alarm — a
 search served during a cleanup batch sees rows whose files are already gone. A
 *persistently* non-zero value across restarts is the anomaly.
 

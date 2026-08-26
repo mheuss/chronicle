@@ -584,10 +584,14 @@ struct StorageStats: Codable, Sendable {
     let mediaServed: UInt64?
     /// Of `mediaServed`, how many had no file on disk.
     ///
-    /// A transient non-zero value is NORMAL, not an alarm: retention deletes
-    /// files before rows within a batch, so rows briefly outlive their files.
-    /// Only a persistently non-zero value across restarts is an anomaly. Copy
-    /// shown to a user should not treat a non-zero reading as a fault.
+    /// A non-zero value is NOT by itself an alarm: retention deletes files
+    /// before rows within a batch, so a search served during a cleanup sees
+    /// rows whose files are already gone.
+    ///
+    /// The counter only increments and resets at process start, so it cannot
+    /// distinguish that from a real fault within one daemon lifetime — and it
+    /// counts serve events, not distinct rows. Copy shown to a user should not
+    /// present a non-zero reading as a failure.
     let mediaAbsent: UInt64?
 }
 

@@ -211,5 +211,4 @@ struct StatusTranscriptionSpliceTests {
         #expect(TranscriptionBannerCopy(after.data.transcription).showsProgress,
                 "without this the 1 Hz poll never starts and progress never shows")
     }
-
 }
