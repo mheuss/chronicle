@@ -362,8 +362,8 @@ async fn main() -> Result<()> {
 
     // Owned here, not by the supervisor or the engine: `CaptureEngine` is
     // rebuilt on every resume, so an engine-owned counter would reset each
-    // cycle. Nothing reads it yet — the reporter that does arrives in a later
-    // task on this branch, and needs it to outlive the supervisor.
+    // cycle. The drop reporter spawned below reads it, and needs it to outlive
+    // the supervisor.
     let capture_drops = Arc::new(chronicle_capture::CaptureDropCounters::default());
 
     let capture_probe_holder: Arc<std::sync::Mutex<Option<chronicle_capture::EngineStatusProbe>>> =

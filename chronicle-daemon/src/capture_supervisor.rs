@@ -168,10 +168,10 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
 
     /// Build the config for one engine start.
     ///
-    /// Extracted from `start` so a test can assert the counters are carried:
-    /// the `..Default::default()` below would otherwise silently hand each
-    /// rebuilt engine a fresh set, which is the exact loss this design exists
-    /// to remove.
+    /// Extracted from `start` so a test can assert the counters are carried.
+    /// `CaptureConfig::default()` hands out a *fresh* counter set, so building
+    /// this config from the default would silently give each rebuilt engine
+    /// its own counters — the exact loss this design exists to remove.
     fn capture_config<'t>(
         &self,
         audio: Option<chronicle_audio::AudioHandlerToken<'t>>,
@@ -179,10 +179,13 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         // Every field spelled out rather than `..Default::default()`: the
         // default hands out a *fresh* counter set, so a future field added
         // above would quietly reintroduce the per-engine reset this method
-        // exists to prevent — and the discarded allocation is pure waste.
+        // exists to prevent. Bound once rather than called per scalar — each
+        // call allocates a counter set that is immediately discarded, and one
+        // wasted allocation is enough.
+        let defaults = CaptureConfig::default();
         CaptureConfig {
-            frame_interval_secs: CaptureConfig::default().frame_interval_secs,
-            channel_buffer_size: CaptureConfig::default().channel_buffer_size,
+            frame_interval_secs: defaults.frame_interval_secs,
+            channel_buffer_size: defaults.channel_buffer_size,
             audio,
             drop_counters: Arc::clone(&self.capture_drops),
         }
@@ -455,9 +458,11 @@ mod tests {
 
         // Two configs share one allocation, so a rebuilt engine keeps
         // accumulating rather than restarting at zero.
-        // Drop the explicit `drop_counters` line from `capture_config` and the
-        // `..Default::default()` hands each config a fresh set, so these read
-        // zero — which is the whole failure this task exists to prevent.
+        // The mutation this pins: swap `Arc::clone(&self.capture_drops)` in
+        // `capture_config` for `defaults.drop_counters`. Each config then gets
+        // its own set, these read zero, and `ptr_eq` below fails — the whole
+        // failure this task exists to prevent. (Deleting the field outright
+        // would not compile: the literal has no `..Default::default()`.)
         assert_eq!(drops.snapshot().full, 3);
         assert_eq!(drops.snapshot().closed, 4);
         assert!(Arc::ptr_eq(&drops, &first.drop_counters));

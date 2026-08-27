@@ -29,10 +29,15 @@ impl ReporterState {
     ///
     /// The counters are monotonic by construction — they are created once and
     /// never rebuilt — so this is plain subtraction with no restart case. If a
-    /// future change makes a counter rebuildable these become underflow panics
-    /// in debug and wrap in release, which is the loud failure we want. Do not
-    /// "harden" them with `saturating_sub`: that converts a broken invariant
-    /// into quiet wrong numbers.
+    /// future change makes a counter rebuildable, this underflows: a panic in
+    /// debug, and in release a wrap to a nonsensical delta near `u64::MAX` that
+    /// is glaring in the log line. Neither is silent, which is the point. Do
+    /// not "harden" them with `saturating_sub` — that turns a broken invariant
+    /// into quiet wrong numbers. `checked_sub().expect()` was considered and
+    /// rejected: in release — which is what ships — it panics the reporter
+    /// task, and the design treats a reporter
+    /// panic as fatal to the loop, so a counter bug would take drop reporting
+    /// down entirely rather than printing one absurd number.
     pub(crate) fn observe(&mut self, current: DropTotals) -> Option<String> {
         // Fixed order: the output is greppable and the tests can assert on it.
         let fields: [(&str, u64, u64); 7] = [
@@ -188,8 +193,17 @@ pub(crate) const REPORT_LEVEL: log::Level = log::Level::Warn;
 
 /// Build the reporter's counter-read closure from the two producers' handles.
 ///
-/// Exists so `main`'s wiring is testable: passing a fresh `Arc` to either side
-/// leaves half the report reading zero forever, and nothing downstream notices.
+/// Extracted so the read side is testable in isolation: passing a fresh `Arc`
+/// to either argument leaves half the report reading zero forever, and nothing
+/// downstream notices.
+///
+/// Note what this does NOT cover. `main` choosing which `Arc` to pass is still
+/// unpinned — swap `audio_pipeline.drop_counters()` at the call site for a
+/// fresh `AudioDropCounters::default()` and every test in the tree still
+/// passes. The capture side has no such gap, because the supervisor owns its
+/// `Arc` and `supervisor_config_carries_its_own_counters` asserts `ptr_eq`
+/// against it. Closing the audio equivalent means lifting that choice out of
+/// `async fn main()`, which no test calls.
 pub(crate) fn counter_reader(
     audio: std::sync::Arc<chronicle_audio::AudioDropCounters>,
     capture: std::sync::Arc<chronicle_capture::CaptureDropCounters>,
