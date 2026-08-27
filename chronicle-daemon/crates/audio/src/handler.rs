@@ -5,6 +5,7 @@
 //! over a bounded channel.
 
 use std::ffi::c_char;
+use std::sync::Arc;
 use std::sync::mpsc::SyncSender;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -108,6 +109,7 @@ unsafe fn extract_pcm_bytes(sample_buffer: &CMSampleBuffer) -> Option<Vec<u8>> {
 /// Ivars for the `AudioOutputHandler` ObjC class.
 pub struct AudioOutputHandlerIvars {
     sender: SyncSender<AudioMessage>,
+    counters: Arc<crate::AudioDropCounters>,
 }
 
 define_class!(
@@ -162,31 +164,45 @@ define_class!(
             };
 
             // Best-effort send. Drop on full to avoid blocking the SCK callback thread.
-            if let Err(e) = self.ivars().sender.try_send(AudioMessage::Buffer(buffer)) {
-                match e {
-                    std::sync::mpsc::TrySendError::Full(_) => {
-                        log::warn!(
-                            "audio buffer dropped (channel full), source={}",
-                            source.as_str()
-                        );
-                    }
-                    std::sync::mpsc::TrySendError::Disconnected(_) => {
-                        log::warn!(
-                            "audio buffer dropped (channel closed), source={}",
-                            source.as_str()
-                        );
-                    }
-                }
-            }
+            //
+            // ADR-013: no logger on this thread. The daemon's drop reporter
+            // turns these counts into log lines off-thread. `source` is always
+            // System here — the microphone has its own AVAudioEngine path
+            // (ADR-010).
+            // Accounting lives in `send_audio` so a test can drive it with a
+            // real channel; this body is a call precisely so there is nothing
+            // here a test cannot reach.
+            crate::drops::send_audio(
+                &self.ivars().sender,
+                AudioMessage::Buffer(buffer),
+                &self.ivars().counters,
+                crate::drops::AudioSourceKind::System,
+            );
         }
     }
 );
 
 impl AudioOutputHandler {
     /// Create a new handler that sends audio buffers over the given channel.
-    pub fn new(sender: SyncSender<AudioMessage>) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(AudioOutputHandlerIvars { sender });
+    ///
+    /// `counters` is shared with the daemon's drop reporter, which does all
+    /// the logging for the drops this handler records.
+    pub fn new(
+        sender: SyncSender<AudioMessage>,
+        counters: Arc<crate::AudioDropCounters>,
+    ) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(AudioOutputHandlerIvars { sender, counters });
         unsafe { objc2::msg_send![super(this), init] }
+    }
+
+    /// The drop counters this handler writes into.
+    ///
+    /// Exists so `AudioPipeline`'s tests can assert the handler shares the
+    /// pipeline's allocation rather than one of its own — a mismatch compiles
+    /// cleanly and counts where nothing reads.
+    #[cfg(test)]
+    pub(crate) fn counters(&self) -> &Arc<crate::AudioDropCounters> {
+        &self.ivars().counters
     }
 
     /// Get a reference suitable for passing to `SCStream::addStreamOutput`.
@@ -320,11 +336,22 @@ mod tests {
     }
 
     #[test]
+    fn handler_carries_the_shared_counters() {
+        let (tx, _rx) = std::sync::mpsc::sync_channel::<AudioMessage>(1);
+        let counters = Arc::new(crate::AudioDropCounters::default());
+        let handler = AudioOutputHandler::new(tx, Arc::clone(&counters));
+        counters
+            .system_full
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(handler.ivars().counters.snapshot().system_full, 1);
+    }
+
+    #[test]
     fn handler_class_registers_with_runtime() {
         // Verifies that the ObjC class created by define_class! is valid
         // and can be instantiated.
         let (tx, _rx) = std::sync::mpsc::sync_channel::<AudioMessage>(4);
-        let handler = AudioOutputHandler::new(tx);
+        let handler = AudioOutputHandler::new(tx, Arc::new(crate::AudioDropCounters::default()));
 
         // The handler should be usable as an SCStreamOutput protocol object.
         let _protocol_obj = handler.as_protocol_object();

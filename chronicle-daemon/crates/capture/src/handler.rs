@@ -17,6 +17,7 @@ use objc2_core_media::CMSampleBuffer;
 use objc2_screen_capture_kit::{SCStream, SCStreamOutput, SCStreamOutputType};
 use tokio::sync::mpsc;
 
+use crate::drops::send_frame;
 use crate::pixel_buffer;
 use crate::{CapturedFrame, SendableSampleBuffer};
 
@@ -37,6 +38,10 @@ pub(crate) struct CaptureOutputHandlerIvars {
     frames_dropped: Arc<AtomicU64>,
     /// Per-display count of frames skipped for having no image buffer (HEU-493).
     null_buffer_frames: AtomicU64,
+    /// Process-lifetime drop counters, shared across every engine the daemon
+    /// builds. Distinct from `frames_dropped`, which stays per-engine because
+    /// `CaptureStats` reports it over IPC.
+    drop_counters: Arc<crate::CaptureDropCounters>,
 }
 
 define_class!(
@@ -102,25 +107,22 @@ define_class!(
                 scale_factor: ivars.scale_factor,
             };
 
-            match ivars.sender.try_send(frame) {
-                Ok(()) => {
-                    ivars.frames_captured.fetch_add(1, Ordering::Relaxed);
-                }
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    ivars.frames_dropped.fetch_add(1, Ordering::Relaxed);
-                    log::warn!(
-                        "Frame dropped for display {} (channel full)",
-                        ivars.display_id
-                    );
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    ivars.frames_dropped.fetch_add(1, Ordering::Relaxed);
-                    log::warn!(
-                        "Frame dropped for display {} (channel closed)",
-                        ivars.display_id
-                    );
-                }
-            }
+            // Two counters by design: `frames_dropped` stays per-engine because
+            // CaptureStats reports it over IPC, while `drop_counters` is shared
+            // across engine rebuilds so the reporter's totals stay monotonic.
+            // No logger here — pipeline.md flags this delivery thread as
+            // latency-sensitive, and the drop reporter logs off-thread instead.
+            //
+            // The accounting lives in `send_frame` so a test can drive it with
+            // a real channel; this body is a call precisely so there is nothing
+            // here for a test to be unable to reach.
+            send_frame(
+                &ivars.sender,
+                frame,
+                &ivars.frames_captured,
+                &ivars.frames_dropped,
+                &ivars.drop_counters,
+            );
         }
     }
 );
@@ -133,12 +135,15 @@ impl CaptureOutputHandler {
     /// * `scale_factor`    -- retina scale (1.0 or 2.0)
     /// * `frames_captured` -- shared counter incremented on each successful send
     /// * `frames_dropped`  -- shared counter incremented when the channel is full
+    /// * `drop_counters`   -- process-lifetime counters read by the daemon's
+    ///   drop reporter, which does all the logging for these drops
     pub(crate) fn new(
         sender: mpsc::Sender<CapturedFrame>,
         display_id: u32,
         scale_factor: f64,
         frames_captured: Arc<AtomicU64>,
         frames_dropped: Arc<AtomicU64>,
+        drop_counters: Arc<crate::CaptureDropCounters>,
     ) -> Retained<Self> {
         let this = Self::alloc().set_ivars(CaptureOutputHandlerIvars {
             sender,
@@ -147,8 +152,35 @@ impl CaptureOutputHandler {
             frames_captured,
             frames_dropped,
             null_buffer_frames: AtomicU64::new(0),
+            drop_counters,
         });
         unsafe { objc2::msg_send![super(this), init] }
+    }
+
+    /// Build the handler for one display, taking the drop counters from the
+    /// config.
+    ///
+    /// The `Arc::clone` of `config.drop_counters` lives here rather than at
+    /// the `engine.rs` call site so a plain unit test can reach it: that call
+    /// site sits past `SCShareableContent`, which needs Screen Recording TCC,
+    /// so everything downstream of it is `#[ignore]`d. A one-token slip there
+    /// — `Arc::clone` to `Arc::new` — used to pass the entire suite.
+    pub(crate) fn for_display(
+        config: &crate::CaptureConfig<'_>,
+        sender: mpsc::Sender<CapturedFrame>,
+        display_id: u32,
+        scale_factor: f64,
+        frames_captured: Arc<AtomicU64>,
+        frames_dropped: Arc<AtomicU64>,
+    ) -> Retained<Self> {
+        Self::new(
+            sender,
+            display_id,
+            scale_factor,
+            frames_captured,
+            frames_dropped,
+            Arc::clone(&config.drop_counters),
+        )
     }
 
     /// Get a reference suitable for passing to `SCStream::addStreamOutput`.
@@ -175,10 +207,50 @@ mod tests {
             2.0, // scale_factor
             frames_captured,
             frames_dropped,
+            Arc::new(crate::CaptureDropCounters::default()),
         );
 
         // The handler should be usable as an SCStreamOutput protocol object.
         let _protocol_obj = handler.as_protocol_object();
+    }
+
+    #[test]
+    fn handler_writes_into_the_counters_it_was_given() {
+        // A handler wired to its own fresh set compiles cleanly and counts
+        // where the reporter never looks — assert it shares the caller's.
+        let (tx, _rx) = mpsc::channel(4);
+        let drops = Arc::new(crate::CaptureDropCounters::default());
+        let handler = CaptureOutputHandler::new(
+            tx,
+            42,
+            2.0,
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::clone(&drops),
+        );
+
+        assert!(Arc::ptr_eq(&drops, &handler.ivars().drop_counters));
+    }
+
+    #[test]
+    fn for_display_takes_the_counters_from_the_config() {
+        // Covers the hop that engine.rs used to own, where a fresh set
+        // instead of a clone passed the whole workspace suite.
+        let (tx, _rx) = mpsc::channel(4);
+        let config = crate::CaptureConfig::default();
+        let handler = CaptureOutputHandler::for_display(
+            &config,
+            tx,
+            7,
+            1.0,
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        );
+
+        assert!(
+            Arc::ptr_eq(&config.drop_counters, &handler.ivars().drop_counters),
+            "handler must share the config's counters, not a fresh set"
+        );
     }
 
     #[test]
@@ -203,6 +275,7 @@ mod tests {
             2.0,
             Arc::clone(&frames_captured),
             Arc::clone(&frames_dropped),
+            Arc::new(crate::CaptureDropCounters::default()),
         );
 
         let ivars = handler.ivars();

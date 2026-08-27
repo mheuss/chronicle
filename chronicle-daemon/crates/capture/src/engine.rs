@@ -200,7 +200,8 @@ impl<'a> CaptureEngine<'a> {
             });
 
             // Create the handler wired to our frame channel.
-            let handler = CaptureOutputHandler::new(
+            let handler = CaptureOutputHandler::for_display(
+                &config,
                 sender.clone(),
                 display_id,
                 scale_factor,

@@ -1,5 +1,6 @@
 mod capture_runtime;
 mod capture_supervisor;
+mod drop_reporter;
 mod ipc_handler;
 mod media_presence;
 mod permissions;
@@ -167,9 +168,28 @@ fn note_reconcile_outcome(
     }
 }
 
+/// The filter applied when `RUST_LOG` is unset.
+///
+/// `chronicle` is a prefix match, not a crate name — `env_filter` compares with
+/// `target.starts_with(directive)` — so one directive covers every current and
+/// future `chronicle_*` crate while dependencies stay at `warn`.
+///
+/// Named rather than inlined so a test can pin it. `env_logger::init()` cannot
+/// be exercised twice in a process, but the string it is handed can.
+const DEFAULT_LOG_FILTER: &str = "warn,chronicle=info";
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
+    // `chronicle` is a prefix match, not a crate name: env_filter compares
+    // with `target.starts_with(directive)`, so one directive covers
+    // chronicle_daemon, chronicle_audio, chronicle_capture and every future
+    // chronicle_* crate without enumerating them. Dependencies stay at warn,
+    // so a model download does not narrate itself.
+    //
+    // `Env::default()` still reads RUST_LOG; `default_filter_or` only supplies
+    // the fallback, so RUST_LOG keeps overriding in both directions.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(DEFAULT_LOG_FILTER))
+        .init();
     log::info!("chronicle-daemon starting");
 
     // --- Permission preflight ---
@@ -339,6 +359,13 @@ async fn main() -> Result<()> {
     // `set_microphone_enabled(&self)` only takes a shared borrow, so the
     // event loop below can still toggle the mic while the runtime runs;
     // the pipeline is still stopped at shutdown.
+
+    // Owned here, not by the supervisor or the engine: `CaptureEngine` is
+    // rebuilt on every resume, so an engine-owned counter would reset each
+    // cycle. The drop reporter spawned below reads it, and needs it to outlive
+    // the supervisor.
+    let capture_drops = Arc::new(chronicle_capture::CaptureDropCounters::default());
+
     let capture_probe_holder: Arc<std::sync::Mutex<Option<chronicle_capture::EngineStatusProbe>>> =
         Arc::new(std::sync::Mutex::new(None));
 
@@ -355,6 +382,7 @@ async fn main() -> Result<()> {
         Arc::clone(&capture_paused),
         Arc::clone(&mic_state_atom),
         storage.base_dir().to_path_buf(),
+        Arc::clone(&capture_drops),
     );
 
     if initial_capture_paused {
@@ -394,6 +422,29 @@ async fn main() -> Result<()> {
     // Set only when the shutdown drain grace expires; tells `transcribe_loop` to
     // stop after the segment it is already working on.
     let stop_transcription = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Drop reporter. Spawned here, BEFORE provisioning::boot() below, not
+    // beside the status refreshers further down: the microphone is restored
+    // early and a model load can take a long time, so a reporter spawned after
+    // boot() stays silent through exactly the window HEU-548 describes. The
+    // counters accumulate either way and ReporterState starts at zero, so a
+    // late reporter would still eventually report the burst — what a late
+    // spawn costs is promptness, while an operator is watching the terminal.
+    //
+    // It takes its own shutdown channel rather than the shared `cancel` token:
+    // `cancel.cancel()` fires at the top of the shutdown block, while both
+    // callbacks are still live. That is the same reasoning `transcribe_loop`
+    // already follows — see "Graceful Multi-Stage Shutdown" in
+    // docs/use-cases/pipeline.md.
+    let (drop_report_tx, drop_report_rx) = tokio::sync::oneshot::channel();
+    let drop_reporter_handle = tokio::spawn(crate::drop_reporter::run_reporter(
+        crate::drop_reporter::counter_reader(
+            audio_pipeline.drop_counters(),
+            Arc::clone(&capture_drops),
+        ),
+        drop_report_rx,
+        crate::drop_reporter::REPORT_PERIOD,
+    ));
+
     let engine_handle = Arc::new(provisioning::EngineHandle::new());
     // Awaited here, before `audio_store_loop` spawns below, so nothing can be
     // enqueued while the engine slot is still being filled — the no-loss
@@ -842,6 +893,28 @@ async fn main() -> Result<()> {
     }
     log::info!("Audio pipeline stopped");
 
+    // Drop reporter last: both producers have now stopped, so its final read
+    // sees every drop including any from teardown. The counters are held in
+    // main, so they outlive the pipeline and the supervisor.
+    //
+    // This runs on the poisoned path too. `supervisor.shutdown()` set
+    // `poisoned` above, but exit(3) does not happen until the end of main,
+    // after the drain — so suppressing the report here would only hide drops
+    // in the very run where something went wrong enough to poison the engine.
+    //
+    // The await is unbounded, deliberately: the final read is seven relaxed
+    // atomic loads, a format, and at most one log line. `tokio::time::timeout`
+    // would consume the handle and detach the task, which is the trap
+    // docs/development/tokio-shutdown.md documents.
+    // `Err` here means the receiver is already gone, which today can only mean
+    // the task panicked — the `await` on the next line reports that, so the
+    // discard is deliberate rather than indifferent.
+    let _ = drop_report_tx.send(());
+    if let Err(e) = drop_reporter_handle.await {
+        log::error!("drop reporter task panicked: {e}");
+        shutdown_failed = true;
+    }
+
     // Wait for bridge thread to finish
     // Deliberately not `?`. An early return here would skip `drop(transcription_sink)`
     // and the drain block below, detaching the transcription task and discarding an
@@ -919,6 +992,49 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn default_log_filter_admits_chronicle_info_but_not_dependency_info() {
+        // The headline change of HEU-653. Built as a real Filter rather than a
+        // string comparison, so this tests the behaviour rather than the spelling.
+        let filter = env_filter::Builder::new().parse(DEFAULT_LOG_FILTER).build();
+
+        // Our crates: info and above.
+        for target in [
+            "chronicle_daemon",
+            "chronicle_daemon::permissions",
+            "chronicle_audio::microphone",
+            "chronicle_capture::handler",
+            "chronicle_storage",
+        ] {
+            assert!(
+                filter.enabled(&meta(log::Level::Info, target)),
+                "{target} must emit at info — this is the ticket"
+            );
+        }
+
+        // Dependencies: warn and above only. This is what the `chronicle`
+        // prefix buys over a bare `info`.
+        for target in ["reqwest::connect", "hyper::client", "rusqlite", "tokio"] {
+            assert!(
+                !filter.enabled(&meta(log::Level::Info, target)),
+                "{target} must not emit at info"
+            );
+            assert!(
+                filter.enabled(&meta(log::Level::Warn, target)),
+                "{target} must still emit at warn"
+            );
+        }
+
+        // And nothing is silenced below error anywhere.
+        assert!(filter.enabled(&meta(log::Level::Error, "anything_at_all")));
+    }
+
+    /// A `log::Metadata` for one level/target pair, which is what
+    /// `env_filter::Filter::enabled` takes.
+    fn meta<'a>(level: log::Level, target: &'a str) -> log::Metadata<'a> {
+        log::Metadata::builder().level(level).target(target).build()
+    }
     use super::*;
 
     #[tokio::test]
