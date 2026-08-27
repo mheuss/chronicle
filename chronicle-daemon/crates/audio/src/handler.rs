@@ -6,7 +6,6 @@
 
 use std::ffi::c_char;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::sync::mpsc::SyncSender;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -107,41 +106,6 @@ unsafe fn extract_pcm_bytes(sample_buffer: &CMSampleBuffer) -> Option<Vec<u8>> {
     Some(slice.to_vec())
 }
 
-/// Which side of `TrySendError` a dropped buffer came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DropCause {
-    /// Channel full — downstream is slow.
-    Full,
-    /// Channel closed — downstream is gone.
-    Closed,
-}
-
-impl<T> From<&std::sync::mpsc::TrySendError<T>> for DropCause {
-    fn from(e: &std::sync::mpsc::TrySendError<T>) -> Self {
-        match e {
-            std::sync::mpsc::TrySendError::Full(_) => DropCause::Full,
-            std::sync::mpsc::TrySendError::Disconnected(_) => DropCause::Closed,
-        }
-    }
-}
-
-/// Record one discarded system-audio buffer.
-///
-/// Takes the error rather than a pre-classified cause so the callback carries
-/// no logic at all: every step from `TrySendError` to counter field is inside
-/// something a test can call without a real `CMSampleBuffer`. Splitting the
-/// classification out would leave the half that stayed in the callback
-/// untestable, and an inverted mapping would ship silently.
-pub(crate) fn count_system_drop<T>(
-    counters: &crate::AudioDropCounters,
-    err: &std::sync::mpsc::TrySendError<T>,
-) {
-    match DropCause::from(err) {
-        DropCause::Full => counters.system_full.fetch_add(1, Ordering::Relaxed),
-        DropCause::Closed => counters.system_closed.fetch_add(1, Ordering::Relaxed),
-    };
-}
-
 /// Ivars for the `AudioOutputHandler` ObjC class.
 pub struct AudioOutputHandlerIvars {
     sender: SyncSender<AudioMessage>,
@@ -205,9 +169,15 @@ define_class!(
             // turns these counts into log lines off-thread. `source` is always
             // System here — the microphone has its own AVAudioEngine path
             // (ADR-010).
-            if let Err(e) = self.ivars().sender.try_send(AudioMessage::Buffer(buffer)) {
-                count_system_drop(&self.ivars().counters, &e);
-            }
+            // Accounting lives in `send_audio` so a test can drive it with a
+            // real channel; this body is a call precisely so there is nothing
+            // here a test cannot reach.
+            crate::drops::send_audio(
+                &self.ivars().sender,
+                AudioMessage::Buffer(buffer),
+                &self.ivars().counters,
+                crate::drops::AudioSourceKind::System,
+            );
         }
     }
 );
@@ -363,42 +333,6 @@ mod tests {
 
         let result = tx.try_send(make_buf());
         assert!(result.is_err(), "should fail when channel is full");
-    }
-
-    #[test]
-    fn try_send_error_maps_to_the_right_counter() {
-        // Drive real TrySendError values, not a hand-picked DropCause: the
-        // classification is the part that would invert silently.
-        let (full_tx, _full_rx) = std::sync::mpsc::sync_channel::<AudioMessage>(0);
-        let full_err = full_tx.try_send(silent_buffer()).unwrap_err();
-        assert!(matches!(full_err, std::sync::mpsc::TrySendError::Full(_)));
-
-        let (closed_tx, closed_rx) = std::sync::mpsc::sync_channel::<AudioMessage>(1);
-        drop(closed_rx);
-        let closed_err = closed_tx.try_send(silent_buffer()).unwrap_err();
-        assert!(matches!(
-            closed_err,
-            std::sync::mpsc::TrySendError::Disconnected(_)
-        ));
-
-        let c = crate::AudioDropCounters::default();
-
-        count_system_drop(&c, &full_err);
-        assert_eq!(c.snapshot().system_full, 1);
-        assert_eq!(c.snapshot().system_closed, 0, "full must not bump closed");
-
-        count_system_drop(&c, &closed_err);
-        assert_eq!(c.snapshot().system_closed, 1);
-        assert_eq!(c.snapshot().system_full, 1, "closed must not bump full");
-    }
-
-    /// A zero-sample buffer message, for exercising channel error paths.
-    fn silent_buffer() -> AudioMessage {
-        AudioMessage::Buffer(AudioBuffer {
-            samples: Vec::new(),
-            timestamp_ms: 0,
-            source: AudioSource::System,
-        })
     }
 
     #[test]

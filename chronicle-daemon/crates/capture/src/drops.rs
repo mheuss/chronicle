@@ -54,6 +54,35 @@ pub(crate) fn count_frame_drop<T>(
     };
 }
 
+/// Send one frame and account for the outcome.
+///
+/// The whole "try_send, then classify, then count" path in one place, so a test
+/// can drive it with a real channel. The callback body reduces to a call, which
+/// is the point: deleting a counter increment *inside* an ObjC delivery
+/// callback is invisible to every test, because the callback needs a real
+/// `CMSampleBuffer` to invoke. Here it is not invisible.
+///
+/// `captured`/`dropped` are the engine's per-engine counters (`CaptureStats`
+/// reports `dropped` over IPC, unchanged); `drops` is the process-lifetime set
+/// the reporter reads.
+pub(crate) fn send_frame<T>(
+    sender: &tokio::sync::mpsc::Sender<T>,
+    frame: T,
+    captured: &AtomicU64,
+    dropped: &AtomicU64,
+    drops: &CaptureDropCounters,
+) {
+    match sender.try_send(frame) {
+        Ok(()) => {
+            captured.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(e) => {
+            dropped.fetch_add(1, Ordering::Relaxed);
+            count_frame_drop(drops, &e);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,6 +123,38 @@ mod tests {
         count_frame_drop(&c, &closed_err);
         assert_eq!(c.snapshot().closed, 1);
         assert_eq!(c.snapshot().full, 1, "closed must not bump full");
+    }
+
+    #[tokio::test]
+    async fn send_frame_counts_success_full_and_closed() {
+        let captured = AtomicU64::new(0);
+        let dropped = AtomicU64::new(0);
+        let drops = CaptureDropCounters::default();
+
+        // Success bumps captured only.
+        let (tx, rx) = tokio::sync::mpsc::channel::<u8>(1);
+        send_frame(&tx, 1, &captured, &dropped, &drops);
+        assert_eq!(captured.load(Ordering::Relaxed), 1);
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        assert_eq!(drops.snapshot(), CaptureDropSnapshot::default());
+
+        // Channel now full: bumps dropped and `full`, never captured.
+        send_frame(&tx, 2, &captured, &dropped, &drops);
+        assert_eq!(
+            captured.load(Ordering::Relaxed),
+            1,
+            "a drop is not a capture"
+        );
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(drops.snapshot().full, 1);
+        assert_eq!(drops.snapshot().closed, 0);
+
+        // Receiver gone: bumps dropped and `closed`.
+        drop(rx);
+        send_frame(&tx, 3, &captured, &dropped, &drops);
+        assert_eq!(dropped.load(Ordering::Relaxed), 2);
+        assert_eq!(drops.snapshot().closed, 1);
+        assert_eq!(drops.snapshot().full, 1, "closed must not bump full");
     }
 
     #[test]

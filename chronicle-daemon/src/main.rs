@@ -168,6 +168,16 @@ fn note_reconcile_outcome(
     }
 }
 
+/// The filter applied when `RUST_LOG` is unset.
+///
+/// `chronicle` is a prefix match, not a crate name — `env_filter` compares with
+/// `target.starts_with(directive)` — so one directive covers every current and
+/// future `chronicle_*` crate while dependencies stay at `warn`.
+///
+/// Named rather than inlined so a test can pin it. `env_logger::init()` cannot
+/// be exercised twice in a process, but the string it is handed can.
+const DEFAULT_LOG_FILTER: &str = "warn,chronicle=info";
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // `chronicle` is a prefix match, not a crate name: env_filter compares
@@ -178,10 +188,8 @@ async fn main() -> Result<()> {
     //
     // `Env::default()` still reads RUST_LOG; `default_filter_or` only supplies
     // the fallback, so RUST_LOG keeps overriding in both directions.
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("warn,chronicle=info"),
-    )
-    .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(DEFAULT_LOG_FILTER))
+        .init();
     log::info!("chronicle-daemon starting");
 
     // --- Permission preflight ---
@@ -428,15 +436,11 @@ async fn main() -> Result<()> {
     // already follows — see "Graceful Multi-Stage Shutdown" in
     // docs/use-cases/pipeline.md.
     let (drop_report_tx, drop_report_rx) = tokio::sync::oneshot::channel();
-    let reporter_audio = audio_pipeline.drop_counters();
-    let reporter_capture = Arc::clone(&capture_drops);
     let drop_reporter_handle = tokio::spawn(crate::drop_reporter::run_reporter(
-        move || {
-            crate::drop_reporter::totals_from(
-                reporter_audio.snapshot(),
-                reporter_capture.snapshot(),
-            )
-        },
+        crate::drop_reporter::counter_reader(
+            audio_pipeline.drop_counters(),
+            Arc::clone(&capture_drops),
+        ),
         drop_report_rx,
         crate::drop_reporter::REPORT_PERIOD,
     ));
@@ -988,6 +992,49 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn default_log_filter_admits_chronicle_info_but_not_dependency_info() {
+        // The headline change of HEU-653. Built as a real Filter rather than a
+        // string comparison, so this tests the behaviour rather than the spelling.
+        let filter = env_filter::Builder::new().parse(DEFAULT_LOG_FILTER).build();
+
+        // Our crates: info and above.
+        for target in [
+            "chronicle_daemon",
+            "chronicle_daemon::permissions",
+            "chronicle_audio::microphone",
+            "chronicle_capture::handler",
+            "chronicle_storage",
+        ] {
+            assert!(
+                filter.enabled(&meta(log::Level::Info, target)),
+                "{target} must emit at info — this is the ticket"
+            );
+        }
+
+        // Dependencies: warn and above only. This is what the `chronicle`
+        // prefix buys over a bare `info`.
+        for target in ["reqwest::connect", "hyper::client", "rusqlite", "tokio"] {
+            assert!(
+                !filter.enabled(&meta(log::Level::Info, target)),
+                "{target} must not emit at info"
+            );
+            assert!(
+                filter.enabled(&meta(log::Level::Warn, target)),
+                "{target} must still emit at warn"
+            );
+        }
+
+        // And nothing is silenced below error anywhere.
+        assert!(filter.enabled(&meta(log::Level::Error, "anything_at_all")));
+    }
+
+    /// A `log::Metadata` for one level/target pair, which is what
+    /// `env_filter::Filter::enabled` takes.
+    fn meta<'a>(level: log::Level, target: &'a str) -> log::Metadata<'a> {
+        log::Metadata::builder().level(level).target(target).build()
+    }
     use super::*;
 
     #[tokio::test]

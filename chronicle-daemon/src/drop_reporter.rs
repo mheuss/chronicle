@@ -129,7 +129,10 @@ pub(crate) async fn run_reporter<F>(
 ) where
     F: Fn() -> DropTotals,
 {
-    run_reporter_with_sink(read_totals, shutdown, period, |line| log::warn!("{line}")).await
+    run_reporter_with_sink(read_totals, shutdown, period, |line| {
+        log::log!(REPORT_LEVEL, "{line}")
+    })
+    .await
 }
 
 /// As `run_reporter`, with the line sink injected so tests can capture output
@@ -145,6 +148,11 @@ pub(crate) async fn run_reporter_with_sink<F, S>(
 {
     let mut state = ReporterState::default();
     let mut ticker = tokio::time::interval(period);
+    // Not the default `Burst`: after a stall it fires catch-up ticks back to
+    // back, and while drops are ongoing each one carries a real delta — so the
+    // "at most one line per period" contract would break exactly when the log
+    // is busiest. `Delay` restarts the period from the tick that actually ran.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Unlike the storage refresher in main(), the immediate first tick is NOT
     // skipped. That one skips it to avoid double-priming a snapshot; this
     // reporter is silent when nothing was dropped, so an immediate first read
@@ -168,6 +176,25 @@ pub(crate) async fn run_reporter_with_sink<F, S>(
     if let Some(line) = state.observe(read_totals()) {
         emit(line);
     }
+}
+
+/// The level the reporter logs at.
+///
+/// Named and pinned by a test rather than inlined: HEU-653 exists because
+/// `warn!`/`info!` lines were invisible, so the level *is* the deliverable.
+/// Dropping it to `debug!` would leave the daemon silent by default under the
+/// `warn,chronicle=info` filter, and every test would still pass.
+pub(crate) const REPORT_LEVEL: log::Level = log::Level::Warn;
+
+/// Build the reporter's counter-read closure from the two producers' handles.
+///
+/// Exists so `main`'s wiring is testable: passing a fresh `Arc` to either side
+/// leaves half the report reading zero forever, and nothing downstream notices.
+pub(crate) fn counter_reader(
+    audio: std::sync::Arc<chronicle_audio::AudioDropCounters>,
+    capture: std::sync::Arc<chronicle_capture::CaptureDropCounters>,
+) -> impl Fn() -> DropTotals {
+    move || totals_from(audio.snapshot(), capture.snapshot())
 }
 
 /// How often the reporter reads the counters.
@@ -269,6 +296,40 @@ mod tests {
         tx.send(()).unwrap();
         handle.await.unwrap();
         assert_eq!(lines.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reporter_logs_at_warn() {
+        // The level is the deliverable: this ticket exists because warn/info
+        // lines were invisible. `debug!` here would be silent under the
+        // daemon's own default filter.
+        assert_eq!(REPORT_LEVEL, log::Level::Warn);
+    }
+
+    #[test]
+    fn counter_reader_reads_the_allocations_it_was_given() {
+        // Hand it one Arc from each crate, write through the originals, and
+        // confirm the closure sees it. A fresh Arc on either side reads zero
+        // forever and nothing else would notice.
+        let audio = std::sync::Arc::new(chronicle_audio::AudioDropCounters::default());
+        let capture = std::sync::Arc::new(chronicle_capture::CaptureDropCounters::default());
+        let read = counter_reader(
+            std::sync::Arc::clone(&audio),
+            std::sync::Arc::clone(&capture),
+        );
+
+        assert_eq!(read(), DropTotals::default());
+
+        audio
+            .mic_full
+            .fetch_add(3, std::sync::atomic::Ordering::Relaxed);
+        capture
+            .closed
+            .fetch_add(4, std::sync::atomic::Ordering::Relaxed);
+
+        let t = read();
+        assert_eq!(t.mic_full, 3, "audio side must reach the closure");
+        assert_eq!(t.frames_closed, 4, "capture side must reach the closure");
     }
 
     #[test]

@@ -74,6 +74,10 @@ transcription-cpu = ["chronicle-transcription/cpu"]
 tempfile = "3"
 serde_json = "1"
 opus = "0.3"
+# env_logger's filter engine, so a test can assert what DEFAULT_LOG_FILTER
+# actually admits rather than comparing the string to itself. Already in the
+# tree as env_logger's own dependency; named here only to use it in tests.
+env_filter = "1"
 # test-util unlocks tokio::time::pause/advance for the StartRetry policy tests.
 # net + io-util back the hand-rolled HTTP fixture in provisioning tests. They
 # already arrive via chronicle-ipc, but naming them here keeps our tests from

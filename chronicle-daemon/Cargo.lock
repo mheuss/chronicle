@@ -284,6 +284,7 @@ dependencies = [
  "chronicle-storage",
  "chronicle-transcription",
  "chrono",
+ "env_filter",
  "env_logger",
  "libc",
  "log",

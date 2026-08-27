@@ -108,6 +108,7 @@ The value is converted to a `CMTime` with millisecond precision (timescale =
 let config = CaptureConfig {
     frame_interval_secs: 0.5,  // 2 fps
     channel_buffer_size: 16,
+    ..Default::default()       // audio: None, plus process-lifetime drop counters
 };
 let (engine, receiver) = CaptureEngine::start(config)?;
 ```

@@ -19,7 +19,7 @@ use std::cell::Cell;
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{SyncSender, TrySendError};
+use std::sync::mpsc::SyncSender;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use block2::RcBlock;
@@ -30,7 +30,7 @@ use objc2_avf_audio::{
     AVAudioConverterOutputStatus, AVAudioEngine, AVAudioFormat, AVAudioPCMBuffer, AVAudioTime,
 };
 
-use crate::handler::{AudioBuffer, AudioMessage, DropCause};
+use crate::handler::{AudioBuffer, AudioMessage};
 use crate::{AudioDropCounters, AudioError, AudioSource, CHANNEL_COUNT, Result, SAMPLE_RATE};
 
 /// Extra frames added to the output buffer capacity when resampling.
@@ -375,19 +375,6 @@ impl MicrophoneCapture {
 /// encoding-channel sender, and a clone of the drop counters. It runs on an audio thread, so it wraps its ObjC
 /// work in an `autoreleasepool` and uses `try_send` — never blocking the
 /// audio thread (the Structured Backpressure pattern).
-/// Record one discarded microphone buffer.
-///
-/// Takes the error rather than a pre-classified cause so the tap callback
-/// carries no logic at all — every step from `TrySendError` to counter field
-/// sits inside something a test can call. `count_system_drop` in `handler.rs`
-/// has the same shape for the same reason.
-pub(crate) fn count_mic_drop<T>(counters: &AudioDropCounters, err: &TrySendError<T>) {
-    match DropCause::from(err) {
-        DropCause::Full => counters.mic_full.fetch_add(1, Ordering::Relaxed),
-        DropCause::Closed => counters.mic_closed.fetch_add(1, Ordering::Relaxed),
-    };
-}
-
 fn make_tap_block(
     converter: Retained<AVAudioConverter>,
     target_format: Retained<AVAudioFormat>,
@@ -430,9 +417,12 @@ fn make_tap_block(
                 // or closed (downstream gone). ADR-013 forbids a logger here —
                 // including a throttled one — so the daemon's drop reporter
                 // does the logging off-thread.
-                if let Err(e) = buffer_tx.try_send(message) {
-                    count_mic_drop(&counters, &e);
-                }
+                crate::drops::send_audio(
+                    &buffer_tx,
+                    message,
+                    &counters,
+                    crate::drops::AudioSourceKind::Microphone,
+                );
             });
         },
     )
@@ -1629,32 +1619,6 @@ mod tests {
                 );
             }
         });
-    }
-
-    #[test]
-    fn mic_try_send_error_maps_to_the_right_counter() {
-        // Drive real TrySendError values end to end: the classification is
-        // the step that would invert silently, so it must not sit outside
-        // anything a test can call.
-        let (full_tx, _full_rx) = std::sync::mpsc::sync_channel::<AudioMessage>(0);
-        let full_err = full_tx.try_send(silent_buffer()).unwrap_err();
-        let (closed_tx, closed_rx) = std::sync::mpsc::sync_channel::<AudioMessage>(1);
-        drop(closed_rx);
-        let closed_err = closed_tx.try_send(silent_buffer()).unwrap_err();
-
-        let c = AudioDropCounters::default();
-
-        count_mic_drop(&c, &full_err);
-        assert_eq!(c.snapshot().mic_full, 1);
-        assert_eq!(c.snapshot().mic_closed, 0, "full must not bump closed");
-
-        count_mic_drop(&c, &closed_err);
-        assert_eq!(c.snapshot().mic_closed, 1);
-        assert_eq!(c.snapshot().mic_full, 1, "closed must not bump full");
-
-        // And the mic must never touch the system counters.
-        assert_eq!(c.snapshot().system_full, 0);
-        assert_eq!(c.snapshot().system_closed, 0);
     }
 
     /// A zero-sample buffer message, for exercising channel error paths.

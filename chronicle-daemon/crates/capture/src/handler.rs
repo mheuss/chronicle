@@ -17,7 +17,7 @@ use objc2_core_media::CMSampleBuffer;
 use objc2_screen_capture_kit::{SCStream, SCStreamOutput, SCStreamOutputType};
 use tokio::sync::mpsc;
 
-use crate::drops::count_frame_drop;
+use crate::drops::send_frame;
 use crate::pixel_buffer;
 use crate::{CapturedFrame, SendableSampleBuffer};
 
@@ -107,21 +107,22 @@ define_class!(
                 scale_factor: ivars.scale_factor,
             };
 
-            match ivars.sender.try_send(frame) {
-                Ok(()) => {
-                    ivars.frames_captured.fetch_add(1, Ordering::Relaxed);
-                }
-                // Two counters by design: `frames_dropped` stays per-engine
-                // because CaptureStats reports it over IPC, while
-                // `drop_counters` is shared across engine rebuilds so the
-                // reporter's totals stay monotonic. No logger here —
-                // pipeline.md flags this delivery thread as latency-sensitive,
-                // and the drop reporter logs off-thread instead.
-                Err(e) => {
-                    ivars.frames_dropped.fetch_add(1, Ordering::Relaxed);
-                    count_frame_drop(&ivars.drop_counters, &e);
-                }
-            }
+            // Two counters by design: `frames_dropped` stays per-engine because
+            // CaptureStats reports it over IPC, while `drop_counters` is shared
+            // across engine rebuilds so the reporter's totals stay monotonic.
+            // No logger here — pipeline.md flags this delivery thread as
+            // latency-sensitive, and the drop reporter logs off-thread instead.
+            //
+            // The accounting lives in `send_frame` so a test can drive it with
+            // a real channel; this body is a call precisely so there is nothing
+            // here for a test to be unable to reach.
+            send_frame(
+                &ivars.sender,
+                frame,
+                &ivars.frames_captured,
+                &ivars.frames_dropped,
+                &ivars.drop_counters,
+            );
         }
     }
 );
