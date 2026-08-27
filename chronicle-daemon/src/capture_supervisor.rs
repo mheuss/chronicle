@@ -179,13 +179,12 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         // Every field spelled out rather than `..Default::default()`: the
         // default hands out a *fresh* counter set, so a future field added
         // above would quietly reintroduce the per-engine reset this method
-        // exists to prevent. Bound once rather than called per scalar — each
-        // call allocates a counter set that is immediately discarded, and one
-        // wasted allocation is enough.
-        let defaults = CaptureConfig::default();
+        // exists to prevent. The scalars come from named constants rather than
+        // `CaptureConfig::default()`, which would allocate a counter set solely
+        // to throw it away on every engine start.
         CaptureConfig {
-            frame_interval_secs: defaults.frame_interval_secs,
-            channel_buffer_size: defaults.channel_buffer_size,
+            frame_interval_secs: chronicle_capture::DEFAULT_FRAME_INTERVAL_SECS,
+            channel_buffer_size: chronicle_capture::DEFAULT_CHANNEL_BUFFER_SIZE,
             audio,
             drop_counters: Arc::clone(&self.capture_drops),
         }

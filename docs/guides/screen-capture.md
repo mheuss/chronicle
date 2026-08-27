@@ -85,10 +85,13 @@ The frame channel is bounded. The default buffer size is 32 frames (set in
 2. The frame is silently discarded. No retry, no blocking.
 3. The `frames_dropped` atomic counter increments — that one is per-engine and
    is what `CaptureStats` reports over IPC.
-4. A second, process-lifetime counter increments, split by cause (`full` vs
-   `closed`). The drop path does not log: the daemon's drop reporter reads those
-   counters off-thread and emits at most one summary line per 30 s. See
-   ADR-013. (The callback does still carry one throttled warning, for frames
+4. A second counter increments, split by cause (`full` vs `closed`). The drop
+   path does not log: the daemon's drop reporter reads those counters off-thread
+   and emits at most one summary line per 30 s. See ADR-013. These are only
+   process-lifetime when the caller supplies them — `CaptureConfig::default()`
+   allocates a fresh set per config, so the daemon owns one set and passes it
+   into every `CaptureConfig` it builds, which is what survives an engine
+   rebuild. (The callback does still carry one throttled warning, for frames
    SCK delivers with no image buffer — a different condition.)
 
 You can check drop rates at any time with `engine.status()`, which returns a

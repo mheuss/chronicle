@@ -81,11 +81,20 @@ pub struct CaptureConfig<'a> {
     pub drop_counters: Arc<CaptureDropCounters>,
 }
 
+/// Seconds between captured frames. Named so a caller that wants only the
+/// scalar defaults need not build a whole `CaptureConfig` — `Default` allocates
+/// a fresh counter set, which a caller supplying its own would discard.
+pub const DEFAULT_FRAME_INTERVAL_SECS: f64 = 2.0;
+
+/// Frames buffered before the capture channel sheds. See `DEFAULT_FRAME_INTERVAL_SECS`
+/// for why this is a constant rather than something read off `Default`.
+pub const DEFAULT_CHANNEL_BUFFER_SIZE: usize = 32;
+
 impl<'a> Default for CaptureConfig<'a> {
     fn default() -> Self {
         Self {
-            frame_interval_secs: 2.0,
-            channel_buffer_size: 32,
+            frame_interval_secs: DEFAULT_FRAME_INTERVAL_SECS,
+            channel_buffer_size: DEFAULT_CHANNEL_BUFFER_SIZE,
             audio: None,
             drop_counters: Arc::new(CaptureDropCounters::default()),
         }
