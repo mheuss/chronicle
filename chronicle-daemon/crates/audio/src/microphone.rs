@@ -1621,15 +1621,6 @@ mod tests {
         });
     }
 
-    /// A zero-sample buffer message, for exercising channel error paths.
-    fn silent_buffer() -> AudioMessage {
-        AudioMessage::Buffer(AudioBuffer {
-            samples: Vec::new(),
-            timestamp_ms: 0,
-            source: AudioSource::Microphone,
-        })
-    }
-
     /// Constructs `MicrophoneCapture`, starts and stops it, and checks that
     /// `is_running` tracks the engine state. Needs a real Mac microphone, so
     /// it is `#[ignore]`d — run manually with
