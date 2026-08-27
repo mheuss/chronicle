@@ -221,7 +221,8 @@ from a persistent fault — it only increments, and resets at process start. So
 compare readings across restarts rather than treating any non-zero value as a
 problem. Note a transient non-zero reading is normal rather than an alarm — a
 search served during a cleanup batch sees rows whose files are already gone. A
-*persistently* non-zero value across restarts is the anomaly.
+*persistently* non-zero value across restarts is the one to investigate. That is
+a reason to look, not a conclusion on its own.
 
 ### Startup orphan sweep (`sweep_orphans`)
 
