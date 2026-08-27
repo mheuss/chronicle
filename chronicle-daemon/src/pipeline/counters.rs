@@ -19,6 +19,17 @@ pub struct PipelineCounters {
     pub audio_segments_persisted: AtomicU64,
     pub transcription_enqueued: AtomicU64,
     pub transcription_dropped: AtomicU64,
+    /// Media rows handed out over IPC with a path. The denominator for
+    /// `media_absent`; the two are incremented separately and `Relaxed` gives
+    /// no ordering between them, so a snapshot can briefly show absent > served.
+    pub media_served: AtomicU64,
+    /// Of those, how many had no file. A non-zero value is not by itself an
+    /// alarm — `cleanup_media` deletes files before rows, so a search served
+    /// during a cleanup sees rows whose files are already gone. This counter
+    /// only increments and resets at process start, so it cannot tell that
+    /// apart from a real fault within one lifetime; compare across restarts.
+    /// It counts serve events, not distinct rows. See HEU-624.
+    pub media_absent: AtomicU64,
 }
 
 impl PipelineCounters {
@@ -35,6 +46,8 @@ impl PipelineCounters {
             audio_segments_persisted: self.audio_segments_persisted.load(Ordering::Relaxed),
             transcription_enqueued: self.transcription_enqueued.load(Ordering::Relaxed),
             transcription_dropped: self.transcription_dropped.load(Ordering::Relaxed),
+            media_served: self.media_served.load(Ordering::Relaxed),
+            media_absent: self.media_absent.load(Ordering::Relaxed),
         }
     }
 }
@@ -49,4 +62,6 @@ pub struct CountersSnapshot {
     pub audio_segments_persisted: u64,
     pub transcription_enqueued: u64,
     pub transcription_dropped: u64,
+    pub media_served: u64,
+    pub media_absent: u64,
 }

@@ -572,6 +572,27 @@ struct StorageStats: Codable, Sendable {
     let audioSegmentCount: UInt64
     let oldestEntryMs: Int64?
     let retentionDays: UInt32
+    /// Optional on the decoder, NOT on the wire — Rust sends these
+    /// non-optionally. An older daemon omits them, and a non-optional field
+    /// here would fail the decode of this entire block, taking disk usage and
+    /// retention down with it. See docs/use-cases/ipc-compat.md.
+    ///
+    /// The pair is sampled rather than read atomically, so a ratio above 1.0
+    /// is sampling skew, not data. That is a property of the current Rust
+    /// implementation as of HEU-624, not of the wire format — the source of
+    /// truth is `PipelineCounters::snapshot` in chronicle-daemon.
+    let mediaServed: UInt64?
+    /// Of `mediaServed`, how many had no file on disk.
+    ///
+    /// A non-zero value is NOT by itself an alarm: retention deletes files
+    /// before rows within a batch, so a search served during a cleanup sees
+    /// rows whose files are already gone.
+    ///
+    /// The counter only increments and resets at process start, so it cannot
+    /// distinguish that from a real fault within one daemon lifetime — and it
+    /// counts serve events, not distinct rows. Copy shown to a user should not
+    /// present a non-zero reading as a failure.
+    let mediaAbsent: UInt64?
 }
 
 enum TranscriptionState: String, Codable, Sendable {

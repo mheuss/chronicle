@@ -101,6 +101,13 @@ impl MicState {
 /// decoding is out of scope until protocol version negotiation (HEU-456).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+// `Response::Status` is inherently the fat variant: it carries the whole
+// StatusData block while most variants carry an ok flag. Boxing it would add a
+// heap allocation per response and churn every construction and match site, for
+// a warning with no runtime consequence on a type that is built once per
+// request and immediately serialized. HEU-624's two counters pushed the gap
+// from 200 to 216 bytes and tripped the default threshold.
+#[allow(clippy::large_enum_variant)]
 pub enum Response {
     Status {
         ok: bool,
@@ -264,6 +271,31 @@ pub struct StorageStats {
     /// Retention period from `storage::get_config("retention_days")`, defaulting
     /// to 30 if unset/invalid.
     pub retention_days: u32,
+    /// Media rows served over IPC this process lifetime. The denominator for
+    /// `media_absent` — a bare absent count cannot be interpreted without it.
+    ///
+    /// The pair is sampled, not read atomically: `snapshot()` loads the two
+    /// counters independently with `Ordering::Relaxed`, so a concurrent serve
+    /// can land between them. Treat a ratio above 1.0 as sampling skew, not as
+    /// data. (`PipelineCounters::snapshot` lives in chronicle-daemon, not this
+    /// crate.)
+    pub media_served: u64,
+    /// Of those, how many had no file on disk.
+    ///
+    /// A non-zero value is not by itself an alarm. `cleanup_media` deletes
+    /// files before rows within each batch, so a search served during a
+    /// cleanup legitimately sees rows whose files are already gone.
+    ///
+    /// This counter cannot distinguish that from a real problem: it only ever
+    /// increments and resets at process start, so one benign hit reads the same
+    /// as a persistent fault for the rest of the process lifetime. Compare
+    /// across restarts, not within one.
+    ///
+    /// It also counts *serve events*, not distinct rows — the same missing file
+    /// served a hundred times counts a hundred times. Read a large value
+    /// against `media_served` before concluding anything from HEU-624's
+    /// interpretation table.
+    pub media_absent: u64,
 }
 
 /// One search result row. Mirrors the storage-layer `SearchResult` shape,
@@ -641,6 +673,8 @@ mod tests {
             audio_segment_count: 10,
             oldest_entry_ms: Some(1_700_000_000_000),
             retention_days: 30,
+            media_served: 900,
+            media_absent: 3,
         };
         let json = serde_json::to_string(&stats).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -650,6 +684,10 @@ mod tests {
         assert_eq!(v["audio_segment_count"], 10);
         assert_eq!(v["oldest_entry_ms"], 1_700_000_000_000_i64);
         assert_eq!(v["retention_days"], 30);
+        // Both counters ship, and ship together: an absent count with no
+        // denominator is uninterpretable. See HEU-624 BR-2.
+        assert_eq!(v["media_served"], 900);
+        assert_eq!(v["media_absent"], 3);
     }
 
     #[test]
@@ -661,6 +699,8 @@ mod tests {
             audio_segment_count: 0,
             oldest_entry_ms: None,
             retention_days: 30,
+            media_served: 0,
+            media_absent: 0,
         };
         let json = serde_json::to_string(&stats).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
