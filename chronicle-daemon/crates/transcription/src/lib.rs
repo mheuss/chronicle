@@ -425,14 +425,14 @@ impl<T> StateSlot<T> {
             Ok(slot) => slot,
             Err(poisoned) => {
                 let mut slot = poisoned.into_inner();
-                // LOAD-BEARING: the slot must be emptied before `make()` runs
-                // below. A panic leaves the mutex poisoned with the corrupted
-                // state still in it; if we kept that state and a later
-                // `make()` failed, it would sit behind an un-poisoned lock and
-                // the next call would use it as though it were healthy.
-                // Emptying makes the worst case an empty slot, which any later
-                // call just refills. The position relative to `clear_poison()`
-                // is free — swapping those two is a no-op.
+                // LOAD-BEARING: the slot must be emptied before the `is_none`
+                // check below. A panic leaves the mutex poisoned with the
+                // corrupted state still in it. Keep that state and `is_none`
+                // is false, so `make()` never runs and `use_state` is handed
+                // the corrupted state on this very call. Emptying makes the
+                // worst case an empty slot, which any later call just refills.
+                // The position relative to `clear_poison()` is free — swapping
+                // those two is a no-op.
                 *slot = None;
                 self.slot.clear_poison();
                 log::warn!("discarding transcription state after a panic");
