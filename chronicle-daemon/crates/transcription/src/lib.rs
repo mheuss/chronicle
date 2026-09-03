@@ -1171,8 +1171,20 @@ mod tests {
     #[ignore = "timing measurement for HEU-664; needs a provisioned model; run manually"]
     fn measure_create_state_cost() {
         let base = test_base_dir();
-        let engine =
-            TranscriptionEngine::load(&base, DEFAULT_VARIANT).expect("model must be present");
+        // Overridable because the figure is per-variant and the variant is part
+        // of the label: HEU-664's baseline churn run used `small`, while the
+        // code default is `base`. Comparing a `base` cost against a `small`
+        // run is the mistake this exists to prevent.
+        let variant = std::env::var("CHRONICLE_TEST_VARIANT")
+            .ok()
+            .map(|v| parse_variant(&v).expect("CHRONICLE_TEST_VARIANT must be allow-listed"))
+            .unwrap_or(DEFAULT_VARIANT);
+        assert!(
+            model_present(&base, variant),
+            "no `{variant}` model at {} — provision one",
+            base.display()
+        );
+        let engine = TranscriptionEngine::load(&base, variant).expect("model must be present");
 
         // The FIRST state pays one-time Metal setup that later ones do not, so
         // time it separately rather than letting it skew the loop.
@@ -1192,7 +1204,7 @@ mod tests {
 
         println!(
             "create_state ({}, {} build): cold {:?}, then {} runs, {:?} total, {:?} each",
-            DEFAULT_VARIANT.as_str(),
+            variant.as_str(),
             if cfg!(debug_assertions) {
                 "debug"
             } else {
