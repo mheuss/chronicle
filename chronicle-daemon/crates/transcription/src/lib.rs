@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 
 use ogg::reading::PacketReader;
 use opus::{Channels, Decoder};
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+};
 
 /// Subdirectory under the Chronicle base dir where ggml model files live.
 pub const MODELS_SUBDIR: &str = "models";
@@ -476,9 +478,19 @@ impl<T> StateSlot<T> {
 }
 
 /// whisper.cpp engine. The `WhisperContext` (the loaded model) is created once
-/// and shared via `Arc`; each `transcribe` call creates its own `WhisperState`.
+/// and shared via `Arc`. One `WhisperState` is created on first use and reused
+/// for the life of the engine — creating one allocates the whole GGML compute
+/// backend, so doing it per call rebuilt Metal on every segment (HEU-664).
+///
+/// The slot holds its mutex across the whole decode, so concurrent
+/// `transcribe` calls serialize. That costs nothing today: `transcribe_loop`
+/// drains its channel one job at a time with a single `spawn_blocking` in
+/// flight. It is a deliberate trade — a shared state cannot be used from two
+/// threads at once, and per-worker states would reintroduce the per-state
+/// backend allocation this exists to remove.
 pub struct TranscriptionEngine {
     ctx: WhisperContext,
+    state: StateSlot<WhisperState>,
     variant: String,
 }
 
@@ -502,6 +514,7 @@ impl TranscriptionEngine {
 
         Ok(Self {
             ctx,
+            state: StateSlot::new(),
             variant: variant.as_str().to_string(),
         })
     }
@@ -509,48 +522,57 @@ impl TranscriptionEngine {
 
 impl Transcriber for TranscriptionEngine {
     fn transcribe(&self, pcm_16k_mono: &[f32]) -> Result<Transcript, TranscriptionError> {
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| TranscriptionError::Whisper(e.to_string()))?;
+        self.state.with(
+            || {
+                self.ctx
+                    .create_state()
+                    .map_err(|e| TranscriptionError::Whisper(e.to_string()))
+            },
+            |state| {
+                let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+                params.set_translate(false);
+                // language = None means "auto-detect AND transcribe". (set_detect_language(true)
+                // is detect-ONLY — it returns 0 segments and no text. HEU-472 T11.)
+                params.set_language(None);
+                params.set_suppress_blank(true);
+                params.set_n_threads(4); // Metal does the work; keep CPU threads modest
+                // Pinned, not inherited. The state is shared across segments now,
+                // so this is what stops one segment's decode priming the next.
+                // It is already the whisper.cpp default, but whisper-rs documents
+                // it as `false` (whisper_params.rs:119-123) and that is wrong.
+                params.set_no_context(true);
 
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        params.set_translate(false);
-        // language = None means "auto-detect AND transcribe". (set_detect_language(true)
-        // is detect-ONLY — it returns 0 segments and no text. HEU-472 T11.)
-        params.set_language(None);
-        params.set_suppress_blank(true);
-        params.set_n_threads(4); // Metal does the work; keep CPU threads modest
-
-        state
-            .full(params, pcm_16k_mono)
-            .map_err(|e| TranscriptionError::Whisper(e.to_string()))?;
-
-        let n = state
-            .full_n_segments()
-            .map_err(|e| TranscriptionError::Whisper(e.to_string()))?;
-        let mut texts: Vec<String> = Vec::with_capacity(n as usize);
-        for i in 0..n {
-            // Lossy decode: a multibyte codepoint split across a segment boundary
-            // degrades to U+FFFD rather than failing the whole transcript (this
-            // feature auto-detects language, so non-Latin scripts are expected).
-            texts.push(
                 state
-                    .full_get_segment_text_lossy(i)
-                    .map_err(|e| TranscriptionError::Whisper(e.to_string()))?,
-            );
-        }
+                    .full(params, pcm_16k_mono)
+                    .map_err(|e| TranscriptionError::Whisper(e.to_string()))?;
 
-        // Marker filter + empty-text guard (whisper-rs 0.14.4 has no
-        // per-segment no_speech_prob).
-        let text = concat_segment_text(texts.iter().map(String::as_str));
-        let language = state
-            .full_lang_id_from_state()
-            .ok()
-            .and_then(whisper_rs::get_lang_str)
-            .map(|s| s.to_string());
+                let n = state
+                    .full_n_segments()
+                    .map_err(|e| TranscriptionError::Whisper(e.to_string()))?;
+                let mut texts: Vec<String> = Vec::with_capacity(n as usize);
+                for i in 0..n {
+                    // Lossy decode: a multibyte codepoint split across a segment boundary
+                    // degrades to U+FFFD rather than failing the whole transcript (this
+                    // feature auto-detects language, so non-Latin scripts are expected).
+                    texts.push(
+                        state
+                            .full_get_segment_text_lossy(i)
+                            .map_err(|e| TranscriptionError::Whisper(e.to_string()))?,
+                    );
+                }
 
-        Ok(Transcript { text, language })
+                // Marker filter + empty-text guard (whisper-rs 0.14.4 has no
+                // per-segment no_speech_prob).
+                let text = concat_segment_text(texts.iter().map(String::as_str));
+                let language = state
+                    .full_lang_id_from_state()
+                    .ok()
+                    .and_then(whisper_rs::get_lang_str)
+                    .map(|s| s.to_string());
+
+                Ok(Transcript { text, language })
+            },
+        )
     }
 
     fn variant(&self) -> &str {
