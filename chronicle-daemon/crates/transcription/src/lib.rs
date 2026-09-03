@@ -1141,7 +1141,7 @@ mod tests {
     /// non-default data dir. Shared by the tests that need a real model, so
     /// they cannot drift apart on where they look.
     #[track_caller]
-    fn test_base_dir() -> PathBuf {
+    fn test_base_dir(variant: ModelVariant) -> PathBuf {
         let base = std::env::var("CHRONICLE_TEST_BASE_DIR").unwrap_or_else(|_| {
             format!(
                 "{}/Library/Application Support/Chronicle",
@@ -1154,73 +1154,104 @@ mod tests {
         // skip. Reporting `ok` without running whisper is exactly how the bug
         // `engine_transcribes_real_speech` guards went unnoticed.
         assert!(
-            model_present(&base, DEFAULT_VARIANT),
-            "no whisper model at {} — provision one or set CHRONICLE_TEST_BASE_DIR",
+            model_present(&base, variant),
+            "no `{variant}` model at {} — provision one or set CHRONICLE_TEST_BASE_DIR",
             base.display()
         );
         base
     }
 
-    /// What `create_state()` costs — the work HEU-664 stops doing per call.
+    /// What one state's create+free cycle costs — the work HEU-664 stops doing
+    /// per call.
     ///
-    /// Not a before/after latency benchmark: it measures the removed work
-    /// directly, which needs no base-revision build or fixed PCM fixture.
-    /// Report it as per-state creation cost, never as a transcription latency
-    /// delta.
+    /// **Create AND free, not creation alone.** Each iteration builds a state
+    /// and drops it inside the timer. That is deliberate: the pre-HEU-664 path
+    /// created a state per `transcribe` call and freed it at the end of that
+    /// call, so the cycle is exactly the removed work. Do not quote this as a
+    /// creation cost.
+    ///
+    /// Not a before/after latency benchmark either: it measures the removed
+    /// work directly, which needs no base-revision build or fixed PCM fixture.
+    /// Never report it as a transcription latency delta.
     #[test]
     #[ignore = "timing measurement for HEU-664; needs a provisioned model; run manually"]
     fn measure_create_state_cost() {
-        let base = test_base_dir();
         // Overridable because the figure is per-variant and the variant is part
         // of the label: HEU-664's baseline churn run used `small`, while the
         // code default is `base`. Comparing a `base` cost against a `small`
         // run is the mistake this exists to prevent.
         let variant = std::env::var("CHRONICLE_TEST_VARIANT")
             .ok()
-            .map(|v| parse_variant(&v).expect("CHRONICLE_TEST_VARIANT must be allow-listed"))
+            .map(|v| {
+                parse_variant(&v).unwrap_or_else(|| {
+                    panic!(
+                        "CHRONICLE_TEST_VARIANT must be one of {SUPPORTED_VARIANTS:?}, got {v:?}"
+                    )
+                })
+            })
             .unwrap_or(DEFAULT_VARIANT);
-        assert!(
-            model_present(&base, variant),
-            "no `{variant}` model at {} — provision one",
-            base.display()
-        );
+        let base = test_base_dir(variant);
         let engine = TranscriptionEngine::load(&base, variant).expect("model must be present");
 
-        // The FIRST state pays one-time Metal setup that later ones do not, so
-        // time it separately rather than letting it skew the loop.
-        let cold_start = std::time::Instant::now();
-        let warm = engine.ctx.create_state().expect("warm-up state");
-        let cold = cold_start.elapsed();
-        // Drop it before timing: holding it would keep a second backend
-        // resident throughout, which is not the lifecycle being measured.
-        drop(warm);
+        // Timed separately, but NOT because "the first state pays one-time Metal
+        // setup" — measurement says otherwise. The Metal device and metallib are
+        // a process-level singleton that `load` above already touched, outside
+        // both timers. Observed across four runs: 13.0, 11.5, 12.2 ms against a
+        // 9.9-10.9 ms steady state, and 75.9 ms once when the process was the
+        // first to touch Metal in the OS session. So this figure is "how warm
+        // was Metal in this session", is not reproducible, and must not be
+        // quoted as a stable number.
+        let first_start = std::time::Instant::now();
+        let first = engine.ctx.create_state().expect("first state");
+        let first_elapsed = first_start.elapsed();
+        // Drop before the loop: holding it would keep a second backend resident
+        // throughout, which is not the lifecycle being measured.
+        drop(first);
 
+        // Per-iteration samples, not just a mean: with a 9.9-10.9 ms spread one
+        // scheduler hiccup skews a number that gets quoted indefinitely. Min is
+        // the most robust single figure here.
         let runs = 10;
-        let start = std::time::Instant::now();
+        let mut samples: Vec<std::time::Duration> = Vec::with_capacity(runs);
         for _ in 0..runs {
-            let _state = engine.ctx.create_state().expect("state");
+            let iter_start = std::time::Instant::now();
+            let state = engine.ctx.create_state().expect("state");
+            drop(state);
+            samples.push(iter_start.elapsed());
         }
-        let elapsed = start.elapsed();
+        let elapsed: std::time::Duration = samples.iter().sum();
+        samples.sort();
+        let min = samples[0];
+        let median = samples[runs / 2];
 
+        // whisper.cpp/ggml is built by `whisper-rs-sys` with a hardcoded CMake
+        // `Release` (its build.rs), so `cargo test --release` measures the same
+        // native code as a debug run. Only the thin Rust wrapper changes. The
+        // label says so, or the reader infers this is a pessimistic debug
+        // figure that production beats -- it is not.
         println!(
-            "create_state ({}, {} build): cold {:?}, then {} runs, {:?} total, {:?} each",
+            "state create+free ({}, rustc {}, whisper.cpp Release always): \
+             first-after-load {:?} (NOT reproducible -- Metal warmth), \
+             then {} runs: min {:?}, median {:?}, mean {:?}, total {:?}",
             variant.as_str(),
             if cfg!(debug_assertions) {
                 "debug"
             } else {
                 "release"
             },
-            cold,
+            first_elapsed,
             runs,
-            elapsed,
-            elapsed / runs
+            min,
+            median,
+            elapsed / runs as u32,
+            elapsed
         );
     }
 
     #[test]
     #[ignore = "needs a provisioned whisper model + macOS `say`; run manually"]
     fn engine_transcribes_real_speech() {
-        let base = test_base_dir();
+        let base = test_base_dir(DEFAULT_VARIANT);
 
         let pcm = synthesize_test_phrase("the quick brown fox jumps over the lazy dog");
         let engine = TranscriptionEngine::load(&base, DEFAULT_VARIANT).unwrap();
