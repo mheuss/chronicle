@@ -1078,11 +1078,67 @@ mod tests {
         ));
     }
 
+    /// `say` the phrase, encode with the production encoder, decode back to
+    /// 16 kHz mono PCM — the same path the pipeline takes. Test-only.
+    ///
+    /// Extracted so a second phrase costs one line rather than a duplicated
+    /// fixture; the whole body was previously inlined in the caller.
+    fn synthesize_test_phrase(phrase: &str) -> Vec<f32> {
+        use chronicle_audio::OggOpusEncoder;
+
+        // Generate speech with macOS `say` as 48 kHz mono f32 WAV.
+        let dir = tempdir().unwrap();
+        let wav = dir.path().join("tts.wav");
+        let ok = std::process::Command::new("say")
+            .args([
+                "-o",
+                wav.to_str().unwrap(),
+                "--data-format=LEF32@48000",
+                phrase,
+            ])
+            .status()
+            .expect("failed to spawn `say` — is it on PATH?")
+            .success();
+        assert!(ok, "say failed");
+
+        // Read the WAV's f32 samples (find the `data` chunk; rest is f32le).
+        let bytes = std::fs::read(&wav).expect("failed to read `say` output");
+        let data_pos = bytes
+            .windows(4)
+            .position(|w| w == b"data")
+            .expect("no `data` chunk in `say` output")
+            + 8; // skip the "data" tag + size
+        let samples: Vec<f32> = bytes[data_pos..]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
+            .collect();
+
+        // Encode to Ogg/Opus with the production encoder at the production
+        // bitrate (AudioConfig::default().bitrate), then decode like the
+        // pipeline does.
+        let opus = dir.path().join("tts.opus");
+        OggOpusEncoder::new(1, 64_000, opus::Application::Voip)
+            .encode_to_file(&samples, &opus)
+            .unwrap();
+        let pcm = decode_opus_16k_mono(&opus).unwrap();
+
+        // Guard the transcript asserts in the caller: if `say` or the WAV parse
+        // yielded no audio, an empty transcript would be blamed on the
+        // detect_language bug and send the next maintainer after an
+        // already-correct parameter.
+        assert!(
+            pcm.len() > DECODE_RATE,
+            "TTS produced under 1s of audio ({} samples) — fix the fixture, not the engine",
+            pcm.len()
+        );
+        pcm
+    }
+
     #[test]
     #[ignore = "needs a provisioned whisper model + macOS `say`; run manually"]
     fn engine_transcribes_real_speech() {
-        use chronicle_audio::OggOpusEncoder;
-
         // Chronicle *base* dir — the one holding `models/` — overridable for a
         // non-default data dir. `#[ignore]` already keeps this off CI, so anyone
         // reaching this line asked for the test on purpose: a missing model is a
@@ -1101,55 +1157,8 @@ mod tests {
             base.display()
         );
 
-        // 1) Generate speech with macOS `say` as 48 kHz mono f32 WAV.
-        let dir = tempdir().unwrap();
-        let wav = dir.path().join("tts.wav");
-        let phrase = "the quick brown fox jumps over the lazy dog";
-        let ok = std::process::Command::new("say")
-            .args([
-                "-o",
-                wav.to_str().unwrap(),
-                "--data-format=LEF32@48000",
-                phrase,
-            ])
-            .status()
-            .expect("failed to spawn `say` — is it on PATH?")
-            .success();
-        assert!(ok, "say failed");
-
-        // 2) Read the WAV's f32 samples (find the `data` chunk; rest is f32le).
-        let bytes = std::fs::read(&wav).expect("failed to read `say` output");
-        let data_pos = bytes
-            .windows(4)
-            .position(|w| w == b"data")
-            .expect("no `data` chunk in `say` output")
-            + 8; // skip the "data" tag + size
-        let samples: Vec<f32> = bytes[data_pos..]
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| f32::from_le_bytes(*c))
-            .collect();
-
-        // 3) Encode to Ogg/Opus with the production encoder at the production
-        //    bitrate (AudioConfig::default().bitrate), then decode like the
-        //    pipeline does.
-        let opus = dir.path().join("tts.opus");
-        OggOpusEncoder::new(1, 64_000, opus::Application::Voip)
-            .encode_to_file(&samples, &opus)
-            .unwrap();
-        let pcm = decode_opus_16k_mono(&opus).unwrap();
-
-        // Guard the transcript assert below: if `say` or the WAV parse yielded no
-        // audio, an empty transcript would be blamed on the detect_language bug
-        // and send the next maintainer after an already-correct parameter.
-        assert!(
-            pcm.len() > DECODE_RATE,
-            "TTS produced under 1s of audio ({} samples) — fix the fixture, not the engine",
-            pcm.len()
-        );
-
-        // 4) Transcribe with the real engine and assert it produced text.
+        // 1) Transcribe with the real engine and assert it produced text.
+        let pcm = synthesize_test_phrase("the quick brown fox jumps over the lazy dog");
         let engine = TranscriptionEngine::load(&base, DEFAULT_VARIANT).unwrap();
         let t = engine.transcribe(&pcm).unwrap();
         assert!(
@@ -1168,6 +1177,52 @@ mod tests {
             t.language.as_deref(),
             Some("en"),
             "expected auto-detected language `en`"
+        );
+
+        // 2) Second call on the SAME engine — this is the HEU-664 guarantee.
+        // No words in common with phrase 1, so a stale first result cannot pass.
+        let second_pcm = synthesize_test_phrase("pack my box with five dozen liquor jugs");
+        let second = engine.transcribe(&second_pcm).expect("second transcribe");
+        let lower = second.text.to_lowercase();
+        assert!(
+            lower.contains("box") || lower.contains("dozen") || lower.contains("jugs"),
+            "second transcription on a reused state returned: {:?}",
+            second.text
+        );
+
+        // The actual point of HEU-664: two transcriptions, ONE state.
+        // Without this the test passes identically against per-call creation.
+        assert_eq!(
+            engine.state.creation_count(),
+            1,
+            "two transcriptions must share one whisper state"
+        );
+
+        // 3) Empty PCM must not cost the state. `full()` rejects an empty buffer
+        // before it touches the state, so without the guard in `transcribe` that
+        // `Err` reaches `StateSlot::with`, which discards a state that never ran
+        // — turning a run of short segments back into the per-segment rebuild
+        // HEU-664 removes. This is the only place that regression is observable.
+        assert!(
+            matches!(engine.transcribe(&[]), Err(TranscriptionError::Whisper(_))),
+            "empty PCM must be rejected"
+        );
+
+        // The rebuild moves the counter, not the discard — emptying the slot
+        // builds nothing. So the empty call must be followed by a real one or
+        // this assertion passes with the guard deleted. Confirmed by mutation:
+        // without this third transcription, removing the guard is invisible.
+        let third = engine
+            .transcribe(&second_pcm)
+            .expect("third transcribe after an empty buffer");
+        assert!(
+            !third.text.is_empty(),
+            "engine must still work after a rejected empty buffer"
+        );
+        assert_eq!(
+            engine.state.creation_count(),
+            1,
+            "a rejected empty buffer must not have discarded the state"
         );
     }
 
