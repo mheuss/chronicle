@@ -1175,7 +1175,7 @@ mod tests {
     /// Never report it as a transcription latency delta.
     #[test]
     #[ignore = "timing measurement for HEU-664; needs a provisioned model; run manually"]
-    fn measure_create_state_cost() {
+    fn measure_state_create_free_cost() {
         // Overridable because the figure is per-variant and the variant is part
         // of the label: HEU-664's baseline churn run used `small`, while the
         // code default is `base`. Comparing a `base` cost against a `small`
@@ -1196,11 +1196,11 @@ mod tests {
         // Timed separately, but NOT because "the first state pays one-time Metal
         // setup" — measurement says otherwise. The Metal device and metallib are
         // a process-level singleton that `load` above already touched, outside
-        // both timers. Observed across four runs: 13.0, 11.5, 12.2 ms against a
-        // 9.9-10.9 ms steady state, and 75.9 ms once when the process was the
-        // first to touch Metal in the OS session. So this figure is "how warm
-        // was Metal in this session", is not reproducible, and must not be
-        // quoted as a stable number.
+        // both timers. Observed on `base`: 13.0, 11.5, 12.2, 26.0 ms and once
+        // 75.9 ms when the process was first to touch Metal in the OS session,
+        // against a 9.9-10.9 ms steady state for the same variant. So this
+        // figure is "how warm was Metal in this session", is not reproducible,
+        // and must not be quoted as a stable number.
         let first_start = std::time::Instant::now();
         let first = engine.ctx.create_state().expect("first state");
         let first_elapsed = first_start.elapsed();
@@ -1208,9 +1208,9 @@ mod tests {
         // throughout, which is not the lifecycle being measured.
         drop(first);
 
-        // Per-iteration samples, not just a mean: with a 9.9-10.9 ms spread one
-        // scheduler hiccup skews a number that gets quoted indefinitely. Min is
-        // the most robust single figure here.
+        // Per-iteration samples, not just a mean: with a 9.9-10.9 ms spread on
+        // `base` (12.9-13.4 on `small`) one scheduler hiccup skews a number that
+        // gets quoted indefinitely. Min is the most robust single figure here.
         let runs = 10;
         let mut samples: Vec<std::time::Duration> = Vec::with_capacity(runs);
         for _ in 0..runs {
@@ -1222,7 +1222,10 @@ mod tests {
         let elapsed: std::time::Duration = samples.iter().sum();
         samples.sort();
         let min = samples[0];
-        let median = samples[runs / 2];
+        // True median: for an even `runs`, the mean of the two middles. Indexing
+        // `runs / 2` alone would report the upper middle, which is off by half
+        // an interval from what "median" is quoted to mean.
+        let median = (samples[runs / 2 - 1] + samples[runs / 2]) / 2;
 
         // whisper.cpp/ggml is built by `whisper-rs-sys` with a hardcoded CMake
         // `Release` (its build.rs), so `cargo test --release` measures the same
