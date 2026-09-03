@@ -1083,6 +1083,7 @@ mod tests {
     ///
     /// Extracted so a second phrase costs one line rather than a duplicated
     /// fixture; the whole body was previously inlined in the caller.
+    #[track_caller]
     fn synthesize_test_phrase(phrase: &str) -> Vec<f32> {
         use chronicle_audio::OggOpusEncoder;
 
@@ -1157,9 +1158,29 @@ mod tests {
             base.display()
         );
 
-        // 1) Transcribe with the real engine and assert it produced text.
         let pcm = synthesize_test_phrase("the quick brown fox jumps over the lazy dog");
         let engine = TranscriptionEngine::load(&base, DEFAULT_VARIANT).unwrap();
+
+        // 1) Cold: the empty-PCM guard must reject before the slot is ever
+        // populated. Without it, `with` finds an empty slot, builds the whole
+        // GGML backend, hands it to `full()`, and discards it on the `Err` —
+        // so an empty first segment pays a full build for nothing. Checked
+        // cold as well as warm because `load` leaves the slot empty and
+        // nothing exempts the first segment from being short.
+        assert!(
+            matches!(
+                engine.transcribe(&[]),
+                Err(TranscriptionError::Whisper(ref m)) if m == "Input sample buffer was empty."
+            ),
+            "empty PCM must be rejected with whisper-rs's own message"
+        );
+        assert_eq!(
+            engine.state.creation_count(),
+            0,
+            "a rejected empty buffer must not have built a state"
+        );
+
+        // 2) Transcribe with the real engine and assert it produced text.
         let t = engine.transcribe(&pcm).unwrap();
         assert!(
             !t.text.is_empty(),
@@ -1179,7 +1200,7 @@ mod tests {
             "expected auto-detected language `en`"
         );
 
-        // 2) Second call on the SAME engine — this is the HEU-664 guarantee.
+        // 3) Second call on the SAME engine — this is the HEU-664 guarantee.
         // No words in common with phrase 1, so a stale first result cannot pass.
         let second_pcm = synthesize_test_phrase("pack my box with five dozen liquor jugs");
         let second = engine.transcribe(&second_pcm).expect("second transcribe");
@@ -1198,26 +1219,30 @@ mod tests {
             "two transcriptions must share one whisper state"
         );
 
-        // 3) Empty PCM must not cost the state. `full()` rejects an empty buffer
-        // before it touches the state, so without the guard in `transcribe` that
-        // `Err` reaches `StateSlot::with`, which discards a state that never ran
-        // — turning a run of short segments back into the per-segment rebuild
-        // HEU-664 removes. This is the only place that regression is observable.
+        // 4) Warm: the same guard with the slot populated. Without it the `Err`
+        // from `full()` reaches `StateSlot::with`, which discards a healthy
+        // state — turning a run of short segments back into the per-segment
+        // rebuild HEU-664 removes.
         assert!(
-            matches!(engine.transcribe(&[]), Err(TranscriptionError::Whisper(_))),
-            "empty PCM must be rejected"
+            matches!(
+                engine.transcribe(&[]),
+                Err(TranscriptionError::Whisper(ref m)) if m == "Input sample buffer was empty."
+            ),
+            "empty PCM must be rejected with whisper-rs's own message"
         );
 
         // The rebuild moves the counter, not the discard — emptying the slot
-        // builds nothing. So the empty call must be followed by a real one or
-        // this assertion passes with the guard deleted. Confirmed by mutation:
-        // without this third transcription, removing the guard is invisible.
+        // builds nothing. So the warm empty call must be followed by a real one
+        // or the assertion below passes with the guard deleted. Confirmed by
+        // mutation: without this third transcription it is invisible.
         let third = engine
             .transcribe(&second_pcm)
             .expect("third transcribe after an empty buffer");
+        let lower = third.text.to_lowercase();
         assert!(
-            !third.text.is_empty(),
-            "engine must still work after a rejected empty buffer"
+            lower.contains("box") || lower.contains("dozen") || lower.contains("jugs"),
+            "third transcription after a rejected empty buffer returned: {:?}",
+            third.text
         );
         assert_eq!(
             engine.state.creation_count(),
