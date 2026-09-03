@@ -455,7 +455,10 @@ impl<T> StateSlot<T> {
         if result.is_err() {
             // Matches the per-call behaviour this type replaces: a state that
             // errored is never reused. Upstream documents no reuse guarantee
-            // after an error, so do not invent one.
+            // after an error, so do not invent one. In practice `transcribe`
+            // has one reachable discard trigger, `full()` — `full_n_segments`
+            // always returns `Ok`, and the lossy text getter only fails on a
+            // null pointer, which indexing below `n` cannot produce.
             //
             // Emptied before the log so a panicking logger cannot poison the
             // mutex with the errored state still in it. The count reads the
@@ -488,8 +491,18 @@ impl<T> StateSlot<T> {
 /// flight. It is a deliberate trade — a shared state cannot be used from two
 /// threads at once, and per-worker states would reintroduce the per-state
 /// backend allocation this exists to remove.
+///
+/// The trade is memory: between segments the engine now holds the GGML compute
+/// backend, the KV caches, the mel buffer, and the last decode's segments, and
+/// keeps holding them while the daemon is idle. That is the point — it is what
+/// the rebuild was paying for — but it is why resident size sits higher than it
+/// did before.
 pub struct TranscriptionEngine {
     ctx: WhisperContext,
+    // `ctx` is declared first so it drops first. Safe only because
+    // `WhisperState` holds its own `Arc<WhisperInnerContext>`, which keeps the
+    // model alive until the state's `Drop` has run — do not reorder on the
+    // assumption that the state must outlive the context by declaration.
     state: StateSlot<WhisperState>,
     variant: String,
 }
@@ -522,6 +535,19 @@ impl TranscriptionEngine {
 
 impl Transcriber for TranscriptionEngine {
     fn transcribe(&self, pcm_16k_mono: &[f32]) -> Result<Transcript, TranscriptionError> {
+        // Guard before the slot, not inside it. `WhisperState::full` rejects an
+        // empty buffer before it touches the state, so letting that `Err` reach
+        // `StateSlot::with` would discard a state that never ran — and the next
+        // segment would pay a full backend rebuild for nothing. Empty PCM is
+        // reachable: `decode_opus_16k_mono` clears the buffer when a segment is
+        // shorter than the encoder pre-skip. Same error text whisper-rs
+        // produces, so the caller sees exactly what it saw before HEU-664.
+        if pcm_16k_mono.is_empty() {
+            return Err(TranscriptionError::Whisper(
+                "Input sample buffer was empty.".into(),
+            ));
+        }
+
         self.state.with(
             || {
                 self.ctx
@@ -537,9 +563,22 @@ impl Transcriber for TranscriptionEngine {
                 params.set_suppress_blank(true);
                 params.set_n_threads(4); // Metal does the work; keep CPU threads modest
                 // Pinned, not inherited. The state is shared across segments now,
-                // so this is what stops one segment's decode priming the next.
+                // so this stops one segment's *prompt history* priming the next.
                 // It is already the whisper.cpp default, but whisper-rs documents
                 // it as `false` (whisper_params.rs:119-123) and that is wrong.
+                //
+                // It does NOT make segments fully independent, and nothing can:
+                // `decoders[0].rng` is seeded once per state (whisper.cpp:3346)
+                // and the per-call reset loop starts at `j = 1` (:5426), so with
+                // `best_of: 1` it is never re-seeded. Temperature fallback
+                // consumes it (:5199), and the ladder is live because
+                // `temperature_inc` defaults to 0.2. So a segment that hits
+                // fallback advances the rng for later ones, and identical audio
+                // at a different queue position can decode differently.
+                // Accepted: whisper.cpp exposes no reseed, and the alternatives
+                // are disabling fallback or per-call states — the latter being
+                // the thing HEU-664 removes. Output is quality-equivalent, not
+                // byte-identical.
                 params.set_no_context(true);
 
                 state
