@@ -1172,7 +1172,7 @@ mod tests {
                 engine.transcribe(&[]),
                 Err(TranscriptionError::Whisper(ref m)) if m == "Input sample buffer was empty."
             ),
-            "empty PCM must be rejected with whisper-rs's own message"
+            "empty PCM must be rejected with the guard's documented literal"
         );
         assert_eq!(
             engine.state.creation_count(),
@@ -1228,7 +1228,7 @@ mod tests {
                 engine.transcribe(&[]),
                 Err(TranscriptionError::Whisper(ref m)) if m == "Input sample buffer was empty."
             ),
-            "empty PCM must be rejected with whisper-rs's own message"
+            "empty PCM must be rejected with the guard's documented literal"
         );
 
         // The rebuild moves the counter, not the discard — emptying the slot
