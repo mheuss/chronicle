@@ -430,7 +430,22 @@ impl<T> StateSlot<T> {
         }
         let state = slot.as_mut().expect("populated above");
 
-        use_state(state)
+        let result = use_state(state);
+        if result.is_err() {
+            // Matches the per-call behaviour this type replaces: a state that
+            // errored is never reused. Upstream documents no reuse guarantee
+            // after an error, so do not invent one.
+            //
+            // The count is here because it is what verifies the fix: one state
+            // per engine means one backend bring-up, and each discard adds
+            // exactly one more (HEU-664).
+            log::warn!(
+                "discarding transcription state after an error (built {} so far)",
+                self.creation_count()
+            );
+            *slot = None;
+        }
+        result
     }
 }
 
@@ -555,6 +570,30 @@ mod tests {
             slot.creation_count(),
             1,
             "the slot's own counter must agree"
+        );
+    }
+
+    #[test]
+    fn state_slot_discards_a_state_that_errored() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let creations = AtomicUsize::new(0);
+        let slot: StateSlot<u32> = StateSlot::new();
+        let make = || {
+            creations.fetch_add(1, Ordering::Relaxed);
+            Ok(7)
+        };
+
+        let first: Result<u32, &str> = slot.with(make, |_| Err("boom"));
+        assert_eq!(first, Err("boom"));
+
+        let second: Result<u32, &str> = slot.with(make, |state| Ok(*state));
+        assert_eq!(second, Ok(7));
+
+        assert_eq!(
+            creations.load(Ordering::Relaxed),
+            2,
+            "the errored state must be dropped, forcing a rebuild"
         );
     }
 
