@@ -565,20 +565,18 @@ impl Transcriber for TranscriptionEngine {
                 // Pinned, not inherited. The state is shared across segments now,
                 // so this stops one segment's *prompt history* priming the next.
                 // It is already the whisper.cpp default, but whisper-rs documents
-                // it as `false` (whisper_params.rs:119-123) and that is wrong.
+                // it as `false` (whisper_params.rs:119-121) and that is wrong.
                 //
                 // It does NOT make segments fully independent, and nothing can:
-                // `decoders[0].rng` is seeded once per state (whisper.cpp:3346)
-                // and the per-call reset loop starts at `j = 1` (:5426), so with
-                // `best_of: 1` it is never re-seeded. Temperature fallback
-                // consumes it (:5199), and the ladder is live because
-                // `temperature_inc` defaults to 0.2. So a segment that hits
-                // fallback advances the rng for later ones, and identical audio
-                // at a different queue position can decode differently.
-                // Accepted: whisper.cpp exposes no reseed, and the alternatives
-                // are disabling fallback or per-call states — the latter being
-                // the thing HEU-664 removes. Output is quality-equivalent, not
-                // byte-identical.
+                // the state's decoder RNG is seeded once and never reset, so a
+                // segment that hits temperature fallback shifts later ones, and
+                // identical audio at a different queue position can decode
+                // differently. Output is no longer byte-identical across a
+                // queue; whether quality differs has not been measured.
+                // Accepted — whisper.cpp exposes no reseed, and the
+                // alternatives are disabling fallback or per-call states, the
+                // latter being what HEU-664 removes. Mechanism and line-level
+                // citations: docs/development/whisper-rs.md.
                 params.set_no_context(true);
 
                 state
