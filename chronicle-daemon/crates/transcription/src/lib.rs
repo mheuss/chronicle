@@ -498,11 +498,11 @@ impl<T> StateSlot<T> {
 /// the rebuild was paying for — but it is why resident size sits higher than it
 /// did before.
 pub struct TranscriptionEngine {
+    // Declared first, so it drops first. Safe only because `WhisperState` holds
+    // its own `Arc<WhisperInnerContext>`, which keeps the model alive until the
+    // state's `Drop` has run — do not reorder on the assumption that the state
+    // must outlive the context by declaration.
     ctx: WhisperContext,
-    // `ctx` is declared first so it drops first. Safe only because
-    // `WhisperState` holds its own `Arc<WhisperInnerContext>`, which keeps the
-    // model alive until the state's `Drop` has run — do not reorder on the
-    // assumption that the state must outlive the context by declaration.
     state: StateSlot<WhisperState>,
     variant: String,
 }
@@ -540,7 +540,7 @@ impl Transcriber for TranscriptionEngine {
         // `StateSlot::with` would discard a state that never ran — and the next
         // segment would pay a full backend rebuild for nothing. Empty PCM is
         // reachable: `decode_opus_16k_mono` clears the buffer when a segment is
-        // shorter than the encoder pre-skip. Same error text whisper-rs
+        // empty or shorter than the encoder pre-skip. Same error text whisper-rs
         // produces, so the caller sees exactly what it saw before HEU-664.
         if pcm_16k_mono.is_empty() {
             return Err(TranscriptionError::Whisper(
