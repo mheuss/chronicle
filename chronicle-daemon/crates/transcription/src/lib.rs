@@ -425,10 +425,14 @@ impl<T> StateSlot<T> {
             Ok(slot) => slot,
             Err(poisoned) => {
                 let mut slot = poisoned.into_inner();
-                // ORDER IS LOAD-BEARING: empty the slot, THEN clear the poison.
-                // Reversed, a failing `make()` below would leave the state a
-                // panic corrupted behind an un-poisoned lock, and the next
-                // call would use it as though it were healthy.
+                // LOAD-BEARING: the slot must be emptied before `make()` runs
+                // below. A panic leaves the mutex poisoned with the corrupted
+                // state still in it; if we kept that state and a later
+                // `make()` failed, it would sit behind an un-poisoned lock and
+                // the next call would use it as though it were healthy.
+                // Emptying makes the worst case an empty slot, which any later
+                // call just refills. The position relative to `clear_poison()`
+                // is free — swapping those two is a no-op.
                 *slot = None;
                 self.slot.clear_poison();
                 log::warn!("discarding transcription state after a panic");
@@ -643,6 +647,11 @@ mod tests {
         let after: Result<u32, ()> = slot.with(make, |state| Ok(*state));
         assert_eq!(after, Ok(7), "a panic must not disable later calls");
         assert_eq!(creations.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            slot.creation_count(),
+            2,
+            "the slot's own counter must agree"
+        );
     }
 
     #[test]
