@@ -436,14 +436,21 @@ impl<T> StateSlot<T> {
             // errored is never reused. Upstream documents no reuse guarantee
             // after an error, so do not invent one.
             //
-            // The count is here because it is what verifies the fix: one state
-            // per engine means one backend bring-up, and each discard adds
-            // exactly one more (HEU-664).
+            // Emptied before the log so a panicking logger cannot poison the
+            // mutex with the errored state still in it. The count reads the
+            // same either way — a discard never decrements it.
+            *slot = None;
+            // The count is what verifies the fix: one state per engine means
+            // one backend bring-up, and each discard adds at most one more —
+            // the rebuild only happens if another transcription follows, so a
+            // discard on the last one adds a line but no allocation
+            // (HEU-664). Deliberately whisper-specific wording in an otherwise
+            // domain-agnostic type: this string is the anchor HEU-664's live
+            // verification greps for.
             log::warn!(
                 "discarding transcription state after an error (built {} so far)",
                 self.creation_count()
             );
-            *slot = None;
         }
         result
     }
@@ -594,6 +601,11 @@ mod tests {
             creations.load(Ordering::Relaxed),
             2,
             "the errored state must be dropped, forcing a rebuild"
+        );
+        assert_eq!(
+            slot.creation_count(),
+            2,
+            "the slot's own counter must agree"
         );
     }
 
