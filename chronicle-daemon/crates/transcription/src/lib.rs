@@ -421,10 +421,25 @@ impl<T> StateSlot<T> {
         make: impl FnOnce() -> Result<T, E>,
         use_state: impl FnOnce(&mut T) -> Result<R, E>,
     ) -> Result<R, E> {
-        let mut slot = self.slot.lock().expect("StateSlot mutex poisoned");
+        let mut slot = match self.slot.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => {
+                let mut slot = poisoned.into_inner();
+                // ORDER IS LOAD-BEARING: empty the slot, THEN clear the poison.
+                // Reversed, a failing `make()` below would leave the state a
+                // panic corrupted behind an un-poisoned lock, and the next
+                // call would use it as though it were healthy.
+                *slot = None;
+                self.slot.clear_poison();
+                log::warn!("discarding transcription state after a panic");
+                slot
+            }
+        };
 
         if slot.is_none() {
-            *slot = Some(make()?);
+            *slot = Some(make().inspect_err(|_| {
+                log::error!("could not create transcription state");
+            })?);
             self.creations
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -606,6 +621,49 @@ mod tests {
             slot.creation_count(),
             2,
             "the slot's own counter must agree"
+        );
+    }
+
+    #[test]
+    fn state_slot_recovers_from_a_poisoned_lock() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let creations = AtomicUsize::new(0);
+        let slot: StateSlot<u32> = StateSlot::new();
+        let make = || {
+            creations.fetch_add(1, Ordering::Relaxed);
+            Ok(7)
+        };
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<u32, ()> = slot.with(make, |_| panic!("decoder exploded"));
+        }));
+        assert!(poisoned.is_err(), "the closure must have panicked");
+
+        let after: Result<u32, ()> = slot.with(make, |state| Ok(*state));
+        assert_eq!(after, Ok(7), "a panic must not disable later calls");
+        assert_eq!(creations.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn a_failed_rebuild_leaves_the_slot_empty() {
+        let slot: StateSlot<u32> = StateSlot::new();
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<u32, &str> = slot.with(|| Ok(7), |_| panic!("decoder exploded"));
+        }));
+        assert!(poisoned.is_err());
+
+        // Rebuild fails. The suspect state must NOT survive into the next call.
+        let failed: Result<u32, &str> = slot.with(|| Err("no gpu"), |state| Ok(*state));
+        assert_eq!(failed, Err("no gpu"));
+
+        // Next call gets a fresh state, never the one the panic left behind.
+        let recovered: Result<u32, &str> = slot.with(|| Ok(99), |state| Ok(*state));
+        assert_eq!(
+            recovered,
+            Ok(99),
+            "a failed rebuild must leave the slot empty, not the old state"
         );
     }
 
