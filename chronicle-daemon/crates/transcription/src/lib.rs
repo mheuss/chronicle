@@ -421,7 +421,7 @@ impl<T> StateSlot<T> {
         make: impl FnOnce() -> Result<T, E>,
         use_state: impl FnOnce(&mut T) -> Result<R, E>,
     ) -> Result<R, E> {
-        let mut slot = self.slot.lock().expect("poison handled in Task 3");
+        let mut slot = self.slot.lock().expect("StateSlot mutex poisoned");
 
         if slot.is_none() {
             *slot = Some(make()?);
@@ -550,6 +550,11 @@ mod tests {
             creations.load(Ordering::Relaxed),
             1,
             "five calls must share one state"
+        );
+        assert_eq!(
+            slot.creation_count(),
+            1,
+            "the slot's own counter must agree"
         );
     }
 
