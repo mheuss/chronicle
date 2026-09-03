@@ -1137,14 +1137,11 @@ mod tests {
         pcm
     }
 
-    #[test]
-    #[ignore = "needs a provisioned whisper model + macOS `say`; run manually"]
-    fn engine_transcribes_real_speech() {
-        // Chronicle *base* dir — the one holding `models/` — overridable for a
-        // non-default data dir. `#[ignore]` already keeps this off CI, so anyone
-        // reaching this line asked for the test on purpose: a missing model is a
-        // failure, not a skip. Reporting `ok` without running whisper is exactly
-        // how the bug this test guards went unnoticed.
+    /// Chronicle *base* dir — the one holding `models/` — overridable for a
+    /// non-default data dir. Shared by the tests that need a real model, so
+    /// they cannot drift apart on where they look.
+    #[track_caller]
+    fn test_base_dir() -> PathBuf {
         let base = std::env::var("CHRONICLE_TEST_BASE_DIR").unwrap_or_else(|_| {
             format!(
                 "{}/Library/Application Support/Chronicle",
@@ -1152,11 +1149,66 @@ mod tests {
             )
         });
         let base = PathBuf::from(base);
+        // `#[ignore]` already keeps these off CI, so anyone reaching this line
+        // asked for the test on purpose: a missing model is a failure, not a
+        // skip. Reporting `ok` without running whisper is exactly how the bug
+        // `engine_transcribes_real_speech` guards went unnoticed.
         assert!(
             model_present(&base, DEFAULT_VARIANT),
             "no whisper model at {} — provision one or set CHRONICLE_TEST_BASE_DIR",
             base.display()
         );
+        base
+    }
+
+    /// What `create_state()` costs — the work HEU-664 stops doing per call.
+    ///
+    /// Not a before/after latency benchmark: it measures the removed work
+    /// directly, which needs no base-revision build or fixed PCM fixture.
+    /// Report it as per-state creation cost, never as a transcription latency
+    /// delta.
+    #[test]
+    #[ignore = "timing measurement for HEU-664; needs a provisioned model; run manually"]
+    fn measure_create_state_cost() {
+        let base = test_base_dir();
+        let engine =
+            TranscriptionEngine::load(&base, DEFAULT_VARIANT).expect("model must be present");
+
+        // The FIRST state pays one-time Metal setup that later ones do not, so
+        // time it separately rather than letting it skew the loop.
+        let cold_start = std::time::Instant::now();
+        let warm = engine.ctx.create_state().expect("warm-up state");
+        let cold = cold_start.elapsed();
+        // Drop it before timing: holding it would keep a second backend
+        // resident throughout, which is not the lifecycle being measured.
+        drop(warm);
+
+        let runs = 10;
+        let start = std::time::Instant::now();
+        for _ in 0..runs {
+            let _state = engine.ctx.create_state().expect("state");
+        }
+        let elapsed = start.elapsed();
+
+        println!(
+            "create_state ({}, {} build): cold {:?}, then {} runs, {:?} total, {:?} each",
+            DEFAULT_VARIANT.as_str(),
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            },
+            cold,
+            runs,
+            elapsed,
+            elapsed / runs
+        );
+    }
+
+    #[test]
+    #[ignore = "needs a provisioned whisper model + macOS `say`; run manually"]
+    fn engine_transcribes_real_speech() {
+        let base = test_base_dir();
 
         let pcm = synthesize_test_phrase("the quick brown fox jumps over the lazy dog");
         let engine = TranscriptionEngine::load(&base, DEFAULT_VARIANT).unwrap();
