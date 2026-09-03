@@ -390,6 +390,50 @@ pub trait Transcriber: Send + Sync {
     fn variant(&self) -> &str;
 }
 
+/// Holds one long-lived `T` behind a `Mutex`, created on first use.
+///
+/// Exists so the slot lifecycle — lazy creation, invalidation, poison
+/// recovery — is testable without a whisper model. `TranscriptionEngine`
+/// supplies the whisper-specific work; this type never knows about it.
+struct StateSlot<T> {
+    slot: std::sync::Mutex<Option<T>>,
+    /// How many values this slot has built. The point of the type is that this
+    /// stays at 1 for the life of an engine; a test that cannot see it cannot
+    /// tell reuse from the per-call creation this replaces.
+    creations: std::sync::atomic::AtomicUsize,
+}
+
+impl<T> StateSlot<T> {
+    fn new() -> Self {
+        Self {
+            slot: std::sync::Mutex::new(None),
+            creations: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn creation_count(&self) -> usize {
+        self.creations.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Run `use_state` against the held value, creating it first if absent.
+    fn with<R, E>(
+        &self,
+        make: impl FnOnce() -> Result<T, E>,
+        use_state: impl FnOnce(&mut T) -> Result<R, E>,
+    ) -> Result<R, E> {
+        let mut slot = self.slot.lock().expect("poison handled in Task 3");
+
+        if slot.is_none() {
+            *slot = Some(make()?);
+            self.creations
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let state = slot.as_mut().expect("populated above");
+
+        use_state(state)
+    }
+}
+
 /// whisper.cpp engine. The `WhisperContext` (the loaded model) is created once
 /// and shared via `Arc`; each `transcribe` call creates its own `WhisperState`.
 pub struct TranscriptionEngine {
@@ -482,6 +526,31 @@ mod tests {
     /// Construct a `ModelVariant` for tests via the real allow-list parser.
     fn variant(name: &str) -> ModelVariant {
         parse_variant(name).expect("test variant must be allow-listed")
+    }
+
+    #[test]
+    fn state_slot_creates_once_and_reuses() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let creations = AtomicUsize::new(0);
+        let slot: StateSlot<u32> = StateSlot::new();
+
+        for _ in 0..5 {
+            let out: Result<u32, ()> = slot.with(
+                || {
+                    creations.fetch_add(1, Ordering::Relaxed);
+                    Ok(7)
+                },
+                |state| Ok(*state),
+            );
+            assert_eq!(out, Ok(7));
+        }
+
+        assert_eq!(
+            creations.load(Ordering::Relaxed),
+            1,
+            "five calls must share one state"
+        );
     }
 
     #[test]

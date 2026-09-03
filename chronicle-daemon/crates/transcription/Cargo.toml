@@ -10,6 +10,7 @@ license = "MIT"
 whisper-rs = { version = "0.14", default-features = false }
 opus = "0.3"
 ogg = "0.9"
+log = "0.4"
 thiserror = "2"
 sha1 = "0.10"
 
