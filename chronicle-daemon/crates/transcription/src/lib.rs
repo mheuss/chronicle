@@ -161,6 +161,17 @@ pub fn verify_sha1(path: &Path, expected: &str) -> std::io::Result<bool> {
     Ok(actual.eq_ignore_ascii_case(expected))
 }
 
+/// Shortest PCM whisper will decode. Below this, `full()` fails before it
+/// touches the state — an empty slice returns early, and 1..=40 samples fails
+/// language auto-detect. Measured against a real `base` model: 40 errors, 41
+/// succeeds.
+const MIN_DECODABLE_SAMPLES: usize = 41;
+
+/// Rejection message for a buffer under [`MIN_DECODABLE_SAMPLES`]. Matches
+/// whisper-rs's own `WhisperError::NoSamples` wording, so the empty case reads
+/// to a caller exactly as it did before HEU-664.
+const TOO_SHORT_MSG: &str = "Input sample buffer was empty.";
+
 /// A finished transcription.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transcript {
@@ -394,14 +405,15 @@ pub trait Transcriber: Send + Sync {
 
 /// Holds one long-lived `T` behind a `Mutex`, created on first use.
 ///
-/// Exists so the slot lifecycle — lazy creation, invalidation, poison
-/// recovery — is testable without a whisper model. `TranscriptionEngine`
-/// supplies the whisper-specific work; this type never knows about it.
+/// Generic so the lifecycle — lazy creation, invalidation, poison recovery —
+/// is testable with a fake `T` and no whisper model; those three paths are
+/// otherwise reachable only from an ignored real-model test. It is still a
+/// whisper state slot: its log lines name transcription, because they are what
+/// HEU-664's live verification greps for.
 struct StateSlot<T> {
     slot: std::sync::Mutex<Option<T>>,
-    /// How many values this slot has built. The point of the type is that this
-    /// stays at 1 for the life of an engine; a test that cannot see it cannot
-    /// tell reuse from the per-call creation this replaces.
+    /// How many values this slot has built. Stays at 1 for an engine's life
+    /// unless a state is discarded and rebuilt.
     creations: std::sync::atomic::AtomicUsize,
 }
 
@@ -433,8 +445,6 @@ impl<T> StateSlot<T> {
                 // is false, so `make()` never runs and `use_state` is handed
                 // the corrupted state on this very call. Emptying makes the
                 // worst case an empty slot, which any later call just refills.
-                // The position relative to `clear_poison()` is free — swapping
-                // those two is a no-op.
                 *slot = None;
                 self.slot.clear_poison();
                 log::warn!("discarding transcription state after a panic");
@@ -443,9 +453,10 @@ impl<T> StateSlot<T> {
         };
 
         if slot.is_none() {
-            *slot = Some(make().inspect_err(|_| {
-                log::error!("could not create transcription state");
-            })?);
+            // Not logged here: the caller reports this failure with its cause,
+            // so a second detail-free line would precede every one that
+            // matters.
+            *slot = Some(make()?);
             self.creations
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -455,10 +466,9 @@ impl<T> StateSlot<T> {
         if result.is_err() {
             // Matches the per-call behaviour this type replaces: a state that
             // errored is never reused. Upstream documents no reuse guarantee
-            // after an error, so do not invent one. In practice `transcribe`
-            // has one reachable discard trigger, `full()` — `full_n_segments`
-            // always returns `Ok`, and the lossy text getter only fails on a
-            // null pointer, which indexing below `n` cannot produce.
+            // after an error, so do not invent one. Which of a caller's error
+            // paths can actually reach here is version-pinned, so it lives
+            // with the other whisper-rs findings rather than in this type.
             //
             // Emptied before the log so a panicking logger cannot poison the
             // mutex with the errored state still in it. The count reads the
@@ -495,15 +505,13 @@ impl<T> StateSlot<T> {
 /// The trade is memory: between segments the engine now holds the GGML compute
 /// backend, the KV caches, the mel buffer, and the last decode's segments, and
 /// keeps holding them while the daemon is idle. That is the point — it is what
-/// the rebuild was paying for — but it is why resident size sits higher than it
-/// did before.
+/// the rebuild was paying for. Expect resident size to sit higher than before,
+/// though HEU-664 did not measure by how much.
 pub struct TranscriptionEngine {
-    // Declared first, so it drops first. Safe only because `WhisperState` holds
-    // its own `Arc<WhisperInnerContext>`, which keeps the model alive until the
-    // state's `Drop` has run — do not reorder on the assumption that the state
-    // must outlive the context by declaration.
-    ctx: WhisperContext,
+    // Declared before `ctx` so it drops first, which is correct regardless of
+    // how `WhisperState` holds its context. Do not reorder.
     state: StateSlot<WhisperState>,
+    ctx: WhisperContext,
     variant: String,
 }
 
@@ -526,8 +534,8 @@ impl TranscriptionEngine {
             .map_err(|e| TranscriptionError::ModelLoad(e.to_string()))?;
 
         Ok(Self {
-            ctx,
             state: StateSlot::new(),
+            ctx,
             variant: variant.as_str().to_string(),
         })
     }
@@ -535,17 +543,23 @@ impl TranscriptionEngine {
 
 impl Transcriber for TranscriptionEngine {
     fn transcribe(&self, pcm_16k_mono: &[f32]) -> Result<Transcript, TranscriptionError> {
-        // Guard before the slot, not inside it. `WhisperState::full` rejects an
-        // empty buffer before it touches the state, so letting that `Err` reach
+        // Guard before the slot, not inside it. Whisper rejects a too-short
+        // buffer before it does any GPU work, so letting that `Err` reach
         // `StateSlot::with` would discard a state that never ran — and the next
-        // segment would pay a full backend rebuild for nothing. Empty PCM is
-        // reachable: `decode_opus_16k_mono` clears the buffer when a segment is
-        // empty or shorter than the encoder pre-skip. Same error text whisper-rs
-        // produces, so the caller sees exactly what it saw before HEU-664.
-        if pcm_16k_mono.is_empty() {
-            return Err(TranscriptionError::Whisper(
-                "Input sample buffer was empty.".into(),
-            ));
+        // segment would pay a full backend rebuild for nothing.
+        //
+        // The threshold covers the whole class, not just the empty case:
+        // `full()` returns early on an empty slice, and a buffer below
+        // MIN_DECODABLE_SAMPLES fails a step later in language auto-detect,
+        // also before touching the state.
+        //
+        // Nothing the daemon writes lands in that band today — the Opus
+        // encoder pads to whole frames, so the shortest decodable segment is
+        // 216 samples. That floor belongs to another crate and nothing pins
+        // it, which is why this guards the range rather than the one member
+        // of it that is reachable right now.
+        if pcm_16k_mono.len() < MIN_DECODABLE_SAMPLES {
+            return Err(TranscriptionError::Whisper(TOO_SHORT_MSG.into()));
         }
 
         self.state.with(
@@ -575,8 +589,13 @@ impl Transcriber for TranscriptionEngine {
                 // queue; whether quality differs has not been measured.
                 // Accepted — whisper.cpp exposes no reseed, and the
                 // alternatives are disabling fallback or per-call states, the
-                // latter being what HEU-664 removes. Mechanism and line-level
-                // citations: docs/development/whisper-rs.md.
+                // latter being what HEU-664 removes. Mechanism, against
+                // whisper-rs-sys 0.13.1's bundled whisper.cpp: the RNG is
+                // seeded once in whisper_init_state (:3346) and the per-call
+                // re-init loop starts at j = 1 (:5426), so decoder 0 is never
+                // reseeded; it is drawn from only on temperature fallback
+                // (:5199), which is live because temperature_inc defaults to
+                // 0.2 (:4686).
                 params.set_no_context(true);
 
                 state
@@ -626,6 +645,16 @@ mod tests {
     /// Construct a `ModelVariant` for tests via the real allow-list parser.
     fn variant(name: &str) -> ModelVariant {
         parse_variant(name).expect("test variant must be allow-listed")
+    }
+
+    /// The guard short-circuits before whisper-rs, so nothing else can catch
+    /// its message drifting from `WhisperError::NoSamples` on a patch bump.
+    #[test]
+    fn too_short_msg_matches_whisper_rs() {
+        assert_eq!(
+            TOO_SHORT_MSG,
+            whisper_rs::WhisperError::NoSamples.to_string()
+        );
     }
 
     #[test]
@@ -1194,11 +1223,11 @@ mod tests {
         // Timed separately, but NOT because "the first state pays one-time Metal
         // setup" — measurement says otherwise. The Metal device and metallib are
         // a process-level singleton that `load` above already touched, outside
-        // both timers. Observed on `base`: 13.0, 11.5, 12.2, 26.0 ms and once
-        // 75.9 ms when the process was first to touch Metal in the OS session,
-        // against a 9.9-10.9 ms steady state for the same variant. So this
-        // figure is "how warm was Metal in this session", is not reproducible,
-        // and must not be quoted as a stable number.
+        // both timers. Observed swinging by roughly 6x across runs on one
+        // machine while the steady state held. So this figure is "how warm was
+        // Metal in this session", is not reproducible, and must not be quoted
+        // as a stable number — the run that produced HEU-664's figures is on
+        // the ticket.
         let first_start = std::time::Instant::now();
         let first = engine.ctx.create_state().expect("first state");
         let first_elapsed = first_start.elapsed();
@@ -1206,9 +1235,9 @@ mod tests {
         // throughout, which is not the lifecycle being measured.
         drop(first);
 
-        // Per-iteration samples, not just a mean: with a 9.9-10.9 ms spread on
-        // `base` (12.9-13.4 on `small`) one scheduler hiccup skews a number that
-        // gets quoted indefinitely. Min is the most robust single figure here.
+        // Per-iteration samples, not just a mean: the spread is a few percent,
+        // so one scheduler hiccup skews a number that gets quoted
+        // indefinitely. Min is the most robust single figure here.
         let runs = 10;
         let mut samples: Vec<std::time::Duration> = Vec::with_capacity(runs);
         for _ in 0..runs {
