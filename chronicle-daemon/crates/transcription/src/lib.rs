@@ -167,10 +167,16 @@ pub fn verify_sha1(path: &Path, expected: &str) -> std::io::Result<bool> {
 /// succeeds.
 const MIN_DECODABLE_SAMPLES: usize = 41;
 
-/// Rejection message for a buffer under [`MIN_DECODABLE_SAMPLES`]. Matches
-/// whisper-rs's own `WhisperError::NoSamples` wording, so the empty case reads
-/// to a caller exactly as it did before HEU-664.
-const TOO_SHORT_MSG: &str = "Input sample buffer was empty.";
+/// Rejection message for an *empty* buffer. Matches whisper-rs's own
+/// `WhisperError::NoSamples` wording, so this case reads to a caller exactly as
+/// it did before HEU-664.
+///
+/// A non-empty buffer under [`MIN_DECODABLE_SAMPLES`] gets its own message
+/// naming the length, because calling a 40-sample buffer "empty" is simply
+/// false. That case previously surfaced as whisper-rs's `GenericError(-3)`
+/// ("Error code: -3"), so the wording changes — deliberately, since the new one
+/// says what is actually wrong.
+const EMPTY_MSG: &str = "Input sample buffer was empty.";
 
 /// A finished transcription.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -558,8 +564,15 @@ impl Transcriber for TranscriptionEngine {
         // 216 samples. That floor belongs to another crate and nothing pins
         // it, which is why this guards the range rather than the one member
         // of it that is reachable right now.
+        if pcm_16k_mono.is_empty() {
+            return Err(TranscriptionError::Whisper(EMPTY_MSG.into()));
+        }
         if pcm_16k_mono.len() < MIN_DECODABLE_SAMPLES {
-            return Err(TranscriptionError::Whisper(TOO_SHORT_MSG.into()));
+            return Err(TranscriptionError::Whisper(format!(
+                "input sample buffer too short: {} samples, need at least {}",
+                pcm_16k_mono.len(),
+                MIN_DECODABLE_SAMPLES
+            )));
         }
 
         self.state.with(
@@ -650,11 +663,8 @@ mod tests {
     /// The guard short-circuits before whisper-rs, so nothing else can catch
     /// its message drifting from `WhisperError::NoSamples` on a patch bump.
     #[test]
-    fn too_short_msg_matches_whisper_rs() {
-        assert_eq!(
-            TOO_SHORT_MSG,
-            whisper_rs::WhisperError::NoSamples.to_string()
-        );
+    fn empty_msg_matches_whisper_rs() {
+        assert_eq!(EMPTY_MSG, whisper_rs::WhisperError::NoSamples.to_string());
     }
 
     #[test]
@@ -1286,18 +1296,23 @@ mod tests {
         let pcm = synthesize_test_phrase("the quick brown fox jumps over the lazy dog");
         let engine = TranscriptionEngine::load(&base, DEFAULT_VARIANT).unwrap();
 
-        // 1) Cold: the empty-PCM guard must reject before the slot is ever
+        // 1) Cold: the short-PCM guard must reject before the slot is ever
         // populated. Without it, `with` finds an empty slot, builds the whole
         // GGML backend, hands it to `full()`, and discards it on the `Err` —
-        // so an empty first segment pays a full build for nothing. Checked
+        // so a too-short first segment pays a full build for nothing. Checked
         // cold as well as warm because `load` leaves the slot empty and
         // nothing exempts the first segment from being short.
+        //
+        // Deliberately a *non-empty* short buffer: that is the member of the
+        // class the empty check alone would miss, and its message must name
+        // the length rather than call it empty.
         assert!(
             matches!(
-                engine.transcribe(&[]),
-                Err(TranscriptionError::Whisper(ref m)) if m == "Input sample buffer was empty."
+                engine.transcribe(&[0.0; 1]),
+                Err(TranscriptionError::Whisper(ref m))
+                    if m == "input sample buffer too short: 1 samples, need at least 41"
             ),
-            "empty PCM must be rejected with the guard's documented literal"
+            "a non-empty too-short buffer must be rejected on its own terms"
         );
         assert_eq!(
             engine.state.creation_count(),
@@ -1353,7 +1368,7 @@ mod tests {
                 engine.transcribe(&[]),
                 Err(TranscriptionError::Whisper(ref m)) if m == "Input sample buffer was empty."
             ),
-            "empty PCM must be rejected with the guard's documented literal"
+            "empty PCM must be rejected with whisper-rs's own wording"
         );
 
         // The rebuild moves the counter, not the discard — emptying the slot
