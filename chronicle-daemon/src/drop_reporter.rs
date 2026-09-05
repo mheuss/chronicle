@@ -443,7 +443,8 @@ mod tests {
     fn every_field_maps_to_its_own_name() {
         // Without this, swapping mic_closed and system_closed in `observe`
         // passes every other test in this module.
-        let cases: [(&str, fn(&mut DropTotals)); 7] = [
+        type Setter = fn(&mut DropTotals);
+        let cases: [(&str, Setter); 7] = [
             ("mic_full", |t| t.mic_full = 1),
             ("mic_closed", |t| t.mic_closed = 1),
             ("mic_convert_failed", |t| t.mic_convert_failed = 1),

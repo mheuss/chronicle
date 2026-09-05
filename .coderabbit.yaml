@@ -1,0 +1,9 @@
+# CodeRabbit's hosted Clippy has reported a bare "Clippy execution failed" on
+# every PR since #37, with no output to act on. Moving the cargo config to the
+# repo root (HEU-672) did not change that, so whatever it dies on is not
+# observable from here. The gate is local (HEU-673):
+#   cargo clippy --workspace --all-targets -- -D warnings
+reviews:
+  tools:
+    clippy:
+      enabled: false
