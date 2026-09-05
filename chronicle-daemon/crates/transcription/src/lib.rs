@@ -178,6 +178,20 @@ const MIN_DECODABLE_SAMPLES: usize = 41;
 /// deliberately, since the new one says what is actually wrong.
 const EMPTY_MSG: &str = "Input sample buffer was empty.";
 
+/// The short-PCM guard `transcribe` runs before touching the state slot, as a
+/// function of length alone so it can be unit-tested without a model.
+fn short_buffer_error(len: usize) -> Option<TranscriptionError> {
+    if len == 0 {
+        Some(TranscriptionError::Whisper(EMPTY_MSG.into()))
+    } else if len < MIN_DECODABLE_SAMPLES {
+        Some(TranscriptionError::Whisper(format!(
+            "input sample buffer too short: {len} samples, need at least {MIN_DECODABLE_SAMPLES}"
+        )))
+    } else {
+        None
+    }
+}
+
 /// A finished transcription.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transcript {
@@ -564,15 +578,8 @@ impl Transcriber for TranscriptionEngine {
         // 216 samples. That floor belongs to another crate and nothing pins
         // it, which is why this guards the range rather than the one member
         // of it that is reachable right now.
-        if pcm_16k_mono.is_empty() {
-            return Err(TranscriptionError::Whisper(EMPTY_MSG.into()));
-        }
-        if pcm_16k_mono.len() < MIN_DECODABLE_SAMPLES {
-            return Err(TranscriptionError::Whisper(format!(
-                "input sample buffer too short: {} samples, need at least {}",
-                pcm_16k_mono.len(),
-                MIN_DECODABLE_SAMPLES
-            )));
+        if let Some(e) = short_buffer_error(pcm_16k_mono.len()) {
+            return Err(e);
         }
 
         self.state.with(
@@ -665,6 +672,25 @@ mod tests {
     #[test]
     fn empty_msg_matches_whisper_rs() {
         assert_eq!(EMPTY_MSG, whisper_rs::WhisperError::NoSamples.to_string());
+    }
+
+    #[test]
+    fn short_buffer_guard_splits_empty_from_too_short() {
+        let msg = |len| match short_buffer_error(len) {
+            Some(TranscriptionError::Whisper(m)) => Some(m),
+            Some(other) => panic!("unexpected variant: {other:?}"),
+            None => None,
+        };
+        assert_eq!(msg(0).as_deref(), Some("Input sample buffer was empty."));
+        assert_eq!(
+            msg(1).as_deref(),
+            Some("input sample buffer too short: 1 samples, need at least 41")
+        );
+        assert_eq!(
+            msg(40).as_deref(),
+            Some("input sample buffer too short: 40 samples, need at least 41")
+        );
+        assert_eq!(msg(41), None);
     }
 
     #[test]
