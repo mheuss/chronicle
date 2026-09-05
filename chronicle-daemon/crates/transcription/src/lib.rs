@@ -173,9 +173,9 @@ const MIN_DECODABLE_SAMPLES: usize = 41;
 ///
 /// A non-empty buffer under [`MIN_DECODABLE_SAMPLES`] gets its own message
 /// naming the length, because calling a 40-sample buffer "empty" is simply
-/// false. That case previously surfaced as whisper-rs's `GenericError(-3)`
-/// ("Error code: -3"), so the wording changes — deliberately, since the new one
-/// says what is actually wrong.
+/// false. That case previously surfaced as whisper-rs's `GenericError(-3)`,
+/// whose message ends in "Error code: -3", so the wording changes —
+/// deliberately, since the new one says what is actually wrong.
 const EMPTY_MSG: &str = "Input sample buffer was empty.";
 
 /// A finished transcription.
@@ -1317,7 +1317,7 @@ mod tests {
         assert_eq!(
             engine.state.creation_count(),
             0,
-            "a rejected empty buffer must not have built a state"
+            "a rejected too-short buffer must not have built a state"
         );
 
         // 2) Transcribe with the real engine and assert it produced text.
