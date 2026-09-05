@@ -185,7 +185,7 @@ fn short_buffer_error(len: usize) -> Option<TranscriptionError> {
         Some(TranscriptionError::Whisper(EMPTY_MSG.into()))
     } else if len < MIN_DECODABLE_SAMPLES {
         Some(TranscriptionError::Whisper(format!(
-            "input sample buffer too short: {len} samples, need at least {MIN_DECODABLE_SAMPLES}"
+            "input sample buffer too short: got {len}, need at least {MIN_DECODABLE_SAMPLES} samples"
         )))
     } else {
         None
@@ -684,11 +684,11 @@ mod tests {
         assert_eq!(msg(0).as_deref(), Some("Input sample buffer was empty."));
         assert_eq!(
             msg(1).as_deref(),
-            Some("input sample buffer too short: 1 samples, need at least 41")
+            Some("input sample buffer too short: got 1, need at least 41 samples")
         );
         assert_eq!(
             msg(40).as_deref(),
-            Some("input sample buffer too short: 40 samples, need at least 41")
+            Some("input sample buffer too short: got 40, need at least 41 samples")
         );
         assert_eq!(msg(41), None);
     }
@@ -1336,7 +1336,7 @@ mod tests {
             matches!(
                 engine.transcribe(&[0.0; 1]),
                 Err(TranscriptionError::Whisper(ref m))
-                    if m == "input sample buffer too short: 1 samples, need at least 41"
+                    if m == "input sample buffer too short: got 1, need at least 41 samples"
             ),
             "a non-empty too-short buffer must be rejected on its own terms"
         );
