@@ -236,20 +236,16 @@ cargo build            # debug
 cargo build --release  # release
 ```
 
-Run cargo from `chronicle-daemon/`, not from the repo root. Cargo looks for
-`.cargo/config.toml` by walking up from the directory it is invoked in, so
-`chronicle-daemon/` and anything below it work, and the repo root doesn't.
-Cargo does not follow `--manifest-path` when doing this. That file carries two
-things the binary needs:
+The repo-root `.cargo/config.toml` carries two things the binary needs:
 
 - the `/usr/lib/swift` rpath, without which any binary touching
   ScreenCaptureKit crashes at launch with "no LC_RPATH's found"
 - `CMAKE_POLICY_VERSION_MINIMUM=3.5`, without which the vendored Opus build in
   `audiopus_sys` fails to configure under CMake 4
 
-Building with `--manifest-path` from the repo root reads neither. Today that
-fails on the CMake error rather than producing a bad binary, but do not rely on
-that — it is a side effect of the Opus problem, not a guard anyone built.
+Cargo finds that file by walking up from the directory it is invoked in, so it
+applies from the repo root, `chronicle-daemon/`, and anywhere below. Building
+from the root with `--manifest-path chronicle-daemon/Cargo.toml` works too.
 
 ## Testing
 
