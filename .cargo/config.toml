@@ -1,7 +1,7 @@
 # Lives at the repo root on purpose. Cargo finds config by walking up from the
 # directory it is invoked in and does not follow --manifest-path, so a file
 # under chronicle-daemon/ was invisible to any build started from the root
-# (HEU-672). From here it applies everywhere.
+# (HEU-672). From here it applies anywhere inside the repo.
 
 # ScreenCaptureKit depends on libswift_Concurrency.dylib, which is referenced
 # via @rpath. Without an rpath the binary (and test binaries) crash at launch
