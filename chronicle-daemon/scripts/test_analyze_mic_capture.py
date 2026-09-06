@@ -442,29 +442,48 @@ def test_main_rejects_a_short_converted_file(tmp_path, capsys):
     assert "mic-converted.wav" in err and "shorter than" in err
 
 
-def test_main_refuses_to_delete_files_it_did_not_write(tmp_path, capsys):
+def test_main_owns_five_names_in_out_and_nothing_else(tmp_path, capsys):
     native, converted = good_stereo()
     write_capture(tmp_path, native, converted)
     out = tmp_path / "out"
     out.mkdir()
 
-    foreign = out / "candidate-avg.wav"
-    foreign.write_bytes(b"not ours")
-    assert amc.main([str(tmp_path), "--out", str(out)]) == 1
-    assert foreign.read_bytes() == b"not ours"
-    assert "candidate-avg.wav" in capsys.readouterr().err
-    foreign.unlink()
-
     (out / "analysis.json").write_text("not json")
     assert amc.main([str(tmp_path), "--out", str(out)]) == 1
+    assert "analysis.json" in capsys.readouterr().err
     assert (out / "analysis.json").read_text() == "not json"
+
+    (out / "analysis.json").write_text(json.dumps({"something": "else"}))
+    assert amc.main([str(tmp_path), "--out", str(out)]) == 1
+    assert (out / "analysis.json").read_text() == json.dumps({"something": "else"})
     (out / "analysis.json").unlink()
+
+    (out / "analysis.json").mkdir()
+    assert amc.main([str(tmp_path), "--out", str(out)]) == 1
+    (out / "analysis.json").rmdir()
 
     other = out / "candidate-mine.wav"
     other.write_bytes(b"mine")
+    owned = out / "candidate-avg.wav"
+    owned.write_bytes(b"whatever was here is the script's to replace")
     assert amc.main([str(tmp_path), "--out", str(out)]) == 0
     assert other.read_bytes() == b"mine"
-    assert (out / "candidate-avg.wav").exists()
+    assert owned.read_bytes() != b"whatever was here is the script's to replace"
+    assert sorted(p.name for p in out.iterdir()) == sorted(["candidate-mine.wav", *amc.OWNED_OUTPUTS])
+
+
+def test_main_still_cleans_up_after_the_directory_is_renamed(tmp_path):
+    native, converted = good_stereo()
+    take = tmp_path / "take1"
+    write_capture(take, native, converted)
+    assert amc.main([str(take)]) == 0
+    renamed = tmp_path / "take1-renamed"
+    take.rename(renamed)
+
+    write_capture(renamed, native[:, :1], sine(1000, 0.5))  # mono now: gate 0
+    assert amc.main([str(renamed)]) == 3
+    assert not (renamed / "candidate-avg.wav").exists(), "the earlier run's candidates must go"
+    assert json.loads((renamed / "analysis.json").read_text())["gate"].startswith("gate 0")
 
 
 def test_main_rejects_a_missing_manifest(tmp_path, capsys):
@@ -478,9 +497,8 @@ def test_main_rejects_a_missing_manifest(tmp_path, capsys):
 def test_main_removes_its_own_stale_outputs_first(tmp_path):
     mono = sine(1000, 0.5)[:, np.newaxis]
     write_capture(tmp_path, mono, sine(1000, 0.5))
-    stale = tmp_path / "candidate-avg.wav"
-    stale.write_bytes(b"stale")
-    (tmp_path / "analysis.json").write_text(json.dumps({"candidates": {"avg": {"wav": str(stale)}}}))
+    (tmp_path / "candidate-avg.wav").write_bytes(b"stale")
+    (tmp_path / "analysis.json").write_text(json.dumps({"parameters": amc.PARAMETERS, "gate": "gate 0: earlier take"}))
 
     assert amc.main([str(tmp_path)]) == 3
 

@@ -16,7 +16,10 @@ manifest says `measurement_valid: false` unless `--allow-invalid` is given,
 checks both WAVs against the manifest and the converted file's contract, then
 prints every diagnostic the HEU-549 design asks for, writes `analysis.json`
 into `--out` (default: the capture directory), and writes one mono 16 kHz float
-WAV per candidate mix. Each candidate can be transcribed with:
+WAV per candidate mix. Those five names, `analysis.json` and
+`candidate-{avg,diff,c0,c1}.wav`, are the script's own in `--out`: it removes
+them before each run and touches nothing else there. Each candidate can be
+transcribed with:
 
     cargo run -p chronicle-transcription --example transcribe_wav -- <file>
 
@@ -364,6 +367,8 @@ NATIVE_WAV = "mic-native.wav"
 CONVERTED_WAV = "mic-converted.wav"
 ANALYSIS_JSON = "analysis.json"
 CANDIDATE_NAMES = ("avg", "diff", "c0", "c1")
+# Every file this script writes into --out. It removes exactly these before a run.
+OWNED_OUTPUTS = (ANALYSIS_JSON, *(f"candidate-{name}.wav" for name in CANDIDATE_NAMES))
 CONVERTED_RATE = 48_000
 MIN_SECONDS = 1.0
 
@@ -423,31 +428,25 @@ def load_wavs(capture_dir: Path, manifest: dict[str, str]) -> tuple[Wav, Wav]:
 def remove_stale_outputs(out: Path) -> None:
     """Remove what an earlier run of this script left in `out`, and nothing else.
 
-    The earlier run's analysis.json names the candidate WAVs it wrote; those
-    and the report itself are removed. A candidate-<name>.wav no report
-    accounts for, or an analysis.json this script did not write, is someone
-    else's file: refuse rather than delete or overwrite it.
+    The script owns exactly the names in OWNED_OUTPUTS: analysis.json and the
+    four candidate WAVs. They are removed by name, so a renamed directory or an
+    interrupted run still cleans up. An analysis.json that is not this script's
+    report is someone else's file: refuse rather than delete it.
     """
-    out = out.resolve()
     report_path = out / ANALYSIS_JSON
-    if report_path.is_file():
+    if report_path.exists():
+        if not report_path.is_file():
+            raise InputError(f"{report_path} is not a file; pick another --out")
         try:
             previous = json.loads(report_path.read_text())
-            recorded = [Path(stats["wav"]).resolve() for stats in previous.get("candidates", {}).values()]
-        except (ValueError, AttributeError, KeyError, TypeError) as e:
-            raise InputError(
-                f"{report_path} is not this script's output ({e}); pick another --out or remove it"
-            ) from e
-        for path in recorded:
-            if path.parent == out and path.is_file():
-                path.unlink()
-        report_path.unlink()
-    foreign = [out / f"candidate-{name}.wav" for name in CANDIDATE_NAMES if (out / f"candidate-{name}.wav").is_file()]
-    if foreign:
-        raise InputError(
-            f"{', '.join(str(path) for path in foreign)}: not written by this script's last run here; "
-            "pick another --out or remove them"
-        )
+        except ValueError as e:
+            raise InputError(f"{report_path} is not this script's output ({e}); pick another --out or remove it") from e
+        if not isinstance(previous, dict) or "parameters" not in previous:
+            raise InputError(f"{report_path} is not this script's output; pick another --out or remove it")
+    for name in OWNED_OUTPUTS:
+        path = out / name
+        if path.is_file():
+            path.unlink()
 
 
 # --- output ----------------------------------------------------------------
@@ -514,15 +513,15 @@ def write_candidate_wavs(report: dict, native: np.ndarray, native_rate: int, out
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("capture_dir", type=Path, help="directory characterize_mic wrote: mic-native.wav, mic-converted.wav, manifest.txt")
-    parser.add_argument("--out", type=Path, default=None, help="directory for analysis.json and candidate WAVs (default: the capture directory)")
+    parser.add_argument("--out", type=Path, default=None, help="directory for analysis.json and candidate-*.wav (default: the capture directory); those five names are removed there before each run")
     parser.add_argument("--allow-invalid", action="store_true", help="analyse even if the manifest says measurement_valid: false")
     args = parser.parse_args(argv)
 
     manifest_path = args.capture_dir / MANIFEST
     out = args.out if args.out is not None else args.capture_dir
     try:
-        # The manifest proves this is a characterize_mic directory before
-        # anything is deleted. Stale outputs go before the validity check so a
+        # The manifest proves capture_dir is a characterize_mic directory before
+        # the run does anything. Stale outputs go before the validity check so a
         # refused take cannot leave the previous take's report behind.
         manifest = read_manifest(manifest_path)
         out.mkdir(parents=True, exist_ok=True)
