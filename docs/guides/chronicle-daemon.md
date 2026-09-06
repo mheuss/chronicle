@@ -185,6 +185,52 @@ It is not a claim about the current audio path: as of HEU-649,
 `AVAudioConverter` performs every downmix, for every device. HEU-652 is what
 changes that, and this paragraph with it.
 
+### Recording what the tap receives
+
+When the format line is not enough, record the audio itself. The
+`characterize` feature on `chronicle-audio` adds an example that captures the
+tap's native channels and the converter's mono output as WAV files, plus a
+manifest. It is compiled out of every default build, so it never ships.
+
+```bash
+cd chronicle-daemon
+cargo run -p chronicle-audio --features characterize --example characterize_mic -- \
+  --device-label "Blue Yeti" --mode stereo --gain 50% \
+  --phrase "the quick brown fox jumps over the lazy dog" --model-variant base \
+  --seconds 10 --out ./yeti-take-1
+```
+
+`--device-label` is only a label. Set the default input device in System
+Settings first and check it in Audio MIDI Setup; the example records whatever
+is active. `--out` must be a new or empty directory, one per take. Read the
+same phrase, the same way, on every take; the manifest records it. The first
+run prompts for microphone permission. Exit code 2 means the recording is not
+a valid measurement (a dropped frame or a conversion failure). The manifest
+says which; re-record rather than reason about the hole.
+
+Then analyse it offline. The script needs `uv`; its numpy and scipy are locked
+next to it.
+
+```bash
+uv run scripts/analyze_mic_capture.py ./yeti-take-1
+```
+
+It reads the manifest and refuses a recording marked invalid (pass
+`--allow-invalid` to look anyway), prints per-channel levels, correlation, and
+the four candidate mixes, writes `analysis.json`, and writes one 16 kHz WAV per
+candidate. Transcribe a candidate through the real engine with:
+
+```bash
+cargo run -p chronicle-transcription --example transcribe_wav -- ./yeti-take-1/candidate-avg.wav --variant base
+```
+
+The analysis never normalizes or trims. Read the HEU-549 design and HEU-651
+before drawing a conclusion from the numbers; correlation is evidence, not the
+decision rule.
+
+The audio callback does none of this work. It copies samples and sends one
+message; a separate thread writes the files. That split is ADR-013.
+
 ## How to Modify
 
 ### Adding a new pipeline stage
@@ -271,5 +317,11 @@ Grant Screen Recording and Microphone permissions to your terminal app first.
 ### Linting
 
 ```bash
-cd chronicle-daemon && cargo clippy --workspace
+cd chronicle-daemon && cargo clippy --workspace --all-targets -- -D warnings && cargo check -p chronicle-audio --features characterize --all-targets
 ```
+
+The SOP gate runs workspace clippy with `--all-targets -- -D warnings`, then
+`cargo check -p chronicle-audio --features characterize --all-targets`. The
+second command is what keeps the feature-gated code and its example compiling;
+nothing else builds them. The Python analyzer's tests run with
+`uv run scripts/test_analyze_mic_capture.py` as part of `test_command`.
