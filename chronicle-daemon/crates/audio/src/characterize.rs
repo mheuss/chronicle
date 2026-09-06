@@ -372,10 +372,13 @@ pub const ATTEMPTS: u32 = 1;
 
 /// What a recording needs next to it to mean anything a week later.
 ///
-/// Rendered as `key: value` lines. Every number HEU-651's report has to quote
-/// is here, so the spike copies from one file. `recorded_secs` is what the
-/// native WAV actually holds, derived from the frames written; `requested_secs`
-/// is what the caller asked for. They differ when a run is cut short.
+/// Rendered as `key: value` lines. The recording-side facts HEU-651's report
+/// has to quote are here: the device and take, the pinned variables, the
+/// format, the durations, and the drop and validity counts. The analysis
+/// numbers come from the script, not from this file. `recorded_secs` is what
+/// the native WAV actually holds, derived from the frames written;
+/// `requested_secs` is what the caller asked for. They differ when a run is
+/// cut short.
 ///
 /// The design pins four things per take so identical audio cannot pass and
 /// fail for reasons unrelated to the mix: the phrase, the model variant, the
@@ -402,9 +405,11 @@ pub struct Manifest<'a> {
 
 impl Manifest<'_> {
     /// The design's rule: a measurement run is invalid if it contains a
-    /// dropped frame or a conversion failure. Drops show up three ways, so
-    /// all three are checked: a `seq` gap, a first `seq` above zero, and the
-    /// tap's own counters. An empty recording is invalid too.
+    /// dropped frame or a conversion failure. Six checks cover that. Drops
+    /// show up three ways: a `seq` gap, a first `seq` above zero (which also
+    /// rejects an empty recording), and the tap's `mic_full` and `mic_closed`
+    /// counters. A conversion failure is its own count, and so is a malformed
+    /// frame, the marker for a buffer the tap could not read.
     pub fn measurement_valid(&self) -> bool {
         let r = self.report;
         r.first_seq == Some(0)
