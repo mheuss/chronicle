@@ -411,8 +411,8 @@ impl Manifest<'_> {
     /// counters. A conversion failure is its own count, and so is a malformed
     /// frame, the marker for a buffer the tap could not read.
     /// `mic_convert_failed` needs no check of its own: the same failure lands
-    /// in `conversion_failures`, or in `mic_full` if the frame never reached
-    /// the writer.
+    /// in `conversion_failures`, or in `mic_full` or `mic_closed` if the frame
+    /// never reached the writer.
     pub fn measurement_valid(&self) -> bool {
         let r = self.report;
         r.first_seq == Some(0)
