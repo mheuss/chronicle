@@ -242,9 +242,13 @@ impl MicrophoneCapture {
         buffer_tx: SyncSender<AudioMessage>,
         counters: Arc<AudioDropCounters>,
     ) -> Result<Self> {
-        let (capture, _format) = Self::build(counters, |converter, target_format, counters| {
-            make_tap_block(converter, target_format, buffer_tx, counters)
-        })?;
+        let (capture, _format) = Self::build(
+            counters,
+            |_| Ok(()),
+            |converter, target_format, counters| {
+                make_tap_block(converter, target_format, buffer_tx, counters)
+            },
+        )?;
         Ok(capture)
     }
 
@@ -255,35 +259,39 @@ impl MicrophoneCapture {
     /// sends at most once in this mode, and never on the encoding channel, so
     /// those fields are this channel's drops.
     ///
-    /// Rejects a device that does not deliver 32-bit float: `extract_channels`
-    /// cannot read any other layout, so every callback would record nothing.
+    /// Rejects a device that does not deliver 32-bit float before the tap is
+    /// installed: `extract_channels` cannot read any other layout, so every
+    /// callback would record nothing.
+    ///
+    /// Pass a counter set no production tap writes into, or the drop fields
+    /// stop meaning what the manifest reads them as.
     ///
     /// The caller owns the sender's lifetime. `stop()` does not close the
     /// channel; the tap block holds its clone until this value is dropped.
     /// Drop the capture first, then the caller's sender, and the writer's
-    /// receiver ends.
+    /// receiver ends. One `start()` and one `stop()` per capture: the
+    /// sequence counter does not reset on `stop()`, so a second session on the
+    /// same capture would look seq-contiguous across a real gap in the audio.
     #[cfg(feature = "characterize")]
     pub fn new_characterizing(
         characterize_tx: SyncSender<CharacterizationFrame>,
         counters: Arc<AudioDropCounters>,
     ) -> Result<(Self, NativeFormat)> {
-        let (capture, format) = Self::build(counters, |converter, target_format, counters| {
-            make_characterizing_tap_block(converter, target_format, characterize_tx, counters)
-        })?;
-        if !format.float32 {
-            return Err(AudioError::Microphone(format!(
-                "characterization needs 32-bit float input; the device delivers {}",
-                format.common_format
-            )));
-        }
-        Ok((capture, format))
+        Self::build(
+            counters,
+            characterization_input_check,
+            |converter, target_format, counters| {
+                make_characterizing_tap_block(converter, target_format, characterize_tx, counters)
+            },
+        )
     }
 
     /// Build the engine, install the input-node tap, and `prepare()`.
     ///
-    /// Shared by both constructors. `make_block` gets the converter, the
-    /// 48 kHz mono target format, and the counters, and returns the block to
-    /// install. Everything else is identical for both.
+    /// Shared by both constructors. `validate` sees the native format before
+    /// anything is built on it and can refuse the device; `make_block` gets
+    /// the converter, the 48 kHz mono target format, and the counters, and
+    /// returns the block to install. Everything else is identical for both.
     ///
     /// Does **not** start capture — no microphone access, no TCC prompt. Any
     /// AVFoundation setup failure returns [`AudioError`] rather than panicking
@@ -294,6 +302,7 @@ impl MicrophoneCapture {
     /// this path, including a throttled one.
     fn build(
         counters: Arc<AudioDropCounters>,
+        validate: impl FnOnce(&NativeFormat) -> Result<()>,
         make_block: impl FnOnce(
             Retained<AVAudioConverter>,
             Retained<AVAudioFormat>,
@@ -326,6 +335,17 @@ impl MicrophoneCapture {
             let native_common = unsafe { native_format.commonFormat() };
             let native_interleaved = unsafe { native_format.isInterleaved() };
             let mix_eligibility = MixEligibility::classify(native_common, native_channels);
+            let format = NativeFormat {
+                channels: native_channels,
+                sample_rate: native_rate,
+                interleaved: native_interleaved,
+                common_format: common_format_name(native_common),
+                float32: native_common == AVAudioCommonFormat::PCMFormatFloat32,
+            };
+            // Refuse here, before the converter, the tap and `prepare()`, so a
+            // rejected device leaves no half-built engine and no "tap
+            // installed" line behind.
+            validate(&format)?;
 
             // The format the encoder requires: 48 kHz, mono, f32. The
             // "standard" initializer yields deinterleaved f32, so channel
@@ -403,17 +423,9 @@ impl MicrophoneCapture {
                 "microphone tap installed (capture starts on mic-on): \
                  {native_channels} ch, {native_rate} Hz, \
                  interleaved={native_interleaved}, format={}, mix_eligibility={}",
-                common_format_name(native_common),
+                format.common_format,
                 mix_eligibility.as_str()
             );
-
-            let format = NativeFormat {
-                channels: native_channels,
-                sample_rate: native_rate,
-                interleaved: native_interleaved,
-                common_format: common_format_name(native_common),
-                float32: native_common == AVAudioCommonFormat::PCMFormatFloat32,
-            };
 
             Ok((
                 Self {
@@ -535,13 +547,29 @@ fn make_tap_block(
     )
 }
 
+/// The install-time check behind [`MicrophoneCapture::new_characterizing`]:
+/// only 32-bit float input can be recorded.
+#[cfg(feature = "characterize")]
+fn characterization_input_check(format: &NativeFormat) -> Result<()> {
+    if format.float32 {
+        Ok(())
+    } else {
+        Err(AudioError::Microphone(format!(
+            "characterization needs 32-bit float input; the device delivers {}",
+            format.common_format
+        )))
+    }
+}
+
 /// One callback's characterization work: copy the native channels out, run
 /// the converter, stamp a sequence number.
 ///
-/// Returns `None` without consuming a sequence number when the buffer has
-/// nothing readable, so a zero-frame callback leaves no gap for the writer to
-/// misread as a drop. Non-f32 input never reaches here:
-/// [`MicrophoneCapture::new_characterizing`] rejects it at install.
+/// Returns `None` without consuming a sequence number for a zero-frame
+/// buffer, so that leaves no gap for the writer to misread as a drop. A buffer
+/// that has frames but cannot be read as f32 planes (the device changed under
+/// the engine, say) still gets a frame and a sequence number, with `native`
+/// empty: the writer counts that as malformed and the manifest marks the run
+/// invalid, instead of the hole passing as a clean recording.
 #[cfg(feature = "characterize")]
 fn characterize_buffer(
     converter: &AVAudioConverter,
@@ -550,7 +578,11 @@ fn characterize_buffer(
     counters: &AudioDropCounters,
     next_seq: &AtomicU64,
 ) -> Option<CharacterizationFrame> {
-    let native = extract_channels(input_buffer)?;
+    // SAFETY: frameLength is a plain property read.
+    if unsafe { input_buffer.frameLength() } == 0 {
+        return None;
+    }
+    let native = extract_channels(input_buffer).unwrap_or_default();
     let outcome = convert_to_mono_samples(converter, target_format, input_buffer, counters);
     let seq = next_seq.fetch_add(1, Ordering::Relaxed);
     Some(CharacterizationFrame {
@@ -1964,6 +1996,8 @@ mod tests {
             assert_eq!(frame.native[1].len(), 4_800);
             assert_eq!(frame.native[0][0], 0.25);
             assert_eq!(frame.native[1][0], -0.25);
+            assert_eq!(frame.native[0][4_799], 0.25);
+            assert_eq!(frame.native[1][4_799], -0.25);
             assert!(
                 matches!(frame.outcome, ConversionOutcome::Produced(ref s) if !s.is_empty()),
                 "100 ms of stereo must convert to some mono output, got {:?}",
@@ -1996,5 +2030,67 @@ mod tests {
             assert!(characterize_buffer(&converter, &target, &buffer, &counters, &seq).is_none());
             assert_eq!(seq.load(Ordering::Relaxed), 0);
         });
+    }
+
+    /// A buffer with frames that cannot be read as f32 planes must not vanish
+    /// silently: it takes a seq and arrives with no channels, which the writer
+    /// reports as malformed.
+    #[cfg(all(target_os = "macos", feature = "characterize"))]
+    #[test]
+    fn characterize_buffer_marks_an_unreadable_buffer_as_empty() {
+        autoreleasepool(|_| {
+            // SAFETY: alloc yields a fresh AVAudioFormat; unwrapped below.
+            let format = unsafe {
+                AVAudioFormat::initWithCommonFormat_sampleRate_channels_interleaved(
+                    AVAudioFormat::alloc(),
+                    AVAudioCommonFormat::PCMFormatInt16,
+                    SAMPLE_RATE as f64,
+                    2,
+                    true,
+                )
+            }
+            .expect("int16 format should build");
+            // SAFETY: format is valid; 64 is a non-zero capacity.
+            let buffer = unsafe {
+                AVAudioPCMBuffer::initWithPCMFormat_frameCapacity(
+                    AVAudioPCMBuffer::alloc(),
+                    &format,
+                    64,
+                )
+            }
+            .expect("buffer should allocate");
+            // SAFETY: 64 <= frameCapacity.
+            unsafe { buffer.setFrameLength(64) };
+            let converter = stereo_to_mono_converter(&format);
+            // SAFETY: outputFormat is a plain property read on a valid converter.
+            let target = unsafe { converter.outputFormat() };
+            let counters = AudioDropCounters::default();
+            let seq = AtomicU64::new(0);
+
+            let frame = characterize_buffer(&converter, &target, &buffer, &counters, &seq)
+                .expect("an unreadable buffer with frames still produces a frame");
+
+            assert_eq!(frame.seq, 0);
+            assert!(frame.native.is_empty(), "no f32 planes to read");
+            assert_eq!(seq.load(Ordering::Relaxed), 1, "the hole consumed a seq");
+        });
+    }
+
+    #[cfg(feature = "characterize")]
+    #[test]
+    fn characterization_input_check_admits_only_float32() {
+        let mut format = NativeFormat {
+            channels: 2,
+            sample_rate: 48_000.0,
+            interleaved: false,
+            common_format: "f32".into(),
+            float32: true,
+        };
+        assert!(characterization_input_check(&format).is_ok());
+
+        format.common_format = "i16".into();
+        format.float32 = false;
+        let err = characterization_input_check(&format).unwrap_err();
+        assert!(err.to_string().contains("i16"), "{err}");
     }
 }
