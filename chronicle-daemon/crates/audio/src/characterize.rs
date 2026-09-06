@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use hound::{SampleFormat, WavSpec, WavWriter};
 
+use crate::AudioDropSnapshot;
 use crate::SAMPLE_RATE;
 use crate::microphone::{ConversionOutcome, NativeFormat};
 
@@ -366,6 +367,110 @@ fn check_room<W: io::Write + io::Seek>(
     Ok(())
 }
 
+/// Transcription attempts per candidate. Fixed by the design: one.
+pub const ATTEMPTS: u32 = 1;
+
+/// What a recording needs next to it to mean anything a week later.
+///
+/// Rendered as `key: value` lines. Every number HEU-651's report has to quote
+/// is here, so the spike copies from one file. `recorded_secs` is what the
+/// native WAV actually holds, derived from the frames written; `requested_secs`
+/// is what the caller asked for. They differ when a run is cut short.
+///
+/// The design pins four things per take so identical audio cannot pass and
+/// fail for reasons unrelated to the mix: the phrase, the model variant, the
+/// duration, and the attempt count. Attempts is always one; a failed
+/// transcript is not re-rolled.
+#[derive(Debug)]
+pub struct Manifest<'a> {
+    pub device: &'a str,
+    pub mode: &'a str,
+    pub gain: &'a str,
+    /// The fixed phrase that was read. Identical across every take.
+    pub phrase: &'a str,
+    /// The whisper variant the candidates will be transcribed with.
+    pub model_variant: &'a str,
+    pub macos_version: &'a str,
+    pub recorded_at_unix_secs: u64,
+    pub requested_secs: u64,
+    pub format: &'a NativeFormat,
+    pub native_wav: &'a Path,
+    pub converted_wav: &'a Path,
+    pub report: &'a WriterReport,
+    pub drops: AudioDropSnapshot,
+}
+
+impl Manifest<'_> {
+    /// The design's rule: a measurement run is invalid if it contains a
+    /// dropped frame or a conversion failure. Drops show up three ways, so
+    /// all three are checked: a `seq` gap, a first `seq` above zero, and the
+    /// tap's own counters. An empty recording is invalid too.
+    pub fn measurement_valid(&self) -> bool {
+        let r = self.report;
+        r.first_seq == Some(0)
+            && r.seq_gaps == 0
+            && r.conversion_failures == 0
+            && r.malformed_frames == 0
+            && self.drops.mic_full == 0
+            && self.drops.mic_closed == 0
+    }
+
+    /// Seconds of audio in the native WAV, from the frames written.
+    pub fn recorded_secs(&self) -> f64 {
+        self.report.native_frames_written as f64 / self.format.sample_rate
+    }
+
+    /// Seconds of audio in the converted WAV, always at 48 kHz.
+    pub fn converted_secs(&self) -> f64 {
+        self.report.converted_frames_written as f64 / f64::from(SAMPLE_RATE)
+    }
+
+    pub fn render(&self) -> String {
+        let r = self.report;
+        let f = self.format;
+        let opt = |v: Option<u64>| v.map_or_else(|| "none".to_string(), |n| n.to_string());
+        let lines = [
+            format!("device: {}", self.device),
+            format!("mode: {}", self.mode),
+            format!("gain: {}", self.gain),
+            format!("phrase: {}", self.phrase),
+            format!("model_variant: {}", self.model_variant),
+            format!("attempts: {ATTEMPTS}"),
+            format!("macos_version: {}", self.macos_version),
+            format!("recorded_at_unix_secs: {}", self.recorded_at_unix_secs),
+            format!("requested_secs: {}", self.requested_secs),
+            format!("recorded_secs: {:.2}", self.recorded_secs()),
+            format!("converted_secs: {:.2}", self.converted_secs()),
+            format!("native_channels: {}", f.channels),
+            format!("native_sample_rate_hz: {}", f.sample_rate),
+            format!("native_interleaved: {}", f.interleaved),
+            format!("native_common_format: {}", f.common_format),
+            format!("native_wav: {}", self.native_wav.display()),
+            format!("converted_wav: {}", self.converted_wav.display()),
+            format!("frames_received: {}", r.frames_received),
+            format!("first_seq: {}", opt(r.first_seq)),
+            format!("last_seq: {}", opt(r.last_seq)),
+            format!("seq_gaps: {}", r.seq_gaps),
+            format!("produced: {}", r.produced),
+            format!("held_tails: {}", r.held_tails),
+            format!("conversion_failures: {}", r.conversion_failures),
+            format!("malformed_frames: {}", r.malformed_frames),
+            format!("native_frames_written: {}", r.native_frames_written),
+            format!("converted_frames_written: {}", r.converted_frames_written),
+            format!("drops_mic_full: {}", self.drops.mic_full),
+            format!("drops_mic_closed: {}", self.drops.mic_closed),
+            format!(
+                "drops_mic_convert_failed: {}",
+                self.drops.mic_convert_failed
+            ),
+            format!("measurement_valid: {}", self.measurement_valid()),
+        ];
+        let mut out = lines.join("\n");
+        out.push('\n');
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -649,7 +754,7 @@ mod tests {
         }
     }
 
-    /// A rate under the ceiling can still overflow hound's u32 bytes per
+    /// A rate the ceiling allows can still overflow hound's u32 bytes per
     /// second once the channel count is large. That arm of the guard has to
     /// fire on its own.
     #[test]
@@ -660,7 +765,7 @@ mod tests {
         let (_tx, rx) = sync_channel::<CharacterizationFrame>(1);
         let format = NativeFormat {
             channels: 2_000,
-            sample_rate: MAX_SAMPLE_RATE_HZ, // 768000 x 4 x 2000 > u32::MAX
+            sample_rate: MAX_SAMPLE_RATE_HZ, // MAX_SAMPLE_RATE_HZ x 4 bytes x 2000 channels > u32::MAX
             ..stereo_48k()
         };
         let Err(err) = CharacterizationWriter::spawn(rx, &format, &native, &converted) else {
@@ -716,6 +821,126 @@ mod tests {
         assert!(
             CharacterizationWriter::spawn(rx, &stereo_48k(), missing, missing).is_err(),
             "opening a WAV in a missing directory must fail at spawn, not at finish"
+        );
+    }
+
+    fn sample_report() -> WriterReport {
+        WriterReport {
+            frames_received: 100,
+            first_seq: Some(0),
+            last_seq: Some(99),
+            produced: 98,
+            held_tails: 2,
+            native_frames_written: 480_000,
+            converted_frames_written: 479_300,
+            ..WriterReport::default()
+        }
+    }
+
+    fn sample_manifest<'a>(
+        report: &'a WriterReport,
+        drops: AudioDropSnapshot,
+        format: &'a NativeFormat,
+    ) -> Manifest<'a> {
+        Manifest {
+            device: "Blue Yeti",
+            mode: "stereo",
+            gain: "50%",
+            phrase: "the quick brown fox jumps over the lazy dog",
+            model_variant: "base",
+            macos_version: "26.1",
+            recorded_at_unix_secs: 1_757_100_000,
+            requested_secs: 10,
+            format,
+            native_wav: Path::new("/tmp/take/mic-native.wav"),
+            converted_wav: Path::new("/tmp/take/mic-converted.wav"),
+            report,
+            drops,
+        }
+    }
+
+    #[test]
+    fn manifest_renders_every_field_as_a_key_value_line() {
+        let report = sample_report();
+        let format = stereo_48k();
+        let text = sample_manifest(&report, AudioDropSnapshot::default(), &format).render();
+
+        for expected in [
+            "device: Blue Yeti",
+            "mode: stereo",
+            "gain: 50%",
+            "phrase: the quick brown fox jumps over the lazy dog",
+            "model_variant: base",
+            "attempts: 1",
+            "macos_version: 26.1",
+            "recorded_at_unix_secs: 1757100000",
+            "requested_secs: 10",
+            "recorded_secs: 10.00",
+            "converted_secs: 9.99",
+            "native_channels: 2",
+            "native_sample_rate_hz: 48000",
+            "native_interleaved: false",
+            "native_common_format: f32",
+            "native_wav: /tmp/take/mic-native.wav",
+            "converted_wav: /tmp/take/mic-converted.wav",
+            "frames_received: 100",
+            "first_seq: 0",
+            "last_seq: 99",
+            "seq_gaps: 0",
+            "produced: 98",
+            "held_tails: 2",
+            "conversion_failures: 0",
+            "malformed_frames: 0",
+            "native_frames_written: 480000",
+            "converted_frames_written: 479300",
+            "drops_mic_full: 0",
+            "drops_mic_closed: 0",
+            "drops_mic_convert_failed: 0",
+            "measurement_valid: true",
+        ] {
+            assert!(text.contains(expected), "missing `{expected}` in:\n{text}");
+        }
+    }
+
+    #[test]
+    fn manifest_is_valid_only_with_no_gaps_no_failures_and_seq_from_zero() {
+        let format = stereo_48k();
+        let clean = sample_report();
+        assert!(sample_manifest(&clean, AudioDropSnapshot::default(), &format).measurement_valid());
+
+        let gap = WriterReport {
+            seq_gaps: 1,
+            ..sample_report()
+        };
+        assert!(!sample_manifest(&gap, AudioDropSnapshot::default(), &format).measurement_valid());
+
+        let failed = WriterReport {
+            conversion_failures: 1,
+            ..sample_report()
+        };
+        assert!(
+            !sample_manifest(&failed, AudioDropSnapshot::default(), &format).measurement_valid()
+        );
+
+        let late_start = WriterReport {
+            first_seq: Some(3),
+            ..sample_report()
+        };
+        assert!(
+            !sample_manifest(&late_start, AudioDropSnapshot::default(), &format)
+                .measurement_valid(),
+            "a burst dropped before the first frame is a hole too"
+        );
+
+        let dropped = AudioDropSnapshot {
+            mic_full: 1,
+            ..AudioDropSnapshot::default()
+        };
+        assert!(!sample_manifest(&clean, dropped, &format).measurement_valid());
+
+        let empty = WriterReport::default();
+        assert!(
+            !sample_manifest(&empty, AudioDropSnapshot::default(), &format).measurement_valid()
         );
     }
 }
