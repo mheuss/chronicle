@@ -230,7 +230,9 @@ file, every channel silent, a level that is not finite, or every channel flat
 with zero variance. The report's `STOP:` line names which, `analysis.json`
 records it, and no candidate is written. A
 mono microphone always stops at gate 0; that is the script working, not a
-fault. Transcribe a candidate through the real engine with:
+fault. A device with more than two channels passes the gates, exits 0 with
+per-channel levels only, and writes no candidates: the four mixes are defined
+for two channels. Transcribe a candidate through the real engine with:
 
 ```bash
 cargo run -p chronicle-transcription --example transcribe_wav -- ~/chronicle-captures/yeti-take-1/candidate-avg.wav --variant base

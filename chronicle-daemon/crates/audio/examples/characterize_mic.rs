@@ -102,8 +102,11 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--model-variant {model_variant:?} is not one of base, small, medium"
         ));
     }
-    if seconds == 0 {
-        return Err("--seconds must be at least 1".into());
+    // The converter holds back a filter tail, so the converted WAV is a fraction
+    // of a second shorter than the native one. The analyzer wants a full second
+    // of both, which a 1 s take cannot deliver.
+    if seconds < 2 {
+        return Err("--seconds must be at least 2".into());
     }
     let out = out.unwrap_or_else(|| PathBuf::from(format!("mic-capture-{}", unix_secs())));
     Ok(Args {
@@ -162,7 +165,14 @@ fn macos_version() -> String {
         .output()
         .ok()
         .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .chars()
+                .filter(|c| !c.is_control())
+                .collect::<String>()
+                .trim()
+                .to_string()
+        })
         .unwrap_or_else(|| "unknown".into())
 }
 
@@ -368,6 +378,30 @@ mod tests {
                 "0"
             ]))
             .is_err()
+        );
+        assert!(
+            parse_args(&args(&[
+                "--device-label",
+                "Yeti",
+                "--phrase",
+                "fox",
+                "--seconds",
+                "1"
+            ]))
+            .is_err()
+        );
+        assert_eq!(
+            parse_args(&args(&[
+                "--device-label",
+                "Yeti",
+                "--phrase",
+                "fox",
+                "--seconds",
+                "2"
+            ]))
+            .unwrap()
+            .seconds,
+            2
         );
         assert!(
             parse_args(&args(&[

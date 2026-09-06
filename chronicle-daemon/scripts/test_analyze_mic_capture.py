@@ -335,17 +335,24 @@ def write_capture(
     converted_rate: int = RATE,
     native_dtype=np.float32,
     converted_dtype=np.float32,
+    native_frames: int | None = None,
+    converted_frames: int | None = None,
 ):
     directory.mkdir(parents=True, exist_ok=True)
     wavfile.write(directory / "mic-native.wav", native_rate, native.astype(native_dtype))
     wavfile.write(directory / "mic-converted.wav", converted_rate, converted.astype(converted_dtype))
     channels = manifest_channels if manifest_channels is not None else native.shape[1]
-    (directory / "manifest.txt").write_text(
-        "device: test\n"
-        f"native_channels: {channels}\n"
-        f"native_sample_rate_hz: {native_rate}\n"
-        f"measurement_valid: {'true' if valid else 'false'}\n"
-    )
+    lines = [
+        "device: test",
+        f"native_channels: {channels}",
+        f"native_sample_rate_hz: {native_rate}",
+        f"measurement_valid: {'true' if valid else 'false'}",
+    ]
+    if native_frames is not None:
+        lines.append(f"native_frames_written: {native_frames}")
+    if converted_frames is not None:
+        lines.append(f"converted_frames_written: {converted_frames}")
+    (directory / "manifest.txt").write_text("\n".join(lines) + "\n")
 
 
 def good_stereo(secs: float = 1.0):
@@ -425,6 +432,63 @@ def test_main_rejects_a_float64_native_as_gate_1(tmp_path):
     write_capture(tmp_path, native, converted, native_dtype=np.float64)
     assert amc.main([str(tmp_path)]) == 3
     assert json.loads((tmp_path / "analysis.json").read_text())["gate"].startswith("gate 1")
+
+
+def test_main_rejects_a_wav_whose_frame_count_disagrees_with_the_manifest(tmp_path, capsys):
+    native, converted = good_stereo()
+    write_capture(tmp_path, native, converted, native_frames=native.shape[0], converted_frames=len(converted))
+    assert amc.main([str(tmp_path)]) == 0
+
+    write_capture(tmp_path, native, converted, native_frames=native.shape[0] - 1, converted_frames=len(converted))
+    assert amc.main([str(tmp_path)]) == 1
+    assert "native_frames_written" in capsys.readouterr().err
+
+    write_capture(tmp_path, native, converted, native_frames=native.shape[0], converted_frames=len(converted) + 480)
+    assert amc.main([str(tmp_path)]) == 1
+    assert "converted_frames_written" in capsys.readouterr().err
+
+
+def test_analysis_json_is_strict_json_even_with_silent_and_dead_channels(tmp_path):
+    c0 = sine(1000, 0.5)
+    write_capture(tmp_path, stereo(c0, -c0), sine(1000, 0.001))  # avg cancels to -inf dBFS
+    assert amc.main([str(tmp_path)]) == 0
+    text = (tmp_path / "analysis.json").read_text()
+
+    def refuse(token):
+        raise AssertionError(f"non-finite token {token} in analysis.json")
+
+    report = json.loads(text, parse_constant=refuse)
+    assert report["candidates"]["avg"]["rms_dbfs"] == "-inf"
+    assert report["candidates"]["avg"]["transfer_gain_db"] == "inf"
+
+    write_capture(tmp_path, stereo(c0, np.full(RATE, 0.3)), sine(1000, 0.3))  # DC channel: r is NaN
+    assert amc.main([str(tmp_path)]) == 0
+    report = json.loads((tmp_path / "analysis.json").read_text(), parse_constant=refuse)
+    assert report["pearson_r"] == "NaN"
+    assert report["r_band"] == "undefined"
+
+
+def test_analyze_and_main_handle_more_than_two_channels(tmp_path, capsys):
+    four = np.stack([sine(1000, 0.5), sine(1000, 0.4), sine(1000, 0.3), sine(1000, 0.2)], axis=1)
+    report = amc.analyze(wav(four), wav(sine(1000, 0.3)))
+    assert report["gate"] is None
+    assert len(report["native"]["per_channel"]) == 4
+    assert "candidates" not in report and "pearson_r" not in report
+    assert report["note"].startswith("4 channels")
+
+    write_capture(tmp_path, four, sine(1000, 0.3))
+    assert amc.main([str(tmp_path)]) == 0
+    assert not any(tmp_path.glob("candidate-*.wav"))
+    assert "4 channels" in capsys.readouterr().out
+    assert "note" in json.loads((tmp_path / "analysis.json").read_text())
+
+
+def test_main_refuses_a_directory_at_a_candidate_name(tmp_path, capsys):
+    native, converted = good_stereo()
+    write_capture(tmp_path, native, converted)
+    (tmp_path / "candidate-avg.wav").mkdir()
+    assert amc.main([str(tmp_path)]) == 1
+    assert "candidate-avg.wav" in capsys.readouterr().err
 
 
 def test_main_rejects_a_recording_shorter_than_one_second(tmp_path, capsys):

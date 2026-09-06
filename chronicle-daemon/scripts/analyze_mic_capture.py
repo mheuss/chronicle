@@ -417,9 +417,15 @@ def load_wavs(capture_dir: Path, manifest: dict[str, str]) -> tuple[Wav, Wav]:
             f"{CONVERTED_WAV} must be 1 ch, {CONVERTED_RATE} Hz, float32; "
             f"got {converted.channels} ch, {converted.rate} Hz, {converted.dtype}"
         )
-    for name, wav in ((NATIVE_WAV, native), (CONVERTED_WAV, converted)):
+    for name, wav, key in (
+        (NATIVE_WAV, native, "native_frames_written"),
+        (CONVERTED_WAV, converted, "converted_frames_written"),
+    ):
         if wav.frames < MIN_SECONDS * wav.rate:
             problems.append(f"{name} is shorter than {MIN_SECONDS:g} s ({wav.frames} frames); too short to analyse")
+        want_frames = manifest.get(key)
+        if want_frames is not None and int(want_frames) != wav.frames:
+            problems.append(f"manifest {key} {want_frames} but {name} has {wav.frames} frames; not the file the manifest describes")
     if problems:
         raise InputError("; ".join(problems))
     return native, converted
@@ -445,6 +451,8 @@ def remove_stale_outputs(out: Path) -> None:
             raise InputError(f"{report_path} is not this script's output; pick another --out or remove it")
     for name in OWNED_OUTPUTS:
         path = out / name
+        if path.exists() and not path.is_file():
+            raise InputError(f"{path} is not a file; pick another --out")
         if path.is_file():
             path.unlink()
 
@@ -502,6 +510,17 @@ def render(report: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _json_ready(value):
+    """Strict JSON has no NaN or Infinity; spell them the way the text report does."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return _fmt(value)
+    if isinstance(value, dict):
+        return {k: _json_ready(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_ready(v) for v in value]
+    return value
+
+
 def write_candidate_wavs(report: dict, native: np.ndarray, native_rate: int, out: Path) -> None:
     """One mono 16 kHz float WAV per candidate, in the design's order."""
     for name, samples in candidates(native).items():
@@ -540,10 +559,13 @@ def main(argv: list[str] | None = None) -> int:
     report["native"]["path"] = str(args.capture_dir / NATIVE_WAV)
     report["converted"]["path"] = str(args.capture_dir / CONVERTED_WAV)
 
-    if report["gate"] is None and "candidates" in report:
-        write_candidate_wavs(report, native_wav.samples, native_wav.rate, out)
-
-    (out / ANALYSIS_JSON).write_text(json.dumps(report, indent=2))
+    try:
+        if report["gate"] is None and "candidates" in report:
+            write_candidate_wavs(report, native_wav.samples, native_wav.rate, out)
+        (out / ANALYSIS_JSON).write_text(json.dumps(_json_ready(report), indent=2, allow_nan=False))
+    except OSError as e:
+        sys.stderr.write(f"output error: {e}\n")
+        return 1
     sys.stdout.write(render(report))
     sys.stdout.write(f"wrote {out / ANALYSIS_JSON}\n")
     return 3 if report["gate"] is not None else 0

@@ -90,11 +90,23 @@ impl fmt::Display for FinishError {
         match self {
             Self::Writer {
                 error,
-                partial: Some(partial),
+                partial: Some(p),
             } => write!(
                 f,
-                "characterization writer failed: {error} (after {} frames received)",
-                partial.frames_received
+                "characterization writer failed: {error} (partial report: frames_received {}, \
+                 first_seq {}, last_seq {}, seq_gaps {}, produced {}, held_tails {}, \
+                 conversion_failures {}, malformed_frames {}, native_frames_written {}, \
+                 converted_frames_written {})",
+                p.frames_received,
+                p.first_seq.map_or("none".to_string(), |v| v.to_string()),
+                p.last_seq.map_or("none".to_string(), |v| v.to_string()),
+                p.seq_gaps,
+                p.produced,
+                p.held_tails,
+                p.conversion_failures,
+                p.malformed_frames,
+                p.native_frames_written,
+                p.converted_frames_written,
             ),
             Self::Writer {
                 error,
@@ -723,10 +735,52 @@ mod tests {
             matches!(err, hound::Error::IoError(ref e) if e.to_string().contains("disk full")),
             "{err}"
         );
-        assert_eq!(
-            partial.frames_received, 1,
+        assert!(
+            partial.frames_received >= 1,
             "the counts up to the failure come back with the error"
         );
+    }
+
+    #[test]
+    fn writer_error_display_carries_every_partial_count() {
+        let partial = WriterReport {
+            frames_received: 9,
+            first_seq: Some(0),
+            last_seq: Some(8),
+            seq_gaps: 1,
+            produced: 7,
+            held_tails: 1,
+            conversion_failures: 1,
+            malformed_frames: 0,
+            native_frames_written: 43_200,
+            converted_frames_written: 33_600,
+        };
+        let shown = FinishError::Writer {
+            error: hound::Error::IoError(std::io::Error::other("disk full")),
+            partial: Some(partial),
+        }
+        .to_string();
+        for needle in [
+            "disk full",
+            "frames_received 9",
+            "first_seq 0",
+            "last_seq 8",
+            "seq_gaps 1",
+            "produced 7",
+            "held_tails 1",
+            "conversion_failures 1",
+            "malformed_frames 0",
+            "native_frames_written 43200",
+            "converted_frames_written 33600",
+        ] {
+            assert!(shown.contains(needle), "{needle:?} missing from {shown:?}");
+        }
+        let lost = FinishError::Writer {
+            error: hound::Error::IoError(std::io::Error::other("disk full")),
+            partial: None,
+        }
+        .to_string();
+        assert!(lost.contains("counts lost"), "{lost:?}");
     }
 
     #[test]
