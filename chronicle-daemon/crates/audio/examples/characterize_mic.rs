@@ -116,8 +116,13 @@ fn required(flag: &str, value: Option<String>) -> Result<String, String> {
 }
 
 /// The manifest has no escaping, so a control character could forge a line.
+/// Python's `splitlines`, which the analyzer uses, also breaks on these.
+fn breaks_a_line(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')
+}
+
 fn one_line(flag: &str, value: &str) -> Result<(), String> {
-    if value.chars().any(char::is_control) {
+    if value.chars().any(breaks_a_line) {
         return Err(format!(
             "{flag} must be one line with no control characters"
         ));
@@ -154,7 +159,7 @@ fn macos_version() -> String {
         .map(|o| {
             String::from_utf8_lossy(&o.stdout)
                 .chars()
-                .filter(|c| !c.is_control())
+                .filter(|c| !breaks_a_line(*c))
                 .collect::<String>()
                 .trim()
                 .to_string()
@@ -339,6 +344,7 @@ mod tests {
             ("--mode", "stereo\n"),
             ("--gain", "50%\r"),
             ("--phrase", "fox\njumps"),
+            ("--phrase", "fox\u{2028}measurement_valid: true"),
             ("--out", "/tmp/take\n"),
         ] {
             let mut list = vec!["--device-label", "Yeti", "--phrase", "fox"];

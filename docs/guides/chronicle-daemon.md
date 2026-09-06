@@ -203,10 +203,10 @@ cargo run -p chronicle-audio --features characterize --example characterize_mic 
 `--device-label` is only a label. Set the default input device in System
 Settings first and check it in Audio MIDI Setup; the example records whatever
 is active. `--out` must be a new or empty directory, one per take. Keep it
-outside the repository: a take is a recording of your voice. The names the
-example and the analyzer write are gitignored as a backstop, but the directory
-itself is not, so a take left inside the tree still shows up in `git status`.
-Read the
+outside the repository: a take is a recording of your voice. As a backstop,
+every recorded and derived file is gitignored, and so is the example's default
+`mic-capture-*` directory. `manifest.txt` is not, so a take in a directory you
+named still shows in `git status`. Read the
 same phrase, the same way, on every take; the manifest records it. The first
 run prompts for microphone permission. Exit code 2 means the recording is not
 a valid measurement: a dropped frame, a conversion failure, a frame the tap

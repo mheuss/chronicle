@@ -24,7 +24,8 @@ transcribed with:
     cargo run -p chronicle-transcription --example transcribe_wav -- <file>
 
 Exit codes: 0 analysed, 1 bad input, 2 refused as invalid, 3 a precedence gate
-fired (the report says which).
+fired (the report says which). In `analysis.json` a non-finite number is the
+string `-inf`, `inf` or `NaN`, never a bare JSON constant.
 
 Everything is computed in float64. Formulas:
 
@@ -382,17 +383,30 @@ def check_measurement_valid(manifest: dict[str, str], manifest_path: Path, allow
         )
 
 
+def _manifest_int(manifest: dict[str, str], key: str) -> int | None:
+    raw = manifest.get(key)
+    if raw is None:
+        return None
+    try:
+        return int(float(raw))
+    except ValueError as e:
+        raise InputError(f"manifest {key} is {raw!r}, not a number") from e
+
+
 def load_wavs(capture_dir: Path, manifest: dict[str, str]) -> tuple[Wav, Wav]:
     """Read and validate both WAVs. Every failure here means "wrong file"."""
     native = read_wav(capture_dir / NATIVE_WAV)
     converted = read_wav(capture_dir / CONVERTED_WAV)
 
     problems = []
-    want_channels = manifest.get("native_channels")
-    if want_channels is not None and int(want_channels) != native.channels:
+    # The speech band's upper edge has to sit under Nyquist or butter() raises.
+    if native.rate <= 2 * SPEECH_BAND_HZ[1]:
+        problems.append(f"{NATIVE_WAV} is {native.rate} Hz; the {SPEECH_BAND_HZ[1]:g} Hz speech band needs more than {2 * SPEECH_BAND_HZ[1]:g} Hz")
+    want_channels = _manifest_int(manifest, "native_channels")
+    if want_channels is not None and want_channels != native.channels:
         problems.append(f"manifest native_channels {want_channels} but {NATIVE_WAV} has {native.channels}")
-    want_rate = manifest.get("native_sample_rate_hz")
-    if want_rate is not None and int(float(want_rate)) != native.rate:
+    want_rate = _manifest_int(manifest, "native_sample_rate_hz")
+    if want_rate is not None and want_rate != native.rate:
         problems.append(f"manifest native_sample_rate_hz {want_rate} but {NATIVE_WAV} is {native.rate} Hz")
     if converted.channels != 1 or converted.rate != CONVERTED_RATE or not converted.is_float32:
         problems.append(
@@ -405,8 +419,8 @@ def load_wavs(capture_dir: Path, manifest: dict[str, str]) -> tuple[Wav, Wav]:
     ):
         if wav.frames < MIN_SECONDS * wav.rate:
             problems.append(f"{name} is shorter than {MIN_SECONDS:g} s ({wav.frames} frames); too short to analyse")
-        want_frames = manifest.get(key)
-        if want_frames is not None and int(want_frames) != wav.frames:
+        want_frames = _manifest_int(manifest, key)
+        if want_frames is not None and want_frames != wav.frames:
             problems.append(f"manifest {key} {want_frames} but {name} has {wav.frames} frames; not the file the manifest describes")
     if problems:
         raise InputError("; ".join(problems))
@@ -418,8 +432,8 @@ def remove_stale_outputs(out: Path) -> None:
     analysis.json that does not look like this script's report is refused,
     not deleted."""
     report_path = out / ANALYSIS_JSON
-    if report_path.exists():
-        if not report_path.is_file():
+    if report_path.is_symlink() or report_path.exists():
+        if not report_path.is_file() or report_path.is_symlink():
             raise InputError(f"{report_path} is not a file; pick another --out")
         try:
             previous = json.loads(report_path.read_text())
@@ -429,8 +443,8 @@ def remove_stale_outputs(out: Path) -> None:
             raise InputError(f"{report_path} is not this script's output; pick another --out or remove it")
     for name in OWNED_OUTPUTS:
         path = out / name
-        if path.exists() and not path.is_file():
-            raise InputError(f"{path} is not a file; pick another --out")
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise InputError(f"{path} is not a plain file; pick another --out")
         if path.is_file():
             path.unlink()
 
@@ -540,7 +554,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if report["gate"] is None and "candidates" in report:
             write_candidate_wavs(report, native_wav.samples, native_wav.rate, out)
-        (out / ANALYSIS_JSON).write_text(json.dumps(_json_ready(report), indent=2, allow_nan=False))
+        # Write then rename, so a run that dies mid-write leaves no half report
+        # for the next run to refuse.
+        tmp_report = out / (ANALYSIS_JSON + ".tmp")
+        tmp_report.write_text(json.dumps(_json_ready(report), indent=2, allow_nan=False))
+        tmp_report.replace(out / ANALYSIS_JSON)
     except OSError as e:
         sys.stderr.write(f"output error: {e}\n")
         return 1

@@ -36,6 +36,7 @@ pub struct CharacterizationFrame {
 pub struct WriterReport {
     pub frames_received: u64,
     pub first_seq: Option<u64>,
+    /// The last `seq` received, which is also the highest.
     pub last_seq: Option<u64>,
     pub seq_gaps: u64,
     pub produced: u64,
@@ -70,23 +71,30 @@ impl fmt::Display for FinishError {
             Self::Writer {
                 error,
                 partial: Some(p),
-            } => write!(
-                f,
-                "characterization writer failed: {error} (partial report: frames_received {}, \
-                 first_seq {}, last_seq {}, seq_gaps {}, produced {}, held_tails {}, \
-                 conversion_failures {}, malformed_frames {}, native_frames_written {}, \
-                 converted_frames_written {})",
-                p.frames_received,
-                p.first_seq.map_or("none".to_string(), |v| v.to_string()),
-                p.last_seq.map_or("none".to_string(), |v| v.to_string()),
-                p.seq_gaps,
-                p.produced,
-                p.held_tails,
-                p.conversion_failures,
-                p.malformed_frames,
-                p.native_frames_written,
-                p.converted_frames_written,
-            ),
+            } => {
+                let WriterReport {
+                    frames_received,
+                    first_seq,
+                    last_seq,
+                    seq_gaps,
+                    produced,
+                    held_tails,
+                    conversion_failures,
+                    malformed_frames,
+                    native_frames_written,
+                    converted_frames_written,
+                } = p;
+                let opt = |v: &Option<u64>| v.map_or_else(|| "none".to_string(), |v| v.to_string());
+                write!(
+                    f,
+                    "characterization writer failed: {error} (partial report: frames_received {frames_received}, \
+                     first_seq {}, last_seq {}, seq_gaps {seq_gaps}, produced {produced}, held_tails {held_tails}, \
+                     conversion_failures {conversion_failures}, malformed_frames {malformed_frames}, \
+                     native_frames_written {native_frames_written}, converted_frames_written {converted_frames_written})",
+                    opt(first_seq),
+                    opt(last_seq),
+                )
+            }
             Self::Writer {
                 error,
                 partial: None,
@@ -121,10 +129,11 @@ pub struct CharacterizationWriter {
 }
 
 impl CharacterizationWriter {
-    /// Open both WAVs and start the thread. Opening here means a bad path
-    /// fails before any audio is recorded; if the second file fails, the first
-    /// is removed. Each file stops just short of 4 GiB, the limit of a WAV
-    /// data chunk, with a `Writer` error.
+    /// Open both WAVs and start the thread. `native_path` gets `format`'s
+    /// channel count and rate; `converted_path` gets one channel at 48 kHz.
+    /// Opening here means a bad path fails before any audio is recorded; if
+    /// the second file fails, the first is removed. Each file stops just short
+    /// of 4 GiB, the limit of a WAV data chunk, with a `Writer` error.
     pub fn spawn(
         frames: Receiver<CharacterizationFrame>,
         format: &NativeFormat,

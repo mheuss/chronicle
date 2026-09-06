@@ -491,6 +491,54 @@ def test_main_refuses_a_directory_at_a_candidate_name(tmp_path, capsys):
     assert "candidate-avg.wav" in capsys.readouterr().err
 
 
+def test_main_refuses_a_symlink_at_an_owned_name(tmp_path, capsys):
+    native, converted = good_stereo()
+    write_capture(tmp_path, native, converted)
+    victim = tmp_path / "elsewhere" / "notes.wav"
+    (tmp_path / "candidate-avg.wav").symlink_to(victim)  # dangling
+    assert amc.main([str(tmp_path)]) == 1
+    assert "candidate-avg.wav" in capsys.readouterr().err
+    assert not victim.exists(), "nothing may be written through a symlink"
+    (tmp_path / "candidate-avg.wav").unlink()
+
+    (tmp_path / "analysis.json").symlink_to(tmp_path / "elsewhere" / "report.json")
+    assert amc.main([str(tmp_path)]) == 1
+    assert not (tmp_path / "elsewhere").exists()
+
+
+def test_main_rejects_a_native_rate_the_speech_band_cannot_use(tmp_path, capsys):
+    c0 = sine(1000, 0.5, rate=6000)
+    write_capture(tmp_path, stereo(c0, c0), sine(1000, 0.3), native_rate=6000)
+    assert amc.main([str(tmp_path)]) == 1
+    assert "speech band" in capsys.readouterr().err
+
+
+def test_main_names_the_manifest_key_that_is_not_a_number(tmp_path, capsys):
+    native, converted = good_stereo()
+    write_capture(tmp_path, native, converted)
+    with (tmp_path / "manifest.txt").open("a") as f:
+        f.write("native_frames_written: lots\n")
+    assert amc.main([str(tmp_path)]) == 1
+    assert "native_frames_written" in capsys.readouterr().err
+
+
+def test_main_reports_a_failed_write_as_an_output_error(tmp_path, capsys):
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    native, converted = good_stereo()
+    write_capture(tmp_path, native, converted)
+    out = tmp_path / "out"
+    out.mkdir()
+    out.chmod(0o500)
+    try:
+        assert amc.main([str(tmp_path), "--out", str(out)]) == 1
+        assert "output error" in capsys.readouterr().err
+    finally:
+        out.chmod(0o700)
+
+
 def test_main_rejects_a_recording_shorter_than_one_second(tmp_path, capsys):
     native, converted = good_stereo(secs=0.5)
     write_capture(tmp_path, native, converted)
