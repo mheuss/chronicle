@@ -592,7 +592,8 @@ def test_main_owns_its_names_in_out_and_nothing_else(tmp_path, capsys):
     assert "analysis.json" in capsys.readouterr().err
     assert (out / "analysis.json").read_text() == "not json"
 
-    for foreign in [{"something": "else"}, {"parameters": {"lr": 0.01}, "results": []}]:
+    five_names_no_shape = {k: "someone else's data" for k in ["parameters", "environment", "native", "converted", "gate"]}
+    for foreign in [{"something": "else"}, {"parameters": {"lr": 0.01}, "results": []}, five_names_no_shape]:
         (out / "analysis.json").write_text(json.dumps(foreign))
         assert amc.main([str(tmp_path), "--out", str(out)]) == 1, foreign
         assert (out / "analysis.json").read_text() == json.dumps(foreign)
@@ -686,7 +687,14 @@ def test_main_removes_its_own_stale_outputs_first(tmp_path):
     mono = sine(1000, 0.5)[:, np.newaxis]
     write_capture(tmp_path, mono, sine(1000, 0.5))
     (tmp_path / "candidate-avg.wav").write_bytes(b"stale")
-    earlier = {key: {} for key in amc.REPORT_KEYS} | {"parameters": amc.PARAMETERS, "gate": "gate 0: earlier take"}
+    earlier = {  # the shape analyze() writes on a gated run, spelled out rather than derived from the constant under test
+        "parameters": {"speech_band_hz": [300.0, 3400.0]},
+        "environment": {"python": "3.11.0"},
+        "native": {"rate_hz": 48000, "channels": 1},
+        "converted": {"rate_hz": 48000},
+        "gate": "gate 0: earlier take",
+        "manifest": {"device": "test"},
+    }
     (tmp_path / "analysis.json").write_text(json.dumps(earlier))
 
     assert amc.main([str(tmp_path)]) == 3

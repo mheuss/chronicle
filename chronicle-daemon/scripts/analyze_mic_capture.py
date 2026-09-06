@@ -439,6 +439,16 @@ def load_wavs(capture_dir: Path, manifest: dict[str, str]) -> tuple[Wav, Wav]:
     return native, converted
 
 
+def _looks_like_our_report(previous) -> bool:
+    """Shape, not exact values: a report from another version of this script
+    must still count as ours, a foreign file that happens to use the same key
+    names must not."""
+    if not isinstance(previous, dict) or not REPORT_KEYS <= previous.keys():
+        return False
+    native = previous.get("native")
+    return isinstance(previous.get("parameters"), dict) and isinstance(native, dict) and "rate_hz" in native
+
+
 def remove_stale_outputs(out: Path) -> None:
     """Remove the OWNED_OUTPUTS names from `out` and nothing else. An
     analysis.json that does not look like this script's report is refused,
@@ -461,7 +471,7 @@ def remove_stale_outputs(out: Path) -> None:
             previous = json.loads(report_path.read_text(encoding="utf-8"))
         except ValueError as e:
             raise InputError(f"{report_path} is not this script's output ({e}); pick another --out or remove it") from e
-        if not isinstance(previous, dict) or not REPORT_KEYS <= previous.keys():
+        if not _looks_like_our_report(previous):
             raise InputError(f"{report_path} is not this script's output; pick another --out or remove it")
     for name in OWNED_OUTPUTS:
         path = out / name

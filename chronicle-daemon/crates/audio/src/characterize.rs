@@ -193,8 +193,9 @@ impl CharacterizationWriter {
             .spawn(move || {
                 let result = match write_all(frames, &mut native, &mut converted) {
                     Ok(report) => {
-                        // Finalize both even if the first fails, or the second
-                        // WAV is left with an unpatched header.
+                        // hound patches the header on drop too; an explicit
+                        // finalize is what surfaces a flush error instead of
+                        // swallowing it, so both get one.
                         let native_done = native.finalize();
                         let converted_done = converted.finalize();
                         match native_done.and(converted_done) {
@@ -866,11 +867,20 @@ mod tests {
 
     #[test]
     fn manifest_rounds_the_rate_like_the_wav_header() {
-        let report = sample_report();
         let mut format = stereo_48k();
         format.sample_rate = 44_100.5;
+        let s = session(&format);
+        drop(s.tx);
+        let report = s
+            .writer
+            .finish(Duration::from_secs(5))
+            .expect("writer should finish");
+        let (spec, _) = read_all(&s.native);
+
         let text = sample_manifest(&report, AudioDropSnapshot::default(), &format).render();
-        assert!(text.contains("native_sample_rate_hz: 44101\n"), "{text}");
+        let line = format!("native_sample_rate_hz: {}\n", spec.sample_rate);
+        assert_eq!(spec.sample_rate, 44_101);
+        assert!(text.contains(&line), "{text}");
     }
 
     #[test]
