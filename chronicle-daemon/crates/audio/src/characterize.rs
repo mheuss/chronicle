@@ -388,7 +388,7 @@ impl Manifest<'_> {
     }
 
     pub fn recorded_secs(&self) -> f64 {
-        self.report.native_frames_written as f64 / self.format.sample_rate
+        self.report.native_frames_written as f64 / self.format.sample_rate.round()
     }
 
     pub fn converted_secs(&self) -> f64 {
@@ -877,10 +877,17 @@ mod tests {
             .expect("writer should finish");
         let (spec, _) = read_all(&s.native);
 
-        let text = sample_manifest(&report, AudioDropSnapshot::default(), &format).render();
+        let manifest = sample_manifest(&report, AudioDropSnapshot::default(), &format);
+        let text = manifest.render();
         let line = format!("native_sample_rate_hz: {}\n", spec.sample_rate);
         assert_eq!(spec.sample_rate, 44_101);
         assert!(text.contains(&line), "{text}");
+        let full = sample_report();
+        let ten_seconds = sample_manifest(&full, AudioDropSnapshot::default(), &format);
+        assert_eq!(
+            ten_seconds.recorded_secs(),
+            full.native_frames_written as f64 / f64::from(spec.sample_rate)
+        );
     }
 
     #[test]

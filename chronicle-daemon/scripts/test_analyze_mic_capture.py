@@ -8,7 +8,7 @@
 # ///
 """Tests for analyze_mic_capture.py.
 
-Run:  uv run chronicle-daemon/scripts/test_analyze_mic_capture.py
+Run:  cd chronicle-daemon && uv run scripts/test_analyze_mic_capture.py
 """
 
 import json
@@ -374,6 +374,7 @@ def test_main_writes_candidates_json_and_prints_a_report(tmp_path, capsys):
         assert data.ndim == 1, name
         assert len(data) == 16_000, name
     report = json.loads((tmp_path / "analysis.json").read_text())
+    assert report["generator"] == "chronicle analyze_mic_capture"
     assert report["pearson_r"] == pytest.approx(1.0)
     assert report["candidates"]["c1"]["wav"].endswith("candidate-c1.wav")
     assert report["parameters"]["candidate_rate_hz"] == 16_000
@@ -593,7 +594,9 @@ def test_main_owns_its_names_in_out_and_nothing_else(tmp_path, capsys):
     assert (out / "analysis.json").read_text() == "not json"
 
     five_names_no_shape = {k: "someone else's data" for k in ["parameters", "environment", "native", "converted", "gate"]}
-    for foreign in [{"something": "else"}, {"parameters": {"lr": 0.01}, "results": []}, five_names_no_shape]:
+    shaped_but_unmarked = {"parameters": {}, "environment": None, "native": {"rate_hz": 1}, "converted": None, "gate": None}
+    wrong_marker = {"generator": "another tool", "parameters": {}, "environment": {}, "native": {"rate_hz": 1}, "converted": {}, "gate": None}
+    for foreign in [{"something": "else"}, {"parameters": {"lr": 0.01}, "results": []}, five_names_no_shape, shaped_but_unmarked, wrong_marker]:
         (out / "analysis.json").write_text(json.dumps(foreign))
         assert amc.main([str(tmp_path), "--out", str(out)]) == 1, foreign
         assert (out / "analysis.json").read_text() == json.dumps(foreign)
@@ -688,6 +691,7 @@ def test_main_removes_its_own_stale_outputs_first(tmp_path):
     write_capture(tmp_path, mono, sine(1000, 0.5))
     (tmp_path / "candidate-avg.wav").write_bytes(b"stale")
     earlier = {  # the shape analyze() writes on a gated run, spelled out rather than derived from the constant under test
+        "generator": "chronicle analyze_mic_capture",
         "parameters": {"speech_band_hz": [300.0, 3400.0]},
         "environment": {"python": "3.11.0"},
         "native": {"rate_hz": 48000, "channels": 1},

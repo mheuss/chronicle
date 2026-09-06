@@ -8,7 +8,7 @@
 """Analyse a microphone characterization capture (HEU-650; read in HEU-651).
 
 Run:
-    uv run chronicle-daemon/scripts/analyze_mic_capture.py <capture-dir> [--out DIR] [--allow-invalid]
+    cd chronicle-daemon && uv run scripts/analyze_mic_capture.py <capture-dir> [--out DIR] [--allow-invalid]
 
 `<capture-dir>` is the directory `characterize_mic` wrote: `mic-native.wav`,
 `mic-converted.wav` and `manifest.txt`. The script refuses a recording whose
@@ -294,6 +294,7 @@ def analyze(native_wav: Wav, converted_wav: Wav) -> dict:
     channels = native.shape[1]
     converted_mono = converted_wav.samples[:, 0]
     report = {
+        "generator": GENERATOR,
         "parameters": PARAMETERS,
         "environment": environment(),
         "native": {
@@ -352,9 +353,10 @@ CONVERTED_WAV = "mic-converted.wav"
 ANALYSIS_JSON = "analysis.json"
 CANDIDATE_NAMES = ("avg", "diff", "c0", "c1")
 TMP_REPORT = ANALYSIS_JSON + ".tmp"
-# Top-level keys every report from analyze() carries, gate or no gate. The
-# identity check for a previous analysis.json.
-REPORT_KEYS = frozenset({"parameters", "environment", "native", "converted", "gate"})
+# Every report from analyze() carries this marker and these keys, gate or no
+# gate. They are how a previous analysis.json is recognised as this script's.
+GENERATOR = "chronicle analyze_mic_capture"
+REPORT_KEYS = frozenset({"generator", "parameters", "environment", "native", "converted", "gate"})
 # Every file this script writes into --out. It removes exactly these before a run.
 OWNED_OUTPUTS = (ANALYSIS_JSON, TMP_REPORT, *(f"candidate-{name}.wav" for name in CANDIDATE_NAMES))
 CONVERTED_RATE = 48_000
@@ -440,13 +442,16 @@ def load_wavs(capture_dir: Path, manifest: dict[str, str]) -> tuple[Wav, Wav]:
 
 
 def _looks_like_our_report(previous) -> bool:
-    """Shape, not exact values: a report from another version of this script
-    must still count as ours, a foreign file that happens to use the same key
-    names must not."""
+    """The generator marker plus the report's shape. Values are not compared,
+    so a report from another version of this script still counts as ours."""
     if not isinstance(previous, dict) or not REPORT_KEYS <= previous.keys():
         return False
-    native = previous.get("native")
-    return isinstance(previous.get("parameters"), dict) and isinstance(native, dict) and "rate_hz" in native
+    if previous["generator"] != GENERATOR:
+        return False
+    for key in ("parameters", "environment", "native", "converted"):
+        if not isinstance(previous[key], dict):
+            return False
+    return "rate_hz" in previous["native"] and (previous["gate"] is None or isinstance(previous["gate"], str))
 
 
 def remove_stale_outputs(out: Path) -> None:
