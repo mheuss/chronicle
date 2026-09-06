@@ -48,3 +48,8 @@ characterize = ["dep:hound"]
 [dev-dependencies]
 tempfile = "3"
 trybuild = "1"
+
+[[example]]
+name = "characterize_mic"
+required-features = ["characterize"]
+test = true
