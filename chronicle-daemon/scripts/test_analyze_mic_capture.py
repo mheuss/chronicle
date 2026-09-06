@@ -263,8 +263,9 @@ def test_gate_3_fires_when_a_channel_rms_is_not_finite():
 
 
 def test_gate_2_takes_precedence_over_gate_3():
-    quiet = sine(1000, 0.001)
-    assert gate(stereo(quiet, np.zeros(RATE))).startswith("gate 2")
+    # All-zero input satisfies both gates: every channel silent, every channel
+    # zero variance. The design's order says gate 2.
+    assert gate(stereo(np.zeros(RATE), np.zeros(RATE))).startswith("gate 2")
 
 
 def test_candidates_are_the_four_pinned_mixes():
@@ -379,10 +380,13 @@ def test_main_writes_candidates_json_and_prints_a_report(tmp_path, capsys):
 
 def test_main_refuses_an_invalid_measurement_unless_overridden(tmp_path):
     native, converted = good_stereo()
-    write_capture(tmp_path, native, converted, valid=False)
+    write_capture(tmp_path, native, converted)
+    assert amc.main([str(tmp_path)]) == 0
+    assert (tmp_path / "analysis.json").exists()
 
+    write_capture(tmp_path, native, converted, valid=False)
     assert amc.main([str(tmp_path)]) == 2
-    assert not (tmp_path / "candidate-avg.wav").exists()
+    assert not (tmp_path / "candidate-avg.wav").exists(), "a refused take must not leave the earlier report behind"
     assert not (tmp_path / "analysis.json").exists()
 
     assert amc.main([str(tmp_path), "--allow-invalid"]) == 0
@@ -430,6 +434,39 @@ def test_main_rejects_a_recording_shorter_than_one_second(tmp_path, capsys):
     assert "shorter than" in capsys.readouterr().err
 
 
+def test_main_rejects_a_short_converted_file(tmp_path, capsys):
+    native, _ = good_stereo()
+    write_capture(tmp_path, native, sine(1000, 0.3, secs=0.5))
+    assert amc.main([str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "mic-converted.wav" in err and "shorter than" in err
+
+
+def test_main_refuses_to_delete_files_it_did_not_write(tmp_path, capsys):
+    native, converted = good_stereo()
+    write_capture(tmp_path, native, converted)
+    out = tmp_path / "out"
+    out.mkdir()
+
+    foreign = out / "candidate-avg.wav"
+    foreign.write_bytes(b"not ours")
+    assert amc.main([str(tmp_path), "--out", str(out)]) == 1
+    assert foreign.read_bytes() == b"not ours"
+    assert "candidate-avg.wav" in capsys.readouterr().err
+    foreign.unlink()
+
+    (out / "analysis.json").write_text("not json")
+    assert amc.main([str(tmp_path), "--out", str(out)]) == 1
+    assert (out / "analysis.json").read_text() == "not json"
+    (out / "analysis.json").unlink()
+
+    other = out / "candidate-mine.wav"
+    other.write_bytes(b"mine")
+    assert amc.main([str(tmp_path), "--out", str(out)]) == 0
+    assert other.read_bytes() == b"mine"
+    assert (out / "candidate-avg.wav").exists()
+
+
 def test_main_rejects_a_missing_manifest(tmp_path, capsys):
     native, converted = good_stereo()
     write_capture(tmp_path, native, converted)
@@ -441,8 +478,9 @@ def test_main_rejects_a_missing_manifest(tmp_path, capsys):
 def test_main_removes_its_own_stale_outputs_first(tmp_path):
     mono = sine(1000, 0.5)[:, np.newaxis]
     write_capture(tmp_path, mono, sine(1000, 0.5))
-    (tmp_path / "candidate-avg.wav").write_bytes(b"stale")
-    (tmp_path / "analysis.json").write_text("{}")
+    stale = tmp_path / "candidate-avg.wav"
+    stale.write_bytes(b"stale")
+    (tmp_path / "analysis.json").write_text(json.dumps({"candidates": {"avg": {"wav": str(stale)}}}))
 
     assert amc.main([str(tmp_path)]) == 3
 

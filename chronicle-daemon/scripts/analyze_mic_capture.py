@@ -363,7 +363,7 @@ MANIFEST = "manifest.txt"
 NATIVE_WAV = "mic-native.wav"
 CONVERTED_WAV = "mic-converted.wav"
 ANALYSIS_JSON = "analysis.json"
-CANDIDATE_GLOB = "candidate-*.wav"
+CANDIDATE_NAMES = ("avg", "diff", "c0", "c1")
 CONVERTED_RATE = 48_000
 MIN_SECONDS = 1.0
 
@@ -387,14 +387,16 @@ def read_manifest(path: Path) -> dict[str, str]:
     return manifest
 
 
-def load_capture(capture_dir: Path, allow_invalid: bool) -> tuple[dict[str, str], Wav, Wav]:
-    """Read and validate one capture. Every failure here means "wrong file"."""
-    manifest = read_manifest(capture_dir / MANIFEST)
+def check_measurement_valid(manifest: dict[str, str], manifest_path: Path, allow_invalid: bool) -> None:
     if manifest.get("measurement_valid") != "true" and not allow_invalid:
         raise InvalidMeasurement(
-            f"{capture_dir / MANIFEST} says measurement_valid: {manifest.get('measurement_valid', 'missing')}; "
+            f"{manifest_path} says measurement_valid: {manifest.get('measurement_valid', 'missing')}; "
             "re-record, or pass --allow-invalid to look anyway"
         )
+
+
+def load_wavs(capture_dir: Path, manifest: dict[str, str]) -> tuple[Wav, Wav]:
+    """Read and validate both WAVs. Every failure here means "wrong file"."""
     native = read_wav(capture_dir / NATIVE_WAV)
     converted = read_wav(capture_dir / CONVERTED_WAV)
 
@@ -410,20 +412,42 @@ def load_capture(capture_dir: Path, allow_invalid: bool) -> tuple[dict[str, str]
             f"{CONVERTED_WAV} must be 1 ch, {CONVERTED_RATE} Hz, float32; "
             f"got {converted.channels} ch, {converted.rate} Hz, {converted.dtype}"
         )
-    if native.frames < MIN_SECONDS * native.rate:
-        problems.append(
-            f"{NATIVE_WAV} is shorter than {MIN_SECONDS:g} s ({native.frames} frames); too short to analyse"
-        )
+    for name, wav in ((NATIVE_WAV, native), (CONVERTED_WAV, converted)):
+        if wav.frames < MIN_SECONDS * wav.rate:
+            problems.append(f"{name} is shorter than {MIN_SECONDS:g} s ({wav.frames} frames); too short to analyse")
     if problems:
         raise InputError("; ".join(problems))
-    return manifest, native, converted
+    return native, converted
 
 
 def remove_stale_outputs(out: Path) -> None:
-    """Nothing from an earlier run may survive into this one."""
-    for path in list(out.glob(CANDIDATE_GLOB)) + [out / ANALYSIS_JSON]:
-        if path.is_file():
-            path.unlink()
+    """Remove what an earlier run of this script left in `out`, and nothing else.
+
+    The earlier run's analysis.json names the candidate WAVs it wrote; those
+    and the report itself are removed. A candidate-<name>.wav no report
+    accounts for, or an analysis.json this script did not write, is someone
+    else's file: refuse rather than delete or overwrite it.
+    """
+    out = out.resolve()
+    report_path = out / ANALYSIS_JSON
+    if report_path.is_file():
+        try:
+            previous = json.loads(report_path.read_text())
+            recorded = [Path(stats["wav"]).resolve() for stats in previous.get("candidates", {}).values()]
+        except (ValueError, AttributeError, KeyError, TypeError) as e:
+            raise InputError(
+                f"{report_path} is not this script's output ({e}); pick another --out or remove it"
+            ) from e
+        for path in recorded:
+            if path.parent == out and path.is_file():
+                path.unlink()
+        report_path.unlink()
+    foreign = [out / f"candidate-{name}.wav" for name in CANDIDATE_NAMES if (out / f"candidate-{name}.wav").is_file()]
+    if foreign:
+        raise InputError(
+            f"{', '.join(str(path) for path in foreign)}: not written by this script's last run here; "
+            "pick another --out or remove them"
+        )
 
 
 # --- output ----------------------------------------------------------------
@@ -494,18 +518,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-invalid", action="store_true", help="analyse even if the manifest says measurement_valid: false")
     args = parser.parse_args(argv)
 
+    manifest_path = args.capture_dir / MANIFEST
+    out = args.out if args.out is not None else args.capture_dir
     try:
-        manifest, native_wav, converted_wav = load_capture(args.capture_dir, args.allow_invalid)
+        # The manifest proves this is a characterize_mic directory before
+        # anything is deleted. Stale outputs go before the validity check so a
+        # refused take cannot leave the previous take's report behind.
+        manifest = read_manifest(manifest_path)
+        out.mkdir(parents=True, exist_ok=True)
+        remove_stale_outputs(out)
+        check_measurement_valid(manifest, manifest_path, args.allow_invalid)
+        native_wav, converted_wav = load_wavs(args.capture_dir, manifest)
     except InvalidMeasurement as e:
         sys.stderr.write(f"refused: {e}\n")
         return 2
-    except (InputError, FileNotFoundError, ValueError) as e:
+    except (InputError, OSError, ValueError) as e:
         sys.stderr.write(f"input error: {e}\n")
         return 1
-
-    out = args.out if args.out is not None else args.capture_dir
-    out.mkdir(parents=True, exist_ok=True)
-    remove_stale_outputs(out)
 
     report = analyze(native_wav, converted_wav)
     report["manifest"] = manifest
