@@ -17,6 +17,10 @@ pub struct CharacterizationFrame {
     pub seq: u64,
     /// Native input, one `Vec` per channel, already stride-corrected. Every
     /// channel has the same length.
+    ///
+    /// Empty means the callback got a buffer with frames it could not read as
+    /// f32 planes. The `seq` was still consumed. Treat such a frame as
+    /// malformed, never as silence: it is a hole in the recording.
     pub native: Vec<Vec<f32>>,
     /// The converter's result for this same buffer.
     pub outcome: ConversionOutcome,

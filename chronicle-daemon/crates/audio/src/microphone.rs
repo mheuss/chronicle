@@ -342,9 +342,9 @@ impl MicrophoneCapture {
                 common_format: common_format_name(native_common),
                 float32: native_common == AVAudioCommonFormat::PCMFormatFloat32,
             };
-            // Refuse here, before the converter, the tap and `prepare()`, so a
-            // rejected device leaves no half-built engine and no "tap
-            // installed" line behind.
+            // Refuse here, before the converter, the tap install and
+            // `prepare()`, so a rejected device leaves no tap on the input
+            // node and no "tap installed" line behind.
             validate(&format)?;
 
             // The format the encoder requires: 48 kHz, mono, f32. The
@@ -565,11 +565,11 @@ fn characterization_input_check(format: &NativeFormat) -> Result<()> {
 /// the converter, stamp a sequence number.
 ///
 /// Returns `None` without consuming a sequence number for a zero-frame
-/// buffer, so that leaves no gap for the writer to misread as a drop. A buffer
-/// that has frames but cannot be read as f32 planes (the device changed under
-/// the engine, say) still gets a frame and a sequence number, with `native`
-/// empty: the writer counts that as malformed and the manifest marks the run
-/// invalid, instead of the hole passing as a clean recording.
+/// buffer, so that leaves no gap to misread as a drop. A buffer that has
+/// frames but cannot be read as f32 planes (the device changed under the
+/// engine, say) still gets a frame and a sequence number, with `native`
+/// empty. That is the frame's malformed marker: the seq is consumed, so the
+/// hole stays visible to whatever consumes the frames.
 #[cfg(feature = "characterize")]
 fn characterize_buffer(
     converter: &AVAudioConverter,
@@ -1914,8 +1914,9 @@ mod tests {
         assert!(!mic.is_running(), "engine should not run after stop()");
     }
 
-    /// Build a deinterleaved 48 kHz stereo f32 buffer with `frames` frames,
-    /// channel 0 filled with `left` and channel 1 with `right`.
+    /// Build a deinterleaved 48 kHz stereo f32 buffer with `frames` frames.
+    /// Channel 0 holds `left + f * RAMP` at frame `f`, channel 1 the same on
+    /// `right`, so a stride or offset bug shows at the tail, not just at 0.
     #[cfg(all(target_os = "macos", feature = "characterize"))]
     fn make_stereo_buffer(
         frames: u32,
@@ -1951,10 +1952,17 @@ mod tests {
             let plane = unsafe { *data.add(ch) };
             let samples =
                 unsafe { std::slice::from_raw_parts_mut(plane.as_ptr(), frames as usize) };
-            samples.fill(value);
+            for (f, sample) in samples.iter_mut().enumerate() {
+                *sample = value + f as f32 * RAMP;
+            }
         }
         (format, buffer)
     }
+
+    /// Per-frame increment `make_stereo_buffer` adds, small enough that 4800
+    /// frames stay well inside full scale.
+    #[cfg(all(target_os = "macos", feature = "characterize"))]
+    const RAMP: f32 = 0.000_01;
 
     #[cfg(all(target_os = "macos", feature = "characterize"))]
     fn stereo_to_mono_converter(input: &AVAudioFormat) -> Retained<AVAudioConverter> {
@@ -1996,8 +2004,8 @@ mod tests {
             assert_eq!(frame.native[1].len(), 4_800);
             assert_eq!(frame.native[0][0], 0.25);
             assert_eq!(frame.native[1][0], -0.25);
-            assert_eq!(frame.native[0][4_799], 0.25);
-            assert_eq!(frame.native[1][4_799], -0.25);
+            assert_eq!(frame.native[0][4_799], 0.25 + 4_799.0 * RAMP);
+            assert_eq!(frame.native[1][4_799], -0.25 + 4_799.0 * RAMP);
             assert!(
                 matches!(frame.outcome, ConversionOutcome::Produced(ref s) if !s.is_empty()),
                 "100 ms of stereo must convert to some mono output, got {:?}",
@@ -2033,8 +2041,8 @@ mod tests {
     }
 
     /// A buffer with frames that cannot be read as f32 planes must not vanish
-    /// silently: it takes a seq and arrives with no channels, which the writer
-    /// reports as malformed.
+    /// silently: it takes a seq and arrives with no channels, the marker a
+    /// consumer reads as malformed.
     #[cfg(all(target_os = "macos", feature = "characterize"))]
     #[test]
     fn characterize_buffer_marks_an_unreadable_buffer_as_empty() {
