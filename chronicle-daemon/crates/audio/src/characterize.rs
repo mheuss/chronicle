@@ -45,6 +45,8 @@ pub struct CharacterizationFrame {
 pub struct WriterReport {
     pub frames_received: u64,
     pub first_seq: Option<u64>,
+    /// The last `seq` received, which is also the highest: the tap's counter
+    /// only goes up and the channel is a FIFO.
     pub last_seq: Option<u64>,
     pub seq_gaps: u64,
     pub produced: u64,
@@ -63,14 +65,15 @@ pub struct WriterReport {
 /// Why [`CharacterizationWriter::finish`] did not return a clean report.
 #[derive(Debug)]
 pub enum FinishError {
-    /// The writer thread hit a WAV or I/O error, or panicked. `partial` holds
-    /// every count collected up to that point, so a session that died in its
-    /// last minute still reports the nine that worked. The files may be
-    /// truncated; their headers are patched only as well as `hound`'s `Drop`
-    /// manages.
+    /// The writer thread hit a WAV or I/O error, or panicked. On an error,
+    /// `partial` holds every count collected up to it, so a session that died
+    /// in its last minute still reports the nine that worked. On a panic the
+    /// counts die with the thread's stack and `partial` is `None`. The files
+    /// may be truncated; their headers are patched only as well as `hound`'s
+    /// `Drop` manages.
     Writer {
         error: hound::Error,
-        partial: WriterReport,
+        partial: Option<WriterReport>,
     },
     /// The channel did not close within the timeout. Some sender is still
     /// alive, most likely a `MicrophoneCapture` that was not dropped before
@@ -84,11 +87,18 @@ pub enum FinishError {
 impl fmt::Display for FinishError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Writer { error, partial } => write!(
+            Self::Writer {
+                error,
+                partial: Some(partial),
+            } => write!(
                 f,
                 "characterization writer failed: {error} (after {} frames received)",
                 partial.frames_received
             ),
+            Self::Writer {
+                error,
+                partial: None,
+            } => write!(f, "characterization writer failed: {error} (counts lost)"),
             Self::Timeout(d) => write!(
                 f,
                 "characterization writer did not finish within {d:?}: a sender is still alive; \
@@ -104,12 +114,17 @@ impl std::error::Error for FinishError {}
 /// was counted before it.
 type WriterResult = Result<WriterReport, (hound::Error, WriterReport)>;
 
+/// Highest native rate a device is allowed to claim. Well above any real
+/// microphone. hound's `rate * bytes_per_sample * channels` must also fit a
+/// `u32`, which `spawn` checks separately because it depends on the count.
+const MAX_SAMPLE_RATE_HZ: f64 = 768_000.0;
+
 /// Owns the thread that turns frames into two WAV files.
 ///
 /// The thread ends when every `SyncSender<CharacterizationFrame>` is dropped.
 /// `Receiver::recv` returns `Err` only after every queued frame has been
 /// delivered, so there is no separate drain step.
-#[must_use = "call finish(), or the report and the files' finalization are lost"]
+#[must_use = "call finish(), or the report is lost"]
 pub struct CharacterizationWriter {
     handle: JoinHandle<()>,
     completion_rx: Receiver<WriterResult>,
@@ -132,16 +147,27 @@ impl CharacterizationWriter {
         native_path: &Path,
         converted_path: &Path,
     ) -> Result<Self, hound::Error> {
-        let channels = u16::try_from(format.channels).map_err(|_| {
-            hound::Error::IoError(io::Error::other(format!(
-                "{} channels does not fit a WAV header",
-                format.channels
-            )))
-        })?;
-        if !format.sample_rate.is_finite() || format.sample_rate < 1.0 {
+        let channels = match u16::try_from(format.channels) {
+            Ok(n) if n > 0 => n,
+            _ => {
+                return Err(hound::Error::IoError(io::Error::other(format!(
+                    "{} channels does not fit a WAV header",
+                    format.channels
+                ))));
+            }
+        };
+        // `as u32` would saturate a rate too large for the header, and hound
+        // computes bytes per second in u32 and panics on overflow, so both
+        // are refused here.
+        let rate = format.sample_rate;
+        let bytes_per_sec = rate.round() * 4.0 * f64::from(channels);
+        if !rate.is_finite()
+            || rate < 1.0
+            || rate > MAX_SAMPLE_RATE_HZ
+            || bytes_per_sec > f64::from(u32::MAX)
+        {
             return Err(hound::Error::IoError(io::Error::other(format!(
-                "{} Hz is not a sample rate a WAV header can hold",
-                format.sample_rate
+                "{rate} Hz x {channels} channels is not a format a WAV header can hold                  (1 to {MAX_SAMPLE_RATE_HZ} Hz, bytes per second within u32)"
             ))));
         }
         let native_spec = WavSpec {
@@ -202,7 +228,10 @@ impl CharacterizationWriter {
             }
             Ok(Err((error, partial))) => {
                 let _ = self.handle.join();
-                Err(FinishError::Writer { error, partial })
+                Err(FinishError::Writer {
+                    error,
+                    partial: Some(partial),
+                })
             }
             Err(RecvTimeoutError::Timeout) => Err(FinishError::Timeout(timeout)),
             Err(RecvTimeoutError::Disconnected) => {
@@ -216,14 +245,14 @@ impl CharacterizationWriter {
                 };
                 Err(FinishError::Writer {
                     error: hound::Error::IoError(io::Error::other(detail)),
-                    partial: WriterReport::default(),
+                    partial: None,
                 })
             }
         }
     }
 }
 
-fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {
@@ -234,8 +263,8 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 }
 
 /// RIFF stores the data chunk length in 32 bits and `hound` counts the bytes
-/// in a `u32`. Stop one frame short of wrapping it. The margin covers the
-/// header and one more frame of slack.
+/// in a `u32`. Every write is checked in full before it happens, so the
+/// margin only has to cover hound's 60-byte header. 4096 is that, with room.
 const WAV_DATA_LIMIT_BYTES: u64 = u32::MAX as u64 - 4096;
 
 /// The writer loop. Returns every count collected so far alongside any error,
@@ -320,7 +349,8 @@ fn check_room<W: io::Write + io::Seek>(
     samples_to_add: usize,
     name: &str,
 ) -> Result<(), hound::Error> {
-    let bytes_after = (u64::from(writer.len()) + samples_to_add as u64) * 4;
+    let bytes_per_sample = u64::from(writer.spec().bits_per_sample).div_ceil(8);
+    let bytes_after = (u64::from(writer.len()) + samples_to_add as u64) * bytes_per_sample;
     if bytes_after > WAV_DATA_LIMIT_BYTES {
         return Err(hound::Error::IoError(io::Error::other(format!(
             "{name} reached the 4 GiB WAV data limit; the session is over"
@@ -599,7 +629,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let native = dir.path().join("mic-native.wav");
         let converted = dir.path().join("mic-converted.wav");
-        for bad in [f64::NAN, 0.0, -48_000.0] {
+        for bad in [f64::NAN, 0.0, -48_000.0, 6.0e8, 1.0e12] {
             let (_tx, rx) = sync_channel::<CharacterizationFrame>(1);
             let format = NativeFormat {
                 sample_rate: bad,
@@ -610,6 +640,32 @@ mod tests {
                 "{bad} Hz must be refused, not saturated to 0"
             );
         }
+    }
+
+    #[test]
+    fn spawn_rejects_zero_channels() {
+        let dir = tempfile::tempdir().unwrap();
+        let native = dir.path().join("mic-native.wav");
+        let converted = dir.path().join("mic-converted.wav");
+        let (_tx, rx) = sync_channel::<CharacterizationFrame>(1);
+        let format = NativeFormat {
+            channels: 0,
+            ..stereo_48k()
+        };
+        assert!(
+            CharacterizationWriter::spawn(rx, &format, &native, &converted).is_err(),
+            "zero channels would panic hound at finalize; refuse it at spawn"
+        );
+    }
+
+    #[test]
+    fn panic_message_reads_str_and_string_payloads() {
+        let s: Box<dyn std::any::Any + Send> = Box::new("boom");
+        assert_eq!(panic_message(&*s), "boom");
+        let owned: Box<dyn std::any::Any + Send> = Box::new(String::from("owned boom"));
+        assert_eq!(panic_message(&*owned), "owned boom");
+        let other: Box<dyn std::any::Any + Send> = Box::new(7u8);
+        assert_eq!(panic_message(&*other), "<non-string panic payload>");
     }
 
     #[test]
