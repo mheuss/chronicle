@@ -1,8 +1,9 @@
-//! Compile-fail tests for `AudioPipeline` borrow invariants.
+//! trybuild tests for what `chronicle-audio` lets a dependent crate write.
 //!
 //! The token-alive-during-stop test verifies that the borrow checker
 //! refuses to allow `AudioPipeline::stop(&mut self)` while an
-//! `AudioHandlerToken<'_>` is outstanding.
+//! `AudioHandlerToken<'_>` is outstanding. The characterize tests verify that
+//! the `characterize` module is absent without its feature and public with it.
 
 #[test]
 fn borrow_invariants() {
