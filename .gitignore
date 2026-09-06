@@ -56,3 +56,11 @@ chronicle-daemon/docs/
 # Python bytecode and pytest cache
 __pycache__/
 .pytest_cache/
+
+# Microphone characterization takes (chronicle-daemon/crates/audio/examples/characterize_mic.rs)
+# and what scripts/analyze_mic_capture.py derives from them. Recorded audio never lands in git.
+mic-capture-*/
+mic-native.wav
+mic-converted.wav
+candidate-*.wav
+analysis.json

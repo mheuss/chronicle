@@ -197,12 +197,16 @@ cd chronicle-daemon
 cargo run -p chronicle-audio --features characterize --example characterize_mic -- \
   --device-label "Blue Yeti" --mode stereo --gain 50% \
   --phrase "the quick brown fox jumps over the lazy dog" --model-variant base \
-  --seconds 10 --out ./yeti-take-1
+  --seconds 10 --out ~/chronicle-captures/yeti-take-1
 ```
 
 `--device-label` is only a label. Set the default input device in System
 Settings first and check it in Audio MIDI Setup; the example records whatever
-is active. `--out` must be a new or empty directory, one per take. Read the
+is active. `--out` must be a new or empty directory, one per take. Keep it
+outside the repository: a take is a recording of your voice. The names the
+example and the analyzer write are gitignored as a backstop, but the directory
+itself is not, so a take left inside the tree still shows up in `git status`.
+Read the
 same phrase, the same way, on every take; the manifest records it. The first
 run prompts for microphone permission. Exit code 2 means the recording is not
 a valid measurement: a dropped frame, a conversion failure, a frame the tap
@@ -215,7 +219,7 @@ Then analyse it offline. The script needs `uv` (`brew install uv`); its numpy
 and scipy are locked next to it.
 
 ```bash
-uv run scripts/analyze_mic_capture.py ./yeti-take-1
+uv run scripts/analyze_mic_capture.py ~/chronicle-captures/yeti-take-1
 ```
 
 It reads the manifest and refuses a recording marked invalid (pass
@@ -229,7 +233,7 @@ mono microphone always stops at gate 0; that is the script working, not a
 fault. Transcribe a candidate through the real engine with:
 
 ```bash
-cargo run -p chronicle-transcription --example transcribe_wav -- ./yeti-take-1/candidate-avg.wav --variant base
+cargo run -p chronicle-transcription --example transcribe_wav -- ~/chronicle-captures/yeti-take-1/candidate-avg.wav --variant base
 ```
 
 It needs the `base` model under the Chronicle data directory; if it is missing,
