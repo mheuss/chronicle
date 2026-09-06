@@ -40,7 +40,7 @@ pub struct CharacterizationFrame {
 ///
 /// `seq_gaps` counts frames missing *between* `first_seq` and `last_seq`. A
 /// burst dropped before the first frame arrived shows up as `first_seq > 0`,
-/// not as a gap, so the manifest checks both.
+/// not as a gap. A reader judging the recording needs both.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WriterReport {
     pub frames_received: u64,
