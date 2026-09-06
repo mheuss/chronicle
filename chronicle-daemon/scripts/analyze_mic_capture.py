@@ -80,7 +80,7 @@ PARAMETERS = {
 class Wav:
     rate: int
     samples: np.ndarray  # shape (frames, channels), float64
-    dtype: str  # the stored sample type, e.g. "float32"; gate 1 reads it
+    dtype: str  # the stored sample type, e.g. "float32"
 
     @property
     def is_float32(self) -> bool:
@@ -98,9 +98,11 @@ class Wav:
 def read_wav(path: Path) -> Wav:
     """Read a WAV into float64 without judging it.
 
-    The stored dtype is reported, not enforced, so the precedence gates can
-    run in the design's order: a mono integer file is gate 0, not gate 1. Only
-    exact float32 counts as the f32 the tap delivers; float64 does not.
+    The stored dtype is reported, not enforced, so the caller can decide what a
+    wrong one means. Only exact float32 counts as the f32 the tap delivers;
+    float64 does not. Integer WAVs come back at their stored integer scale, not
+    +-1.0, so no level metric is meaningful on one until the caller has checked
+    `is_float32`.
     """
     rate, data = wavfile.read(path)
     if data.ndim == 1:

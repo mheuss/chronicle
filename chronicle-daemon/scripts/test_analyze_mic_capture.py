@@ -110,6 +110,27 @@ def test_cross_correlation_of_independent_noise_is_weak():
     assert result["strong"] is False
 
 
+def test_cross_correlation_window_is_five_milliseconds():
+    a = noise()
+    inside = amc.cross_correlation_peak(a, np.roll(a, 200), RATE)  # 4.17 ms
+    assert inside["lag_samples"] == 200
+    outside = amc.cross_correlation_peak(a, np.roll(a, 400), RATE)  # 8.33 ms
+    assert abs(outside["lag_samples"]) <= 240
+    assert abs(outside["value"]) < 0.1, "a delay past the window must not be found"
+    assert outside["strong"] is False
+
+
+def test_cross_correlation_peak_of_one_half_is_not_strong():
+    a = noise(seed=1)
+    # Adding independent noise at three times the variance scales the
+    # normalized peak to 1 / sqrt(1 + 3) = 0.5, below the 0.7 threshold.
+    b = np.roll(a, 5) + math.sqrt(3) * noise(seed=2)
+    result = amc.cross_correlation_peak(a, b, RATE)
+    assert result["lag_samples"] == 5
+    assert result["value"] == pytest.approx(0.5, abs=0.03)
+    assert result["strong"] is False
+
+
 # --- band-pass and resampling -------------------------------------------
 
 
@@ -118,6 +139,21 @@ def test_speech_band_keeps_one_khz_and_removes_fifty_hz():
     fifty = sine(50, 1.0)
     assert amc.rms(amc.speech_band(one_k, RATE)) == pytest.approx(amc.rms(one_k), rel=0.05)
     assert amc.rms(amc.speech_band(fifty, RATE)) < 0.05 * amc.rms(fifty)
+
+
+def test_speech_band_is_fourth_order():
+    # One octave below the low edge: order 2 leaves 4.5% of the level, order 4
+    # leaves 0.3%. The threshold sits between them.
+    probe = sine(150, 1.0)
+    assert amc.rms(amc.speech_band(probe, RATE)) < 0.01 * amc.rms(probe)
+
+
+def test_speech_band_edges_are_at_300_and_3400_hz():
+    # Zero-phase filtering squares the magnitude response, so each corner
+    # sits at -6 dB, half the input level.
+    for edge in (300.0, 3400.0):
+        probe = sine(edge, 1.0)
+        assert amc.rms(amc.speech_band(probe, RATE)) == pytest.approx(0.5 * amc.rms(probe), rel=0.02), edge
 
 
 def test_resample_to_16k_keeps_length_ratio_and_level():
