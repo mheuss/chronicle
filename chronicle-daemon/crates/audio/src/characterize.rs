@@ -5,7 +5,7 @@
 
 use std::fmt;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -177,6 +177,20 @@ impl CharacterizationWriter {
             bits_per_sample: BITS_PER_SAMPLE,
             sample_format: SampleFormat::Float,
         };
+        if same_target(native_path, converted_path) {
+            return Err(hound::Error::IoError(io::Error::other(format!(
+                "native and converted paths must differ; both are {}",
+                native_path.display()
+            ))));
+        }
+        for path in [native_path, converted_path] {
+            if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+                return Err(hound::Error::IoError(io::Error::other(format!(
+                    "{} is a symlink; refusing to write through it",
+                    path.display()
+                ))));
+            }
+        }
         let mut native = WavWriter::create(native_path, native_spec)?;
         let mut converted = match WavWriter::create(converted_path, converted_spec) {
             Ok(writer) => writer,
@@ -256,6 +270,29 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     } else {
         "<non-string panic payload>".to_string()
     }
+}
+
+/// Two output paths name the same file when their parents resolve to the same
+/// directory and the file names match. The parents have to exist for `create`
+/// to succeed, so canonicalizing them is enough; the files need not exist yet.
+fn same_target(a: &Path, b: &Path) -> bool {
+    fn resolved(p: &Path) -> PathBuf {
+        let dir = p
+            .parent()
+            .map(|d| {
+                if d.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    d
+                }
+            })
+            .and_then(|d| d.canonicalize().ok());
+        match (dir, p.file_name()) {
+            (Some(dir), Some(name)) => dir.join(name),
+            _ => p.to_path_buf(),
+        }
+    }
+    resolved(a) == resolved(b)
 }
 
 /// hound adds 60 bytes to the data length for the RIFF size field; 4096
@@ -741,6 +778,35 @@ mod tests {
             !native.exists(),
             "a half-opened pair must not leave a stray native WAV"
         );
+    }
+
+    #[test]
+    fn spawn_refuses_the_same_file_for_both_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mic.wav");
+        let spelled_differently = dir.path().join(".").join("mic.wav");
+        let (_tx, rx) = sync_channel::<CharacterizationFrame>(1);
+        let err = CharacterizationWriter::spawn(rx, &stereo_48k(), &path, &spelled_differently)
+            .err()
+            .expect("same file twice must be refused");
+        assert!(err.to_string().contains("must differ"), "{err}");
+        assert!(!path.exists(), "nothing may be opened before the check");
+    }
+
+    #[test]
+    fn spawn_refuses_a_symlink_at_either_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let native = dir.path().join("mic-native.wav");
+        let converted = dir.path().join("mic-converted.wav");
+        let target = dir.path().join("elsewhere.wav");
+        std::os::unix::fs::symlink(&target, &converted).unwrap();
+        let (_tx, rx) = sync_channel::<CharacterizationFrame>(1);
+        let err = CharacterizationWriter::spawn(rx, &stereo_48k(), &native, &converted)
+            .err()
+            .expect("a symlink at an output path must be refused");
+        assert!(err.to_string().contains("symlink"), "{err}");
+        assert!(!target.exists(), "nothing may be written through the link");
+        assert!(!native.exists(), "the native file must not be opened first");
     }
 
     #[test]
