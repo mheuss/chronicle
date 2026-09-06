@@ -192,6 +192,18 @@ impl CharacterizationWriter {
             }
         }
         let mut native = WavWriter::create(native_path, native_spec)?;
+        // The native file exists now, so it is visible under every spelling
+        // of itself: this is where a case variant, a Unicode normalization
+        // variant or a hard link at `converted_path` shows up.
+        if same_inode(native_path, converted_path) {
+            drop(native);
+            let _ = std::fs::remove_file(native_path);
+            return Err(hound::Error::IoError(io::Error::other(format!(
+                "native and converted paths must differ; {} and {} are one file",
+                native_path.display(),
+                converted_path.display()
+            ))));
+        }
         let mut converted = match WavWriter::create(converted_path, converted_spec) {
             Ok(writer) => writer,
             Err(e) => {
@@ -272,9 +284,9 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-/// Two output paths name the same file when their parents resolve to the same
-/// directory and the file names match. The parents have to exist for `create`
-/// to succeed, so canonicalizing them is enough; the files need not exist yet.
+/// Pre-open check for spellings the path layer resolves (`.`, `..`, a
+/// symlinked parent). What the filesystem unifies (case, Unicode
+/// normalization, hard links) is caught by [`same_inode`] after the first open.
 fn same_target(a: &Path, b: &Path) -> bool {
     fn resolved(p: &Path) -> PathBuf {
         let dir = p
@@ -293,6 +305,14 @@ fn same_target(a: &Path, b: &Path) -> bool {
         }
     }
     resolved(a) == resolved(b)
+}
+
+fn same_inode(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        _ => false,
+    }
 }
 
 /// hound adds 60 bytes to the data length for the RIFF size field; 4096
@@ -784,13 +804,47 @@ mod tests {
     fn spawn_refuses_the_same_file_for_both_outputs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mic.wav");
-        let spelled_differently = dir.path().join(".").join("mic.wav");
+        let name = dir.path().file_name().unwrap();
+        let spelled_differently = dir.path().join("..").join(name).join("mic.wav");
         let (_tx, rx) = sync_channel::<CharacterizationFrame>(1);
         let err = CharacterizationWriter::spawn(rx, &stereo_48k(), &path, &spelled_differently)
             .err()
             .expect("same file twice must be refused");
         assert!(err.to_string().contains("must differ"), "{err}");
         assert!(!path.exists(), "nothing may be opened before the check");
+    }
+
+    #[test]
+    fn spawn_refuses_two_names_for_one_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.wav");
+        let b = dir.path().join("b.wav");
+        std::fs::write(&a, b"old").unwrap();
+        std::fs::hard_link(&a, &b).unwrap();
+        let (_tx, rx) = sync_channel::<CharacterizationFrame>(1);
+        let err = CharacterizationWriter::spawn(rx, &stereo_48k(), &a, &b)
+            .err()
+            .expect("two names for one inode must be refused");
+        assert!(err.to_string().contains("one file"), "{err}");
+        assert!(b.exists(), "the caller's other link is left in place");
+
+        let probe = dir.path().join("probe");
+        std::fs::write(&probe, b"").unwrap();
+        if dir.path().join("PROBE").exists() {
+            // Case-insensitive volume: two spellings, one inode, and neither
+            // exists before the call, so only the post-open check can see it.
+            let lower = dir.path().join("mic.wav");
+            let upper = dir.path().join("MIC.WAV");
+            let (_tx, rx) = sync_channel::<CharacterizationFrame>(1);
+            let err = CharacterizationWriter::spawn(rx, &stereo_48k(), &lower, &upper)
+                .err()
+                .expect("a case variant of the same file must be refused");
+            assert!(err.to_string().contains("one file"), "{err}");
+            assert!(
+                !lower.exists(),
+                "the half-opened native file must be removed"
+            );
+        }
     }
 
     #[test]
@@ -889,11 +943,12 @@ mod tests {
     #[test]
     fn spawn_fails_when_the_output_directory_is_missing() {
         let (_tx, rx) = sync_channel::<CharacterizationFrame>(1);
-        let missing = Path::new("/nonexistent-dir-for-heu-650/mic-native.wav");
-        assert!(
-            CharacterizationWriter::spawn(rx, &stereo_48k(), missing, missing).is_err(),
-            "opening a WAV in a missing directory must fail at spawn, not at finish"
-        );
+        let native = Path::new("/nonexistent-dir-for-heu-650/mic-native.wav");
+        let converted = Path::new("/nonexistent-dir-for-heu-650/mic-converted.wav");
+        let err = CharacterizationWriter::spawn(rx, &stereo_48k(), native, converted)
+            .err()
+            .expect("opening a WAV in a missing directory must fail at spawn, not at finish");
+        assert!(!err.to_string().contains("must differ"), "{err}");
     }
 
     fn sample_report() -> WriterReport {
