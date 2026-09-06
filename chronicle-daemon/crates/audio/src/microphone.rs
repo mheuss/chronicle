@@ -248,7 +248,7 @@ impl MicrophoneCapture {
         Ok(capture)
     }
 
-    /// Characterization mode (HEU-650): the tap sends one
+    /// Characterization mode (HEU-650): the tap sends at most one
     /// [`CharacterizationFrame`] per callback on `characterize_tx` and sends
     /// nothing on the encoding channel. Drops count into the same
     /// `mic_full` / `mic_closed` fields the production tap uses. A callback
