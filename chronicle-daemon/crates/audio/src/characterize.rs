@@ -373,12 +373,12 @@ pub const ATTEMPTS: u32 = 1;
 /// What a recording needs next to it to mean anything a week later.
 ///
 /// Rendered as `key: value` lines. The recording-side facts HEU-651's report
-/// has to quote are here: the device and take, the pinned variables, the
-/// format, the durations, and the drop and validity counts. The analysis
-/// numbers come from the script, not from this file. `recorded_secs` is what
-/// the native WAV actually holds, derived from the frames written;
-/// `requested_secs` is what the caller asked for. They differ when a run is
-/// cut short.
+/// has to quote are here: the device and its settings, the pinned variables,
+/// the format, the durations, and the drop and validity counts. Nothing
+/// derived from the audio is here. This file holds what the recorder knew.
+/// `recorded_secs` is what the native WAV actually holds, derived from the
+/// frames written; `requested_secs` is what the caller asked for. They differ
+/// when a run is cut short, or when frames were lost.
 ///
 /// The design pins four things per take so identical audio cannot pass and
 /// fail for reasons unrelated to the mix: the phrase, the model variant, the
@@ -410,6 +410,9 @@ impl Manifest<'_> {
     /// rejects an empty recording), and the tap's `mic_full` and `mic_closed`
     /// counters. A conversion failure is its own count, and so is a malformed
     /// frame, the marker for a buffer the tap could not read.
+    /// `mic_convert_failed` needs no check of its own: the same failure lands
+    /// in `conversion_failures`, or in `mic_full` if the frame never reached
+    /// the writer.
     pub fn measurement_valid(&self) -> bool {
         let r = self.report;
         r.first_seq == Some(0)
