@@ -119,6 +119,10 @@ type WriterResult = Result<WriterReport, (hound::Error, WriterReport)>;
 /// `u32`, which `spawn` checks separately because it depends on the count.
 const MAX_SAMPLE_RATE_HZ: f64 = 768_000.0;
 
+/// Both files are 32-bit float. One constant so the specs and the size
+/// guards cannot drift apart.
+const BITS_PER_SAMPLE: u16 = 32;
+
 /// Owns the thread that turns frames into two WAV files.
 ///
 /// The thread ends when every `SyncSender<CharacterizationFrame>` is dropped.
@@ -151,7 +155,7 @@ impl CharacterizationWriter {
             Ok(n) if n > 0 => n,
             _ => {
                 return Err(hound::Error::IoError(io::Error::other(format!(
-                    "{} channels does not fit a WAV header",
+                    "{} is not a channel count a WAV header can hold (1 to 65535)",
                     format.channels
                 ))));
             }
@@ -160,26 +164,28 @@ impl CharacterizationWriter {
         // computes bytes per second in u32 and panics on overflow, so both
         // are refused here.
         let rate = format.sample_rate;
-        let bytes_per_sec = rate.round() * 4.0 * f64::from(channels);
+        let bytes_per_sample = f64::from(BITS_PER_SAMPLE.div_ceil(8));
+        let bytes_per_sec = rate.round() * bytes_per_sample * f64::from(channels);
         if !rate.is_finite()
             || rate < 1.0
             || rate > MAX_SAMPLE_RATE_HZ
             || bytes_per_sec > f64::from(u32::MAX)
         {
             return Err(hound::Error::IoError(io::Error::other(format!(
-                "{rate} Hz x {channels} channels is not a format a WAV header can hold                  (1 to {MAX_SAMPLE_RATE_HZ} Hz, bytes per second within u32)"
+                "{rate} Hz x {channels} channels is not a format a WAV header can hold \
+                 (1 to {MAX_SAMPLE_RATE_HZ} Hz, and bytes per second within u32)"
             ))));
         }
         let native_spec = WavSpec {
             channels,
             sample_rate: format.sample_rate.round() as u32,
-            bits_per_sample: 32,
+            bits_per_sample: BITS_PER_SAMPLE,
             sample_format: SampleFormat::Float,
         };
         let converted_spec = WavSpec {
             channels: 1,
             sample_rate: SAMPLE_RATE,
-            bits_per_sample: 32,
+            bits_per_sample: BITS_PER_SAMPLE,
             sample_format: SampleFormat::Float,
         };
         let mut native = WavWriter::create(native_path, native_spec)?;
@@ -264,7 +270,8 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 
 /// RIFF stores the data chunk length in 32 bits and `hound` counts the bytes
 /// in a `u32`. Every write is checked in full before it happens, so the
-/// margin only has to cover hound's 60-byte header. 4096 is that, with room.
+/// margin only has to cover the 60 bytes hound adds to the data length for
+/// the RIFF size field. 4096 is that, with room.
 const WAV_DATA_LIMIT_BYTES: u64 = u32::MAX as u64 - 4096;
 
 /// The writer loop. Returns every count collected so far alongside any error,
@@ -640,6 +647,26 @@ mod tests {
                 "{bad} Hz must be refused, not saturated to 0"
             );
         }
+    }
+
+    /// A rate under the ceiling can still overflow hound's u32 bytes per
+    /// second once the channel count is large. That arm of the guard has to
+    /// fire on its own.
+    #[test]
+    fn spawn_rejects_a_bytes_per_second_that_overflows_u32() {
+        let dir = tempfile::tempdir().unwrap();
+        let native = dir.path().join("mic-native.wav");
+        let converted = dir.path().join("mic-converted.wav");
+        let (_tx, rx) = sync_channel::<CharacterizationFrame>(1);
+        let format = NativeFormat {
+            channels: 2_000,
+            sample_rate: MAX_SAMPLE_RATE_HZ, // 768000 x 4 x 2000 > u32::MAX
+            ..stereo_48k()
+        };
+        let Err(err) = CharacterizationWriter::spawn(rx, &format, &native, &converted) else {
+            panic!("a bytes-per-second overflow must be refused");
+        };
+        assert!(err.to_string().contains("bytes per second"), "{err}");
     }
 
     #[test]
