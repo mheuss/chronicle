@@ -1,6 +1,6 @@
 // With `--features characterize` this compiles: the module and its frame type
-// are public. Without the feature it must not, which is the proof that a
-// default build carries none of the characterization path.
+// are public. Without the feature it must not: the module is not in the public
+// API. This says nothing about what else a default build compiled.
 use chronicle_audio::characterize::CharacterizationFrame;
 
 fn main() {

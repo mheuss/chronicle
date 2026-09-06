@@ -4,6 +4,9 @@
 //! refuses to allow `AudioPipeline::stop(&mut self)` while an
 //! `AudioHandlerToken<'_>` is outstanding. The characterize tests verify that
 //! the `characterize` module is absent without its feature and public with it.
+//!
+//! The `.stderr` snapshots pin rustc's diagnostic wording. A red result right
+//! after a toolchain bump may only need `TRYBUILD=overwrite` and a re-read.
 
 #[test]
 fn borrow_invariants() {
