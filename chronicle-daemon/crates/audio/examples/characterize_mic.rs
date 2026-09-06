@@ -18,8 +18,9 @@
 //!
 //! Exit code 2 means the files were written but the recording is not a valid
 //! measurement (a dropped frame or a conversion failure; see the manifest).
-//! Exit code 1 is an error. If it happens after recording starts, `--out`
-//! can hold WAV files with no manifest. Treat that directory as discarded.
+//! Exit code 1 is an error. If it happens once the WAV files are open,
+//! `--out` can hold WAV files with no manifest. Treat that directory as
+//! discarded.
 //! The first run prompts for microphone permission.
 
 use std::path::{Path, PathBuf};
@@ -123,7 +124,7 @@ fn required(flag: &str, value: Option<String>) -> Result<String, String> {
 }
 
 /// The manifest is `key: value` lines with no escaping. A newline inside a
-/// value would forge a line, so every free-text value must be one line.
+/// value would forge a line, so any control character is refused.
 fn one_line(flag: &str, value: &str) -> Result<(), String> {
     if value.chars().any(char::is_control) {
         return Err(format!(
@@ -135,9 +136,10 @@ fn one_line(flag: &str, value: &str) -> Result<(), String> {
 
 /// Create `dir` if missing; refuse it if it holds anything.
 fn ensure_empty_dir(dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)
-        .map_err(|e| std::io::Error::other(format!("{}: {e}", dir.display())))?;
-    if std::fs::read_dir(dir)?.next().is_some() {
+    let with_path =
+        |e: std::io::Error| std::io::Error::new(e.kind(), format!("{}: {e}", dir.display()));
+    std::fs::create_dir_all(dir).map_err(with_path)?;
+    if std::fs::read_dir(dir).map_err(with_path)?.next().is_some() {
         return Err(std::io::Error::other(format!(
             "{} is not empty; use a new directory per take",
             dir.display()
@@ -346,7 +348,10 @@ mod tests {
             let mut list = vec!["--device-label", "Yeti", "--phrase", "fox"];
             list.extend([flag, value]);
             let err = parse_args(&args(&list)).unwrap_err();
-            assert!(err.contains(flag), "{flag}: {err}");
+            assert!(
+                err.contains(flag) && err.contains("control characters"),
+                "{flag}: {err}"
+            );
         }
     }
 
@@ -418,25 +423,26 @@ mod tests {
     }
 
     /// `CHANNEL_CAPACITY` copies the bound the daemon's encoding channel
-    /// uses. Read `engine.rs` at test time and check every site.
+    /// uses. Read `engine.rs` at test time and check every production site.
+    /// The engine's own tests may pick other bounds, so they are skipped.
     #[test]
     fn channel_capacity_matches_the_engine() {
         let sibling = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine.rs");
         let source = std::fs::read_to_string(&sibling).expect("engine.rs readable");
+        let production = source.split("\nmod tests {").next().unwrap_or(&source);
         let needle = "sync_channel::<AudioMessage>(";
         let mut sites = 0;
-        for line in source.lines().filter(|l| l.contains(needle)) {
-            let start = line.find(needle).unwrap() + needle.len();
-            let literal: String = line[start..]
-                .chars()
-                .take_while(char::is_ascii_digit)
-                .collect();
-            assert_eq!(
-                literal.parse::<usize>().ok(),
-                Some(CHANNEL_CAPACITY),
-                "engine.rs bound differs: {line}"
-            );
-            sites += 1;
+        for line in production.lines().filter(|l| l.contains(needle)) {
+            for (at, _) in line.match_indices(needle) {
+                let rest = &line[at + needle.len()..];
+                let literal: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                assert_eq!(
+                    literal.parse::<usize>().ok(),
+                    Some(CHANNEL_CAPACITY),
+                    "engine.rs bound differs: {line}"
+                );
+                sites += 1;
+            }
         }
         assert!(sites > 0, "no AudioMessage channel found in engine.rs");
     }
