@@ -442,7 +442,10 @@ def remove_stale_outputs(out: Path) -> None:
     not deleted."""
     # On a case-insensitive filesystem a constructed path resolves to a user's
     # `Candidate-AVG.wav`; only names present exactly as spelled are ours.
-    present = {entry.name for entry in os.scandir(out)}
+    try:
+        present = {entry.name for entry in os.scandir(out)}
+    except OSError as e:
+        raise InputError(f"{out}: cannot list --out ({e.strerror}); it needs read permission") from e
     for name in OWNED_OUTPUTS:
         path = out / name
         if name not in present and (path.is_symlink() or path.exists()):
@@ -538,8 +541,10 @@ def write_candidate_wavs(report: dict, native: np.ndarray, native_rate: int, out
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Paths in the report may not fit the locale's codec. A host can leave
+    # sys.stdout as None or substitute a plain object, hence the hasattr.
     for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):  # paths in the report may not fit the locale's codec
+        if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("capture_dir", type=Path, help="directory characterize_mic wrote: mic-native.wav, mic-converted.wav, manifest.txt")

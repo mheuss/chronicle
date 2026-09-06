@@ -123,7 +123,9 @@ fn breaks_a_line(c: char) -> bool {
 
 fn one_line(flag: &str, value: &str) -> Result<(), String> {
     if value.chars().any(breaks_a_line) {
-        return Err(format!("{flag} must be a single line of printable text"));
+        return Err(format!(
+            "{flag} must be a single line with no control characters"
+        ));
     }
     Ok(())
 }
@@ -342,6 +344,7 @@ mod tests {
             ("--mode", "stereo\n"),
             ("--gain", "50%\r"),
             ("--phrase", "fox\njumps"),
+            ("--phrase", "fox\tjumps"),
             ("--phrase", "fox\u{2028}measurement_valid: true"),
             ("--out", "/tmp/take\n"),
         ] {

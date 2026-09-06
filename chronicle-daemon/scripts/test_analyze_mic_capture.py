@@ -531,6 +531,23 @@ def test_main_names_the_manifest_key_that_is_not_a_whole_number(tmp_path, capsys
     assert amc.main([str(tmp_path)]) == 0
 
 
+def test_main_names_an_unlistable_out_directory(tmp_path, capsys):
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    native, converted = good_stereo()
+    write_capture(tmp_path, native, converted)
+    out = tmp_path / "dropbox"
+    out.mkdir()
+    out.chmod(0o333)  # write and search, no read
+    try:
+        assert amc.main([str(tmp_path), "--out", str(out)]) == 1
+        assert "read permission" in capsys.readouterr().err
+    finally:
+        out.chmod(0o700)
+
+
 def test_main_reports_a_failed_write_as_an_output_error(tmp_path, capsys):
     import os
 
@@ -629,6 +646,7 @@ def test_main_refuses_a_case_variant_of_an_owned_name(tmp_path, capsys):
         assert "different-case" in capsys.readouterr().err
     else:
         assert code == 0
+        pytest.skip("case-sensitive filesystem: the different-case guard cannot fire here")
 
 
 def test_main_still_cleans_up_after_the_directory_is_renamed(tmp_path):
