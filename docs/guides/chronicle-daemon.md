@@ -201,19 +201,18 @@ cargo run -p chronicle-audio --features characterize --example characterize_mic 
 ```
 
 `--device-label` is only a label. Set the default input device in System
-Settings first and check it in Audio MIDI Setup; the example records whatever
-is active. `--out` must be a new or empty directory, one per take. Keep it
-outside the repository: a take is a recording of your voice. As a backstop,
-every recorded and derived file is gitignored, and so is the example's default
+Settings first and check it in Audio MIDI Setup; the example records whatever is
+active. `--out` must be a new or empty directory, one per take. Keep it outside
+the repository: a take is a recording of your voice. As a backstop, every
+recorded and derived file is gitignored, and so is the example's default
 `mic-capture-*` directory. `manifest.txt` is not, so a take in a directory you
 named still shows in `git status`. Read the same phrase, the same way, on every
-take; the manifest records it. The first
-run prompts for microphone permission. Exit code 2 means the recording is not
-a valid measurement: a dropped frame, a conversion failure, a frame the tap
-could not read, a channel that closed early, or no frames at all. The manifest
-has a line for each; re-record rather than reason about the hole. A good take
-leaves three files in `--out`: `mic-native.wav`, `mic-converted.wav` and
-`manifest.txt`.
+take; the manifest records it. The first run prompts for microphone permission.
+Exit code 2 means the recording is not a valid measurement: a dropped frame, a
+conversion failure, a frame the tap could not read, a channel that closed early,
+or no frames at all. The manifest has a line for each; re-record rather than
+reason about the hole. A good take leaves three files in `--out`:
+`mic-native.wav`, `mic-converted.wav` and `manifest.txt`.
 
 Then analyse it offline. The script needs `uv` (`brew install uv`); its numpy
 and scipy are locked next to it.

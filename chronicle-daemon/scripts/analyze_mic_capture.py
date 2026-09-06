@@ -53,6 +53,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from dataclasses import dataclass
 from math import gcd
@@ -369,7 +370,11 @@ def read_manifest(path: Path) -> dict[str, str]:
     if not path.is_file():
         raise InputError(f"{path}: no manifest.txt; is this a characterize_mic output directory?")
     manifest: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        raise InputError(f"{path} is not UTF-8 ({e})") from e
+    for line in text.splitlines():
         key, sep, value = line.partition(":")
         if sep:
             manifest[key.strip()] = value.strip()
@@ -389,11 +394,11 @@ def _manifest_int(manifest: dict[str, str], key: str) -> int | None:
     if raw is None:
         return None
     try:
-        value = float(raw)
+        value = float(raw)  # inf and nan parse; is_integer() rejects them below
         if not value.is_integer():
             raise ValueError("not a whole number")
         return int(value)
-    except (ValueError, OverflowError) as e:
+    except ValueError as e:
         raise InputError(f"manifest {key} is {raw!r}, not a whole number") from e
 
 
@@ -435,6 +440,13 @@ def remove_stale_outputs(out: Path) -> None:
     """Remove the OWNED_OUTPUTS names from `out` and nothing else. An
     analysis.json that does not look like this script's report is refused,
     not deleted."""
+    # On a case-insensitive filesystem a constructed path resolves to a user's
+    # `Candidate-AVG.wav`; only names present exactly as spelled are ours.
+    present = {entry.name for entry in os.scandir(out)}
+    for name in OWNED_OUTPUTS:
+        path = out / name
+        if name not in present and (path.is_symlink() or path.exists()):
+            raise InputError(f"{path} exists only under a different-case name; pick another --out")
     report_path = out / ANALYSIS_JSON
     if report_path.is_symlink() or report_path.exists():
         if not report_path.is_file() or report_path.is_symlink():
@@ -526,6 +538,9 @@ def write_candidate_wavs(report: dict, native: np.ndarray, native_rate: int, out
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):  # paths in the report may not fit the locale's codec
+            stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("capture_dir", type=Path, help="directory characterize_mic wrote: mic-native.wav, mic-converted.wav, manifest.txt")
     parser.add_argument("--out", type=Path, default=None, help="directory for analysis.json and candidate-*.wav (default: the capture directory); the script's own names are removed there before each run")

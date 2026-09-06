@@ -517,15 +517,17 @@ def test_main_rejects_a_native_rate_the_speech_band_cannot_use(tmp_path, capsys)
 
 def test_main_names_the_manifest_key_that_is_not_a_whole_number(tmp_path, capsys):
     native, converted = good_stereo()
-    for bad in ["lots", "inf", "-inf", "1e400", "nan", "2.5"]:
+    frames = native.shape[0]
+    # `frames + 0.5` would truncate to a matching count if the whole-number check were missing.
+    for bad in ["lots", "inf", "-inf", "1e400", "nan", "2.5", f"{frames}.5"]:
         write_capture(tmp_path, native, converted)
         with (tmp_path / "manifest.txt").open("a") as f:
             f.write(f"native_frames_written: {bad}\n")
         assert amc.main([str(tmp_path)]) == 1, bad
         assert "native_frames_written" in capsys.readouterr().err, bad
-    write_capture(tmp_path, native, converted, native_frames=native.shape[0])
+    write_capture(tmp_path, native, converted, native_frames=frames)
     with (tmp_path / "manifest.txt").open("a") as f:
-        f.write("native_sample_rate_hz: 48000.0\n")  # the Rust side writes the rate as a float
+        f.write(f"native_frames_written: {frames}.0\n")  # a decimal spelling of a whole number is accepted
     assert amc.main([str(tmp_path)]) == 0
 
 
@@ -562,7 +564,7 @@ def test_main_rejects_a_short_converted_file(tmp_path, capsys):
     assert "mic-converted.wav" in err and "shorter than" in err
 
 
-def test_main_owns_five_names_in_out_and_nothing_else(tmp_path, capsys):
+def test_main_owns_its_names_in_out_and_nothing_else(tmp_path, capsys):
     native, converted = good_stereo()
     write_capture(tmp_path, native, converted)
     out = tmp_path / "out"
@@ -589,7 +591,44 @@ def test_main_owns_five_names_in_out_and_nothing_else(tmp_path, capsys):
     assert amc.main([str(tmp_path), "--out", str(out)]) == 0
     assert other.read_bytes() == b"mine"
     assert owned.read_bytes() != b"whatever was here is the script's to replace"
-    assert sorted(p.name for p in out.iterdir()) == sorted(["candidate-mine.wav", *(n for n in amc.OWNED_OUTPUTS if n != amc.TMP_REPORT)])
+    assert sorted(p.name for p in out.iterdir()) == sorted(
+        ["candidate-mine.wav", "analysis.json", "candidate-avg.wav", "candidate-diff.wav", "candidate-c0.wav", "candidate-c1.wav"]
+    )
+
+
+def test_the_temp_report_is_an_owned_name(tmp_path, capsys):
+    assert "analysis.json.tmp" in amc.OWNED_OUTPUTS
+    native, converted = good_stereo()
+    write_capture(tmp_path, native, converted)
+
+    stale = tmp_path / "analysis.json.tmp"
+    stale.write_text("half written {")
+    assert amc.main([str(tmp_path)]) == 0
+    assert not stale.exists(), "a leftover temp report is cleaned up"
+
+    (tmp_path / "elsewhere").mkdir()
+    victim = tmp_path / "elsewhere" / "report.json"
+    stale.symlink_to(victim)  # dangling, parent exists
+    assert amc.main([str(tmp_path)]) == 1
+    assert "analysis.json.tmp" in capsys.readouterr().err
+    assert not victim.exists(), "nothing may be written through a symlink at the temp name"
+
+
+def test_main_refuses_a_case_variant_of_an_owned_name(tmp_path, capsys):
+    native, converted = good_stereo()
+    write_capture(tmp_path, native, converted)
+    users = tmp_path / "Candidate-AVG.wav"
+    users.write_bytes(b"not ours")
+    case_insensitive = (tmp_path / "candidate-avg.wav").exists()
+
+    code = amc.main([str(tmp_path)])
+
+    assert users.read_bytes() == b"not ours", "a user's file must never be replaced"
+    if case_insensitive:
+        assert code == 1
+        assert "different-case" in capsys.readouterr().err
+    else:
+        assert code == 0
 
 
 def test_main_still_cleans_up_after_the_directory_is_renamed(tmp_path):
@@ -604,6 +643,16 @@ def test_main_still_cleans_up_after_the_directory_is_renamed(tmp_path):
     assert amc.main([str(renamed)]) == 3
     assert not (renamed / "candidate-avg.wav").exists(), "the earlier run's candidates must go"
     assert json.loads((renamed / "analysis.json").read_text())["gate"].startswith("gate 0")
+
+
+def test_main_rejects_a_manifest_that_is_not_utf8(tmp_path, capsys):
+    native, converted = good_stereo()
+    write_capture(tmp_path, native, converted)
+    with (tmp_path / "manifest.txt").open("ab") as f:
+        f.write(b"phrase: caf\xe9\n")  # Latin-1 e-acute
+    assert amc.main([str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "manifest.txt" in err and "UTF-8" in err
 
 
 def test_main_rejects_a_missing_manifest(tmp_path, capsys):
