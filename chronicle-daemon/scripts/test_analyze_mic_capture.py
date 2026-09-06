@@ -592,9 +592,10 @@ def test_main_owns_its_names_in_out_and_nothing_else(tmp_path, capsys):
     assert "analysis.json" in capsys.readouterr().err
     assert (out / "analysis.json").read_text() == "not json"
 
-    (out / "analysis.json").write_text(json.dumps({"something": "else"}))
-    assert amc.main([str(tmp_path), "--out", str(out)]) == 1
-    assert (out / "analysis.json").read_text() == json.dumps({"something": "else"})
+    for foreign in [{"something": "else"}, {"parameters": {"lr": 0.01}, "results": []}]:
+        (out / "analysis.json").write_text(json.dumps(foreign))
+        assert amc.main([str(tmp_path), "--out", str(out)]) == 1, foreign
+        assert (out / "analysis.json").read_text() == json.dumps(foreign)
     (out / "analysis.json").unlink()
 
     (out / "analysis.json").mkdir()
@@ -685,7 +686,8 @@ def test_main_removes_its_own_stale_outputs_first(tmp_path):
     mono = sine(1000, 0.5)[:, np.newaxis]
     write_capture(tmp_path, mono, sine(1000, 0.5))
     (tmp_path / "candidate-avg.wav").write_bytes(b"stale")
-    (tmp_path / "analysis.json").write_text(json.dumps({"parameters": amc.PARAMETERS, "gate": "gate 0: earlier take"}))
+    earlier = {key: {} for key in amc.REPORT_KEYS} | {"parameters": amc.PARAMETERS, "gate": "gate 0: earlier take"}
+    (tmp_path / "analysis.json").write_text(json.dumps(earlier))
 
     assert amc.main([str(tmp_path)]) == 3
 

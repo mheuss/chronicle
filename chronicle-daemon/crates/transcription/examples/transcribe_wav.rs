@@ -47,6 +47,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--base-dir" => {
                 let raw = iter
                     .next()
+                    .filter(|v| !v.starts_with("--"))
                     .ok_or_else(|| format!("--base-dir needs a value\n{USAGE}"))?;
                 base_dir = Some(PathBuf::from(raw));
             }
@@ -205,5 +206,7 @@ mod tests {
         assert!(parse_args(&args(&["take.wav", "--bogus"])).is_err());
         assert!(parse_args(&args(&["take.wav", "--variant"])).is_err());
         assert!(parse_args(&args(&["take.wav", "--base-dir"])).is_err());
+        let err = parse_args(&args(&["--base-dir", "--variant", "take.wav"])).unwrap_err();
+        assert!(err.contains("--base-dir needs a value"), "{err}");
     }
 }

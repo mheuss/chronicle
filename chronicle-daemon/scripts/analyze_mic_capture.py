@@ -352,6 +352,9 @@ CONVERTED_WAV = "mic-converted.wav"
 ANALYSIS_JSON = "analysis.json"
 CANDIDATE_NAMES = ("avg", "diff", "c0", "c1")
 TMP_REPORT = ANALYSIS_JSON + ".tmp"
+# Top-level keys every report from analyze() carries, gate or no gate. The
+# identity check for a previous analysis.json.
+REPORT_KEYS = frozenset({"parameters", "environment", "native", "converted", "gate"})
 # Every file this script writes into --out. It removes exactly these before a run.
 OWNED_OUTPUTS = (ANALYSIS_JSON, TMP_REPORT, *(f"candidate-{name}.wav" for name in CANDIDATE_NAMES))
 CONVERTED_RATE = 48_000
@@ -458,7 +461,7 @@ def remove_stale_outputs(out: Path) -> None:
             previous = json.loads(report_path.read_text(encoding="utf-8"))
         except ValueError as e:
             raise InputError(f"{report_path} is not this script's output ({e}); pick another --out or remove it") from e
-        if not isinstance(previous, dict) or "parameters" not in previous:
+        if not isinstance(previous, dict) or not REPORT_KEYS <= previous.keys():
             raise InputError(f"{report_path} is not this script's output; pick another --out or remove it")
     for name in OWNED_OUTPUTS:
         path = out / name

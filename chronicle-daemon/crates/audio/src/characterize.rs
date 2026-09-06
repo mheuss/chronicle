@@ -192,10 +192,16 @@ impl CharacterizationWriter {
             .name("mic-characterization-writer".into())
             .spawn(move || {
                 let result = match write_all(frames, &mut native, &mut converted) {
-                    Ok(report) => match native.finalize().and_then(|()| converted.finalize()) {
-                        Ok(()) => Ok(report),
-                        Err(e) => Err((e, report)),
-                    },
+                    Ok(report) => {
+                        // Finalize both even if the first fails, or the second
+                        // WAV is left with an unpatched header.
+                        let native_done = native.finalize();
+                        let converted_done = converted.finalize();
+                        match native_done.and(converted_done) {
+                            Ok(()) => Ok(report),
+                            Err(e) => Err((e, report)),
+                        }
+                    }
                     Err(failed) => Err(failed),
                 };
                 // After a `finish` timeout the receiver is gone; nobody to tell.
@@ -405,7 +411,9 @@ impl Manifest<'_> {
             format!("recorded_secs: {:.2}", self.recorded_secs()),
             format!("converted_secs: {:.2}", self.converted_secs()),
             format!("native_channels: {}", f.channels),
-            format!("native_sample_rate_hz: {}", f.sample_rate),
+            // Rounded like the WAV header, so the analyzer's manifest check
+            // compares whole numbers on both sides.
+            format!("native_sample_rate_hz: {}", f.sample_rate.round() as u32),
             format!("native_interleaved: {}", f.interleaved),
             format!("native_common_format: {}", f.common_format),
             format!("native_wav: {}", self.native_wav.display()),
@@ -854,6 +862,15 @@ mod tests {
             report,
             drops,
         }
+    }
+
+    #[test]
+    fn manifest_rounds_the_rate_like_the_wav_header() {
+        let report = sample_report();
+        let mut format = stereo_48k();
+        format.sample_rate = 44_100.5;
+        let text = sample_manifest(&report, AudioDropSnapshot::default(), &format).render();
+        assert!(text.contains("native_sample_rate_hz: 44101\n"), "{text}");
     }
 
     #[test]
