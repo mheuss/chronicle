@@ -205,8 +205,9 @@ Settings first and check it in Audio MIDI Setup; the example records whatever
 is active. `--out` must be a new or empty directory, one per take. Read the
 same phrase, the same way, on every take; the manifest records it. The first
 run prompts for microphone permission. Exit code 2 means the recording is not
-a valid measurement (a dropped frame or a conversion failure). The manifest
-says which; re-record rather than reason about the hole.
+a valid measurement: a dropped frame, a conversion failure, a frame the tap
+could not read, or a channel that closed early. The manifest has a line for
+each; re-record rather than reason about the hole.
 
 Then analyse it offline. The script needs `uv`; its numpy and scipy are locked
 next to it.
@@ -322,6 +323,8 @@ cd chronicle-daemon && cargo clippy --workspace --all-targets -- -D warnings && 
 
 The SOP gate runs workspace clippy with `--all-targets -- -D warnings`, then
 `cargo check -p chronicle-audio --features characterize --all-targets`. The
-second command is what keeps the feature-gated code and its example compiling;
-nothing else builds them. The Python analyzer's tests run with
-`uv run scripts/test_analyze_mic_capture.py` as part of `test_command`.
+second command builds the feature-gated code and its example without running
+anything, so the lint gate catches a broken example on its own. The
+feature-gated tests run with `cargo test -p chronicle-audio --features
+characterize`, and the Python analyzer's tests with
+`uv run scripts/test_analyze_mic_capture.py`, both as part of `test_command`.
