@@ -442,8 +442,9 @@ def load_wavs(capture_dir: Path, manifest: dict[str, str]) -> tuple[Wav, Wav]:
 
 
 def _looks_like_our_report(previous) -> bool:
-    """The generator marker plus the report's shape. Values are not compared,
-    so a report from another version of this script still counts as ours."""
+    """The generator marker, compared exactly, plus the report's shape. The
+    measured values are not compared, so a report from another version of
+    this script still counts as ours."""
     if not isinstance(previous, dict) or not REPORT_KEYS <= previous.keys():
         return False
     if previous["generator"] != GENERATOR:
