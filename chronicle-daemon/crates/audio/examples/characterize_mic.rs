@@ -18,8 +18,9 @@
 //!
 //! Exit code 2 means the files were written but the recording is not a valid
 //! measurement (a dropped frame or a conversion failure; see the manifest).
-//! Exit code 1 is an error before or during recording. The first run prompts
-//! for microphone permission.
+//! Exit code 1 is an error. If it happens after recording starts, `--out`
+//! can hold WAV files with no manifest. Treat that directory as discarded.
+//! The first run prompts for microphone permission.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -87,6 +88,13 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
 
     let device_label = required("--device-label", device_label)?;
     let phrase = required("--phrase", phrase)?;
+    one_line("--device-label", &device_label)?;
+    one_line("--mode", &mode)?;
+    one_line("--gain", &gain)?;
+    one_line("--phrase", &phrase)?;
+    if let Some(out) = &out {
+        one_line("--out", &out.to_string_lossy())?;
+    }
     if !MODEL_VARIANTS.contains(&model_variant.as_str()) {
         return Err(format!(
             "--model-variant {model_variant:?} is not one of base, small, medium"
@@ -114,9 +122,21 @@ fn required(flag: &str, value: Option<String>) -> Result<String, String> {
     }
 }
 
+/// The manifest is `key: value` lines with no escaping. A newline inside a
+/// value would forge a line, so every free-text value must be one line.
+fn one_line(flag: &str, value: &str) -> Result<(), String> {
+    if value.chars().any(char::is_control) {
+        return Err(format!(
+            "{flag} must be one line with no control characters"
+        ));
+    }
+    Ok(())
+}
+
 /// Create `dir` if missing; refuse it if it holds anything.
 fn ensure_empty_dir(dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| std::io::Error::other(format!("{}: {e}", dir.display())))?;
     if std::fs::read_dir(dir)?.next().is_some() {
         return Err(std::io::Error::other(format!(
             "{} is not empty; use a new directory per take",
@@ -315,6 +335,22 @@ mod tests {
     }
 
     #[test]
+    fn free_text_values_must_be_one_line() {
+        for (flag, value) in [
+            ("--device-label", "Yeti\nmeasurement_valid: true"),
+            ("--mode", "stereo\n"),
+            ("--gain", "50%\r"),
+            ("--phrase", "fox\njumps"),
+            ("--out", "/tmp/take\n"),
+        ] {
+            let mut list = vec!["--device-label", "Yeti", "--phrase", "fox"];
+            list.extend([flag, value]);
+            let err = parse_args(&args(&list)).unwrap_err();
+            assert!(err.contains(flag), "{flag}: {err}");
+        }
+    }
+
+    #[test]
     fn seconds_must_be_a_positive_integer() {
         assert!(
             parse_args(&args(&[
@@ -379,6 +415,30 @@ mod tests {
             MODEL_VARIANTS.len(),
             "the sibling list has a variant this copy lacks: {line}"
         );
+    }
+
+    /// `CHANNEL_CAPACITY` copies the bound the daemon's encoding channel
+    /// uses. Read `engine.rs` at test time and check every site.
+    #[test]
+    fn channel_capacity_matches_the_engine() {
+        let sibling = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine.rs");
+        let source = std::fs::read_to_string(&sibling).expect("engine.rs readable");
+        let needle = "sync_channel::<AudioMessage>(";
+        let mut sites = 0;
+        for line in source.lines().filter(|l| l.contains(needle)) {
+            let start = line.find(needle).unwrap() + needle.len();
+            let literal: String = line[start..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            assert_eq!(
+                literal.parse::<usize>().ok(),
+                Some(CHANNEL_CAPACITY),
+                "engine.rs bound differs: {line}"
+            );
+            sites += 1;
+        }
+        assert!(sites > 0, "no AudioMessage channel found in engine.rs");
     }
 
     #[test]
