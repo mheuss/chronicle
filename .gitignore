@@ -64,3 +64,4 @@ mic-native.wav
 mic-converted.wav
 candidate-*.wav
 analysis.json
+analysis.json.tmp

@@ -494,16 +494,18 @@ def test_main_refuses_a_directory_at_a_candidate_name(tmp_path, capsys):
 def test_main_refuses_a_symlink_at_an_owned_name(tmp_path, capsys):
     native, converted = good_stereo()
     write_capture(tmp_path, native, converted)
-    victim = tmp_path / "elsewhere" / "notes.wav"
-    (tmp_path / "candidate-avg.wav").symlink_to(victim)  # dangling
-    assert amc.main([str(tmp_path)]) == 1
-    assert "candidate-avg.wav" in capsys.readouterr().err
-    assert not victim.exists(), "nothing may be written through a symlink"
-    (tmp_path / "candidate-avg.wav").unlink()
-
-    (tmp_path / "analysis.json").symlink_to(tmp_path / "elsewhere" / "report.json")
-    assert amc.main([str(tmp_path)]) == 1
-    assert not (tmp_path / "elsewhere").exists()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()  # the target's parent exists, so a write through the link would succeed
+    for name in amc.OWNED_OUTPUTS:
+        link = tmp_path / name
+        victim = elsewhere / f"victim-{name}"
+        link.symlink_to(victim)  # dangling
+        assert amc.main([str(tmp_path)]) == 1, name
+        assert name in capsys.readouterr().err, name
+        assert not victim.exists(), f"{name}: nothing may be written through a symlink"
+        assert link.is_symlink(), f"{name}: the link must be left alone"
+        link.unlink()
+    assert list(elsewhere.iterdir()) == []
 
 
 def test_main_rejects_a_native_rate_the_speech_band_cannot_use(tmp_path, capsys):
@@ -513,13 +515,18 @@ def test_main_rejects_a_native_rate_the_speech_band_cannot_use(tmp_path, capsys)
     assert "speech band" in capsys.readouterr().err
 
 
-def test_main_names_the_manifest_key_that_is_not_a_number(tmp_path, capsys):
+def test_main_names_the_manifest_key_that_is_not_a_whole_number(tmp_path, capsys):
     native, converted = good_stereo()
-    write_capture(tmp_path, native, converted)
+    for bad in ["lots", "inf", "-inf", "1e400", "nan", "2.5"]:
+        write_capture(tmp_path, native, converted)
+        with (tmp_path / "manifest.txt").open("a") as f:
+            f.write(f"native_frames_written: {bad}\n")
+        assert amc.main([str(tmp_path)]) == 1, bad
+        assert "native_frames_written" in capsys.readouterr().err, bad
+    write_capture(tmp_path, native, converted, native_frames=native.shape[0])
     with (tmp_path / "manifest.txt").open("a") as f:
-        f.write("native_frames_written: lots\n")
-    assert amc.main([str(tmp_path)]) == 1
-    assert "native_frames_written" in capsys.readouterr().err
+        f.write("native_sample_rate_hz: 48000.0\n")  # the Rust side writes the rate as a float
+    assert amc.main([str(tmp_path)]) == 0
 
 
 def test_main_reports_a_failed_write_as_an_output_error(tmp_path, capsys):
@@ -527,8 +534,9 @@ def test_main_reports_a_failed_write_as_an_output_error(tmp_path, capsys):
 
     if os.geteuid() == 0:
         pytest.skip("root ignores directory permissions")
-    native, converted = good_stereo()
-    write_capture(tmp_path, native, converted)
+    # Mono stops at gate 0, so no candidate is written and the failing write
+    # is the report itself.
+    write_capture(tmp_path, sine(1000, 0.5)[:, np.newaxis], sine(1000, 0.5))
     out = tmp_path / "out"
     out.mkdir()
     out.chmod(0o500)
@@ -581,7 +589,7 @@ def test_main_owns_five_names_in_out_and_nothing_else(tmp_path, capsys):
     assert amc.main([str(tmp_path), "--out", str(out)]) == 0
     assert other.read_bytes() == b"mine"
     assert owned.read_bytes() != b"whatever was here is the script's to replace"
-    assert sorted(p.name for p in out.iterdir()) == sorted(["candidate-mine.wav", *amc.OWNED_OUTPUTS])
+    assert sorted(p.name for p in out.iterdir()) == sorted(["candidate-mine.wav", *(n for n in amc.OWNED_OUTPUTS if n != amc.TMP_REPORT)])
 
 
 def test_main_still_cleans_up_after_the_directory_is_renamed(tmp_path):

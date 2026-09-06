@@ -16,9 +16,9 @@ manifest says `measurement_valid: false` unless `--allow-invalid` is given,
 checks both WAVs against the manifest and the converted file's contract, then
 prints every diagnostic the HEU-549 design asks for, writes `analysis.json`
 into `--out` (default: the capture directory), and writes one mono 16 kHz float
-WAV per candidate mix. Those five names, `analysis.json` and
-`candidate-{avg,diff,c0,c1}.wav`, are the script's own in `--out`: it removes
-them before each run and touches nothing else there. Each candidate can be
+WAV per candidate mix. The script's own names in `--out` are `analysis.json`,
+its `.tmp` while writing, and `candidate-{avg,diff,c0,c1}.wav`: it removes them
+before each run and touches nothing else there. Each candidate can be
 transcribed with:
 
     cargo run -p chronicle-transcription --example transcribe_wav -- <file>
@@ -350,8 +350,9 @@ NATIVE_WAV = "mic-native.wav"
 CONVERTED_WAV = "mic-converted.wav"
 ANALYSIS_JSON = "analysis.json"
 CANDIDATE_NAMES = ("avg", "diff", "c0", "c1")
+TMP_REPORT = ANALYSIS_JSON + ".tmp"
 # Every file this script writes into --out. It removes exactly these before a run.
-OWNED_OUTPUTS = (ANALYSIS_JSON, *(f"candidate-{name}.wav" for name in CANDIDATE_NAMES))
+OWNED_OUTPUTS = (ANALYSIS_JSON, TMP_REPORT, *(f"candidate-{name}.wav" for name in CANDIDATE_NAMES))
 CONVERTED_RATE = 48_000
 MIN_SECONDS = 1.0
 
@@ -368,7 +369,7 @@ def read_manifest(path: Path) -> dict[str, str]:
     if not path.is_file():
         raise InputError(f"{path}: no manifest.txt; is this a characterize_mic output directory?")
     manifest: dict[str, str] = {}
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         key, sep, value = line.partition(":")
         if sep:
             manifest[key.strip()] = value.strip()
@@ -388,9 +389,12 @@ def _manifest_int(manifest: dict[str, str], key: str) -> int | None:
     if raw is None:
         return None
     try:
-        return int(float(raw))
-    except ValueError as e:
-        raise InputError(f"manifest {key} is {raw!r}, not a number") from e
+        value = float(raw)
+        if not value.is_integer():
+            raise ValueError("not a whole number")
+        return int(value)
+    except (ValueError, OverflowError) as e:
+        raise InputError(f"manifest {key} is {raw!r}, not a whole number") from e
 
 
 def load_wavs(capture_dir: Path, manifest: dict[str, str]) -> tuple[Wav, Wav]:
@@ -434,9 +438,9 @@ def remove_stale_outputs(out: Path) -> None:
     report_path = out / ANALYSIS_JSON
     if report_path.is_symlink() or report_path.exists():
         if not report_path.is_file() or report_path.is_symlink():
-            raise InputError(f"{report_path} is not a file; pick another --out")
+            raise InputError(f"{report_path} is not a plain file; pick another --out")
         try:
-            previous = json.loads(report_path.read_text())
+            previous = json.loads(report_path.read_text(encoding="utf-8"))
         except ValueError as e:
             raise InputError(f"{report_path} is not this script's output ({e}); pick another --out or remove it") from e
         if not isinstance(previous, dict) or "parameters" not in previous:
@@ -524,7 +528,7 @@ def write_candidate_wavs(report: dict, native: np.ndarray, native_rate: int, out
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("capture_dir", type=Path, help="directory characterize_mic wrote: mic-native.wav, mic-converted.wav, manifest.txt")
-    parser.add_argument("--out", type=Path, default=None, help="directory for analysis.json and candidate-*.wav (default: the capture directory); those five names are removed there before each run")
+    parser.add_argument("--out", type=Path, default=None, help="directory for analysis.json and candidate-*.wav (default: the capture directory); the script's own names are removed there before each run")
     parser.add_argument("--allow-invalid", action="store_true", help="analyse even if the manifest says measurement_valid: false")
     args = parser.parse_args(argv)
 
@@ -556,8 +560,8 @@ def main(argv: list[str] | None = None) -> int:
             write_candidate_wavs(report, native_wav.samples, native_wav.rate, out)
         # Write then rename, so a run that dies mid-write leaves no half report
         # for the next run to refuse.
-        tmp_report = out / (ANALYSIS_JSON + ".tmp")
-        tmp_report.write_text(json.dumps(_json_ready(report), indent=2, allow_nan=False))
+        tmp_report = out / TMP_REPORT
+        tmp_report.write_text(json.dumps(_json_ready(report), indent=2, allow_nan=False), encoding="utf-8")
         tmp_report.replace(out / ANALYSIS_JSON)
     except OSError as e:
         sys.stderr.write(f"output error: {e}\n")

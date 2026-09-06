@@ -206,8 +206,8 @@ is active. `--out` must be a new or empty directory, one per take. Keep it
 outside the repository: a take is a recording of your voice. As a backstop,
 every recorded and derived file is gitignored, and so is the example's default
 `mic-capture-*` directory. `manifest.txt` is not, so a take in a directory you
-named still shows in `git status`. Read the
-same phrase, the same way, on every take; the manifest records it. The first
+named still shows in `git status`. Read the same phrase, the same way, on every
+take; the manifest records it. The first
 run prompts for microphone permission. Exit code 2 means the recording is not
 a valid measurement: a dropped frame, a conversion failure, a frame the tap
 could not read, a channel that closed early, or no frames at all. The manifest
