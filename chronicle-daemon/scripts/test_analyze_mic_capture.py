@@ -244,7 +244,7 @@ def test_gate_1_fires_for_a_stereo_wav_that_is_not_float32():
 
 
 def test_gate_2_fires_when_every_channel_is_silent():
-    native = stereo(sine(1000, 0.001), sine(1000, 0.002))  # both near -57 dBFS
+    native = stereo(sine(1000, 0.001), sine(1000, 0.002))  # -63 and -57 dBFS, both under -50
     assert gate(native).startswith("gate 2")
 
 
