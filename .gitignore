@@ -53,3 +53,6 @@ docs/audits/
 docs/qa/
 
 chronicle-daemon/docs/
+# Python bytecode and pytest cache from chronicle-daemon/scripts
+__pycache__/
+.pytest_cache/
