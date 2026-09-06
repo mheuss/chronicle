@@ -44,8 +44,8 @@ const RESAMPLER_HEADROOM_FRAMES: u32 = 4096;
 
 /// What one converter call produced for one tap buffer.
 ///
-/// The converter has five exits and only one carries samples. Collapsing the
-/// other four into `None` hid the difference between the resampler holding its
+/// The converter has six exits and only one carries samples. Collapsing the
+/// other five into `None` hid the difference between the resampler holding its
 /// filter tail, which happens on most calls, and a genuine failure, which
 /// should never happen. The characterization path needs that difference to know
 /// whether a recording can be trusted, and `mic_convert_failed` wants it too.
