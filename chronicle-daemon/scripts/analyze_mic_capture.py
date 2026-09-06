@@ -5,20 +5,12 @@
 #     "scipy>=1.14,<2",
 # ]
 # ///
-"""Analyse a microphone characterization capture (HEU-650; read in HEU-651).
+"""Metrics for a microphone characterization capture (HEU-650; read in HEU-651).
 
-Run:
-    uv run chronicle-daemon/scripts/analyze_mic_capture.py \
-        <mic-native.wav> <mic-converted.wav> [--out DIR]
-
-Reads the two WAVs `characterize_mic` wrote, prints every diagnostic the
-HEU-549 design asks for, writes `analysis.json` into `--out` (default: the
-native WAV's directory), and writes one mono 16 kHz float WAV per candidate mix.
-Each can be transcribed with:
-
-    cargo run -p chronicle-transcription --example transcribe_wav -- <file>
-
-Everything is computed in float64. Formulas:
+The functions here take the two WAVs `characterize_mic` writes, `mic-native.wav`
+and `mic-converted.wav`, and compute the level, correlation and band-pass
+diagnostics the HEU-549 design asks for. Everything is computed in float64.
+Formulas:
 
     rms(x)         = sqrt(mean(x^2))
     dBFS(v)        = 20 * log10(v); full scale is 1.0; v == 0 reports -inf
@@ -26,17 +18,12 @@ Everything is computed in float64. Formulas:
     xcorr(a, b, k) = sum(a'[n] b'[n + k]) / sqrt(sum(a'^2) * sum(b'^2)) for k in +-5 ms;
                      a positive k means b is DELAYED by k samples relative to a
     speech band    = 4th-order Butterworth band-pass 300-3400 Hz, zero phase
-    candidates     = (c0+c1)/2, (c0-c1)/2, c0, c1 -- two-channel input only, never normalized
-    transfer gain  = dBFS(converter output) - dBFS(candidate)
 
 Nothing here normalizes or trims. The Yeti's defect is level collapse, so a
 normalizer would erase the thing being measured, and trimming would move RMS
 differently per channel. Nothing here aligns the two files either: the
 converter holds back a filter tail, so they are not frame-aligned, and every
 number is an aggregate over the whole recording.
-
-Listen too. Per channel and per candidate. Thin, hollow or phasey audio is
-audible long before a number shows it.
 """
 
 from __future__ import annotations
@@ -56,9 +43,10 @@ from scipy.signal import butter, resample_poly, sosfiltfilt
 
 # Pinned analysis parameters (design "Analysis parameters, pinned").
 SPEECH_BAND_HZ = (300.0, 3400.0)
-# The design says "4th-order Butterworth band-pass". That is butter(N=4): for a
-# bandpass, scipy realises N biquad sections per edge, so the filter has 8
-# poles. Both readings are stated here so nobody changes N to 2 to "fix" it.
+# The design says "4th-order Butterworth band-pass". That is butter(N=4): the
+# band-pass transform doubles the prototype order, so the filter has 8 poles in
+# 4 biquad sections. Both readings are stated here so nobody changes N to 2 to
+# "fix" it.
 BUTTER_ORDER = 4
 XCORR_WINDOW_S = 0.005
 STRONG_PEAK = 0.7
