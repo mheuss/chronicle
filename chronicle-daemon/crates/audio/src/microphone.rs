@@ -251,9 +251,9 @@ impl MicrophoneCapture {
     /// Characterization mode (HEU-650): the tap sends one
     /// [`CharacterizationFrame`] per callback on `characterize_tx` and sends
     /// nothing on the encoding channel. Drops count into the same
-    /// `mic_full` / `mic_closed` fields the production tap uses; there is
-    /// exactly one send per callback in this mode, so those fields are this
-    /// channel's drops.
+    /// `mic_full` / `mic_closed` fields the production tap uses. A callback
+    /// sends at most once in this mode, and never on the encoding channel, so
+    /// those fields are this channel's drops.
     ///
     /// Rejects a device that does not deliver 32-bit float: `extract_channels`
     /// cannot read any other layout, so every callback would record nothing.
