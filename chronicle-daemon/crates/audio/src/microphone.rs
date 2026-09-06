@@ -42,6 +42,36 @@ use crate::{AudioDropCounters, AudioError, AudioSource, CHANNEL_COUNT, Result, S
 /// and over-allocating the output buffer only wastes a little memory.
 const RESAMPLER_HEADROOM_FRAMES: u32 = 4096;
 
+/// What one converter call produced for one tap buffer.
+///
+/// The converter has five exits and only one carries samples. Collapsing the
+/// other four into `None` hid the difference between the resampler holding its
+/// filter tail, which happens on most calls, and a genuine failure, which
+/// should never happen. The characterization path needs that difference to know
+/// whether a recording can be trusted, and `mic_convert_failed` wants it too.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConversionOutcome {
+    /// The converter emitted at least one frame.
+    Produced(Vec<f32>),
+    /// Nothing to emit this call: the input was empty, or the converter kept
+    /// the whole input as its held-back tail under `NoDataNow`. Benign.
+    HeldTail,
+    /// Output-buffer allocation failed, the converter returned its `Error`
+    /// status, or the output exposed no float channel data. Counted once in
+    /// `mic_convert_failed` by `convert_to_mono_samples`.
+    Failed,
+}
+
+impl ConversionOutcome {
+    /// The samples, if any were produced. What the production tap wants.
+    pub fn into_produced(self) -> Option<Vec<f32>> {
+        match self {
+            Self::Produced(samples) => Some(samples),
+            Self::HeldTail | Self::Failed => None,
+        }
+    }
+}
+
 /// Copy one deinterleaved f32 channel into an owned `Vec<f32>`.
 ///
 /// `channel` is a slice of f32 PCM samples for a single channel — the layout
@@ -388,14 +418,11 @@ fn make_tap_block(
                 // lives for the duration of this callback.
                 let input_buffer = unsafe { input_buffer.as_ref() };
 
-                let samples = match convert_to_mono_samples(
-                    &converter,
-                    &target_format,
-                    input_buffer,
-                    &counters,
-                ) {
-                    Some(s) if !s.is_empty() => s,
-                    _ => return,
+                let Some(samples) =
+                    convert_to_mono_samples(&converter, &target_format, input_buffer, &counters)
+                        .into_produced()
+                else {
+                    return;
                 };
 
                 // Wall-clock timestamp, matching AudioOutputHandler. PTS-to-
@@ -431,9 +458,9 @@ fn make_tap_block(
 /// Convert one native-format tap buffer to mono/48 kHz/f32 samples.
 ///
 /// Runs the converter into a freshly allocated target-format buffer, then
-/// copies channel zero out as an owned `Vec<f32>`. Returns `None` if the
-/// output buffer cannot be allocated, the conversion fails, or the converted
-/// buffer exposes no float channel data.
+/// copies channel zero out as an owned `Vec<f32>`. Every exit is named by
+/// [`ConversionOutcome`]; a `Failed` is counted in `mic_convert_failed` here,
+/// in one place, so callers never count.
 ///
 /// The converter is shared across tap buffers and keeps its resampler state
 /// between calls: the input block signals `NoDataNow`, not `EndOfStream`, so
@@ -456,11 +483,25 @@ fn convert_to_mono_samples(
     target_format: &AVAudioFormat,
     input_buffer: &AVAudioPCMBuffer,
     counters: &AudioDropCounters,
-) -> Option<Vec<f32>> {
+) -> ConversionOutcome {
+    let outcome = convert_uncounted(converter, target_format, input_buffer);
+    if outcome == ConversionOutcome::Failed {
+        counters.mic_convert_failed.fetch_add(1, Ordering::Relaxed);
+    }
+    outcome
+}
+
+/// The conversion itself. Split from [`convert_to_mono_samples`] so the three
+/// `Failed` exits are counted by one line rather than three.
+fn convert_uncounted(
+    converter: &AVAudioConverter,
+    target_format: &AVAudioFormat,
+    input_buffer: &AVAudioPCMBuffer,
+) -> ConversionOutcome {
     // SAFETY: frameLength is a plain property read.
     let input_frames = unsafe { input_buffer.frameLength() };
     if input_frames == 0 {
-        return None;
+        return ConversionOutcome::HeldTail;
     }
 
     // Sample-rate conversion can expand the frame count. Size the output
@@ -478,13 +519,15 @@ fn convert_to_mono_samples(
 
     // SAFETY: target_format is a valid PCM format; output_capacity is a
     // non-zero frame count.
-    let output_buffer = unsafe {
+    let Some(output_buffer) = (unsafe {
         AVAudioPCMBuffer::initWithPCMFormat_frameCapacity(
             AVAudioPCMBuffer::alloc(),
             target_format,
             output_capacity,
         )
-    }?;
+    }) else {
+        return ConversionOutcome::Failed;
+    };
 
     // The converter's input block hands the whole input buffer over on its
     // first call, then signals `NoDataNow` — not `EndOfStream` — so the
@@ -533,36 +576,29 @@ fn convert_to_mono_samples(
     // `InputRanDry` once it has consumed the tap buffer — the expected status
     // here. Only `Error` indicates a real failure.
     if status == AVAudioConverterOutputStatus::Error {
-        // Only the Error status counts as a conversion failure. Of the four
-        // other `None` exits, two are benign — an empty input buffer, and a
-        // converter that produced no frames, which is expected `InputRanDry`
-        // behaviour. The remaining two are genuine failures that go
-        // uncounted: a failed output-buffer allocation and missing float
-        // channel data, both `?` early-returns. Neither was logged before
-        // this change either, so counting them is a scope decision rather
-        // than a regression to fix here — see HEU-663.
-        counters.mic_convert_failed.fetch_add(1, Ordering::Relaxed);
-        return None;
+        return ConversionOutcome::Failed;
     }
 
     // SAFETY: frameLength reflects how many frames the converter produced.
     let output_frames = unsafe { output_buffer.frameLength() } as usize;
     if output_frames == 0 {
-        return None;
+        return ConversionOutcome::HeldTail;
     }
 
     // SAFETY: the target format is 32-bit float, so floatChannelData is
     // non-nil and points to `channelCount` pointers, each to `frameLength`
     // samples. The target format is mono, so channel zero is the whole signal.
     let channel_data = unsafe { output_buffer.floatChannelData() };
-    let channel_ptr = NonNull::new(channel_data)?;
+    let Some(channel_ptr) = NonNull::new(channel_data) else {
+        return ConversionOutcome::Failed;
+    };
     // SAFETY: channel_ptr points to at least one channel pointer.
     let channel_zero = unsafe { channel_ptr.as_ptr().read() };
     // SAFETY: channel_zero points to `output_frames` valid f32 samples; the
     // standard mono format is non-interleaved with stride 1.
     let channel_slice = unsafe { std::slice::from_raw_parts(channel_zero.as_ptr(), output_frames) };
 
-    Some(mono_samples(channel_slice, output_frames))
+    ConversionOutcome::Produced(mono_samples(channel_slice, output_frames))
 }
 
 /// Copy `frames` samples out of each channel plane, honouring `stride`.
@@ -1332,6 +1368,7 @@ mod tests {
                 &input_buffer,
                 &AudioDropCounters::default(),
             )
+            .into_produced()
             .expect("conversion should yield samples");
 
             assert!(!out.is_empty(), "converted output must not be empty");
@@ -1346,6 +1383,63 @@ mod tests {
                 out.len(),
             );
         });
+    }
+
+    /// A buffer with `frameLength == 0` has nothing to convert. That is the
+    /// benign no-output case, not a failure, and it must not count.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn convert_reports_held_tail_for_a_zero_frame_buffer() {
+        autoreleasepool(|_| {
+            // SAFETY: alloc yields a fresh AVAudioFormat; unwrapped below.
+            let format = unsafe {
+                AVAudioFormat::initStandardFormatWithSampleRate_channels(
+                    AVAudioFormat::alloc(),
+                    SAMPLE_RATE as f64,
+                    CHANNEL_COUNT,
+                )
+            }
+            .expect("48 kHz mono format should build");
+            // SAFETY: format is valid; 16 is a non-zero capacity.
+            let input = unsafe {
+                AVAudioPCMBuffer::initWithPCMFormat_frameCapacity(
+                    AVAudioPCMBuffer::alloc(),
+                    &format,
+                    16,
+                )
+            }
+            .expect("buffer should allocate");
+            // Deliberately no setFrameLength — frameLength stays 0.
+            // SAFETY: both formats are valid PCM formats.
+            let converter = unsafe {
+                AVAudioConverter::initFromFormat_toFormat(
+                    AVAudioConverter::alloc(),
+                    &format,
+                    &format,
+                )
+            }
+            .expect("identity converter should build");
+            let counters = AudioDropCounters::default();
+
+            let outcome = convert_to_mono_samples(&converter, &format, &input, &counters);
+
+            assert_eq!(outcome, ConversionOutcome::HeldTail);
+            assert_eq!(
+                counters.snapshot().mic_convert_failed,
+                0,
+                "a zero-frame buffer is not a conversion failure"
+            );
+        });
+    }
+
+    #[test]
+    fn into_produced_keeps_only_samples() {
+        assert_eq!(
+            ConversionOutcome::Produced(vec![0.5]).into_produced(),
+            Some(vec![0.5])
+        );
+        assert_eq!(ConversionOutcome::HeldTail.into_produced(), None);
+        assert_eq!(ConversionOutcome::Failed.into_produced(), None);
     }
 
     /// Build a mono f32 buffer of `frames` samples of a 997 Hz sine wave, at
@@ -1456,6 +1550,7 @@ mod tests {
                 &full,
                 &AudioDropCounters::default(),
             )
+            .into_produced()
             .expect("single-shot conversion should yield samples");
 
             // Chunked: the same signal in two halves through ONE shared converter.
@@ -1476,6 +1571,7 @@ mod tests {
                 &chunk0,
                 &AudioDropCounters::default(),
             )
+            .into_produced()
             .expect("chunk 0 conversion should yield samples");
             chunked.extend(
                 convert_to_mono_samples(
@@ -1484,6 +1580,7 @@ mod tests {
                     &chunk1,
                     &AudioDropCounters::default(),
                 )
+                .into_produced()
                 .expect("chunk 1 conversion should yield samples"),
             );
 
@@ -1591,6 +1688,7 @@ mod tests {
 
             let out =
                 convert_to_mono_samples(&converter, &format, &input, &AudioDropCounters::default())
+                    .into_produced()
                     .expect("identity conversion should yield samples");
 
             // The converter holds back its internal-block tail under NoDataNow
