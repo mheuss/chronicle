@@ -342,6 +342,7 @@ name = "chronicle-transcription"
 version = "0.1.0"
 dependencies = [
  "chronicle-audio",
+ "hound",
  "log",
  "ogg",
  "opus",
