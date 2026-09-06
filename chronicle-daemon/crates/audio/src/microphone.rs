@@ -113,8 +113,8 @@ fn common_format_name(format: AVAudioCommonFormat) -> String {
 
 /// The input device's native format, read once at tap install.
 ///
-/// Public because the characterization example needs the channel count and
-/// sample rate for its WAV headers and its manifest. A snapshot: nothing
+/// Public so code outside this crate can read the channel count and sample
+/// rate, which is what a WAV header or a manifest needs. A snapshot: nothing
 /// updates it if the default input device changes later (the design's
 /// "Device scope" names that as pre-existing behaviour).
 #[derive(Debug, Clone, PartialEq)]
