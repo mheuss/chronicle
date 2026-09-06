@@ -17,7 +17,8 @@
 //! first, and check it in Audio MIDI Setup before you trust the recording.
 //!
 //! Exit code 2 means the files were written but the recording is not a valid
-//! measurement (a dropped frame or a conversion failure; see the manifest).
+//! measurement; the manifest has a line for every cause `measurement_valid`
+//! checks.
 //! Exit code 1 is an error. If it happens once the WAV files are open,
 //! `--out` can hold WAV files with no manifest. Treat that directory as
 //! discarded.

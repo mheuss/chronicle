@@ -206,11 +206,13 @@ is active. `--out` must be a new or empty directory, one per take. Read the
 same phrase, the same way, on every take; the manifest records it. The first
 run prompts for microphone permission. Exit code 2 means the recording is not
 a valid measurement: a dropped frame, a conversion failure, a frame the tap
-could not read, or a channel that closed early. The manifest has a line for
-each; re-record rather than reason about the hole.
+could not read, a channel that closed early, or no frames at all. The manifest
+has a line for each; re-record rather than reason about the hole. A good take
+leaves three files in `--out`: `mic-native.wav`, `mic-converted.wav` and
+`manifest.txt`.
 
-Then analyse it offline. The script needs `uv`; its numpy and scipy are locked
-next to it.
+Then analyse it offline. The script needs `uv` (`brew install uv`); its numpy
+and scipy are locked next to it.
 
 ```bash
 uv run scripts/analyze_mic_capture.py ./yeti-take-1
@@ -219,13 +221,19 @@ uv run scripts/analyze_mic_capture.py ./yeti-take-1
 It reads the manifest and refuses a recording marked invalid (pass
 `--allow-invalid` to look anyway), prints per-channel levels, correlation, and
 the four candidate mixes, writes `analysis.json`, and writes one 16 kHz WAV per
-candidate. Transcribe a candidate through the real engine with:
+candidate. Exit code 3 means a precedence gate fired: mono input, a non-f32
+file, every channel silent, or a level that is not finite. The report's `STOP:`
+line names which, `analysis.json` records it, and no candidate is written. A
+mono microphone always stops at gate 0; that is the script working, not a
+fault. Transcribe a candidate through the real engine with:
 
 ```bash
 cargo run -p chronicle-transcription --example transcribe_wav -- ./yeti-take-1/candidate-avg.wav --variant base
 ```
 
-The analysis never normalizes or trims. Read the HEU-549 design and HEU-651
+It needs the `base` model under the Chronicle data directory; if it is missing,
+run `scripts/fetch-whisper-model.sh base` from `chronicle-daemon/`. The analysis
+never normalizes or trims. Read the HEU-549 design and HEU-651
 before drawing a conclusion from the numbers; correlation is evidence, not the
 decision rule.
 
@@ -302,7 +310,12 @@ from the root with `--manifest-path chronicle-daemon/Cargo.toml` works too.
 cd chronicle-daemon && cargo test --workspace
 ```
 
-All crates have unit tests. No special setup needed.
+All crates have unit tests. No special setup needed for this command. The SOP
+`test_command` runs two more stages after it: `cargo test -p chronicle-audio
+--features characterize` for the feature-gated audio tests, and
+`uv run scripts/test_analyze_mic_capture.py` for the Python analyzer. Those
+need the `characterize` feature to build and `uv` installed. The Swift tests
+run last.
 
 ### Integration tests
 
