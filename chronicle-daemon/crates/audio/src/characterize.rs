@@ -51,30 +51,48 @@ pub struct WriterReport {
     pub held_tails: u64,
     pub conversion_failures: u64,
     /// Frames whose channel count or channel lengths disagreed with the
-    /// format the WAV was opened with. Not written; never expected.
+    /// format the WAV was opened with. Not written to the native file; never
+    /// expected. The converted side is still written, so after the first one
+    /// the two files are offset by that frame's samples. Compare them sample
+    /// for sample only when this is zero.
     pub malformed_frames: u64,
     pub native_frames_written: u64,
     pub converted_frames_written: u64,
 }
 
-/// Why [`CharacterizationWriter::finish`] did not return a report.
+/// Why [`CharacterizationWriter::finish`] did not return a clean report.
 #[derive(Debug)]
 pub enum FinishError {
-    /// The writer thread reported a WAV or I/O error.
-    Writer(hound::Error),
+    /// The writer thread hit a WAV or I/O error, or panicked. `partial` holds
+    /// every count collected up to that point, so a session that died in its
+    /// last minute still reports the nine that worked. The files may be
+    /// truncated; their headers are patched only as well as `hound`'s `Drop`
+    /// manages.
+    Writer {
+        error: hound::Error,
+        partial: WriterReport,
+    },
     /// The channel did not close within the timeout. Some sender is still
     /// alive, most likely a `MicrophoneCapture` that was not dropped before
-    /// the caller's own sender.
+    /// the caller's own sender. The thread keeps running. If the process
+    /// stays alive until every sender drops, both files finalize normally and
+    /// only the report is lost. If the process exits first, both WAVs are cut
+    /// off mid-write with stale headers.
     Timeout(Duration),
 }
 
 impl fmt::Display for FinishError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Writer(e) => write!(f, "characterization writer failed: {e}"),
+            Self::Writer { error, partial } => write!(
+                f,
+                "characterization writer failed: {error} (after {} frames received)",
+                partial.frames_received
+            ),
             Self::Timeout(d) => write!(
                 f,
-                "characterization writer did not finish within {d:?}: a sender is still alive"
+                "characterization writer did not finish within {d:?}: a sender is still alive; \
+                 the files complete only if this process outlives the writer thread"
             ),
         }
     }
@@ -82,14 +100,19 @@ impl fmt::Display for FinishError {
 
 impl std::error::Error for FinishError {}
 
+/// The writer thread's verdict: a clean report, or the error plus whatever
+/// was counted before it.
+type WriterResult = Result<WriterReport, (hound::Error, WriterReport)>;
+
 /// Owns the thread that turns frames into two WAV files.
 ///
 /// The thread ends when every `SyncSender<CharacterizationFrame>` is dropped.
 /// `Receiver::recv` returns `Err` only after every queued frame has been
 /// delivered, so there is no separate drain step.
+#[must_use = "call finish(), or the report and the files' finalization are lost"]
 pub struct CharacterizationWriter {
     handle: JoinHandle<()>,
-    completion_rx: Receiver<Result<WriterReport, hound::Error>>,
+    completion_rx: Receiver<WriterResult>,
 }
 
 impl CharacterizationWriter {
@@ -98,7 +121,11 @@ impl CharacterizationWriter {
     /// `mic-native.wav` gets `format.channels` channels at the device's
     /// native rate; `mic-converted.wav` gets one channel at 48 kHz. Both are
     /// 32-bit float. Opening happens here so a bad path fails before any
-    /// audio is recorded.
+    /// audio is recorded, and a failure on the second file removes the first.
+    ///
+    /// A WAV data chunk is 32-bit, so each file stops accepting samples just
+    /// short of 4 GiB (about 3 hours of stereo 48 kHz float, far less for
+    /// wide or fast devices) and the session ends with a `Writer` error.
     pub fn spawn(
         frames: Receiver<CharacterizationFrame>,
         format: &NativeFormat,
@@ -111,6 +138,12 @@ impl CharacterizationWriter {
                 format.channels
             )))
         })?;
+        if !format.sample_rate.is_finite() || format.sample_rate < 1.0 {
+            return Err(hound::Error::IoError(io::Error::other(format!(
+                "{} Hz is not a sample rate a WAV header can hold",
+                format.sample_rate
+            ))));
+        }
         let native_spec = WavSpec {
             channels,
             sample_rate: format.sample_rate.round() as u32,
@@ -124,17 +157,26 @@ impl CharacterizationWriter {
             sample_format: SampleFormat::Float,
         };
         let mut native = WavWriter::create(native_path, native_spec)?;
-        let mut converted = WavWriter::create(converted_path, converted_spec)?;
+        let mut converted = match WavWriter::create(converted_path, converted_spec) {
+            Ok(writer) => writer,
+            Err(e) => {
+                drop(native);
+                let _ = std::fs::remove_file(native_path);
+                return Err(e);
+            }
+        };
 
         let (completion_tx, completion_rx) = channel();
         let handle = std::thread::Builder::new()
             .name("mic-characterization-writer".into())
             .spawn(move || {
-                let result = write_all(frames, &mut native, &mut converted).and_then(|report| {
-                    native.finalize()?;
-                    converted.finalize()?;
-                    Ok(report)
-                });
+                let result = match write_all(frames, &mut native, &mut converted) {
+                    Ok(report) => match native.finalize().and_then(|()| converted.finalize()) {
+                        Ok(()) => Ok(report),
+                        Err(e) => Err((e, report)),
+                    },
+                    Err(failed) => Err(failed),
+                };
                 // If `finish` already timed out the receiver is gone, and
                 // there is nobody left to tell.
                 let _ = completion_tx.send(result);
@@ -150,38 +192,77 @@ impl CharacterizationWriter {
     /// finalize, then return the report.
     ///
     /// `JoinHandle::join` has no timeout, so the bound comes from the
-    /// completion channel. On timeout the thread is left running; the caller
-    /// still owns a sender and can only exit.
+    /// completion channel. On timeout the thread is left running; see
+    /// [`FinishError::Timeout`] for what that means for the files.
     pub fn finish(self, timeout: Duration) -> Result<WriterReport, FinishError> {
         match self.completion_rx.recv_timeout(timeout) {
             Ok(Ok(report)) => {
                 let _ = self.handle.join();
                 Ok(report)
             }
-            Ok(Err(e)) => {
+            Ok(Err((error, partial))) => {
                 let _ = self.handle.join();
-                Err(FinishError::Writer(e))
+                Err(FinishError::Writer { error, partial })
             }
             Err(RecvTimeoutError::Timeout) => Err(FinishError::Timeout(timeout)),
             Err(RecvTimeoutError::Disconnected) => {
-                let _ = self.handle.join();
-                Err(FinishError::Writer(hound::Error::IoError(
-                    io::Error::other("the writer thread exited without reporting"),
-                )))
+                // The thread dropped its sender without sending: it panicked.
+                // The payload is the only diagnostic there is; keep it.
+                let detail = match self.handle.join() {
+                    Ok(()) => "the writer thread exited without reporting".to_string(),
+                    Err(payload) => {
+                        format!("the writer thread panicked: {}", panic_message(&payload))
+                    }
+                };
+                Err(FinishError::Writer {
+                    error: hound::Error::IoError(io::Error::other(detail)),
+                    partial: WriterReport::default(),
+                })
             }
         }
     }
 }
 
-/// The writer loop. Generic over the sink so a test can hand it a failing
-/// one; the round-trip tests use real files to exercise `finalize`.
-fn write_all<W: io::Write + io::Seek>(
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
+}
+
+/// RIFF stores the data chunk length in 32 bits and `hound` counts the bytes
+/// in a `u32`. Stop one frame short of wrapping it. The margin covers the
+/// header and one more frame of slack.
+const WAV_DATA_LIMIT_BYTES: u64 = u32::MAX as u64 - 4096;
+
+/// The writer loop. Returns every count collected so far alongside any error,
+/// so a failure late in a session does not erase what it measured.
+fn write_all<N: io::Write + io::Seek, C: io::Write + io::Seek>(
     frames: Receiver<CharacterizationFrame>,
-    native: &mut WavWriter<W>,
-    converted: &mut WavWriter<W>,
-) -> Result<WriterReport, hound::Error> {
-    let channels = usize::from(native.spec().channels);
+    native: &mut WavWriter<N>,
+    converted: &mut WavWriter<C>,
+) -> WriterResult {
     let mut report = WriterReport::default();
+    match write_frames(frames, native, converted, &mut report) {
+        Ok(()) => Ok(report),
+        Err(e) => Err((e, report)),
+    }
+}
+
+/// Assumes `seq` never repeats and never goes backwards: one tap block owns
+/// one counter and feeds one FIFO channel, so it cannot. A `seq` at or below
+/// the previous one would be absorbed here without a gap, and `last_seq`
+/// would hold the last received value, not the highest.
+fn write_frames<N: io::Write + io::Seek, C: io::Write + io::Seek>(
+    frames: Receiver<CharacterizationFrame>,
+    native: &mut WavWriter<N>,
+    converted: &mut WavWriter<C>,
+    report: &mut WriterReport,
+) -> Result<(), hound::Error> {
+    let channels = usize::from(native.spec().channels);
 
     for frame in frames {
         report.frames_received += 1;
@@ -199,11 +280,12 @@ fn write_all<W: io::Write + io::Seek>(
                 .iter()
                 .all(|ch| ch.len() == frame.native[0].len());
         if well_formed {
+            let frames_in = frame.native[0].len();
+            check_room(native, frames_in * channels, "mic-native.wav")?;
             // Frame-major, channel-minor: a multichannel WAV interleaves
             // frames, and `native` is planar. The channel-major loop is the
             // one the data structure invites; it produces a file that opens
             // fine and analyses wrong.
-            let frames_in = frame.native[0].len();
             for f in 0..frames_in {
                 for channel in &frame.native {
                     native.write_sample(channel[f])?;
@@ -216,6 +298,7 @@ fn write_all<W: io::Write + io::Seek>(
 
         match frame.outcome {
             ConversionOutcome::Produced(samples) => {
+                check_room(converted, samples.len(), "mic-converted.wav")?;
                 for sample in &samples {
                     converted.write_sample(*sample)?;
                 }
@@ -227,7 +310,23 @@ fn write_all<W: io::Write + io::Seek>(
         }
     }
 
-    Ok(report)
+    Ok(())
+}
+
+/// Refuse a write that would carry the data chunk past what its 32-bit
+/// length can describe.
+fn check_room<W: io::Write + io::Seek>(
+    writer: &WavWriter<W>,
+    samples_to_add: usize,
+    name: &str,
+) -> Result<(), hound::Error> {
+    let bytes_after = (u64::from(writer.len()) + samples_to_add as u64) * 4;
+    if bytes_after > WAV_DATA_LIMIT_BYTES {
+        return Err(hound::Error::IoError(io::Error::other(format!(
+            "{name} reached the 4 GiB WAV data limit; the session is over"
+        ))));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -396,12 +495,14 @@ mod tests {
         let s = session(&stereo_48k());
         let late = s.tx.clone();
         drop(s.tx);
+        // Started before the releaser thread exists, so its sleep can only
+        // make the measured wait longer, never shorter.
+        let started = Instant::now();
         let releaser = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(300));
             drop(late);
         });
 
-        let started = Instant::now();
         let report = s.writer.finish(Duration::from_secs(5)).unwrap();
         releaser.join().unwrap();
 
@@ -466,12 +567,63 @@ mod tests {
         }
         drop(tx);
 
-        let err = write_all(rx, &mut native, &mut converted).unwrap_err();
+        let (err, partial) = write_all(rx, &mut native, &mut converted).unwrap_err();
 
         assert!(
             matches!(err, hound::Error::IoError(ref e) if e.to_string().contains("disk full")),
             "{err}"
         );
+        assert_eq!(
+            partial.frames_received, 1,
+            "the counts up to the failure come back with the error"
+        );
+    }
+
+    #[test]
+    fn spawn_removes_the_native_file_when_the_converted_open_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let native = dir.path().join("mic-native.wav");
+        let converted = Path::new("/nonexistent-dir-for-heu-650/mic-converted.wav");
+        let (_tx, rx) = sync_channel::<CharacterizationFrame>(1);
+
+        assert!(CharacterizationWriter::spawn(rx, &stereo_48k(), &native, converted).is_err());
+
+        assert!(
+            !native.exists(),
+            "a half-opened pair must not leave a stray native WAV"
+        );
+    }
+
+    #[test]
+    fn spawn_rejects_a_sample_rate_a_header_cannot_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let native = dir.path().join("mic-native.wav");
+        let converted = dir.path().join("mic-converted.wav");
+        for bad in [f64::NAN, 0.0, -48_000.0] {
+            let (_tx, rx) = sync_channel::<CharacterizationFrame>(1);
+            let format = NativeFormat {
+                sample_rate: bad,
+                ..stereo_48k()
+            };
+            assert!(
+                CharacterizationWriter::spawn(rx, &format, &native, &converted).is_err(),
+                "{bad} Hz must be refused, not saturated to 0"
+            );
+        }
+    }
+
+    #[test]
+    fn check_room_refuses_a_write_past_the_data_limit() {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 48_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let writer = hound::WavWriter::new(std::io::Cursor::new(Vec::new()), spec).unwrap();
+        let room = (WAV_DATA_LIMIT_BYTES / 4) as usize;
+        assert!(check_room(&writer, room, "t").is_ok());
+        assert!(check_room(&writer, room + 1, "t").is_err());
     }
 
     #[test]
