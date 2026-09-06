@@ -46,28 +46,20 @@ use crate::{AudioDropCounters, AudioError, AudioSource, CHANNEL_COUNT, Result, S
 /// and over-allocating the output buffer only wastes a little memory.
 const RESAMPLER_HEADROOM_FRAMES: u32 = 4096;
 
-/// What one converter call produced for one tap buffer.
-///
-/// The converter has six exits and only one carries samples. Collapsing the
-/// other five into `None` hid the difference between the resampler holding its
-/// filter tail, which happens on most calls, and a genuine failure, which
-/// should never happen. `mic_convert_failed` counts the second and not the
-/// first, so the two have to be told apart here.
+/// What one converter call produced for one tap buffer. A held-back filter
+/// tail happens on most calls and is not a failure; only `Failed` counts in
+/// `mic_convert_failed`, so the two are told apart here.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConversionOutcome {
-    /// The converter emitted at least one frame.
     Produced(Vec<f32>),
-    /// Nothing to emit this call: the input was empty, or the converter kept
-    /// the whole input as its held-back tail under `NoDataNow`. Benign.
+    /// Empty input, or the converter kept the whole input as its tail. Benign.
     HeldTail,
-    /// Output-buffer allocation failed, the converter returned its `Error`
-    /// status, or the output exposed no float channel data. Counted once in
-    /// `mic_convert_failed` by `convert_to_mono_samples`.
+    /// Allocation failed, the converter returned `Error`, or the output had no
+    /// float channel data. Counted once in `mic_convert_failed`.
     Failed,
 }
 
 impl ConversionOutcome {
-    /// The samples, if any were produced. What the production tap wants.
     pub fn into_produced(self) -> Option<Vec<f32>> {
         match self {
             Self::Produced(samples) => Some(samples),
@@ -115,12 +107,8 @@ fn common_format_name(format: AVAudioCommonFormat) -> String {
     }
 }
 
-/// The input device's native format, read once at tap install.
-///
-/// Public so code outside this crate can read the channel count and sample
-/// rate, which is what a WAV header or a manifest needs. A snapshot: nothing
-/// updates it if the default input device changes later (the design's
-/// "Device scope" names that as pre-existing behaviour).
+/// The input device's native format, read once at tap install. A snapshot: a
+/// later default-device change does not update it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NativeFormat {
     pub channels: u32,
@@ -235,9 +223,7 @@ pub struct MicrophoneCapture {
 }
 
 impl MicrophoneCapture {
-    /// Production capture: the tap forwards mono/48 kHz buffers over the
-    /// encoding channel. `buffer_tx` is a clone of that channel's sender. See
-    /// [`Self::build`] for everything else.
+    /// Production capture: the tap forwards mono 48 kHz buffers on `buffer_tx`.
     pub fn new(
         buffer_tx: SyncSender<AudioMessage>,
         counters: Arc<AudioDropCounters>,
@@ -253,25 +239,14 @@ impl MicrophoneCapture {
     }
 
     /// Characterization mode (HEU-650): the tap sends at most one
-    /// [`CharacterizationFrame`] per callback on `characterize_tx` and sends
-    /// nothing on the encoding channel. Drops count into the same
-    /// `mic_full` / `mic_closed` fields the production tap uses. A callback
-    /// sends at most once in this mode, and never on the encoding channel, so
-    /// those fields are this channel's drops.
-    ///
-    /// Rejects a device that does not deliver 32-bit float before the tap is
-    /// installed: `extract_channels` cannot read any other layout, so every
-    /// callback would record nothing.
-    ///
-    /// Pass a counter set no production tap writes into, or the drop fields
-    /// stop meaning what the manifest reads them as.
-    ///
-    /// The caller owns the sender's lifetime. `stop()` does not close the
-    /// channel; the tap block holds its clone until this value is dropped.
-    /// Drop the capture first, then the caller's sender, and the writer's
-    /// receiver ends. One `start()` and one `stop()` per capture: the
-    /// sequence counter does not reset on `stop()`, so a second session on the
-    /// same capture would look seq-contiguous across a real gap in the audio.
+    /// [`CharacterizationFrame`] per callback on `characterize_tx` and nothing
+    /// on the encoding channel, so `mic_full` and `mic_closed` are this
+    /// channel's drops; pass a counter set no production tap writes into.
+    /// Rejects non-f32 input at install, since `extract_channels` reads
+    /// nothing else. The tap block holds a clone of the sender until this
+    /// value is dropped: drop the capture, then the sender, and the writer's
+    /// receiver ends. One `start()` and `stop()` per capture; the sequence
+    /// counter does not reset.
     #[cfg(feature = "characterize")]
     pub fn new_characterizing(
         characterize_tx: SyncSender<CharacterizationFrame>,
@@ -288,10 +263,8 @@ impl MicrophoneCapture {
 
     /// Build the engine, install the input-node tap, and `prepare()`.
     ///
-    /// Shared by both constructors. `validate` sees the native format before
-    /// anything is built on it and can refuse the device; `make_block` gets
-    /// the converter, the 48 kHz mono target format, and the counters, and
-    /// returns the block to install. Everything else is identical for both.
+    /// Shared by both constructors. `validate` may refuse the device before
+    /// anything is built on it; `make_block` returns the block to install.
     ///
     /// Does **not** start capture — no microphone access, no TCC prompt. Any
     /// AVFoundation setup failure returns [`AudioError`] rather than panicking
@@ -342,9 +315,8 @@ impl MicrophoneCapture {
                 common_format: common_format_name(native_common),
                 float32: native_common == AVAudioCommonFormat::PCMFormatFloat32,
             };
-            // Refuse here, before the converter, the tap install and
-            // `prepare()`, so a rejected device leaves no tap on the input
-            // node and no "tap installed" line behind.
+            // Before the converter, the tap install and `prepare()`, so a
+            // rejected device leaves no tap and no "tap installed" line behind.
             validate(&format)?;
 
             // The format the encoder requires: 48 kHz, mono, f32. The
@@ -547,8 +519,7 @@ fn make_tap_block(
     )
 }
 
-/// The install-time check behind [`MicrophoneCapture::new_characterizing`]:
-/// only 32-bit float input can be recorded.
+/// Install-time check for [`MicrophoneCapture::new_characterizing`].
 #[cfg(feature = "characterize")]
 fn characterization_input_check(format: &NativeFormat) -> Result<()> {
     if format.float32 {
@@ -561,15 +532,10 @@ fn characterization_input_check(format: &NativeFormat) -> Result<()> {
     }
 }
 
-/// One callback's characterization work: copy the native channels out, run
-/// the converter, stamp a sequence number.
-///
-/// Returns `None` without consuming a sequence number for a zero-frame
-/// buffer, so that leaves no gap to misread as a drop. A buffer that has
-/// frames but cannot be read as f32 planes (the device changed under the
-/// engine, say) still gets a frame and a sequence number, with `native`
-/// empty. That is the frame's malformed marker: the seq is consumed, so the
-/// hole stays visible to whatever consumes the frames.
+/// One callback's characterization work. A zero-frame buffer returns `None`
+/// without consuming a `seq`; a buffer that cannot be read as f32 planes
+/// still takes a `seq` and arrives with `native` empty, so the hole stays
+/// visible.
 #[cfg(feature = "characterize")]
 fn characterize_buffer(
     converter: &AVAudioConverter,
@@ -592,8 +558,7 @@ fn characterize_buffer(
     })
 }
 
-/// The characterization tap block. Same shape as [`make_tap_block`]: an
-/// `autoreleasepool`, one bounded `try_send`, counters, no logger.
+/// The characterization tap block: same shape as [`make_tap_block`].
 #[cfg(feature = "characterize")]
 fn make_characterizing_tap_block(
     converter: Retained<AVAudioConverter>,
@@ -666,8 +631,7 @@ fn convert_to_mono_samples(
     outcome
 }
 
-/// The conversion itself. Split from [`convert_to_mono_samples`] so the three
-/// `Failed` exits are counted by one line rather than three.
+/// Split from [`convert_to_mono_samples`] so one line counts every `Failed`.
 fn convert_uncounted(
     converter: &AVAudioConverter,
     target_format: &AVAudioFormat,
@@ -856,9 +820,8 @@ fn extract_channels_from_planes(planes: &[&[f32]], frames: usize, stride: usize)
 /// calls and does not open a pool of its own; the tap block already runs inside
 /// one, so both HEU-650's feature-gated characterization path and HEU-652's
 /// production path are covered.
-// The only caller is the characterization tap, behind the `characterize`
-// feature, so a default build still sees this as dead. HEU-652 wires the
-// production tap block through it and removes the attribute.
+// Only the characterization tap calls this, so a default build sees it as
+// dead. HEU-652 wires the production tap through it and removes the attribute.
 #[cfg_attr(not(feature = "characterize"), allow(dead_code))]
 fn extract_channels(buffer: &AVAudioPCMBuffer) -> Option<Vec<Vec<f32>>> {
     // SAFETY: each of these four is a plain property read with no
@@ -1559,8 +1522,7 @@ mod tests {
         });
     }
 
-    /// A buffer with `frameLength == 0` has nothing to convert. That is the
-    /// benign no-output case, not a failure, and it must not count.
+    /// `frameLength == 0` is the benign no-output case and must not count.
     #[cfg(target_os = "macos")]
     #[test]
     fn convert_reports_held_tail_for_a_zero_frame_buffer() {
@@ -1914,9 +1876,8 @@ mod tests {
         assert!(!mic.is_running(), "engine should not run after stop()");
     }
 
-    /// Build a deinterleaved 48 kHz stereo f32 buffer with `frames` frames.
-    /// Channel 0 holds `left + f * RAMP` at frame `f`, channel 1 the same on
-    /// `right`, so a stride or offset bug shows at the tail, not just at 0.
+    /// Deinterleaved 48 kHz stereo f32, `frames` long. Channel 0 holds
+    /// `left + f * RAMP` at frame `f`, so a stride bug shows past frame 0.
     #[cfg(all(target_os = "macos", feature = "characterize"))]
     fn make_stereo_buffer(
         frames: u32,
@@ -1959,8 +1920,7 @@ mod tests {
         (format, buffer)
     }
 
-    /// Per-frame increment `make_stereo_buffer` adds, small enough that 4800
-    /// frames stay well inside full scale.
+    /// Small enough that 4800 frames stay inside full scale.
     #[cfg(all(target_os = "macos", feature = "characterize"))]
     const RAMP: f32 = 0.000_01;
 
@@ -1982,8 +1942,6 @@ mod tests {
         .expect("stereo -> mono converter should build")
     }
 
-    /// One frame carries both channels, in order, plus the converter's
-    /// outcome, and consumes exactly one sequence number.
     #[cfg(all(target_os = "macos", feature = "characterize"))]
     #[test]
     fn characterize_buffer_carries_both_channels_and_the_outcome() {
@@ -2020,8 +1978,7 @@ mod tests {
         });
     }
 
-    /// A zero-frame buffer records nothing and must not burn a sequence
-    /// number, or the writer would report a gap that was never a drop.
+    /// A zero-frame buffer must not burn a `seq`, or the writer reports a gap.
     #[cfg(all(target_os = "macos", feature = "characterize"))]
     #[test]
     fn characterize_buffer_skips_a_zero_frame_buffer_without_a_seq() {
@@ -2040,9 +1997,7 @@ mod tests {
         });
     }
 
-    /// A buffer with frames that cannot be read as f32 planes must not vanish
-    /// silently: it takes a seq and arrives with no channels, the marker a
-    /// consumer reads as malformed.
+    /// An unreadable buffer takes a `seq` and arrives with no channels.
     #[cfg(all(target_os = "macos", feature = "characterize"))]
     #[test]
     fn characterize_buffer_marks_an_unreadable_buffer_as_empty() {

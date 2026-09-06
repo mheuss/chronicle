@@ -1,10 +1,5 @@
 //! trybuild tests for what `chronicle-audio` lets a dependent crate write.
 //!
-//! The token-alive-during-stop test verifies that the borrow checker
-//! refuses to allow `AudioPipeline::stop(&mut self)` while an
-//! `AudioHandlerToken<'_>` is outstanding. The characterize tests verify that
-//! the `characterize` module is absent without its feature and public with it.
-//!
 //! The `.stderr` snapshots pin rustc's diagnostic wording. A red result right
 //! after a toolchain bump may only need `TRYBUILD=overwrite` and a re-read.
 
@@ -14,9 +9,7 @@ fn borrow_invariants() {
     t.compile_fail("tests/trybuild/stop_while_token_alive.rs");
 }
 
-/// Without the feature, `chronicle_audio::characterize` does not exist in the
-/// public API. That is what this proves: the module is absent, so an example
-/// crate cannot name its types. It does not inspect what else was compiled.
+/// Proves the module is not public without the feature, and nothing more.
 #[cfg(not(feature = "characterize"))]
 #[test]
 fn characterize_module_is_absent_by_default() {
@@ -24,8 +17,6 @@ fn characterize_module_is_absent_by_default() {
     t.compile_fail("tests/trybuild/characterize_public.rs");
 }
 
-/// The mirror image: with the feature on, an example crate can name the
-/// frame type through the public API.
 #[cfg(feature = "characterize")]
 #[test]
 fn characterization_is_public_with_the_feature() {

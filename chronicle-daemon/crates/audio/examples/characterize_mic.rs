@@ -4,25 +4,15 @@
 //! cargo run -p chronicle-audio --features characterize --example characterize_mic -- \
 //!     --device-label "Blue Yeti" --mode stereo --gain 50% \
 //!     --phrase "the quick brown fox jumps over the lazy dog" --model-variant base \
-//!     --seconds 10 --out ./yeti-take-1
+//!     --seconds 10 --out ~/chronicle-captures/yeti-take-1
 //! ```
 //!
 //! Writes `mic-native.wav`, `mic-converted.wav` and `manifest.txt` into
-//! `--out`, which must not exist yet or must be empty: a rerun into a used
-//! directory could leave a fresh partial WAV next to an old manifest that
-//! says `measurement_valid: true`.
-//!
-//! `--device-label` is a label for the manifest. It does not select or
-//! verify the active input device. Set the default input in System Settings
-//! first, and check it in Audio MIDI Setup before you trust the recording.
-//!
-//! Exit code 2 means the files were written but the recording is not a valid
-//! measurement; the manifest has a line for every cause `measurement_valid`
-//! checks.
-//! Exit code 1 is an error. If it happens once the WAV files are open,
-//! `--out` can hold WAV files with no manifest. Treat that directory as
-//! discarded.
-//! The first run prompts for microphone permission.
+//! `--out`, which must be new or empty and should sit outside the repository.
+//! `--device-label` is only a label: set the default input in System Settings
+//! first and check it in Audio MIDI Setup. Exit 2 means the take is not a
+//! valid measurement; the manifest says why. Exit 1 after the WAVs opened can
+//! leave WAVs with no manifest; discard that directory.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -33,14 +23,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use chronicle_audio::characterize::{CharacterizationFrame, CharacterizationWriter, Manifest};
 use chronicle_audio::{AudioDropCounters, MicrophoneCapture};
 
-/// Same bound as the encoding channel in `engine.rs`, so a drop here means
-/// what a drop there means.
+/// The encoding channel's bound in `engine.rs`, so drops here compare to drops there.
 const CHANNEL_CAPACITY: usize = 64;
 const FINISH_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Mirrors `SUPPORTED_VARIANTS` in `chronicle-transcription`. Kept as a copy
-/// because a dependency from this crate on the transcription crate would pull
-/// whisper into every audio test build. If that list changes, change this one.
+/// Copy of `SUPPORTED_VARIANTS` in `chronicle-transcription`; depending on that
+/// crate would pull whisper into every audio test build.
 const MODEL_VARIANTS: &[&str] = &["base", "small", "medium"];
 
 const USAGE: &str = "usage: characterize_mic --device-label TEXT --phrase TEXT [--mode TEXT] [--gain TEXT] [--model-variant base|small|medium] [--seconds N] [--out DIR]";
@@ -127,8 +115,7 @@ fn required(flag: &str, value: Option<String>) -> Result<String, String> {
     }
 }
 
-/// The manifest is `key: value` lines with no escaping. A newline inside a
-/// value would forge a line, so any control character is refused.
+/// The manifest has no escaping, so a control character could forge a line.
 fn one_line(flag: &str, value: &str) -> Result<(), String> {
     if value.chars().any(char::is_control) {
         return Err(format!(
@@ -138,7 +125,6 @@ fn one_line(flag: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Create `dir` if missing; refuse it if it holds anything.
 fn ensure_empty_dir(dir: &Path) -> std::io::Result<()> {
     let with_path =
         |e: std::io::Error| std::io::Error::new(e.kind(), format!("{}: {e}", dir.display()));
@@ -223,9 +209,8 @@ fn run(args: &Args) -> Result<bool, Box<dyn std::error::Error>> {
     std::thread::sleep(Duration::from_secs(args.seconds));
     capture.stop()?;
 
-    // `stop()` halts the engine, but the tap block keeps its sender until the
-    // capture is dropped. Drop the capture first, then our own sender, and
-    // only then is the writer's channel closed.
+    // The tap block keeps its sender until the capture is dropped; the writer's
+    // channel closes only after that and our own sender are gone.
     drop(capture);
     drop(tx);
 
@@ -431,9 +416,7 @@ mod tests {
         assert!(parse_args(&args(&["--device-label", "Yeti", "--phrase"])).is_err());
     }
 
-    /// `MODEL_VARIANTS` is a copy of the transcription crate's list. Read the
-    /// sibling at test time and anchor each variant inside the one line that
-    /// defines it, so a change on either side fails here.
+    /// Reads the sibling crate's list at test time so a change on either side fails here.
     #[test]
     fn model_variants_match_the_transcription_crate() {
         let sibling =
@@ -457,9 +440,7 @@ mod tests {
         );
     }
 
-    /// `CHANNEL_CAPACITY` copies the bound the daemon's encoding channel
-    /// uses. Read `engine.rs` at test time and check every production site.
-    /// The engine's own tests may pick other bounds, so they are skipped.
+    /// Reads `engine.rs` at test time; its own test module may use other bounds.
     #[test]
     fn channel_capacity_matches_the_engine() {
         let sibling = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine.rs");

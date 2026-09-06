@@ -64,10 +64,8 @@ from scipy.signal import butter, resample_poly, sosfiltfilt
 
 # Pinned analysis parameters (design "Analysis parameters, pinned").
 SPEECH_BAND_HZ = (300.0, 3400.0)
-# The design says "4th-order Butterworth band-pass". That is butter(N=4): the
-# band-pass transform doubles the prototype order, so the filter has 8 poles in
-# 4 biquad sections. Both readings are stated here so nobody changes N to 2 to
-# "fix" it.
+# butter(N=4) is the design's "4th-order"; the band-pass transform makes that
+# 8 poles in 4 sections. Do not "fix" N to 2.
 BUTTER_ORDER = 4
 XCORR_WINDOW_S = 0.005
 STRONG_PEAK = 0.7
@@ -117,14 +115,9 @@ class Wav:
 
 
 def read_wav(path: Path) -> Wav:
-    """Read a WAV into float64 without judging it.
-
-    The stored dtype is reported, not enforced, so the caller can decide what a
-    wrong one means. Only exact float32 counts as the f32 the tap delivers;
-    float64 does not. Integer WAVs come back at their stored integer scale, not
-    +-1.0, so no level metric is meaningful on one until the caller has checked
-    `is_float32`.
-    """
+    """Read a WAV into float64 without judging it. The dtype is reported, not
+    enforced; integer WAVs keep their integer scale, so check `is_float32`
+    before any level metric."""
     rate, data = wavfile.read(path)
     if data.ndim == 1:
         data = data[:, np.newaxis]
@@ -232,16 +225,9 @@ def resample_to_16k(x: np.ndarray, rate: int) -> np.ndarray:
 
 
 def gate(native: np.ndarray, rate: int, is_float32: bool) -> str | None:
-    """The design's precedence gates, evaluated in its order: 0, 1, 2, 3.
-
-    Gate 3 covers the *source* recording: it tests each native channel's RMS
-    statistic for finiteness, which a NaN or infinite sample makes non-finite,
-    and fires when every channel has zero variance. It does not cover the
-    candidates: a candidate whose RMS is 0 (-inf dBFS) is a result the
-    interpretation table reads, not an invalid measurement. An exactly silent
-    native channel has RMS 0.0, which is finite; its -inf dBFS is reported.
-    Returns None when the analysis may proceed.
-    """
+    """The design's precedence gates in order 0, 1, 2, 3; None means proceed.
+    Gate 3 reads only per-channel RMS finiteness and all-zero variance, never
+    the candidates: a candidate at -inf dBFS is a result, not an invalid take."""
     channels = native.shape[1]
     if channels == 1:
         return "gate 0: native channel count is 1; no downmix exists, HEU-549 does not apply to this device"
@@ -299,13 +285,9 @@ def _channel_stats(x: np.ndarray, rate: int) -> dict:
 
 
 def analyze(native_wav: Wav, converted_wav: Wav) -> dict:
-    """Every diagnostic the design lists, as one JSON-ready dict.
-
-    The gates run first, on nothing but RMS, so a recording that should stop
-    stops before any filter sees it. Candidates are only computed for
-    two-channel input; arrays and aggregate devices are outside the
-    measurement (design "Channel counts above 2").
-    """
+    """Every diagnostic the design lists, as one JSON-ready dict. Gates run
+    first, on RMS alone, before any filter; candidates exist only for
+    two-channel input."""
     native, native_rate = native_wav.samples, native_wav.rate
     channels = native.shape[1]
     converted_mono = converted_wav.samples[:, 0]
@@ -432,13 +414,9 @@ def load_wavs(capture_dir: Path, manifest: dict[str, str]) -> tuple[Wav, Wav]:
 
 
 def remove_stale_outputs(out: Path) -> None:
-    """Remove what an earlier run of this script left in `out`, and nothing else.
-
-    The script owns exactly the names in OWNED_OUTPUTS: analysis.json and the
-    four candidate WAVs. They are removed by name, so a renamed directory or an
-    interrupted run still cleans up. An analysis.json that is not this script's
-    report is someone else's file: refuse rather than delete it.
-    """
+    """Remove the OWNED_OUTPUTS names from `out` and nothing else. An
+    analysis.json that does not look like this script's report is refused,
+    not deleted."""
     report_path = out / ANALYSIS_JSON
     if report_path.exists():
         if not report_path.is_file():

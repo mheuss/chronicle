@@ -1,10 +1,7 @@
-//! Feature-gated microphone characterization (HEU-650).
-//!
-//! Records what the input-node tap receives and what `AVAudioConverter`
-//! produces from it, as two 32-bit float WAV files, for offline analysis. The
-//! audio thread only fills a [`CharacterizationFrame`] and `try_send`s it; a
-//! plain thread writes the files (ADR-013). Compiled only with
-//! `--features characterize`.
+//! Feature-gated microphone characterization (HEU-650): records what the tap
+//! receives and what `AVAudioConverter` makes of it as two 32-bit float WAVs.
+//! The audio thread only fills a [`CharacterizationFrame`] and `try_send`s it;
+//! a plain thread writes the files (ADR-013).
 
 use std::fmt;
 use std::io;
@@ -19,45 +16,34 @@ use crate::AudioDropSnapshot;
 use crate::SAMPLE_RATE;
 use crate::microphone::{ConversionOutcome, NativeFormat};
 
-/// One tap callback's worth of data: both sides of the conversion for the same
-/// input buffer, so the writer never has to pair two streams.
+/// One tap callback's worth of data: both sides of the conversion for one buffer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CharacterizationFrame {
-    /// Monotonic per-session counter, assigned in the callback. A gap means a
-    /// frame was dropped between the tap and the writer.
+    /// Per-session counter assigned in the callback; a gap is a dropped frame.
     pub seq: u64,
-    /// Native input, one `Vec` per channel, already stride-corrected. Every
-    /// channel has the same length.
-    ///
-    /// Empty means the callback got a buffer with frames it could not read as
-    /// f32 planes. The `seq` was still consumed. Treat such a frame as
-    /// malformed, never as silence: it is a hole in the recording.
+    /// Native input, one `Vec` per channel, stride-corrected. Empty marks a
+    /// buffer the tap could not read as f32 planes; its `seq` was still
+    /// consumed, so treat it as a hole, never as silence.
     pub native: Vec<Vec<f32>>,
     /// The converter's result for this same buffer.
     pub outcome: ConversionOutcome,
 }
 
-/// What the writer saw, reported once when the channel closes.
-///
-/// `seq_gaps` counts frames missing *between* `first_seq` and `last_seq`. A
-/// burst dropped before the first frame arrived shows up as `first_seq > 0`,
-/// not as a gap. A reader judging the recording needs both.
+/// What the writer saw, reported once when the channel closes. `seq_gaps`
+/// counts frames missing between `first_seq` and `last_seq`; a burst lost
+/// before the first frame shows as `first_seq > 0`, not as a gap.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WriterReport {
     pub frames_received: u64,
     pub first_seq: Option<u64>,
-    /// The last `seq` received, which is also the highest: the tap's counter
-    /// only goes up and the channel is a FIFO.
     pub last_seq: Option<u64>,
     pub seq_gaps: u64,
     pub produced: u64,
     pub held_tails: u64,
     pub conversion_failures: u64,
-    /// Frames whose channel count or channel lengths disagreed with the
-    /// format the WAV was opened with. Not written to the native file; never
-    /// expected. The converted side is still written, so after the first one
-    /// the two files are offset by that frame's samples. Compare them sample
-    /// for sample only when this is zero.
+    /// Frames whose channel count or lengths disagreed with the WAV's format.
+    /// Skipped on the native side only, so the two files are offset after the
+    /// first one.
     pub malformed_frames: u64,
     pub native_frames_written: u64,
     pub converted_frames_written: u64,
@@ -66,22 +52,15 @@ pub struct WriterReport {
 /// Why [`CharacterizationWriter::finish`] did not return a clean report.
 #[derive(Debug)]
 pub enum FinishError {
-    /// The writer thread hit a WAV or I/O error, or panicked. On an error,
-    /// `partial` holds every count collected up to it, so a session that died
-    /// in its last minute still reports the nine that worked. On a panic the
-    /// counts die with the thread's stack and `partial` is `None`. The files
-    /// may be truncated; their headers are patched only as well as `hound`'s
-    /// `Drop` manages.
+    /// The writer thread hit a WAV or I/O error (`partial` holds the counts so
+    /// far) or panicked (`partial` is `None`). The files may be truncated.
     Writer {
         error: hound::Error,
         partial: Option<WriterReport>,
     },
-    /// The channel did not close within the timeout. Some sender is still
-    /// alive, most likely a `MicrophoneCapture` that was not dropped before
-    /// the caller's own sender. The thread keeps running. If the process
-    /// stays alive until every sender drops, both files finalize normally and
-    /// only the report is lost. If the process exits first, both WAVs are cut
-    /// off mid-write with stale headers.
+    /// The channel did not close in time: a sender is still alive, usually a
+    /// `MicrophoneCapture` not dropped before the caller's sender. The thread
+    /// keeps running; if the process exits first, both WAVs are cut off.
     Timeout(Duration),
 }
 
@@ -123,24 +102,18 @@ impl fmt::Display for FinishError {
 
 impl std::error::Error for FinishError {}
 
-/// The writer thread's verdict: a clean report, or the error plus whatever
-/// was counted before it.
+/// A clean report, or the error plus whatever was counted before it.
 type WriterResult = Result<WriterReport, (hound::Error, WriterReport)>;
 
-/// Highest native rate a device is allowed to claim. Well above any real
-/// microphone. hound's `rate * bytes_per_sample * channels` must also fit a
-/// `u32`, which `spawn` checks separately because it depends on the count.
+/// Highest native rate a device may claim. hound's bytes per second must also
+/// fit a `u32`; `spawn` checks that, since it depends on the channel count.
 const MAX_SAMPLE_RATE_HZ: f64 = 768_000.0;
 
-/// Both files are 32-bit float. One constant so the specs and the size
-/// guards cannot drift apart.
 const BITS_PER_SAMPLE: u16 = 32;
 
-/// Owns the thread that turns frames into two WAV files.
-///
-/// The thread ends when every `SyncSender<CharacterizationFrame>` is dropped.
-/// `Receiver::recv` returns `Err` only after every queued frame has been
-/// delivered, so there is no separate drain step.
+/// Owns the thread that turns frames into two WAV files. It ends when every
+/// sender is dropped; `recv` errors only after the queue drains, so there is
+/// no drain step.
 #[must_use = "call finish(), or the report is lost"]
 pub struct CharacterizationWriter {
     handle: JoinHandle<()>,
@@ -148,16 +121,10 @@ pub struct CharacterizationWriter {
 }
 
 impl CharacterizationWriter {
-    /// Open both WAV files and start the writer thread.
-    ///
-    /// `mic-native.wav` gets `format.channels` channels at the device's
-    /// native rate; `mic-converted.wav` gets one channel at 48 kHz. Both are
-    /// 32-bit float. Opening happens here so a bad path fails before any
-    /// audio is recorded, and a failure on the second file removes the first.
-    ///
-    /// A WAV data chunk is 32-bit, so each file stops accepting samples just
-    /// short of 4 GiB (about 3 hours of stereo 48 kHz float, far less for
-    /// wide or fast devices) and the session ends with a `Writer` error.
+    /// Open both WAVs and start the thread. Opening here means a bad path
+    /// fails before any audio is recorded; if the second file fails, the first
+    /// is removed. Each file stops just short of 4 GiB, the limit of a WAV
+    /// data chunk, with a `Writer` error.
     pub fn spawn(
         frames: Receiver<CharacterizationFrame>,
         format: &NativeFormat,
@@ -222,8 +189,7 @@ impl CharacterizationWriter {
                     },
                     Err(failed) => Err(failed),
                 };
-                // If `finish` already timed out the receiver is gone, and
-                // there is nobody left to tell.
+                // After a `finish` timeout the receiver is gone; nobody to tell.
                 let _ = completion_tx.send(result);
             })?;
 
@@ -234,11 +200,7 @@ impl CharacterizationWriter {
     }
 
     /// Wait up to `timeout` for the channel to close and the files to
-    /// finalize, then return the report.
-    ///
-    /// `JoinHandle::join` has no timeout, so the bound comes from the
-    /// completion channel. On timeout the thread is left running; see
-    /// [`FinishError::Timeout`] for what that means for the files.
+    /// finalize. `join` has no timeout, so the completion channel supplies it.
     pub fn finish(self, timeout: Duration) -> Result<WriterReport, FinishError> {
         match self.completion_rx.recv_timeout(timeout) {
             Ok(Ok(report)) => {
@@ -254,8 +216,7 @@ impl CharacterizationWriter {
             }
             Err(RecvTimeoutError::Timeout) => Err(FinishError::Timeout(timeout)),
             Err(RecvTimeoutError::Disconnected) => {
-                // The thread dropped its sender without sending: it panicked.
-                // The payload is the only diagnostic there is; keep it.
+                // Dropped without sending: the thread panicked. Keep the payload.
                 let detail = match self.handle.join() {
                     Ok(()) => "the writer thread exited without reporting".to_string(),
                     Err(payload) => {
@@ -281,14 +242,11 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-/// RIFF stores the data chunk length in 32 bits and `hound` counts the bytes
-/// in a `u32`. Every write is checked in full before it happens, so the
-/// margin only has to cover the 60 bytes hound adds to the data length for
-/// the RIFF size field. 4096 is that, with room.
+/// hound adds 60 bytes to the data length for the RIFF size field; 4096
+/// covers that with room.
 const WAV_DATA_LIMIT_BYTES: u64 = u32::MAX as u64 - 4096;
 
-/// The writer loop. Returns every count collected so far alongside any error,
-/// so a failure late in a session does not erase what it measured.
+/// The writer loop. An error comes back with every count collected so far.
 fn write_all<N: io::Write + io::Seek, C: io::Write + io::Seek>(
     frames: Receiver<CharacterizationFrame>,
     native: &mut WavWriter<N>,
@@ -301,10 +259,8 @@ fn write_all<N: io::Write + io::Seek, C: io::Write + io::Seek>(
     }
 }
 
-/// Assumes `seq` never repeats and never goes backwards: one tap block owns
-/// one counter and feeds one FIFO channel, so it cannot. A `seq` at or below
-/// the previous one would be absorbed here without a gap, and `last_seq`
-/// would hold the last received value, not the highest.
+/// Assumes `seq` never repeats or goes backwards: one tap block owns the
+/// counter and one FIFO carries it.
 fn write_frames<N: io::Write + io::Seek, C: io::Write + io::Seek>(
     frames: Receiver<CharacterizationFrame>,
     native: &mut WavWriter<N>,
@@ -331,10 +287,8 @@ fn write_frames<N: io::Write + io::Seek, C: io::Write + io::Seek>(
         if well_formed {
             let frames_in = frame.native[0].len();
             check_room(native, frames_in * channels, "mic-native.wav")?;
-            // Frame-major, channel-minor: a multichannel WAV interleaves
-            // frames, and `native` is planar. The channel-major loop is the
-            // one the data structure invites; it produces a file that opens
-            // fine and analyses wrong.
+            // Frame-major: a WAV interleaves frames and `native` is planar. The
+            // channel-major loop opens fine and analyses wrong.
             for f in 0..frames_in {
                 for channel in &frame.native {
                     native.write_sample(channel[f])?;
@@ -362,8 +316,7 @@ fn write_frames<N: io::Write + io::Seek, C: io::Write + io::Seek>(
     Ok(())
 }
 
-/// Refuse a write that would carry the data chunk past what its 32-bit
-/// length can describe.
+/// Refuse a write that would carry the data chunk past its 32-bit length.
 fn check_room<W: io::Write + io::Seek>(
     writer: &WavWriter<W>,
     samples_to_add: usize,
@@ -382,28 +335,17 @@ fn check_room<W: io::Write + io::Seek>(
 /// Transcription attempts per candidate. Fixed by the design: one.
 pub const ATTEMPTS: u32 = 1;
 
-/// What a recording needs next to it to mean anything a week later.
-///
-/// Rendered as `key: value` lines. The recording-side facts HEU-651's report
-/// has to quote are here: the device and its settings, the pinned variables,
-/// the format, the durations, and the drop and validity counts. Nothing
-/// derived from the audio is here. This file holds what the recorder knew.
-/// `recorded_secs` is what the native WAV actually holds, derived from the
-/// frames written; `requested_secs` is what the caller asked for. They differ
-/// when a run is cut short, or when frames were lost.
-///
-/// The design pins four things per take so identical audio cannot pass and
-/// fail for reasons unrelated to the mix: the phrase, the model variant, the
-/// duration, and the attempt count. Attempts is always one; a failed
-/// transcript is not re-rolled.
+/// What a recording needs beside it to mean anything later, rendered as
+/// `key: value` lines: the device and its settings, the pinned phrase, model,
+/// duration and attempt count, the format, and the drop and validity counts.
+/// Nothing derived from the audio. `recorded_secs` comes from the frames
+/// written; `requested_secs` from the caller.
 #[derive(Debug)]
 pub struct Manifest<'a> {
     pub device: &'a str,
     pub mode: &'a str,
     pub gain: &'a str,
-    /// The fixed phrase that was read. Identical across every take.
     pub phrase: &'a str,
-    /// The whisper variant the candidates will be transcribed with.
     pub model_variant: &'a str,
     pub macos_version: &'a str,
     pub recorded_at_unix_secs: u64,
@@ -416,15 +358,9 @@ pub struct Manifest<'a> {
 }
 
 impl Manifest<'_> {
-    /// The design's rule: a measurement run is invalid if it contains a
-    /// dropped frame or a conversion failure. Six checks cover that. Drops
-    /// show up three ways: a `seq` gap, a first `seq` above zero (which also
-    /// rejects an empty recording), and the tap's `mic_full` and `mic_closed`
-    /// counters. A conversion failure is its own count, and so is a malformed
-    /// frame, the marker for a buffer the tap could not read.
-    /// `mic_convert_failed` needs no check of its own: the same failure lands
-    /// in `conversion_failures`, or in `mic_full` or `mic_closed` if the frame
-    /// never reached the writer.
+    /// Invalid on any dropped frame (a `seq` gap, a first `seq` above zero,
+    /// `mic_full`, `mic_closed`), a conversion failure, or a malformed frame.
+    /// `mic_convert_failed` needs no check: it always lands in one of those.
     pub fn measurement_valid(&self) -> bool {
         let r = self.report;
         r.first_seq == Some(0)
@@ -435,12 +371,10 @@ impl Manifest<'_> {
             && self.drops.mic_closed == 0
     }
 
-    /// Seconds of audio in the native WAV, from the frames written.
     pub fn recorded_secs(&self) -> f64 {
         self.report.native_frames_written as f64 / self.format.sample_rate
     }
 
-    /// Seconds of audio in the converted WAV, always at 48 kHz.
     pub fn converted_secs(&self) -> f64 {
         self.report.converted_frames_written as f64 / f64::from(SAMPLE_RATE)
     }
@@ -577,8 +511,7 @@ mod tests {
         assert_eq!(spec.sample_rate, 48_000);
         assert_eq!(spec.bits_per_sample, 32);
         assert_eq!(spec.sample_format, hound::SampleFormat::Float);
-        // Frame-major: L0 R0 L1 R1 L2 R2. A channel-major loop would produce
-        // 1 2 3 10 20 30 and open without error.
+        // Frame-major: L0 R0 L1 R1 L2 R2. Channel-major gives 1 2 3 10 20 30.
         assert_eq!(samples, vec![1.0, 10.0, 2.0, 20.0, 3.0, 30.0]);
 
         let (spec, samples) = read_all(&s.converted);
@@ -650,15 +583,13 @@ mod tests {
         assert!(samples.is_empty());
     }
 
-    /// The shutdown trap: `finish` must not return until every sender is
-    /// gone, and must return promptly once they are.
+    /// `finish` must not return until every sender is gone, and promptly then.
     #[test]
     fn writer_finishes_only_after_the_last_sender_drops() {
         let s = session(&stereo_48k());
         let late = s.tx.clone();
         drop(s.tx);
-        // Started before the releaser thread exists, so its sleep can only
-        // make the measured wait longer, never shorter.
+        // Started before the releaser thread, so its sleep only lengthens the wait.
         let started = Instant::now();
         let releaser = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(300));
@@ -683,10 +614,7 @@ mod tests {
         drop(s.tx);
     }
 
-    /// A sink that accepts the WAV header and then refuses everything, so
-    /// the write error surfaces inside `write_all` and comes back as `Err`.
-    /// `finish` maps that `Err` to `FinishError::Writer` in one arm; this is
-    /// the half that has logic in it.
+    /// A sink that accepts the WAV header and refuses everything after it.
     struct FailingSink {
         written: usize,
     }
@@ -720,8 +648,7 @@ mod tests {
         };
         let mut native = hound::WavWriter::new(FailingSink { written: 0 }, spec).unwrap();
         let mut converted = hound::WavWriter::new(FailingSink { written: 0 }, spec).unwrap();
-        // Unbounded: every frame is queued before `write_all` runs, and a
-        // bounded channel would block the sends with nobody draining.
+        // Unbounded: every frame is queued before anyone drains.
         let (tx, rx) = std::sync::mpsc::channel();
         for _ in 0..64 {
             tx.send(frame(0, vec![vec![0.0; 16]], ConversionOutcome::HeldTail))
@@ -816,9 +743,8 @@ mod tests {
         }
     }
 
-    /// A rate the ceiling allows can still overflow hound's u32 bytes per
-    /// second once the channel count is large. That arm of the guard has to
-    /// fire on its own.
+    /// A rate under the ceiling can still overflow bytes per second at a high
+    /// channel count.
     #[test]
     fn spawn_rejects_a_bytes_per_second_that_overflows_u32() {
         let dir = tempfile::tempdir().unwrap();
