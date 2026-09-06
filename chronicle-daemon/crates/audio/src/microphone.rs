@@ -111,6 +111,23 @@ fn common_format_name(format: AVAudioCommonFormat) -> String {
     }
 }
 
+/// The input device's native format, read once at tap install.
+///
+/// Public because the characterization example needs the channel count and
+/// sample rate for its WAV headers and its manifest. A snapshot: nothing
+/// updates it if the default input device changes later (the design's
+/// "Device scope" names that as pre-existing behaviour).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NativeFormat {
+    pub channels: u32,
+    pub sample_rate: f64,
+    pub interleaved: bool,
+    /// `f32`, `i16`, ... as [`common_format_name`] spells it.
+    pub common_format: String,
+    /// True for 32-bit float buffers, the only layout `extract_channels` reads.
+    pub float32: bool,
+}
+
 /// Whether the device active at tap install is **eligible** for the explicit
 /// downmix HEU-652 will add.
 ///
