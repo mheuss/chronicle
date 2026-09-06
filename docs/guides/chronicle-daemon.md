@@ -222,8 +222,9 @@ It reads the manifest and refuses a recording marked invalid (pass
 `--allow-invalid` to look anyway), prints per-channel levels, correlation, and
 the four candidate mixes, writes `analysis.json`, and writes one 16 kHz WAV per
 candidate. Exit code 3 means a precedence gate fired: mono input, a non-f32
-file, every channel silent, or a level that is not finite. The report's `STOP:`
-line names which, `analysis.json` records it, and no candidate is written. A
+file, every channel silent, a level that is not finite, or every channel flat
+with zero variance. The report's `STOP:` line names which, `analysis.json`
+records it, and no candidate is written. A
 mono microphone always stops at gate 0; that is the script working, not a
 fault. Transcribe a candidate through the real engine with:
 
