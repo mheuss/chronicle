@@ -124,7 +124,7 @@ fn breaks_a_line(c: char) -> bool {
 fn one_line(flag: &str, value: &str) -> Result<(), String> {
     if value.chars().any(breaks_a_line) {
         return Err(format!(
-            "{flag} must be a single line with no control characters"
+            "{flag} must be one line: no control, line-separator or paragraph-separator characters"
         ));
     }
     Ok(())
@@ -352,7 +352,7 @@ mod tests {
             list.extend([flag, value]);
             let err = parse_args(&args(&list)).unwrap_err();
             assert!(
-                err.contains(flag) && err.contains("single line"),
+                err.contains(flag) && err.contains("one line"),
                 "{flag}: {err}"
             );
         }
