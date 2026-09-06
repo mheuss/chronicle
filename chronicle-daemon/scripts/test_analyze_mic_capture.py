@@ -219,5 +219,236 @@ def test_write_float_wav_round_trips(tmp_path):
     np.testing.assert_allclose(back, x, rtol=1e-6)
 
 
+# --- gates, candidates, report -------------------------------------------
+
+
+def stereo(c0: np.ndarray, c1: np.ndarray) -> np.ndarray:
+    return np.stack([c0, c1], axis=1)
+
+
+def gate(native: np.ndarray, is_float32: bool = True) -> str | None:
+    return amc.gate(native, RATE, is_float32)
+
+
+def test_gate_0_fires_for_mono_input():
+    assert gate(sine(1000, 0.5)[:, np.newaxis]).startswith("gate 0")
+
+
+def test_gate_0_beats_gate_1_for_a_mono_integer_wav():
+    assert gate(sine(1000, 0.5)[:, np.newaxis], is_float32=False).startswith("gate 0")
+
+
+def test_gate_1_fires_for_a_stereo_wav_that_is_not_float32():
+    native = stereo(sine(1000, 0.5), sine(1000, 0.5))
+    assert gate(native, is_float32=False).startswith("gate 1")
+
+
+def test_gate_2_fires_when_every_channel_is_silent():
+    native = stereo(sine(1000, 0.001), sine(1000, 0.002))  # both near -57 dBFS
+    assert gate(native).startswith("gate 2")
+
+
+def test_gate_2_does_not_fire_when_one_channel_is_healthy():
+    assert gate(stereo(sine(1000, 0.5), sine(1000, 0.001))) is None
+
+
+def test_gate_3_fires_when_every_channel_has_zero_variance():
+    assert gate(stereo(np.full(RATE, 0.5), np.full(RATE, 0.5))).startswith("gate 3")
+
+
+def test_gate_3_fires_when_a_channel_rms_is_not_finite():
+    c0 = sine(1000, 0.5)
+    c0[10] = np.nan  # one NaN sample makes that channel's RMS NaN
+    assert gate(stereo(c0, sine(1000, 0.5))).startswith("gate 3")
+
+
+def test_gate_2_takes_precedence_over_gate_3():
+    quiet = sine(1000, 0.001)
+    assert gate(stereo(quiet, np.zeros(RATE))).startswith("gate 2")
+
+
+def test_candidates_are_the_four_pinned_mixes():
+    c0 = np.array([1.0, 2.0])
+    c1 = np.array([3.0, -2.0])
+    cands = amc.candidates(stereo(c0, c1))
+    np.testing.assert_allclose(cands["avg"], [2.0, 0.0])
+    np.testing.assert_allclose(cands["diff"], [-1.0, 2.0])
+    np.testing.assert_allclose(cands["c0"], c0)
+    np.testing.assert_allclose(cands["c1"], c1)
+    assert list(cands) == ["avg", "diff", "c0", "c1"]
+
+
+def test_r_band_names():
+    assert amc.r_band(0.9) == "high"
+    assert amc.r_band(0.1) == "low"
+    assert amc.r_band(-0.1) == "low"
+    assert amc.r_band(-0.9) == "strongly negative"
+    assert amc.r_band(0.5) == "partial"
+    assert amc.r_band(-0.5) == "partial"
+    assert amc.r_band(math.nan) == "undefined"
+
+
+def wav(samples: np.ndarray, rate: int = RATE) -> "amc.Wav":
+    if samples.ndim == 1:
+        samples = samples[:, np.newaxis]
+    return amc.Wav(rate=rate, samples=samples.astype(np.float64), dtype="float32")
+
+
+def test_analyze_anti_correlated_stereo():
+    c0 = sine(1000, 0.5)
+    converted = sine(1000, 0.001)  # what a cancelling converter would emit
+    report = amc.analyze(wav(stereo(c0, -c0)), wav(converted))
+
+    assert report["gate"] is None
+    assert report["pearson_r"] == pytest.approx(-1.0)
+    assert report["r_band"] == "strongly negative"
+    assert report["candidates"]["avg"]["rms_dbfs"] == -math.inf
+    assert report["candidates"]["diff"]["rms_dbfs"] == pytest.approx(-9.03, abs=0.05)
+    assert report["candidates"]["c0"]["rms_dbfs"] == pytest.approx(-9.03, abs=0.05)
+    assert report["candidates"]["c0"]["clipped_samples"] == 0
+    assert report["converted"]["rms_dbfs"] == pytest.approx(-63.0, abs=0.1)
+    assert report["candidates"]["c0"]["transfer_gain_db"] == pytest.approx(-54.0, abs=0.2)
+
+
+def test_analyze_stops_at_a_gate_before_any_filtering():
+    # Two frames: sosfiltfilt would raise on input this short, so a report
+    # with a gate proves the gate ran first.
+    native = stereo(np.zeros(2), np.zeros(2))
+    report = amc.analyze(wav(native), wav(np.zeros(2)))
+    assert report["gate"].startswith("gate 2")
+    assert "candidates" not in report
+    assert "per_channel" not in report["native"]
+
+
+# --- capture directory and CLI ----------------------------------------------
+
+
+def write_capture(
+    directory,
+    native: np.ndarray,
+    converted: np.ndarray,
+    *,
+    valid: bool = True,
+    manifest_channels: int | None = None,
+    native_rate: int = RATE,
+    converted_rate: int = RATE,
+    native_dtype=np.float32,
+    converted_dtype=np.float32,
+):
+    directory.mkdir(parents=True, exist_ok=True)
+    wavfile.write(directory / "mic-native.wav", native_rate, native.astype(native_dtype))
+    wavfile.write(directory / "mic-converted.wav", converted_rate, converted.astype(converted_dtype))
+    channels = manifest_channels if manifest_channels is not None else native.shape[1]
+    (directory / "manifest.txt").write_text(
+        "device: test\n"
+        f"native_channels: {channels}\n"
+        f"native_sample_rate_hz: {native_rate}\n"
+        f"measurement_valid: {'true' if valid else 'false'}\n"
+    )
+
+
+def good_stereo(secs: float = 1.0):
+    c0 = sine(1000, 0.5, secs=secs)
+    return stereo(c0, 0.5 * c0), sine(1000, 0.3, secs=secs)
+
+
+def test_main_writes_candidates_json_and_prints_a_report(tmp_path, capsys):
+    native, converted = good_stereo()
+    write_capture(tmp_path, native, converted)
+
+    code = amc.main([str(tmp_path)])
+
+    assert code == 0
+    for name in ["avg", "diff", "c0", "c1"]:
+        rate, data = wavfile.read(tmp_path / f"candidate-{name}.wav")
+        assert rate == 16_000, name
+        assert data.dtype == np.float32, name
+        assert data.ndim == 1, name
+        assert len(data) == 16_000, name
+    report = json.loads((tmp_path / "analysis.json").read_text())
+    assert report["pearson_r"] == pytest.approx(1.0)
+    assert report["candidates"]["c1"]["wav"].endswith("candidate-c1.wav")
+    assert report["parameters"]["candidate_rate_hz"] == 16_000
+    assert set(report["environment"]) >= {"python", "numpy", "scipy"}
+    assert report["manifest"]["device"] == "test"
+    printed = capsys.readouterr().out
+    assert "pearson r" in printed
+    assert "clipped" in printed
+    assert "candidate-avg.wav" in printed
+
+
+def test_main_refuses_an_invalid_measurement_unless_overridden(tmp_path):
+    native, converted = good_stereo()
+    write_capture(tmp_path, native, converted, valid=False)
+
+    assert amc.main([str(tmp_path)]) == 2
+    assert not (tmp_path / "candidate-avg.wav").exists()
+    assert not (tmp_path / "analysis.json").exists()
+
+    assert amc.main([str(tmp_path), "--allow-invalid"]) == 0
+    assert (tmp_path / "candidate-avg.wav").exists()
+    report = json.loads((tmp_path / "analysis.json").read_text())
+    assert report["manifest"]["measurement_valid"] == "false"
+
+
+def test_main_exits_3_when_a_gate_fires(tmp_path):
+    mono = sine(1000, 0.5)[:, np.newaxis]
+    write_capture(tmp_path, mono, sine(1000, 0.5))
+
+    code = amc.main([str(tmp_path)])
+
+    assert code == 3
+    assert not (tmp_path / "candidate-avg.wav").exists()
+    assert json.loads((tmp_path / "analysis.json").read_text())["gate"].startswith("gate 0")
+
+
+def test_main_rejects_a_manifest_that_disagrees_with_the_wav(tmp_path, capsys):
+    native, converted = good_stereo()
+    write_capture(tmp_path, native, converted, manifest_channels=4)
+    assert amc.main([str(tmp_path)]) == 1
+    assert "native_channels" in capsys.readouterr().err
+
+
+def test_main_rejects_a_converted_file_off_contract(tmp_path, capsys):
+    native, converted = good_stereo()
+    write_capture(tmp_path, native, stereo(converted, converted))
+    assert amc.main([str(tmp_path)]) == 1
+    assert "mic-converted.wav" in capsys.readouterr().err
+
+
+def test_main_rejects_a_float64_native_as_gate_1(tmp_path):
+    native, converted = good_stereo()
+    write_capture(tmp_path, native, converted, native_dtype=np.float64)
+    assert amc.main([str(tmp_path)]) == 3
+    assert json.loads((tmp_path / "analysis.json").read_text())["gate"].startswith("gate 1")
+
+
+def test_main_rejects_a_recording_shorter_than_one_second(tmp_path, capsys):
+    native, converted = good_stereo(secs=0.5)
+    write_capture(tmp_path, native, converted)
+    assert amc.main([str(tmp_path)]) == 1
+    assert "shorter than" in capsys.readouterr().err
+
+
+def test_main_rejects_a_missing_manifest(tmp_path, capsys):
+    native, converted = good_stereo()
+    write_capture(tmp_path, native, converted)
+    (tmp_path / "manifest.txt").unlink()
+    assert amc.main([str(tmp_path)]) == 1
+    assert "manifest.txt" in capsys.readouterr().err
+
+
+def test_main_removes_its_own_stale_outputs_first(tmp_path):
+    mono = sine(1000, 0.5)[:, np.newaxis]
+    write_capture(tmp_path, mono, sine(1000, 0.5))
+    (tmp_path / "candidate-avg.wav").write_bytes(b"stale")
+    (tmp_path / "analysis.json").write_text("{}")
+
+    assert amc.main([str(tmp_path)]) == 3
+
+    assert not (tmp_path / "candidate-avg.wav").exists(), "a stale candidate must not survive a gated run"
+    assert json.loads((tmp_path / "analysis.json").read_text())["gate"].startswith("gate 0")
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
