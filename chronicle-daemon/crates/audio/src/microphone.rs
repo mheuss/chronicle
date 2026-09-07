@@ -2,14 +2,15 @@
 //!
 //! A dedicated capture path, independent of the screen-capture SCStream.
 //! Toggling the microphone start/stops this engine; screen and system-audio
-//! capture are never touched. See the HEU-330 design, section 2.1.
+//! capture are never touched. See HEU-330.
 //!
 //! The engine's input-node tap delivers the device's *native* format, which
 //! is hardware-dependent (e.g. 44.1 kHz on some mics). The encoder and
-//! `SegmentAccumulator` require exactly 48 kHz mono
-//! f32, so an `AVAudioConverter` normalizes every tap buffer to that target
+//! `SegmentAccumulator` require exactly 48 kHz mono f32, so an
+//! `AVAudioConverter` normalizes every tap buffer to that target
 //! format. When the device already delivers 48 kHz mono f32 this is an
-//! identity passthrough. Otherwise it is a real resample/downmix. The
+//! identity passthrough. Otherwise it resamples; a stereo device is not mixed
+//! down, because with no `channelMap` set the converter selects channel 0. The
 //! converter's input block signals `NoDataNow` (not `EndOfStream`) between tap
 //! buffers, so it keeps its resampler state across them — a non-48 kHz mic is
 //! resampled as one continuous stream rather than one isolated resample per
@@ -168,9 +169,7 @@ impl MicrophoneCapture {
             // Read what the device actually delivers. Logged once, after the
             // tap is installed (below), rather than per callback: the tap
             // block runs on a real-time audio thread, and ADR-013 wants no
-            // logger there at all. (That path already carries pre-existing
-            // per-buffer warnings this branch does not touch — logging the
-            // format per callback would make it worse, not better.)
+            // logger there at all.
             // SAFETY: all four are plain property reads on a valid format.
             let native_channels = unsafe { native_format.channelCount() };
             let native_rate = unsafe { native_format.sampleRate() };
@@ -198,6 +197,11 @@ impl MicrophoneCapture {
 
             // One converter, native -> target. Used on every tap buffer; an
             // identity passthrough when native already matches the target.
+            //
+            // With no channelMap set, a 2-to-1 conversion selects channel 0 and
+            // discards channel 1. HEU-651 measured the output as bit-identical
+            // to native channel 0 on two devices; on a Blue Yeti that costs
+            // 7.7-7.9 dB, because channel 0 is the quieter capsule.
             // SAFETY: both formats are valid PCM formats.
             let converter = unsafe {
                 AVAudioConverter::initFromFormat_toFormat(
@@ -525,11 +529,9 @@ mod tests {
 
     #[test]
     fn common_format_names_are_distinct_and_stable() {
-        // Same reasoning as the eligibility labels below, and it matters more
-        // here: `Ineligible` collapses "not f32" and "more than two channels",
-        // so this name is the only field in the log line that separates an
-        // Int16 stereo microphone from a four-channel f32 array. A swapped arm
-        // would ship silently and corrupt exactly the evidence HEU-651 reads.
+        // This name separates two devices with the same channel count in the
+        // log, such as an Int16 stereo microphone and an f32 stereo one. A
+        // swapped arm would ship silently.
         assert_eq!(
             common_format_name(AVAudioCommonFormat::PCMFormatFloat32),
             "f32"
