@@ -117,11 +117,11 @@ transcripts. The daemon logs the device's native input format once, when it
 installs the tap:
 
 ```text
-[2026-08-22T22:02:06Z INFO  chronicle_audio::microphone] microphone tap installed (capture starts on mic-on): 2 ch, 48000 Hz, interleaved=false, format=f32, mix_eligibility=stereo
+[2026-08-22T22:02:06Z INFO  chronicle_audio::microphone] microphone tap installed (capture starts on mic-on): 2 ch, 48000 Hz, interleaved=false, format=f32
 ```
 
-It reports channel count, sample rate, whether samples are interleaved, the
-sample format, and whether the device is eligible for the explicit downmix.
+It reports channel count, sample rate, whether samples are interleaved, and the
+sample format.
 
 You will see it in a normal run — the daemon defaults to `warn,chronicle=info`,
 so no `RUST_LOG` is needed:
@@ -170,20 +170,6 @@ Four things to know before you trust what you read:
 Cross-check the numbers against **Audio MIDI Setup** (`open -a "Audio MIDI
 Setup"`), which shows each device's format. System Settings → Sound → Input only
 tells you which device is selected.
-
-`mix_eligibility` names which of three routes a future explicit downmix will
-send the device down: `stereo` takes the measured mix, `mono` takes a fast
-passthrough that skips the mixing machinery entirely, and `ineligible` — non-f32
-input, zero channels, or more than two channels — stays on today's converter,
-unchanged and unmeasured.
-
-Because `ineligible` collapses those causes into one word, **read `format=` and
-the channel count to find out which one applies** — that is what separates an
-Int16 stereo microphone from a four-channel f32 array.
-
-It is not a claim about the current audio path: as of HEU-649,
-`AVAudioConverter` performs every downmix, for every device. HEU-652 is what
-changes that, and this paragraph with it.
 
 ## How to Modify
 

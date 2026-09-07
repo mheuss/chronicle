@@ -82,12 +82,9 @@ fn mono_samples(channel: &[f32], frame_count: usize) -> Vec<f32> {
 /// Name an `AVAudioCommonFormat` for the tap-install log.
 ///
 /// `AVAudioCommonFormat`'s derived `Debug` prints the raw discriminant —
-/// `AVAudioCommonFormat(1)` — which makes the one line this ticket exists to
-/// provide require a lookup table to read. It matters more than it looks:
-/// [`MixEligibility::Ineligible`] collapses "not f32" and "more than two
-/// channels" into a single label, so the format name is the only thing in the
-/// line that tells an Int16 stereo microphone apart from a four-channel f32
-/// array.
+/// `AVAudioCommonFormat(1)` — which needs a lookup table to read. This name is
+/// what separates two devices with the same channel count in the log, such as
+/// an Int16 stereo microphone and an f32 stereo one.
 ///
 /// Values from `objc2-avf-audio`'s `AVAudioFormat.rs`. An unrecognized value
 /// prints as `unknown(N)` rather than being silently dropped — a format
@@ -113,71 +110,6 @@ pub struct NativeFormat {
     pub interleaved: bool,
     /// `f32`, `i16`, ... as [`common_format_name`] spells it.
     pub common_format: String,
-}
-
-/// Whether the device active at tap install is **eligible** for the explicit
-/// downmix HEU-652 will add.
-///
-/// This is deliberately *not* called a "path". As of HEU-649 nothing branches
-/// on it: `AVAudioConverter` still performs every downmix, for every device.
-/// Naming it a path and logging `downmix_path=explicit-mix` would make the
-/// diagnostic assert a route that is not taken — worse than no diagnostic,
-/// because the next person debugging a silent microphone would believe it.
-///
-/// It is also not a claim about resampling. The converter handles sample rate
-/// for every device before and after HEU-652, so even an eligible device still
-/// goes through it.
-///
-/// **Contract for callers:** classify from the native format once, at tap
-/// install, and never re-evaluate. `MicrophoneCapture` and its converter are
-/// built once when the pipeline is created, so a default-input change leaves
-/// any classification stale until the daemon restarts. That is pre-existing
-/// behaviour, not something this branch changes.
-///
-/// Three routes, not two: `Mono` takes a fast passthrough, `Stereo` takes the
-/// measured explicit mix, and `Ineligible` stays on today's converter.
-///
-/// The rule in one sentence: **the explicit mix will apply only to input the
-/// measurement covers; everything else keeps the path it already uses.**
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MixEligibility {
-    /// One f32 channel. **A distinct route, not the stereo one.** HEU-652
-    /// gives mono a fast path that skips extraction, the intermediate `Vec`,
-    /// and the second PCM buffer entirely — it does not enter the explicit-mix
-    /// machinery, it bypasses it. Grouped under "eligibility" only because the
-    /// classification is what selects the route.
-    Mono,
-    /// Two f32 channels. The case HEU-549 is about; HEU-652 applies the
-    /// measured policy here.
-    Stereo,
-    /// Everything else — non-f32 at any channel count, zero channels, or
-    /// more than two. Not eligible for the explicit mix; these keep today's
-    /// converter behaviour **unchanged and unmeasured**. That is a
-    /// no-regression guarantee, not a claim that the current behaviour is
-    /// correct for them — nothing has measured a non-f32 or multi-channel
-    /// device.
-    Ineligible,
-}
-
-impl MixEligibility {
-    fn classify(format: AVAudioCommonFormat, channels: u32) -> Self {
-        match (format, channels) {
-            (AVAudioCommonFormat::PCMFormatFloat32, 1) => Self::Mono,
-            (AVAudioCommonFormat::PCMFormatFloat32, 2) => Self::Stereo,
-            _ => Self::Ineligible,
-        }
-    }
-
-    /// The label written to the tap-install log. Kept short and greppable —
-    /// it is what someone diagnosing a silent microphone searches for, so it
-    /// should stay stable.
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Mono => "mono",
-            Self::Stereo => "stereo",
-            Self::Ineligible => "ineligible",
-        }
-    }
 }
 
 /// Microphone capture driven by an `AVAudioEngine` input-node tap.
@@ -278,7 +210,6 @@ impl MicrophoneCapture {
             let native_rate = unsafe { native_format.sampleRate() };
             let native_common = unsafe { native_format.commonFormat() };
             let native_interleaved = unsafe { native_format.isInterleaved() };
-            let mix_eligibility = MixEligibility::classify(native_common, native_channels);
             let format = NativeFormat {
                 channels: native_channels,
                 sample_rate: native_rate,
@@ -352,10 +283,6 @@ impl MicrophoneCapture {
             // both fail — a line emitted earlier would claim an install that
             // never happened.
             //
-            // `mix_eligibility` describes what HEU-652 will do with this
-            // device. Today `AVAudioConverter` performs every downmix
-            // regardless, which is why it is not called a path.
-            //
             // This is `info!`, which the daemon's default filter
             // (`warn,chronicle=info`) admits — so it appears in a normal run
             // with no `RUST_LOG` set. It fires once per tap install, not per
@@ -364,9 +291,8 @@ impl MicrophoneCapture {
             log::info!(
                 "microphone tap installed (capture starts on mic-on): \
                  {native_channels} ch, {native_rate} Hz, \
-                 interleaved={native_interleaved}, format={}, mix_eligibility={}",
-                format.common_format,
-                mix_eligibility.as_str()
+                 interleaved={native_interleaved}, format={}",
+                format.common_format
             );
 
             Ok((
@@ -639,72 +565,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mix_eligibility_is_stereo_for_f32_two_channels() {
-        assert_eq!(
-            MixEligibility::classify(AVAudioCommonFormat::PCMFormatFloat32, 2),
-            MixEligibility::Stereo
-        );
-    }
-
-    #[test]
-    fn mix_eligibility_is_mono_for_f32_one_channel() {
-        assert_eq!(
-            MixEligibility::classify(AVAudioCommonFormat::PCMFormatFloat32, 1),
-            MixEligibility::Mono
-        );
-    }
-
-    #[test]
-    fn mix_eligibility_is_ineligible_above_two_channels() {
-        // No measurement covers arrays. Whatever such a device does today, it
-        // keeps doing — the explicit mix will simply not be applied.
-        //
-        // 3 is the load-bearing case: it is the first value past the boundary,
-        // and an arm that wrongly admitted it would be invisible to a test
-        // that only checks 4. Both are asserted for that reason.
-        for channels in [3, 4, 8] {
-            assert_eq!(
-                MixEligibility::classify(AVAudioCommonFormat::PCMFormatFloat32, channels),
-                MixEligibility::Ineligible,
-                "{channels} channels must not be eligible"
-            );
-        }
-    }
-
-    #[test]
-    fn mix_eligibility_is_ineligible_for_non_f32() {
-        // AVAudioConverter normalizes non-f32 today. Rejecting here would take
-        // a working device to a hard failure, which HEU-649 explicitly forbids:
-        // input the measurement does not cover keeps the path it already uses.
-        //
-        // Every non-f32 format is checked at BOTH channel counts that would
-        // otherwise be eligible. Checking only stereo leaves an arm like
-        // `(PCMFormatInt16, 1) => Mono` undetectable.
-        for format in [
-            AVAudioCommonFormat::PCMFormatInt16,
-            AVAudioCommonFormat::PCMFormatInt32,
-            AVAudioCommonFormat::PCMFormatFloat64,
-            AVAudioCommonFormat::OtherFormat,
-        ] {
-            for channels in [1, 2] {
-                assert_eq!(
-                    MixEligibility::classify(format, channels),
-                    MixEligibility::Ineligible,
-                    "format {format:?} at {channels} ch must not be eligible"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn mix_eligibility_is_ineligible_for_zero_channels() {
-        assert_eq!(
-            MixEligibility::classify(AVAudioCommonFormat::PCMFormatFloat32, 0),
-            MixEligibility::Ineligible
-        );
-    }
-
-    #[test]
     fn common_format_names_are_distinct_and_stable() {
         // Same reasoning as the eligibility labels below, and it matters more
         // here: `Ineligible` collapses "not f32" and "more than two channels",
@@ -738,15 +598,6 @@ mod tests {
         // A format AVFoundation adds later is the case worth seeing, so it
         // prints the discriminant rather than being folded into "other".
         assert_eq!(common_format_name(AVAudioCommonFormat(99)), "unknown(99)");
-    }
-
-    #[test]
-    fn mix_eligibility_labels_are_distinct_and_stable() {
-        // The label is what lands in the log and what a future reader greps
-        // for. Classification tests do not catch a swapped or duplicated label.
-        assert_eq!(MixEligibility::Mono.as_str(), "mono");
-        assert_eq!(MixEligibility::Stereo.as_str(), "stereo");
-        assert_eq!(MixEligibility::Ineligible.as_str(), "ineligible");
     }
 
     #[test]
