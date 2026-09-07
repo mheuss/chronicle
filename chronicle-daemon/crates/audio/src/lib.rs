@@ -8,6 +8,8 @@
 //! and transcription.
 
 mod accumulator;
+#[cfg(feature = "characterize")]
+pub mod characterize;
 mod drops;
 mod encoder;
 mod engine;

@@ -36,7 +36,20 @@ dispatch2 = "0.3"
 opus = "0.3"
 ogg = "0.9"
 thiserror = "2"
+# WAV writer for the characterization capture. Optional: only the
+# `characterize` feature pulls it in, so production builds never compile it.
+hound = { version = "3.5", optional = true }
+
+[features]
+# Record what the microphone tap receives and what the converter produces, as
+# WAV files, for offline analysis (HEU-650, ADR-013). Off by default.
+characterize = ["dep:hound"]
 
 [dev-dependencies]
 tempfile = "3"
 trybuild = "1"
+
+[[example]]
+name = "characterize_mic"
+required-features = ["characterize"]
+test = true

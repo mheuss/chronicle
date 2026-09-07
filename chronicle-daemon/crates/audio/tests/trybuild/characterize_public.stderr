@@ -1,0 +1,13 @@
+error[E0432]: unresolved import `chronicle_audio::characterize`
+ --> tests/trybuild/characterize_public.rs:4:22
+  |
+4 | use chronicle_audio::characterize::CharacterizationFrame;
+  |                      ^^^^^^^^^^^^ could not find `characterize` in `chronicle_audio`
+  |
+note: found an item that was configured out
+ --> src/lib.rs
+  |
+  | #[cfg(feature = "characterize")]
+  |       ------------------------ the item is gated behind the `characterize` feature
+  | pub mod characterize;
+  |         ^^^^^^^^^^^^

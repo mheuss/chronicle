@@ -22,3 +22,9 @@ cpu = []
 [dev-dependencies]
 tempfile = "3"
 chronicle-audio = { path = "../audio" }
+# WAV reader for examples/transcribe_wav.rs. Examples see dev-dependencies.
+hound = "3.5"
+
+[[example]]
+name = "transcribe_wav"
+test = true

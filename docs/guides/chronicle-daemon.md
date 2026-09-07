@@ -185,6 +185,67 @@ It is not a claim about the current audio path: as of HEU-649,
 `AVAudioConverter` performs every downmix, for every device. HEU-652 is what
 changes that, and this paragraph with it.
 
+### Recording what the tap receives
+
+When the format line is not enough, record the audio itself. The
+`characterize` feature on `chronicle-audio` adds an example that captures the
+tap's native channels and the converter's mono output as WAV files, plus a
+manifest. It is compiled out of every default build, so it never ships.
+
+```bash
+cd chronicle-daemon
+cargo run -p chronicle-audio --features characterize --example characterize_mic -- \
+  --device-label "Blue Yeti" --mode stereo --gain 50% \
+  --phrase "the quick brown fox jumps over the lazy dog" --model-variant base \
+  --seconds 10 --out ~/chronicle-captures/yeti-take-1
+```
+
+`--device-label` is only a label. Set the default input device in System
+Settings first and check it in Audio MIDI Setup; the example records whatever is
+active. `--out` must be a new or empty directory, one per take. Keep it outside
+the repository: a take is a recording of your voice. As a backstop, every
+recorded and derived file is gitignored, and so is the example's default
+`mic-capture-*` directory. `manifest.txt` is not, so a take in a directory you
+named still shows in `git status`. Read the same phrase, the same way, on every
+take; the manifest records it. The first run prompts for microphone permission.
+Exit code 2 means the recording is not a valid measurement: a dropped frame, a
+conversion failure, a frame the tap could not read, a channel that closed early,
+or no frames at all. The manifest has a line for each; re-record rather than
+reason about the hole. A good take leaves three files in `--out`:
+`mic-native.wav`, `mic-converted.wav` and `manifest.txt`.
+
+Then analyse it offline. The script needs `uv` (`brew install uv`); its numpy
+and scipy are locked next to it.
+
+```bash
+uv run scripts/analyze_mic_capture.py ~/chronicle-captures/yeti-take-1
+```
+
+It reads the manifest and refuses a recording marked invalid (pass
+`--allow-invalid` to look anyway), prints per-channel levels, correlation, and
+the four candidate mixes, writes `analysis.json`, and writes one 16 kHz WAV per
+candidate. Exit code 3 means a precedence gate fired: mono input, a non-f32
+file, every channel silent, a level that is not finite, or every channel flat
+with zero variance. The report's `STOP:` line names which, `analysis.json`
+records it, and no candidate is written. A
+mono microphone always stops at gate 0; that is the script working, not a
+fault. A device with more than two channels passes the gates, exits 0 with
+per-channel levels only, and writes no candidates: the four mixes are defined
+for two channels. Transcribe a candidate through the real engine with:
+
+```bash
+cargo run -p chronicle-transcription --example transcribe_wav -- ~/chronicle-captures/yeti-take-1/candidate-avg.wav --variant base
+```
+
+It needs the `base` model under the Chronicle data directory; if it is missing,
+run `scripts/fetch-whisper-model.sh base` from `chronicle-daemon/`. The analysis
+never normalizes or trims. Read the HEU-549 design and HEU-651
+before drawing a conclusion from the numbers; correlation is evidence, not the
+decision rule.
+
+The audio callback does none of this work. It copies samples and sends one
+message; a separate thread writes the files. That split is ADR-013.
+
 ## How to Modify
 
 ### Adding a new pipeline stage
@@ -255,7 +316,12 @@ from the root with `--manifest-path chronicle-daemon/Cargo.toml` works too.
 cd chronicle-daemon && cargo test --workspace
 ```
 
-All crates have unit tests. No special setup needed.
+All crates have unit tests. No special setup needed for this command. The SOP
+`test_command` runs two more stages after it: `cargo test -p chronicle-audio
+--features characterize` for the feature-gated audio tests, and
+`uv run scripts/test_analyze_mic_capture.py` for the Python analyzer. Those
+need the `characterize` feature to build and `uv` installed. The Swift tests
+run last.
 
 ### Integration tests
 
@@ -271,5 +337,13 @@ Grant Screen Recording and Microphone permissions to your terminal app first.
 ### Linting
 
 ```bash
-cd chronicle-daemon && cargo clippy --workspace
+cd chronicle-daemon && cargo clippy --workspace --all-targets -- -D warnings && cargo check -p chronicle-audio --features characterize --all-targets
 ```
+
+The SOP gate runs workspace clippy with `--all-targets -- -D warnings`, then
+`cargo check -p chronicle-audio --features characterize --all-targets`. The
+second command builds the feature-gated code and its example without running
+anything, so the lint gate catches a broken example on its own. The
+feature-gated tests run with `cargo test -p chronicle-audio --features
+characterize`, and the Python analyzer's tests with
+`uv run scripts/test_analyze_mic_capture.py`, both as part of `test_command`.
