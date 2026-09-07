@@ -9,8 +9,9 @@
 //! `SegmentAccumulator` require exactly 48 kHz mono f32, so an
 //! `AVAudioConverter` normalizes every tap buffer to that target
 //! format. When the device already delivers 48 kHz mono f32 this is an
-//! identity passthrough. Otherwise it resamples; a stereo device is not mixed
-//! down, because with no `channelMap` set the converter selects channel 0. The
+//! identity passthrough. Otherwise it resamples, selects a channel, or both: a
+//! stereo device is not mixed down, because with no `channelMap` set the
+//! converter selects channel 0. The
 //! converter's input block signals `NoDataNow` (not `EndOfStream`) between tap
 //! buffers, so it keeps its resampler state across them — a non-48 kHz mic is
 //! resampled as one continuous stream rather than one isolated resample per
@@ -73,9 +74,9 @@ impl ConversionOutcome {
 /// (`AVAudioPCMBuffer::frameLength`); a `frame_count` larger than the slice is
 /// clamped so the copy never reads past the buffer.
 ///
-/// The returned vector holds at most `frame_count` samples. The microphone
-/// path normalizes to mono before this point, so channel zero already is the
-/// whole signal — no downmix happens here.
+/// The returned vector holds at most `frame_count` samples. The converter has
+/// already reduced the signal to one channel before this point, so channel zero
+/// is the whole signal.
 fn mono_samples(channel: &[f32], frame_count: usize) -> Vec<f32> {
     channel[..frame_count.min(channel.len())].to_vec()
 }

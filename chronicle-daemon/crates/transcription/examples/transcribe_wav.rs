@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! cargo run -p chronicle-transcription --example transcribe_wav -- \
-//!     candidate-avg.wav [--variant base|small|medium] [--base-dir DIR]
+//!     take.wav [--variant base|small|medium] [--base-dir DIR]
 //! ```
 //!
 //! `--base-dir` is the Chronicle data directory holding `models/`. Defaults to

@@ -53,3 +53,6 @@ docs/audits/
 docs/qa/
 
 chronicle-daemon/docs/
+
+# Recorded audio never lands in git.
+*.wav
