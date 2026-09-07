@@ -317,11 +317,7 @@ cd chronicle-daemon && cargo test --workspace
 ```
 
 All crates have unit tests. No special setup needed for this command. The SOP
-`test_command` runs two more stages after it: `cargo test -p chronicle-audio
---features characterize` for the feature-gated audio tests, and
-`uv run scripts/test_analyze_mic_capture.py` for the Python analyzer. Those
-need the `characterize` feature to build and `uv` installed. The Swift tests
-run last.
+`test_command` runs the Swift tests after it.
 
 ### Integration tests
 
@@ -337,13 +333,7 @@ Grant Screen Recording and Microphone permissions to your terminal app first.
 ### Linting
 
 ```bash
-cd chronicle-daemon && cargo clippy --workspace --all-targets -- -D warnings && cargo check -p chronicle-audio --features characterize --all-targets
+cd chronicle-daemon && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-The SOP gate runs workspace clippy with `--all-targets -- -D warnings`, then
-`cargo check -p chronicle-audio --features characterize --all-targets`. The
-second command builds the feature-gated code and its example without running
-anything, so the lint gate catches a broken example on its own. The
-feature-gated tests run with `cargo test -p chronicle-audio --features
-characterize`, and the Python analyzer's tests with
-`uv run scripts/test_analyze_mic_capture.py`, both as part of `test_command`.
+The SOP gate runs workspace clippy with `--all-targets -- -D warnings`.
