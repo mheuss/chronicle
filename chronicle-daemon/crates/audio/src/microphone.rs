@@ -6,7 +6,7 @@
 //!
 //! The engine's input-node tap delivers the device's *native* format, which
 //! is hardware-dependent (e.g. 44.1 kHz on some mics). The encoder and
-//! [`SegmentAccumulator`](crate::accumulator) require exactly 48 kHz mono
+//! `SegmentAccumulator` require exactly 48 kHz mono
 //! f32, so an `AVAudioConverter` normalizes every tap buffer to that target
 //! format. When the device already delivers 48 kHz mono f32 this is an
 //! identity passthrough. Otherwise it is a real resample/downmix. The
@@ -46,7 +46,7 @@ const RESAMPLER_HEADROOM_FRAMES: u32 = 4096;
 /// tail happens on most calls and is not a failure; only `Failed` counts in
 /// `mic_convert_failed`, so the two are told apart here.
 #[derive(Debug, Clone, PartialEq)]
-pub enum ConversionOutcome {
+enum ConversionOutcome {
     Produced(Vec<f32>),
     /// Empty input, or the converter kept the whole input as its tail. Benign.
     HeldTail,
@@ -56,7 +56,7 @@ pub enum ConversionOutcome {
 }
 
 impl ConversionOutcome {
-    pub fn into_produced(self) -> Option<Vec<f32>> {
+    fn into_produced(self) -> Option<Vec<f32>> {
         match self {
             Self::Produced(samples) => Some(samples),
             Self::HeldTail | Self::Failed => None,
@@ -100,18 +100,6 @@ fn common_format_name(format: AVAudioCommonFormat) -> String {
     }
 }
 
-/// The input device's native format, read once at tap install. A snapshot: a
-/// later default-device change does not update it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct NativeFormat {
-    pub channels: u32,
-    /// Hz.
-    pub sample_rate: f64,
-    pub interleaved: bool,
-    /// `f32`, `i16`, ... as [`common_format_name`] spells it.
-    pub common_format: String,
-}
-
 /// Microphone capture driven by an `AVAudioEngine` input-node tap.
 ///
 /// Construction installs the tap and prepares the engine but does not start
@@ -149,25 +137,8 @@ pub struct MicrophoneCapture {
 }
 
 impl MicrophoneCapture {
-    /// Production capture: the tap forwards mono 48 kHz buffers on `buffer_tx`.
-    pub fn new(
-        buffer_tx: SyncSender<AudioMessage>,
-        counters: Arc<AudioDropCounters>,
-    ) -> Result<Self> {
-        let (capture, _format) = Self::build(
-            counters,
-            |_| Ok(()),
-            |converter, target_format, counters| {
-                make_tap_block(converter, target_format, buffer_tx, counters)
-            },
-        )?;
-        Ok(capture)
-    }
-
-    /// Build the engine, install the input-node tap, and `prepare()`.
-    ///
-    /// `validate` may refuse the device before anything is built on it;
-    /// `make_block` returns the block to install.
+    /// Production capture: builds the engine, installs the input-node tap and
+    /// `prepare()`s it. The tap forwards mono 48 kHz buffers on `buffer_tx`.
     ///
     /// Does **not** start capture — no microphone access, no TCC prompt. Any
     /// AVFoundation setup failure returns [`AudioError`] rather than panicking
@@ -176,15 +147,10 @@ impl MicrophoneCapture {
     /// `counters` is shared with the daemon's drop reporter, which does all
     /// the logging for the drops the tap records. ADR-013 forbids a logger on
     /// this path, including a throttled one.
-    fn build(
+    pub fn new(
+        buffer_tx: SyncSender<AudioMessage>,
         counters: Arc<AudioDropCounters>,
-        validate: impl FnOnce(&NativeFormat) -> Result<()>,
-        make_block: impl FnOnce(
-            Retained<AVAudioConverter>,
-            Retained<AVAudioFormat>,
-            Arc<AudioDropCounters>,
-        ) -> TapBlock,
-    ) -> Result<(Self, NativeFormat)> {
+    ) -> Result<Self> {
         autoreleasepool(|_| {
             // SAFETY: AVAudioEngine::new builds a fresh engine connected to
             // the default audio device. No preconditions.
@@ -210,15 +176,7 @@ impl MicrophoneCapture {
             let native_rate = unsafe { native_format.sampleRate() };
             let native_common = unsafe { native_format.commonFormat() };
             let native_interleaved = unsafe { native_format.isInterleaved() };
-            let format = NativeFormat {
-                channels: native_channels,
-                sample_rate: native_rate,
-                interleaved: native_interleaved,
-                common_format: common_format_name(native_common),
-            };
-            // Before the converter, the tap install and `prepare()`, so a
-            // rejected device leaves no tap and no "tap installed" line behind.
-            validate(&format)?;
+            let native_format_name = common_format_name(native_common);
 
             // The format the encoder requires: 48 kHz, mono, f32. The
             // "standard" initializer yields deinterleaved f32, so channel
@@ -255,7 +213,12 @@ impl MicrophoneCapture {
             // The tap block runs the converter on every input buffer; we
             // also keep an owned reference on `Self` so `stop()` can reset
             // it. `Retained::clone` just bumps the ObjC retain count.
-            let tap_block = make_block(converter.clone(), target_format, Arc::clone(&counters));
+            let tap_block = make_tap_block(
+                converter.clone(),
+                target_format,
+                buffer_tx,
+                Arc::clone(&counters),
+            );
 
             // Install a nil-format tap. nil means "deliver the native
             // hardware format" — installing an explicit non-native format on
@@ -291,19 +254,15 @@ impl MicrophoneCapture {
             log::info!(
                 "microphone tap installed (capture starts on mic-on): \
                  {native_channels} ch, {native_rate} Hz, \
-                 interleaved={native_interleaved}, format={}",
-                format.common_format
+                 interleaved={native_interleaved}, format={native_format_name}"
             );
 
-            Ok((
-                Self {
-                    engine,
-                    converter,
-                    _tap_block: tap_block,
-                    counters,
-                },
-                format,
-            ))
+            Ok(Self {
+                engine,
+                converter,
+                _tap_block: tap_block,
+                counters,
+            })
         })
     }
 
@@ -331,7 +290,7 @@ impl MicrophoneCapture {
     ///
     /// Also resets the shared `AVAudioConverter` after stopping the engine.
     /// The converter holds back a small filter tail under `NoDataNow` (see
-    /// [`convert_to_mono_samples`]); resetting it on stop drops that tail
+    /// `convert_to_mono_samples`); resetting it on stop drops that tail
     /// so it does not leak into the next capture session as stale audio
     /// timestamped to the new session.
     pub fn stop(&self) -> Result<()> {
