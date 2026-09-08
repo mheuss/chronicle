@@ -85,7 +85,7 @@ pub enum TranscriptionEnqueueResult {
 ///
 /// The gate is checked BEFORE `try_send`, so an engine-less sink reports
 /// `Disabled` even when its channel is closed. That ordering is the
-/// [Catalog] contract: a daemon booting without a model must not count
+/// \[Catalog\] contract: a daemon booting without a model must not count
 /// drops, and before this task it could not, because it held a sink with no
 /// channel at all.
 pub struct TokioTranscriptionSink {

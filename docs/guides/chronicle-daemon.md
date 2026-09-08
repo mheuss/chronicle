@@ -117,14 +117,28 @@ transcripts. The daemon logs the device's native input format once, when it
 installs the tap:
 
 ```text
-[2026-08-22T22:02:06Z INFO  chronicle_audio::microphone] microphone tap installed (capture starts on mic-on): 2 ch, 48000 Hz, interleaved=false, format=f32, mix_eligibility=stereo
+[2026-08-22T22:02:06Z INFO  chronicle_audio::microphone] microphone tap installed (capture starts on mic-on): 2 ch, 48000 Hz, interleaved=false, format=f32
 ```
 
-It reports channel count, sample rate, whether samples are interleaved, the
-sample format, and whether the device is eligible for the explicit downmix.
+It reports channel count, sample rate, whether samples are interleaved, and the
+sample format.
 
-You will see it in a normal run — the daemon defaults to `warn,chronicle=info`,
-so no `RUST_LOG` is needed:
+**A `2 ch` mic is the usual reason audio comes back quiet.** The converter is
+built with no `channelMap`, so a 2-to-1 conversion selects channel 0 and
+discards channel 1 — it does not mix them. If the device puts most of its level
+on channel 1, that level never reaches the recording. HEU-651 measured this on a
+Blue Yeti: its channel 0 runs 7.7-7.9 dB below its channel 1, and the converter
+output was bit-identical to channel 0. A mic that duplicates its channels, like
+the EMEET SmartCam, is unaffected.
+
+Both measured devices reported `interleaved=false, format=f32`, and that is the
+layout the regression test pins. A stereo device reporting some other layout was
+not measured, so read those two fields in the line above before assuming this is
+your problem. Quiet audio from a `1 ch` device is a different problem, and this
+is not it.
+
+You will see the line in a normal run — the daemon defaults to
+`warn,chronicle=info`, so no `RUST_LOG` is needed:
 
 ```bash
 cd chronicle-daemon
@@ -171,81 +185,6 @@ Cross-check the numbers against **Audio MIDI Setup** (`open -a "Audio MIDI
 Setup"`), which shows each device's format. System Settings → Sound → Input only
 tells you which device is selected.
 
-`mix_eligibility` names which of three routes a future explicit downmix will
-send the device down: `stereo` takes the measured mix, `mono` takes a fast
-passthrough that skips the mixing machinery entirely, and `ineligible` — non-f32
-input, zero channels, or more than two channels — stays on today's converter,
-unchanged and unmeasured.
-
-Because `ineligible` collapses those causes into one word, **read `format=` and
-the channel count to find out which one applies** — that is what separates an
-Int16 stereo microphone from a four-channel f32 array.
-
-It is not a claim about the current audio path: as of HEU-649,
-`AVAudioConverter` performs every downmix, for every device. HEU-652 is what
-changes that, and this paragraph with it.
-
-### Recording what the tap receives
-
-When the format line is not enough, record the audio itself. The
-`characterize` feature on `chronicle-audio` adds an example that captures the
-tap's native channels and the converter's mono output as WAV files, plus a
-manifest. It is compiled out of every default build, so it never ships.
-
-```bash
-cd chronicle-daemon
-cargo run -p chronicle-audio --features characterize --example characterize_mic -- \
-  --device-label "Blue Yeti" --mode stereo --gain 50% \
-  --phrase "the quick brown fox jumps over the lazy dog" --model-variant base \
-  --seconds 10 --out ~/chronicle-captures/yeti-take-1
-```
-
-`--device-label` is only a label. Set the default input device in System
-Settings first and check it in Audio MIDI Setup; the example records whatever is
-active. `--out` must be a new or empty directory, one per take. Keep it outside
-the repository: a take is a recording of your voice. As a backstop, every
-recorded and derived file is gitignored, and so is the example's default
-`mic-capture-*` directory. `manifest.txt` is not, so a take in a directory you
-named still shows in `git status`. Read the same phrase, the same way, on every
-take; the manifest records it. The first run prompts for microphone permission.
-Exit code 2 means the recording is not a valid measurement: a dropped frame, a
-conversion failure, a frame the tap could not read, a channel that closed early,
-or no frames at all. The manifest has a line for each; re-record rather than
-reason about the hole. A good take leaves three files in `--out`:
-`mic-native.wav`, `mic-converted.wav` and `manifest.txt`.
-
-Then analyse it offline. The script needs `uv` (`brew install uv`); its numpy
-and scipy are locked next to it.
-
-```bash
-uv run scripts/analyze_mic_capture.py ~/chronicle-captures/yeti-take-1
-```
-
-It reads the manifest and refuses a recording marked invalid (pass
-`--allow-invalid` to look anyway), prints per-channel levels, correlation, and
-the four candidate mixes, writes `analysis.json`, and writes one 16 kHz WAV per
-candidate. Exit code 3 means a precedence gate fired: mono input, a non-f32
-file, every channel silent, a level that is not finite, or every channel flat
-with zero variance. The report's `STOP:` line names which, `analysis.json`
-records it, and no candidate is written. A
-mono microphone always stops at gate 0; that is the script working, not a
-fault. A device with more than two channels passes the gates, exits 0 with
-per-channel levels only, and writes no candidates: the four mixes are defined
-for two channels. Transcribe a candidate through the real engine with:
-
-```bash
-cargo run -p chronicle-transcription --example transcribe_wav -- ~/chronicle-captures/yeti-take-1/candidate-avg.wav --variant base
-```
-
-It needs the `base` model under the Chronicle data directory; if it is missing,
-run `scripts/fetch-whisper-model.sh base` from `chronicle-daemon/`. The analysis
-never normalizes or trims. Read the HEU-549 design and HEU-651
-before drawing a conclusion from the numbers; correlation is evidence, not the
-decision rule.
-
-The audio callback does none of this work. It copies samples and sends one
-message; a separate thread writes the files. That split is ADR-013.
-
 ## How to Modify
 
 ### Adding a new pipeline stage
@@ -273,16 +212,20 @@ message; a separate thread writes the files. That split is ADR-013.
 
 | Crate | Purpose | Key External Deps |
 |-------|---------|-------------------|
-| `chronicle-capture` | Screen capture via ScreenCaptureKit | `screencapturekit`, `objc2-app-kit`, `core-graphics` |
-| `chronicle-audio` | Audio capture + Opus encoding | `objc2-screen-capture-kit`, `opus`, `ogg` |
+| `chronicle-capture` | Screen capture via ScreenCaptureKit | `objc2-screen-capture-kit`, `objc2-app-kit`, `core-graphics` |
+| `chronicle-audio` | Audio capture + Opus encoding | `objc2-avf-audio`, `objc2-screen-capture-kit`, `opus`, `ogg` |
 | `chronicle-storage` | SQLite + FTS5 storage engine | `rusqlite` (bundled), `r2d2` |
 | `chronicle-ocr` | Text extraction via Vision framework | `objc2-vision` |
-| `chronicle-transcription` | Placeholder for future speech-to-text work | none today |
+| `chronicle-transcription` | Local speech-to-text via whisper.cpp | `whisper-rs`, `opus`, `ogg`, `sha1` |
 | `chronicle-ipc` | JSON over Unix socket status server | `serde`, `serde_json` |
 
-All crates are independent of each other. The daemon binary depends on every
-crate above except `chronicle-transcription`, which is currently an unused
-workspace member kept as a placeholder for future speech-to-text work.
+The daemon binary depends on every crate above, `chronicle-transcription`
+included: `provisioning.rs` loads and calls it, and `transcription-metal` is a
+default feature. At runtime the crates are independent of each other with one
+exception — `chronicle-capture` depends on `chronicle-audio`. There is a second
+edge in test builds only: `chronicle-transcription` takes `chronicle-audio` as a
+dev-dependency for `OggOpusEncoder`, so `cargo test -p chronicle-transcription`
+builds it.
 
 ### What depends on the daemon
 
@@ -317,11 +260,7 @@ cd chronicle-daemon && cargo test --workspace
 ```
 
 All crates have unit tests. No special setup needed for this command. The SOP
-`test_command` runs two more stages after it: `cargo test -p chronicle-audio
---features characterize` for the feature-gated audio tests, and
-`uv run scripts/test_analyze_mic_capture.py` for the Python analyzer. Those
-need the `characterize` feature to build and `uv` installed. The Swift tests
-run last.
+`test_command` runs the Swift tests after it.
 
 ### Integration tests
 
@@ -337,13 +276,7 @@ Grant Screen Recording and Microphone permissions to your terminal app first.
 ### Linting
 
 ```bash
-cd chronicle-daemon && cargo clippy --workspace --all-targets -- -D warnings && cargo check -p chronicle-audio --features characterize --all-targets
+cd chronicle-daemon && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-The SOP gate runs workspace clippy with `--all-targets -- -D warnings`, then
-`cargo check -p chronicle-audio --features characterize --all-targets`. The
-second command builds the feature-gated code and its example without running
-anything, so the lint gate catches a broken example on its own. The
-feature-gated tests run with `cargo test -p chronicle-audio --features
-characterize`, and the Python analyzer's tests with
-`uv run scripts/test_analyze_mic_capture.py`, both as part of `test_command`.
+The SOP gate runs workspace clippy with `--all-targets -- -D warnings`.
