@@ -1123,6 +1123,11 @@ mod tests {
             // single emitted frame would satisfy every value assertion below.
             // Same rate in and out, so only the converter's filter tail is held
             // back — the same bound the identity passthrough test uses.
+            assert!(
+                out.len() <= FRAMES as usize,
+                "stereo conversion emitted {} frames, more than the {FRAMES} input",
+                out.len(),
+            );
             let shortfall = (FRAMES as usize).saturating_sub(out.len());
             assert!(
                 shortfall < 1024,

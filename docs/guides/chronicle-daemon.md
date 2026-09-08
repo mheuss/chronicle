@@ -133,8 +133,7 @@ the EMEET SmartCam, is unaffected. Quiet audio from a `1 ch` device is a
 different problem and this is not it.
 
 You will see the line in a normal run — the daemon defaults to
-`warn,chronicle=info`,
-so no `RUST_LOG` is needed:
+`warn,chronicle=info`, so no `RUST_LOG` is needed:
 
 ```bash
 cd chronicle-daemon
