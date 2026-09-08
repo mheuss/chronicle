@@ -123,6 +123,15 @@ installs the tap:
 It reports channel count, sample rate, whether samples are interleaved, and the
 sample format.
 
+**A `2 ch` mic is the usual reason audio comes back quiet.** The converter is
+built with no `channelMap`, so a 2-to-1 conversion selects channel 0 and
+discards channel 1 — it does not mix them. If the device puts most of its level
+on channel 1, that level never reaches the recording. HEU-651 measured this on a
+Blue Yeti: its channel 0 runs 7.7-7.9 dB below its channel 1, and the converter
+output was bit-identical to channel 0. A mic that duplicates its channels, like
+the EMEET SmartCam, is unaffected. Quiet audio from a `1 ch` device is a
+different problem and this is not it.
+
 You will see it in a normal run — the daemon defaults to `warn,chronicle=info`,
 so no `RUST_LOG` is needed:
 
@@ -199,7 +208,7 @@ tells you which device is selected.
 | Crate | Purpose | Key External Deps |
 |-------|---------|-------------------|
 | `chronicle-capture` | Screen capture via ScreenCaptureKit | `objc2-screen-capture-kit`, `objc2-app-kit`, `core-graphics` |
-| `chronicle-audio` | Audio capture + Opus encoding | `objc2-screen-capture-kit`, `opus`, `ogg` |
+| `chronicle-audio` | Audio capture + Opus encoding | `objc2-avf-audio`, `objc2-screen-capture-kit`, `opus`, `ogg` |
 | `chronicle-storage` | SQLite + FTS5 storage engine | `rusqlite` (bundled), `r2d2` |
 | `chronicle-ocr` | Text extraction via Vision framework | `objc2-vision` |
 | `chronicle-transcription` | Local speech-to-text via whisper.cpp | `whisper-rs`, `opus`, `ogg`, `sha1` |
@@ -207,8 +216,11 @@ tells you which device is selected.
 
 The daemon binary depends on every crate above, `chronicle-transcription`
 included: `provisioning.rs` loads and calls it, and `transcription-metal` is a
-default feature. The crates are independent of each other with one exception —
-`chronicle-capture` depends on `chronicle-audio`.
+default feature. At runtime the crates are independent of each other with one
+exception — `chronicle-capture` depends on `chronicle-audio`. There is a second
+edge in test builds only: `chronicle-transcription` takes `chronicle-audio` as a
+dev-dependency for `OggOpusEncoder`, so `cargo test -p chronicle-transcription`
+builds it.
 
 ### What depends on the daemon
 

@@ -4,17 +4,16 @@
 //! Toggling the microphone start/stops this engine; screen and system-audio
 //! capture are never touched. See HEU-330.
 //!
-//! The engine's input-node tap delivers the device's *native* format, which
-//! is hardware-dependent (e.g. 44.1 kHz on some mics). The encoder and
+//! The engine's input-node tap delivers the device's *native* format, which is
+//! hardware-dependent (e.g. 44.1 kHz on some mics). The encoder and
 //! `SegmentAccumulator` require exactly 48 kHz mono f32, so an
-//! `AVAudioConverter` normalizes every tap buffer to that target
-//! format. When the device already delivers 48 kHz mono f32 this is an
-//! identity passthrough. Otherwise it resamples, selects a channel, or both: a
-//! stereo device is not mixed down, because with no `channelMap` set the
-//! converter selects channel 0. The
-//! converter's input block signals `NoDataNow` (not `EndOfStream`) between tap
-//! buffers, so it keeps its resampler state across them — a non-48 kHz mic is
-//! resampled as one continuous stream rather than one isolated resample per
+//! `AVAudioConverter` normalizes every tap buffer to that target format. When
+//! the device already delivers 48 kHz mono f32 this is an identity passthrough.
+//! Otherwise it resamples, selects a channel, or both: a stereo device is not
+//! mixed down, because with no `channelMap` set the converter selects channel 0.
+//! The converter's input block signals `NoDataNow` (not `EndOfStream`) between
+//! tap buffers, so it keeps its resampler state across them — a non-48 kHz mic
+//! is resampled as one continuous stream rather than one isolated resample per
 //! buffer.
 
 use std::cell::Cell;
@@ -1022,6 +1021,105 @@ mod tests {
                 assert!(
                     (got - want).abs() < 1e-6,
                     "identity passthrough changed frame {i}: got {got}, want {want}",
+                );
+            }
+        });
+    }
+
+    /// Runs a 48 kHz **stereo** f32 buffer through `convert_to_mono_samples`
+    /// and asserts the output is channel 0 verbatim — not an average of the two
+    /// channels. This pins the claim the module doc makes about `AVAudioConverter`
+    /// with no `channelMap` set, which HEU-651 measured on real hardware.
+    ///
+    /// The channels carry distinct constants, so all three plausible behaviours
+    /// are distinguishable: channel 0 selection yields `CH0`, channel 1 selection
+    /// yields `CH1`, and a downmix yields their mean. Both constants are exact in
+    /// f32, so the comparison is exact.
+    ///
+    /// Builds only `AVAudioPCMBuffer`/`AVAudioConverter` objects — no
+    /// `AVAudioEngine` — so it touches no hardware and triggers no TCC prompt.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn convert_selects_channel_zero_from_stereo() {
+        autoreleasepool(|_| {
+            const FRAMES: u32 = 4_800; // 0.1 s at 48 kHz
+            const CH0: f32 = 0.25;
+            const CH1: f32 = -0.75;
+            const MEAN: f32 = (CH0 + CH1) / 2.0;
+
+            // SAFETY: alloc yields a fresh AVAudioFormat; the standard initializer
+            // returns nil only on failure, unwrapped below.
+            let input_format = unsafe {
+                AVAudioFormat::initStandardFormatWithSampleRate_channels(
+                    AVAudioFormat::alloc(),
+                    SAMPLE_RATE as f64,
+                    2,
+                )
+            }
+            .expect("48 kHz stereo format should build");
+
+            // The production target: 48 kHz mono, same rate as the input, so the
+            // converter does no resampling and only reduces channels.
+            // SAFETY: as above.
+            let target_format = unsafe {
+                AVAudioFormat::initStandardFormatWithSampleRate_channels(
+                    AVAudioFormat::alloc(),
+                    SAMPLE_RATE as f64,
+                    CHANNEL_COUNT,
+                )
+            }
+            .expect("48 kHz mono format should build");
+
+            // SAFETY: input_format is valid; FRAMES is non-zero.
+            let input = unsafe {
+                AVAudioPCMBuffer::initWithPCMFormat_frameCapacity(
+                    AVAudioPCMBuffer::alloc(),
+                    &input_format,
+                    FRAMES,
+                )
+            }
+            .expect("stereo buffer should allocate");
+            // SAFETY: FRAMES <= frameCapacity.
+            unsafe { input.setFrameLength(FRAMES) };
+
+            // SAFETY: an f32 format, so floatChannelData is non-nil and points to
+            // two channel pointers, each to FRAMES writable samples.
+            let data = unsafe { input.floatChannelData() };
+            assert!(!data.is_null(), "f32 buffer must expose float channel data");
+            for (channel, value) in [(0usize, CH0), (1, CH1)] {
+                // SAFETY: channel < channelCount; the plane holds FRAMES f32s.
+                let plane = unsafe { *data.add(channel) };
+                // SAFETY: plane points to FRAMES valid, writable f32 samples.
+                let samples =
+                    unsafe { std::slice::from_raw_parts_mut(plane.as_ptr(), FRAMES as usize) };
+                samples.fill(value);
+            }
+
+            // SAFETY: both formats are valid PCM formats.
+            let converter = unsafe {
+                AVAudioConverter::initFromFormat_toFormat(
+                    AVAudioConverter::alloc(),
+                    &input_format,
+                    &target_format,
+                )
+            }
+            .expect("stereo-to-mono converter should build");
+
+            let out = convert_to_mono_samples(
+                &converter,
+                &target_format,
+                &input,
+                &AudioDropCounters::default(),
+            )
+            .into_produced()
+            .expect("stereo-to-mono conversion should yield samples");
+
+            assert!(!out.is_empty(), "stereo conversion produced no samples");
+            for (i, got) in out.iter().enumerate() {
+                assert_eq!(
+                    *got, CH0,
+                    "frame {i}: expected channel 0 ({CH0}) verbatim, got {got} \
+                     (channel 1 is {CH1}, their mean is {MEAN})",
                 );
             }
         });
