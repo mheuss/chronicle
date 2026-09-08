@@ -1036,6 +1036,10 @@ mod tests {
     /// yields `CH1`, and a downmix yields their mean. Both constants are exact in
     /// f32, so the comparison is exact.
     ///
+    /// This pins the deinterleaved-f32 stereo case, which is what the device in
+    /// the guide's sample log delivers. Interleaved and Int16 stereo take a
+    /// different converter configuration; HEU-651 covered those on real hardware.
+    ///
     /// Builds only `AVAudioPCMBuffer`/`AVAudioConverter` objects — no
     /// `AVAudioEngine` — so it touches no hardware and triggers no TCC prompt.
     #[cfg(target_os = "macos")]
@@ -1085,10 +1089,10 @@ mod tests {
             // SAFETY: an f32 format, so floatChannelData is non-nil and points to
             // two channel pointers, each to FRAMES writable samples.
             let data = unsafe { input.floatChannelData() };
-            assert!(!data.is_null(), "f32 buffer must expose float channel data");
+            let planes = NonNull::new(data).expect("float channel data should be non-nil");
             for (channel, value) in [(0usize, CH0), (1, CH1)] {
                 // SAFETY: channel < channelCount; the plane holds FRAMES f32s.
-                let plane = unsafe { *data.add(channel) };
+                let plane = unsafe { planes.as_ptr().add(channel).read() };
                 // SAFETY: plane points to FRAMES valid, writable f32 samples.
                 let samples =
                     unsafe { std::slice::from_raw_parts_mut(plane.as_ptr(), FRAMES as usize) };
@@ -1114,7 +1118,18 @@ mod tests {
             .into_produced()
             .expect("stereo-to-mono conversion should yield samples");
 
-            assert!(!out.is_empty(), "stereo conversion produced no samples");
+            // into_produced() already rejects a zero-frame result, so the real
+            // risk is a truncated one: both channels are DC constants, so a
+            // single emitted frame would satisfy every value assertion below.
+            // Same rate in and out, so only the converter's filter tail is held
+            // back — the same bound the identity passthrough test uses.
+            let shortfall = (FRAMES as usize).saturating_sub(out.len());
+            assert!(
+                shortfall < 1024,
+                "stereo conversion emitted {} of {FRAMES} frames — held back \
+                 {shortfall}, far more than the expected filter tail",
+                out.len(),
+            );
             for (i, got) in out.iter().enumerate() {
                 assert_eq!(
                     *got, CH0,
