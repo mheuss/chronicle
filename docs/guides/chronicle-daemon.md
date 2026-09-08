@@ -129,8 +129,13 @@ discards channel 1 — it does not mix them. If the device puts most of its leve
 on channel 1, that level never reaches the recording. HEU-651 measured this on a
 Blue Yeti: its channel 0 runs 7.7-7.9 dB below its channel 1, and the converter
 output was bit-identical to channel 0. A mic that duplicates its channels, like
-the EMEET SmartCam, is unaffected. Quiet audio from a `1 ch` device is a
-different problem and this is not it.
+the EMEET SmartCam, is unaffected.
+
+Both measured devices reported `interleaved=false, format=f32`, and that is the
+layout the regression test pins. A stereo device reporting some other layout was
+not measured, so read those two fields in the line above before assuming this is
+your problem. Quiet audio from a `1 ch` device is a different problem, and this
+is not it.
 
 You will see the line in a normal run — the daemon defaults to
 `warn,chronicle=info`, so no `RUST_LOG` is needed:

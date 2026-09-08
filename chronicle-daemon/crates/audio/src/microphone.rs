@@ -1067,19 +1067,18 @@ mod tests {
             // standard initializer documents and what production relies on at
             // the converter's target format, but assert it rather than trust
             // it: a layout change would corrupt memory instead of failing.
-            // SAFETY: three plain property reads on a valid format.
+            // SAFETY: the three unsafe reads below are plain property reads on
+            // a valid format.
             assert_eq!(
                 unsafe { input_format.commonFormat() },
                 AVAudioCommonFormat::PCMFormatFloat32,
                 "stereo input must be f32 for the floatChannelData writes",
             );
             assert!(
-                // SAFETY: as above.
                 !unsafe { input_format.isInterleaved() },
                 "stereo input must be deinterleaved — one plane per channel",
             );
             assert_eq!(
-                // SAFETY: as above.
                 unsafe { input_format.channelCount() },
                 2,
                 "input format must be stereo",
@@ -1087,7 +1086,8 @@ mod tests {
 
             // The production target: 48 kHz mono, same rate as the input, so the
             // converter does no resampling and only reduces channels.
-            // SAFETY: as above.
+            // SAFETY: alloc yields a fresh AVAudioFormat; the standard
+            // initializer returns nil only on failure, unwrapped below.
             let target_format = unsafe {
                 AVAudioFormat::initStandardFormatWithSampleRate_channels(
                     AVAudioFormat::alloc(),
