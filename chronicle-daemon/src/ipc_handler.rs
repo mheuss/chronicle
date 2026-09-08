@@ -556,7 +556,7 @@ impl RequestHandler for DaemonHandler {
 /// (see `crates/ipc/src/server.rs:223`), so a stat placed after a closure
 /// returns would block the runtime thread.
 ///
-/// [Security] Counts only. The path is never logged: it embeds capture
+/// \[Security\] Counts only. The path is never logged: it embeds capture
 /// timestamps and app identifiers, the same reason the search handler logs
 /// query length rather than content.
 fn count_media_presence(counters: &PipelineCounters, path: &str) {

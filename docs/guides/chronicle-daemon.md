@@ -198,16 +198,17 @@ tells you which device is selected.
 
 | Crate | Purpose | Key External Deps |
 |-------|---------|-------------------|
-| `chronicle-capture` | Screen capture via ScreenCaptureKit | `screencapturekit`, `objc2-app-kit`, `core-graphics` |
+| `chronicle-capture` | Screen capture via ScreenCaptureKit | `objc2-screen-capture-kit`, `objc2-app-kit`, `core-graphics` |
 | `chronicle-audio` | Audio capture + Opus encoding | `objc2-screen-capture-kit`, `opus`, `ogg` |
 | `chronicle-storage` | SQLite + FTS5 storage engine | `rusqlite` (bundled), `r2d2` |
 | `chronicle-ocr` | Text extraction via Vision framework | `objc2-vision` |
-| `chronicle-transcription` | Placeholder for future speech-to-text work | none today |
+| `chronicle-transcription` | Local speech-to-text via whisper.cpp | `whisper-rs`, `opus`, `ogg`, `sha1` |
 | `chronicle-ipc` | JSON over Unix socket status server | `serde`, `serde_json` |
 
-All crates are independent of each other. The daemon binary depends on every
-crate above except `chronicle-transcription`, which is currently an unused
-workspace member kept as a placeholder for future speech-to-text work.
+The daemon binary depends on every crate above, `chronicle-transcription`
+included: `provisioning.rs` loads and calls it, and `transcription-metal` is a
+default feature. The crates are independent of each other with one exception —
+`chronicle-capture` depends on `chronicle-audio`.
 
 ### What depends on the daemon
 

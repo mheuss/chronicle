@@ -692,7 +692,7 @@ impl ProvisionerContext {
 
     /// Drive one full provision: fetch if needed, verify, land, load, swap.
     ///
-    /// **Precondition: the caller already won [`try_begin`].** This must NOT
+    /// **Precondition: the caller already won [`Self::try_begin`].** This must NOT
     /// call it again — a second CAS would lose against its own caller's
     /// reservation and bail out with the flag stuck set, freezing status
     /// forever (codex plan review, critical 1). It starts from the committed
