@@ -1062,6 +1062,29 @@ mod tests {
             }
             .expect("48 kHz stereo format should build");
 
+            // The plane writes below index floatChannelData directly, which is
+            // only valid for a deinterleaved f32 layout. That is what the
+            // standard initializer documents and what production relies on at
+            // the converter's target format, but assert it rather than trust
+            // it: a layout change would corrupt memory instead of failing.
+            // SAFETY: three plain property reads on a valid format.
+            assert_eq!(
+                unsafe { input_format.commonFormat() },
+                AVAudioCommonFormat::PCMFormatFloat32,
+                "stereo input must be f32 for the floatChannelData writes",
+            );
+            assert!(
+                // SAFETY: as above.
+                !unsafe { input_format.isInterleaved() },
+                "stereo input must be deinterleaved — one plane per channel",
+            );
+            assert_eq!(
+                // SAFETY: as above.
+                unsafe { input_format.channelCount() },
+                2,
+                "input format must be stereo",
+            );
+
             // The production target: 48 kHz mono, same rate as the input, so the
             // converter does no resampling and only reduces channels.
             // SAFETY: as above.
