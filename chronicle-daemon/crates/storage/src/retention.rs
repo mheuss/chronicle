@@ -1898,7 +1898,8 @@ mod tests {
                 .base_dir()
                 .join("screenshots")
                 .join(format!("s{i}.heif"));
-            // 450 KB is the live average: 3.5 GB across 7,943 screenshots.
+            // ~450 KB is this machine's live average: 3.5 GB across 7,943
+            // screenshots, measured 2026-09-10.
             mgr.write_file(&path, &vec![0u8; 450 * 1024]).unwrap();
             let meta = ScreenshotMetadata {
                 timestamp: now_millis() - 100 * 86_400 * 1000,
@@ -1922,14 +1923,19 @@ mod tests {
         println!("screenshot batch: {} rows in {elapsed:?}", out.deleted);
     }
 
-    /// NFR-3, audio half. Transcripts on roughly a third of the rows, averaging
-    /// about 120 characters, which is what production looks like.
+    /// NFR-3, audio half. HEU-630 gives the production shape as roughly a
+    /// third of audio rows carrying transcripts, averaging ~120 characters.
+    /// This seeds 167 of 500 rows with a 132-character string — close enough
+    /// that the FTS delete triggers fire on a realistic fraction, which is all
+    /// the measurement needs.
     #[test]
     #[ignore = "measurement, not a check"]
     fn measure_one_audio_batch() {
         let conn = setup_db();
         let (_dir, mgr) = temp_media_mgr();
-        // ~6 KB is one 30-second Opus segment.
+        // ~6 KB is one 30-second Opus segment at this daemon's encoder
+        // settings. Not re-measured here; the live figure is not readable
+        // without touching the user's recordings.
         let data = vec![0u8; 6 * 1024];
         for i in 0..CLEANUP_BATCH_SIZE {
             let transcript = if i % 3 == 0 {
