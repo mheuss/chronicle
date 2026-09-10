@@ -1019,10 +1019,12 @@ async fn main() -> Result<()> {
         // never the sole consumer of, and is less so now that the provision
         // wait above can add up to 5s. The unbounded steps between them
         // (`ipc_server.shutdown`, `supervisor.shutdown`, the bridge join, the
-        // audio-store await) are the ones with no ceiling; the three explicit
-        // waits — the provision wait, this one, and CLEANUP_GRACE at the end of
-        // teardown — total 10.6s of the 20s and are the part we actually
-        // control.
+        // audio-store await) are the ones with no ceiling. Neither is this one:
+        // only the provision wait actually bounds anything, because it aborts
+        // its task on expiry. This grace and CLEANUP_GRACE both re-await after
+        // the timeout, so they are the point at which we say the wait is long,
+        // not a limit on it. Of the three, 5s is a real ceiling and 5.6s is a
+        // reporting threshold.
         const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
         // Borrow the handle — do NOT let `timeout` consume it. Dropping a JoinHandle
         // detaches the task, and runtime drop then destroys its future *without
@@ -1060,20 +1062,20 @@ async fn main() -> Result<()> {
     // `cancel.cancel()` leaves the whole suite green; only a spawned-daemon
     // test would catch it.
     // Four times a measured batch (NFR-3), rounded up to a whole hundred.
-    // Eight runs per table of 500 rows on an M-series laptop: idle spans
-    // 29-49 ms across both tables, and the two runs taken with the CPU busy
-    // gave 131 ms and 105 ms. Taking the slowest, 4 x 131.2 = 524.8 -> 600 ms.
-    // Per-run figures are in the plan's Decisions section.
+    // Eight runs per table of 500 rows (`CLEANUP_BATCH_SIZE`) on an M-series
+    // laptop: those spanned 29-49 ms idle, and 131 ms / 105 ms with a second
+    // copy of the same test suite running. Taking the slowest, 4 x 131.2 =
+    // 524.8 -> 600 ms. Per-run figures are in the plan's Decisions section.
     //
-    // Deliberately not the idle number. A machine shutting down is often a
-    // machine under load, so sizing to idle would fire the warning below on
-    // exactly the shutdowns the grace exists for, and a warning that cries wolf
-    // on every busy exit tells nobody anything.
+    // This constant cannot make shutdown slower or faster. `timeout` returns
+    // the moment the handle resolves, and both arms then await it to
+    // completion — so the grace decides one thing only: the batch duration at
+    // which we tell the operator cleanup is running long. Sizing it to the
+    // idle figure would fire that warning on any loaded shutdown, which is
+    // exactly when it should mean something.
     //
-    // Not a bound on batch duration either — `busy_timeout` is 5000 ms, so a
-    // contended commit can outlast any grace worth having. This is where we
-    // stop waiting quietly and say so; overshooting costs only the log line,
-    // because the timeout arm never sets `shutdown_failed` on its own.
+    // It is not a bound on batch duration either: `busy_timeout` is 5000 ms,
+    // so a contended commit can outlast any grace worth having.
     const CLEANUP_GRACE: std::time::Duration = std::time::Duration::from_millis(600);
     if join_cleanup_task(cleanup_handle, CLEANUP_GRACE).await {
         shutdown_failed = true;

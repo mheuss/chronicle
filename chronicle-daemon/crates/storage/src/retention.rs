@@ -1903,8 +1903,8 @@ mod tests {
                 .base_dir()
                 .join("screenshots")
                 .join(format!("s{i}.heif"));
-            // 3.5 GB across 7,943 screenshots on this machine, measured
-            // 2026-09-10, is ~460 KiB each; 450 KiB here.
+            // `du -sh` says 3.5G across 7,943 screenshots on this machine,
+            // measured 2026-09-10 — binary, so ~462 KiB each; 450 KiB here.
             mgr.write_file(&path, &image).unwrap();
             let meta = ScreenshotMetadata {
                 timestamp: now_millis() - 100 * 86_400 * 1000,
