@@ -299,12 +299,23 @@ pub(crate) fn describe(node: &AVAudioInputNode) -> InputDevice {
     // `getpid()` — so reporting it names no device and changes every run.
     // A device that is not an aggregate has no sub-device list and falls
     // through unchanged.
-    let device = match first_input_subdevice(&subdevices_with_input_counts(device)) {
+    let subdevices = subdevices_with_input_counts(device);
+    let device = match first_input_subdevice(&subdevices) {
         Some(input) => {
             log::debug!("device lookup: resolved aggregate {device} to input sub-device {input}");
             input
         }
-        None => device,
+        None => {
+            // The one arm that leaves `CADefaultDeviceAggregate-<pid>-0` in the
+            // line — the symptom this resolution exists to remove. Say how many
+            // members were seen, so an empty list is distinguishable from a
+            // list where none reported input.
+            log::debug!(
+                "device lookup: no input sub-device among {} member(s) of {device}, reporting it as-is",
+                subdevices.len()
+            );
+            device
+        }
     };
 
     InputDevice {

@@ -124,6 +124,17 @@ It reports the input device the engine resolved to — its name and CoreAudio UI
 — then channel count, sample rate, whether samples are interleaved, and the
 sample format.
 
+**The two halves describe different CoreAudio objects.** `AVAudioEngine` binds
+to an aggregate wrapping the default route, so the format fields come from that
+aggregate while the device fields come from the input member resolved out of it.
+They agree on the hardware measured so far. If you ever see a channel count that
+contradicts what Audio MIDI Setup reports for the named device, that gap is why.
+
+**Redact the UID before you paste this line anywhere public.** A real
+`AppleUSBAudioEngine:` UID ends in the device's hardware serial. Replace that
+segment with `<serial>` and say you did — a comparison still holds with both
+sides redacted. `mheuss/chronicle` is a public repository.
+
 **A `2 ch` mic is the usual reason audio comes back quiet.** The converter is
 built with no `channelMap`, so a 2-to-1 conversion selects channel 0 and
 discards channel 1 — it does not mix them. If the device puts most of its level
