@@ -117,12 +117,12 @@ transcripts. The daemon logs the device's identity and native input format
 once, when it installs the tap:
 
 ```text
-[2026-08-22T22:02:06Z INFO  chronicle_audio::microphone] microphone tap installed (capture starts on mic-on): device_name="Yeti Stereo Microphone" device_uid="AppleUSBAudioEngine:Blue:Yeti:14100000", 2 ch, 48000 Hz, interleaved=false, format=f32
+[2026-08-22T22:02:06Z INFO  chronicle_audio::microphone] microphone tap installed (capture starts on mic-on): device_name="Yeti Stereo Microphone" device_uid="AppleUSBAudioEngine:Blue:Yeti:<serial>", 2 ch, 48000 Hz, interleaved=false, format=f32
 ```
 
-It reports the input device the engine resolved to — its name and CoreAudio UID
-— then channel count, sample rate, whether samples are interleaved, and the
-sample format.
+It reports the input device you selected — its name and CoreAudio UID — then
+channel count, sample rate, whether samples are interleaved, and the sample
+format.
 
 **The two halves can describe different CoreAudio objects.** The device fields
 name the input device you selected in System Settings. The format numbers come

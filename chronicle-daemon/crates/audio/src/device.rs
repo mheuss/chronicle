@@ -157,23 +157,24 @@ fn property_size(
 
 /// The sub-devices of an aggregate, paired with each one's input stream count.
 ///
-/// Empty when the device has no readable sub-device list — because it is not an
-/// aggregate, or because any hop of the read failed.
-fn subdevices_with_input_counts(device: AudioObjectID) -> Vec<(AudioObjectID, usize)> {
-    let Some(bytes) = property_size(
+/// `None` means the device has no sub-device list property at all, so it is not
+/// an aggregate and is already the one to name. `Some` of an empty list means it
+/// *is* an aggregate but nothing usable came back — a different situation, and
+/// naming that device would put `CADefaultDeviceAggregate-<pid>-0` in the line.
+fn subdevices_with_input_counts(device: AudioObjectID) -> Option<Vec<(AudioObjectID, usize)>> {
+    // `?` here is the not-an-aggregate exit: no sub-device list property.
+    let bytes = property_size(
         device,
         kAudioAggregateDevicePropertyActiveSubDeviceList,
         kAudioObjectPropertyScopeGlobal,
         "sub-device list",
-    ) else {
-        return Vec::new();
-    };
+    )?;
 
     let Some(count) = elements_to_allocate(bytes) else {
         // Zero is a real state — an aggregate whose members are all unplugged
         // reports no *active* ones — so this is not necessarily a fault.
         log::debug!("device lookup: sub-device list reported {bytes} bytes, not a usable count");
-        return Vec::new();
+        return Some(Vec::new());
     };
 
     let address = AudioObjectPropertyAddress {
@@ -203,18 +204,19 @@ fn subdevices_with_input_counts(device: AudioObjectID) -> Vec<(AudioObjectID, us
     };
     if status != 0 {
         log::debug!("device lookup: sub-device list read failed, OSStatus {status}");
-        return Vec::new();
+        return Some(Vec::new());
     }
 
     let Some(keep) = elements_to_keep(buffer_bytes, size as usize) else {
         log::debug!(
             "device lookup: sub-device list reported {size} bytes into a {buffer_bytes}-byte buffer"
         );
-        return Vec::new();
+        return Some(Vec::new());
     };
     ids.truncate(keep);
 
-    ids.into_iter()
+    let counts = ids
+        .into_iter()
         .map(|id| {
             // A device with no input reports a readable size of 0, so `None`
             // here is a failed read rather than an absent input.
@@ -227,7 +229,8 @@ fn subdevices_with_input_counts(device: AudioObjectID) -> Vec<(AudioObjectID, us
             .unwrap_or(0);
             (id, bytes / size_of::<AudioObjectID>())
         })
-        .collect()
+        .collect();
+    Some(counts)
 }
 
 /// The count comes from the HAL handler — third-party code for a virtual
@@ -355,14 +358,14 @@ pub(crate) fn describe(node: &AVAudioInputNode) -> InputDevice {
     // `getpid()` — so reporting it names no device and changes every run.
     // A device that is not an aggregate has no sub-device list and falls
     // through unchanged.
-    let subdevices = subdevices_with_input_counts(device);
-    let device = if subdevices.is_empty() {
+    let device = match subdevices_with_input_counts(device) {
         // An ordinary path, not a failure: after a route change the node binds
         // straight to a device, which is then already the one to name.
-        log::debug!("device lookup: {device} has no sub-device list, naming it as-is");
-        device
-    } else {
-        match first_input_subdevice(&subdevices) {
+        None => {
+            log::debug!("device lookup: {device} has no sub-device list, naming it as-is");
+            device
+        }
+        Some(subdevices) => match first_input_subdevice(&subdevices) {
             Some(input) => {
                 let report = device_to_report(input, default_input_device());
                 if report == input {
@@ -382,14 +385,16 @@ pub(crate) fn describe(node: &AVAudioInputNode) -> InputDevice {
             None => {
                 // Reporting the aggregate here would put
                 // `CADefaultDeviceAggregate-<pid>-0` in the line, which names
-                // nothing. `unknown` at least says so.
+                // nothing. `unknown` at least says so. Reached when the list is
+                // present but empty too — an aggregate whose members are all
+                // unplugged reports no *active* ones.
                 log::debug!(
                     "device lookup: no input among {} member(s) of aggregate {device}",
                     subdevices.len()
                 );
                 return absent;
             }
-        }
+        },
     };
 
     InputDevice {
