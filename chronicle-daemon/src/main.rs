@@ -1319,6 +1319,10 @@ mod tests {
         // reports every timeout as a failure returns `true` here too. Its
         // companion below is the other half — together they bracket the detach.
         //
+        // It is load-bearing on its own terms too: the only test of the
+        // `Ok(Err(..))` classification arm. Delete it and that arm can return
+        // `false`, so a cleanup that failed with a real StorageError exits 0.
+        //
         // `tokio::time::sleep`, never `advance()` — going idle auto-advances to
         // the earliest deadline, which is what makes the timeout fire before
         // the task does.
@@ -1337,7 +1341,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_late_but_successful_cleanup_is_not_reported_as_a_failure() {
-        // The half that actually pins the borrow. A consumed handle detaches
+        // The other half of the bracket. A consumed handle detaches
         // the task, so the caller never learns it succeeded and can only report
         // the timeout as a failure — which this catches and the test above,
         // asserting `true`, cannot.
