@@ -74,9 +74,9 @@ fn cancellation_stop_signal(
 /// `grace` is not a bound on how long a batch takes — it is the point at which
 /// we stop waiting quietly and say so.
 ///
-/// Assumes the caller has already raised the task's stop signal. The timeout
-/// arm says it is waiting out one batch, which is only true if the run is
-/// already winding down; called without that, it waits out the whole run.
+/// Assumes the caller has already raised the task's stop signal. Called
+/// without that, the post-grace wait runs out the whole remaining run rather
+/// than the batch it is already on.
 async fn join_cleanup_task(
     mut handle: tokio::task::JoinHandle<Result<(), chronicle_storage::StorageError>>,
     grace: std::time::Duration,
@@ -638,10 +638,11 @@ async fn main() -> Result<()> {
     // signal `?` below returns from `main` first — registering the SIGTERM
     // handler, or `ctrl_c()`'s `res?`. Either skips teardown entirely and
     // detaches the handle. Both are signal-setup failures, so neither is
-    // reachable in practice on Unix. Two things
-    // about this task are worth knowing anyway, spelled out here because this
-    // comment is the only record of them that ships — the documents analysing
-    // them are gitignored.
+    // reachable in practice on Unix.
+    //
+    // Two things about this task are worth knowing anyway, spelled out here
+    // because this comment is the only record of them that ships — the
+    // documents analysing them are gitignored.
     //
     // 1. A worker panic ends the loop, so retention stays off for the rest of
     //    the process lifetime. The join does surface it: `report` logs a second

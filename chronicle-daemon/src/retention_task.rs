@@ -1008,6 +1008,13 @@ mod loop_tests {
             .unwrap(),
         );
 
+        // Explicit rather than riding the `QueryReturnedNoRows => 30` fallback
+        // in `Storage::run_cleanup_interruptible`: this test's precondition is
+        // that the run reaches the batch loop at all, and borrowing that from
+        // another module's default would make it fail for an unrelated reason
+        // if the default ever became 0.
+        storage.set_config("retention_days", "30").await.unwrap();
+
         let ops = StorageCleanupOps::new(storage, Arc::new(|| true));
         let stats = ops.run_cleanup().await.unwrap();
 
