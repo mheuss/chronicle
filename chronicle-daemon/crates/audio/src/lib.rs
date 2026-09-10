@@ -8,6 +8,7 @@
 //! and transcription.
 
 mod accumulator;
+mod device;
 mod drops;
 mod encoder;
 mod engine;

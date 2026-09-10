@@ -31,6 +31,7 @@ use objc2_avf_audio::{
     AVAudioConverterOutputStatus, AVAudioEngine, AVAudioFormat, AVAudioPCMBuffer, AVAudioTime,
 };
 
+use crate::device::{InputDevice, render_fields};
 use crate::handler::{AudioBuffer, AudioMessage};
 use crate::{AudioDropCounters, AudioError, AudioSource, CHANNEL_COUNT, Result, SAMPLE_RATE};
 
@@ -244,6 +245,13 @@ impl MicrophoneCapture {
             // SAFETY: no preconditions.
             unsafe { engine.prepare() };
 
+            // Sits beside the log line it feeds, per Architectural Decision 2 —
+            // not because the unit is uninitialised before here, which
+            // `outputFormatForBus` above already disproves. May name a different
+            // CoreAudio object than the format fields do: those come from
+            // whatever the node bound, this from the selected input device.
+            let device = crate::device::describe(&input);
+
             // The tap is installed and the engine prepared, so this really is
             // a tap-install record. Logged here rather than where the format
             // was read because the converter (above) and the tap install can
@@ -255,11 +263,14 @@ impl MicrophoneCapture {
             // with no `RUST_LOG` set. It fires once per tap install, not per
             // callback, which is why a logger is allowed here at all: ADR-013
             // forbids one on the tap block itself.
-            log::info!(
-                "microphone tap installed (capture starts on mic-on): \
-                 {native_channels} ch, {native_rate} Hz, \
-                 interleaved={native_interleaved}, format={native_format_name}"
+            let message = tap_installed_message(
+                &device,
+                native_channels,
+                native_rate,
+                native_interleaved,
+                &native_format_name,
             );
+            log::info!("{message}");
 
             Ok(Self {
                 engine,
@@ -521,6 +532,25 @@ fn convert_uncounted(
     let channel_slice = unsafe { std::slice::from_raw_parts(channel_zero.as_ptr(), output_frames) };
 
     ConversionOutcome::Produced(mono_samples(channel_slice, output_frames))
+}
+
+/// Builds the tap-install log line.
+///
+/// Separate from the `log::info!` call so the whole line is testable. Renderer
+/// tests alone pass even when the call site never uses the renderer. Per
+/// Architectural Decision 9.
+fn tap_installed_message(
+    device: &InputDevice,
+    channels: u32,
+    rate: f64,
+    interleaved: bool,
+    format_name: &str,
+) -> String {
+    format!(
+        "microphone tap installed (capture starts on mic-on): {}, \
+         {channels} ch, {rate} Hz, interleaved={interleaved}, format={format_name}",
+        render_fields(device)
+    )
 }
 
 #[cfg(test)]
@@ -1187,5 +1217,47 @@ mod tests {
 
         mic.stop().expect("stop should succeed");
         assert!(!mic.is_running(), "engine should not run after stop()");
+    }
+    #[test]
+    fn tap_installed_message_puts_device_before_format() {
+        let device = InputDevice {
+            name: Some("Yeti".to_string()),
+            uid: Some("U1".to_string()),
+        };
+        let message = tap_installed_message(&device, 2, 48000.0, false, "f32");
+        let device_at = message.find("device_name=").expect("device fields");
+        let channels_at = message.find("2 ch").expect("channel count");
+        assert!(
+            device_at < channels_at,
+            "device fields must precede the format fields: {message}"
+        );
+    }
+
+    #[test]
+    fn tap_installed_message_keeps_format_fields_when_the_lookup_failed() {
+        let device = InputDevice {
+            name: None,
+            uid: None,
+        };
+        let message = tap_installed_message(&device, 1, 44100.0, true, "i16");
+        assert!(message.contains(r#"device_name="unknown""#), "{message}");
+        assert!(message.contains("1 ch"), "{message}");
+        assert!(message.contains("44100 Hz"), "{message}");
+        assert!(message.contains("interleaved=true"), "{message}");
+        assert!(message.contains("format=i16"), "{message}");
+    }
+
+    #[test]
+    fn tap_installed_message_matches_the_expected_line() {
+        let device = InputDevice {
+            name: Some("Yeti".to_string()),
+            uid: Some("U1".to_string()),
+        };
+        assert_eq!(
+            tap_installed_message(&device, 2, 48000.0, false, "f32"),
+            "microphone tap installed (capture starts on mic-on): \
+             device_name=\"Yeti\" device_uid=\"U1\", \
+             2 ch, 48000 Hz, interleaved=false, format=f32"
+        );
     }
 }

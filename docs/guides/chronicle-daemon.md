@@ -113,15 +113,33 @@ capture is off by default and toggled from the UI.
 ## Diagnosing a Microphone
 
 Start here when a microphone records silence, near-silence, or empty
-transcripts. The daemon logs the device's native input format once, when it
-installs the tap:
+transcripts. The daemon logs the device's identity and native input format
+once, when it installs the tap:
 
 ```text
-[2026-08-22T22:02:06Z INFO  chronicle_audio::microphone] microphone tap installed (capture starts on mic-on): 2 ch, 48000 Hz, interleaved=false, format=f32
+[2026-08-22T22:02:06Z INFO  chronicle_audio::microphone] microphone tap installed (capture starts on mic-on): device_name="Yeti Stereo Microphone" device_uid="AppleUSBAudioEngine:Generic:Blue Microphones:<serial>:1", 2 ch, 48000 Hz, interleaved=false, format=f32
 ```
 
-It reports channel count, sample rate, whether samples are interleaved, and the
-sample format.
+It reports the input device you selected — its name and CoreAudio UID — then
+channel count, sample rate, whether samples are interleaved, and the sample
+format.
+
+**The two halves can describe different CoreAudio objects.** The device fields
+name the input device you selected in System Settings. The format numbers come
+from whatever `AVAudioEngine` bound, which is usually a private aggregate
+wrapping the default route rather than the device itself.
+
+For a plain microphone these agree. **For an aggregate you built in Audio MIDI
+Setup they will not**, and that is expected rather than a symptom: CoreAudio
+flattens your aggregate into its own, so the numbers come from one member while
+the name is the aggregate. A channel count that disagrees with what Audio MIDI
+Setup shows for the named device is this, not a fault.
+
+**Redact the UID before you paste this line anywhere public.** A real
+`AppleUSBAudioEngine:` UID carries the device's hardware serial in its
+**second-to-last** segment — the trailing one is an interface index, not a
+secret. Replace the serial with `<serial>` and say you did; a comparison still
+holds with both sides redacted. `mheuss/chronicle` is a public repository.
 
 **A `2 ch` mic is the usual reason audio comes back quiet.** The converter is
 built with no `channelMap`, so a 2-to-1 conversion selects channel 0 and
@@ -161,7 +179,7 @@ matches, whatever its level, so a lone crate directive silences every *other*
 crate — `chronicle_daemon`'s own failures included. Lead with a level for
 everything else, as in `RUST_LOG=warn,chronicle_audio=debug`.
 
-Four things to know before you trust what you read:
+Three things to know before you trust what you read:
 
 - **A second daemon on the same data directory will not start.** `IpcServer`
   finds the existing socket and connects to it, and the newcomer exits with
@@ -172,11 +190,6 @@ Four things to know before you trust what you read:
 - **Restart between devices.** `MicrophoneCapture` and its converter are built
   once when the pipeline is created, so changing the default input while the
   daemon runs leaves the converter built for the previous device.
-- **The line does not name the device.** Nothing in it identifies which
-  microphone it describes, and two different devices can produce byte-identical
-  output. Confirm the default input in Audio MIDI Setup *before* you read the
-  line, and label it yourself when you record it — otherwise a second
-  measurement is indistinguishable from the first one repeated.
 - **The line appears with the mic off.** The tap is installed eagerly at
   startup; capture begins only when the mic is enabled. Seeing this line is not
   evidence the microphone was live.
@@ -213,7 +226,7 @@ tells you which device is selected.
 | Crate | Purpose | Key External Deps |
 |-------|---------|-------------------|
 | `chronicle-capture` | Screen capture via ScreenCaptureKit | `objc2-screen-capture-kit`, `objc2-app-kit`, `core-graphics` |
-| `chronicle-audio` | Audio capture + Opus encoding | `objc2-avf-audio`, `objc2-screen-capture-kit`, `opus`, `ogg` |
+| `chronicle-audio` | Audio capture + Opus encoding | `objc2-avf-audio`, `objc2-audio-toolbox`, `objc2-core-audio`, `objc2-screen-capture-kit`, `opus`, `ogg` |
 | `chronicle-storage` | SQLite + FTS5 storage engine | `rusqlite` (bundled), `r2d2` |
 | `chronicle-ocr` | Text extraction via Vision framework | `objc2-vision` |
 | `chronicle-transcription` | Local speech-to-text via whisper.cpp | `whisper-rs`, `opus`, `ogg`, `sha1` |
