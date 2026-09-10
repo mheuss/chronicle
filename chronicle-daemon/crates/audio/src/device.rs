@@ -254,9 +254,10 @@ pub(crate) fn describe(node: &AVAudioInputNode) -> InputDevice {
         return absent;
     }
 
-    // `AVAudioEngine` binds to a private aggregate wrapping the default route,
-    // not to the microphone. Its name is synthetic (`CADefaultDeviceAggregate-
-    // <pid>-0`) and changes every run, so reporting it would defeat the point.
+    // `AVAudioEngine` binds to an aggregate wrapping the default route, not to
+    // the microphone. Its name and UID are both `CADefaultDeviceAggregate-
+    // <pid>-0` — the trailing number is the process id, checked against
+    // `getpid()` — so reporting it names no device and changes every run.
     // A device that is not an aggregate has no sub-device list and falls
     // through unchanged.
     let device = match first_input_subdevice(&subdevices_with_input_counts(device)) {
