@@ -14,14 +14,11 @@ use objc2_core_audio::{
 };
 use objc2_core_foundation::{CFRetained, CFString};
 
-/// The identity of the input device the engine resolved to.
+/// The identity of the input device the line names.
 ///
-/// Not necessarily the device the input node is bound to: that is usually an
-/// aggregate wrapping the default route, and `describe` descends to the member
-/// carrying the input.
-///
-/// Both fields are `Option` because the two property reads fail independently.
-/// A UID with no name still separates two same-named devices.
+/// Not necessarily the device the node is bound to — see `describe`. Both
+/// fields are `Option` because the two property reads fail independently; a UID
+/// with no name still separates two same-named devices.
 pub(crate) struct InputDevice {
     pub(crate) name: Option<String>,
     pub(crate) uid: Option<String>,
@@ -281,17 +278,23 @@ fn default_input_device() -> Option<AudioObjectID> {
         log::debug!("device lookup: default input read failed, OSStatus {status}");
         return None;
     }
+    // Same in/out size check the other reads carry. This handler is Apple's
+    // rather than a HAL plugin's, so a short write is far-fetched — but a
+    // partial one would leave a garbage id that passes the filter below.
+    if size as usize != size_of::<AudioObjectID>() {
+        log::debug!("device lookup: default input reported {size} bytes, expected an id");
+        return None;
+    }
     (device != kAudioObjectUnknown).then_some(device)
 }
 
 /// Which device the line should name, given the member resolved out of the
 /// aggregate and the user's selected default input.
 ///
-/// Normally they are the same object and this is a no-op. They diverge when the
-/// selected default is itself an aggregate: CoreAudio flattens it into the
-/// engine's aggregate, so the members are physical devices and the user's
-/// choice is nowhere in the list. Naming a member there would report a device
-/// the user did not select, indistinguishable from having selected it directly.
+/// Normally the same object, and a no-op. They diverge when the selection is
+/// itself an aggregate: CoreAudio flattens it into the engine's, so the members
+/// are physical devices and the selection is absent from the list. Naming a
+/// member there reports a device the user did not choose.
 fn device_to_report(
     resolved: AudioObjectID,
     default_input: Option<AudioObjectID>,
@@ -315,13 +318,17 @@ fn first_input_subdevice(subdevices: &[(AudioObjectID, usize)]) -> Option<AudioO
         .map(|(id, _)| *id)
 }
 
-/// The identity of the microphone behind the engine's input node.
+/// The identity of the input device the tap will capture from.
 ///
-/// The node binds to an aggregate wrapping the default route, so this descends
-/// to the member carrying the input. A non-aggregate is reported as-is.
+/// The node is often bound to an aggregate wrapping the default route, so this
+/// descends to the member carrying input, then cross-checks that member against
+/// the selected default input and prefers the selection when they differ. A
+/// device bound directly is reported as-is.
 ///
-/// Never fails. An unreadable field comes back `None` and renders as `unknown`;
-/// per Architectural Decision 7 it does not fall back to the system default.
+/// It does read the system default, but only as that cross-check — Architectural
+/// Decision 7 forbids falling back to it when the bound-device read *fails*, and
+/// that path still returns `unknown`. Never fails; an unreadable field renders
+/// as `unknown`.
 pub(crate) fn describe(node: &AVAudioInputNode) -> InputDevice {
     let absent = InputDevice {
         name: None,
@@ -350,8 +357,9 @@ pub(crate) fn describe(node: &AVAudioInputNode) -> InputDevice {
     // through unchanged.
     let subdevices = subdevices_with_input_counts(device);
     let device = if subdevices.is_empty() {
-        // Not an aggregate. The node is bound straight to a device, so it is
-        // already the one to name.
+        // An ordinary path, not a failure: after a route change the node binds
+        // straight to a device, which is then already the one to name.
+        log::debug!("device lookup: {device} has no sub-device list, naming it as-is");
         device
     } else {
         match first_input_subdevice(&subdevices) {
@@ -618,8 +626,8 @@ mod tests {
 
     #[test]
     fn a_list_with_no_input_resolves_to_nothing() {
-        // An output-only aggregate is not the microphone's, so falling back to
-        // the bound device is better than naming a speaker.
+        // An output-only aggregate has no microphone to name. `describe`
+        // renders `unknown` rather than naming a speaker.
         assert_eq!(first_input_subdevice(&[(105, 0), (67, 0)]), None);
     }
 

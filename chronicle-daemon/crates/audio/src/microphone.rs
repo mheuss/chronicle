@@ -249,9 +249,9 @@ impl MicrophoneCapture {
             // The node is bound well before here — `outputFormatForBus` above
             // could not have returned a native format otherwise.
             //
-            // This names a different CoreAudio object than the format fields
-            // do: those come from the node's aggregate, this descends to the
-            // input member. They agree on the hardware measured so far.
+            // May name a different CoreAudio object than the format fields do:
+            // those come from whatever the node bound, this from the selected
+            // input device. They differ when that selection is an aggregate.
             let device = crate::device::describe(&input);
 
             // The tap is installed and the engine prepared, so this really is

@@ -124,11 +124,16 @@ It reports the input device the engine resolved to — its name and CoreAudio UI
 — then channel count, sample rate, whether samples are interleaved, and the
 sample format.
 
-**The two halves describe different CoreAudio objects.** `AVAudioEngine` binds
-to an aggregate wrapping the default route, so the format fields come from that
-aggregate while the device fields come from the input member resolved out of it.
-They agree on the hardware measured so far. If you ever see a channel count that
-contradicts what Audio MIDI Setup reports for the named device, that gap is why.
+**The two halves can describe different CoreAudio objects.** The device fields
+name the input device you selected in System Settings. The format numbers come
+from whatever `AVAudioEngine` bound, which is usually a private aggregate
+wrapping the default route rather than the device itself.
+
+For a plain microphone these agree. **For an aggregate you built in Audio MIDI
+Setup they will not**, and that is expected rather than a symptom: CoreAudio
+flattens your aggregate into its own, so the numbers come from one member while
+the name is the aggregate. A channel count that disagrees with what Audio MIDI
+Setup shows for the named device is this, not a fault.
 
 **Redact the UID before you paste this line anywhere public.** A real
 `AppleUSBAudioEngine:` UID ends in the device's hardware serial. Replace that
