@@ -777,9 +777,9 @@ mod loop_tests {
         // window, but the window is now bounded rather than open-ended: a run
         // that starts into it observes the token through its stop predicate and
         // ends at the next batch boundary. `biased;` is redundant given the
-        // deadline branch ever won the coin flip, the recheck breaks
-        // immediately — and is kept only because the design names it as a
-        // required property.
+        // recheck — if the deadline branch ever won the coin flip, the recheck
+        // breaks immediately — and is kept only because the design names it as
+        // a required property.
         //
         // The reachable race is a deschedule, not a zero `wait`: `wait` is
         // floored at the start delay and every reschedule is a full period out,
@@ -986,5 +986,35 @@ mod loop_tests {
 
         cancel.cancel();
         task.await.unwrap().unwrap();
+    }
+
+    /// The production adapter, which every other test in this file bypasses.
+    ///
+    /// `FakeOps` implements `CleanupOps` directly, so nothing else here reaches
+    /// `StorageCleanupOps` at all — and it is the only place that decides
+    /// whether the interruptible variant is called. Swap
+    /// `run_cleanup_interruptible` back to `run_cleanup` and the whole
+    /// workspace stays green apart from a dead-field lint, which vanishes the
+    /// moment someone deletes the field too.
+    #[tokio::test]
+    async fn the_production_ops_honour_their_stop_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            Storage::open(chronicle_storage::StorageConfig {
+                base_dir: dir.path().to_path_buf(),
+                pool_size: 2,
+            })
+            .await
+            .unwrap(),
+        );
+
+        let ops = StorageCleanupOps::new(storage, Arc::new(|| true));
+        let stats = ops.run_cleanup().await.unwrap();
+
+        assert_eq!(
+            stats.outcome,
+            CleanupOutcome::StopObserved,
+            "an always-true predicate must reach the batch loop"
+        );
     }
 }

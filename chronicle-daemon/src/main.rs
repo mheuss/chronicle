@@ -48,6 +48,21 @@ fn spawn_start_retry(tx: tokio::sync::mpsc::Sender<()>, delay: std::time::Durati
     });
 }
 
+/// A [`StopSignal`](chronicle_storage::StopSignal) that is true once `cancel`
+/// has been cancelled.
+///
+/// Reads the daemon's own token rather than a second flag, so `cancel.cancel()`
+/// stays the only shutdown signal and there is no store-before-cancel ordering
+/// to get right. Called once per batch boundary from a `spawn_blocking` worker;
+/// `is_cancelled()` takes a mutex, which is both cheap at that rate and a
+/// happens-before edge against `cancel()`.
+fn cancellation_stop_signal(
+    cancel: &chronicle_ipc::CancellationToken,
+) -> chronicle_storage::StopSignal {
+    let cancel = cancel.clone();
+    std::sync::Arc::new(move || cancel.is_cancelled())
+}
+
 /// Wait for the retention cleanup task, bounded by `grace`, and report whether
 /// it failed.
 ///
@@ -85,7 +100,9 @@ async fn join_cleanup_task(
     match tokio::time::timeout(grace, &mut handle).await {
         Ok(res) => report(res),
         Err(_) => {
-            log::warn!("cleanup still running after {grace:?}; waiting out its batch");
+            // Not necessarily a batch: a run blocked in `pool.get()` waits
+            // r2d2's 30s default, well past launchd's ExitTimeOut.
+            log::warn!("cleanup still running after {grace:?}; waiting for it to finish");
             // Re-await ONLY here. Polling a `JoinHandle` after it has returned
             // `Ready` is a contract violation.
             report(handle.await)
@@ -617,7 +634,10 @@ async fn main() -> Result<()> {
     // Retention cleanup. Spawned, never awaited on the startup path: HEU-547
     // was a 249-second startup stall and that shape must not come back.
     //
-    // The handle is retained and joined as the last teardown step. Two things
+    // The handle is retained and joined as the last teardown step — on every
+    // path but one: `ctrl_c()`'s `res?` below returns from `main` without
+    // running teardown at all, which detaches the handle. Unreachable on Unix
+    // in practice. Two things
     // about this task are worth knowing anyway, spelled out here because this
     // comment is the only record of them that ships — the documents analysing
     // them are gitignored.
@@ -626,11 +646,12 @@ async fn main() -> Result<()> {
     //    the process lifetime. The join does surface it: `report` logs a second
     //    line and the daemon exits nonzero. But that happens at shutdown, which
     //    may be hours after the panic, and nothing restarts the loop in between.
-    // 2. Unaffected by the join: a run holds one of the four pooled connections
-    //    for its whole duration, not per batch. Steady state is seconds; the first enforcement run took
-    //    minutes. An exhausted pool surfaces as `StorageError::Pool` after
-    //    r2d2's 30s default — survivable for the loop, which reschedules, but a
-    //    pipeline writer that loses a connection drops a capture. Note it does
+    // 2. Unaffected by the join: a run holds one of the four pooled
+    //    connections for its whole duration, not per batch. Steady state is
+    //    seconds; the first enforcement run took minutes. An exhausted pool
+    //    surfaces as `StorageError::Pool` after r2d2's 30s default —
+    //    survivable for the loop, which reschedules, but a pipeline writer
+    //    that loses a connection drops a capture. Note it does
     //    NOT log "database is locked" or "busy", so a grep for those does not
     //    rule it out.
     //
@@ -650,13 +671,9 @@ async fn main() -> Result<()> {
     // `cancel.cancel()` is the only shutdown signal and there is no second flag
     // to order against it. An in-flight run ends at its next batch boundary
     // rather than running to completion.
-    let cleanup_stop: chronicle_storage::StopSignal = {
-        let c = cancel.clone();
-        std::sync::Arc::new(move || c.is_cancelled())
-    };
     let cleanup_ops = Arc::new(retention_task::StorageCleanupOps::new(
         Arc::clone(&storage),
-        cleanup_stop,
+        cancellation_stop_signal(&cancel),
     ));
     let cleanup_handle = tokio::spawn(retention_task::run_cleanup_loop(
         cleanup_ops,
@@ -1028,9 +1045,16 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Last, deliberately. `cancel.cancel()` raised the stop predicate at the
-    // top of teardown, so the in-flight batch has been winding down through
-    // every step above and this wait is normally already satisfied.
+    // Last, deliberately. `cancel.cancel()` raised the stop predicate before
+    // every unbounded teardown step, so the in-flight batch has been winding
+    // down through all of them and this wait is normally already satisfied.
+    // Not through the provision wait, which runs *before* the cancel and is the
+    // largest single wait in teardown — moving the cancel above it would buy
+    // that time too, at the cost of stopping IPC and the refreshers earlier.
+    //
+    // Nothing pins this placement. Moving the join up to sit beside
+    // `cancel.cancel()` leaves the whole suite green; only a spawned-daemon
+    // test would catch it.
     const CLEANUP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
     if join_cleanup_task(cleanup_handle, CLEANUP_GRACE).await {
         shutdown_failed = true;
@@ -1360,5 +1384,20 @@ mod tests {
             !join_cleanup_task(handle, std::time::Duration::from_secs(2)).await,
             "a task that finishes cleanly after the grace is not a failure"
         );
+    }
+
+    #[test]
+    fn the_stop_signal_follows_its_token() {
+        // Two asserts, because the predicate has exactly two states and an
+        // inverted `is_cancelled()` passes either one alone. Nothing else in
+        // the suite reads this predicate: `FakeOps` ignores it, so a flipped
+        // sense would leave the whole workspace green and cleanup would refuse
+        // to run at all while the daemon was healthy.
+        let cancel = chronicle_ipc::CancellationToken::new();
+        let stop = cancellation_stop_signal(&cancel);
+
+        assert!(!stop(), "must not stop before cancellation");
+        cancel.cancel();
+        assert!(stop(), "must stop once cancelled");
     }
 }

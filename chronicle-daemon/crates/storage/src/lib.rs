@@ -40,10 +40,10 @@ pub use retention::MAX_RETENTION_DAYS;
 /// A predicate the cleanup batch loop calls to ask whether it should stop.
 ///
 /// `Arc<dyn Fn>` rather than a borrow because the value crosses the
-/// `spawn_blocking` boundary and needs `'static + Send + Sync`. The only
-/// predicate today is the never-stop one [`Storage::run_cleanup`] supplies;
-/// the daemon's, built over its cancellation token, arrives with the shutdown
-/// wiring.
+/// `spawn_blocking` boundary and needs `'static + Send + Sync`. The daemon
+/// builds one over its cancellation token so a shutdown ends an in-flight run
+/// at a batch boundary; [`Storage::run_cleanup`] supplies a never-stop one for
+/// every other caller.
 pub type StopSignal = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// SQLite-backed storage engine for screenshots, audio, and full-text search.
