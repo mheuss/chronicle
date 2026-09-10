@@ -62,12 +62,6 @@ fn spawn_start_retry(tx: tokio::sync::mpsc::Sender<()>, delay: std::time::Durati
 /// Assumes the caller has already raised the task's stop signal. The timeout
 /// arm says it is waiting out one batch, which is only true if the run is
 /// already winding down; called without that, it waits out the whole run.
-///
-/// Nothing outside the tests calls this at present, so a non-test build sees it
-/// as dead. `expect` rather than `allow`: once teardown calls this, the
-/// expectation goes unfulfilled and `-D warnings` fails until the attribute is
-/// deleted. An `allow` would sit here forever with nothing to notice.
-#[cfg_attr(not(test), expect(dead_code))]
 async fn join_cleanup_task(
     mut handle: tokio::task::JoinHandle<Result<(), chronicle_storage::StorageError>>,
     grace: std::time::Duration,
@@ -623,28 +617,22 @@ async fn main() -> Result<()> {
     // Retention cleanup. Spawned, never awaited on the startup path: HEU-547
     // was a 249-second startup stall and that shape must not come back.
     //
-    // The handle is deliberately dropped, and four consequences follow. They
-    // are spelled out here because this comment is the only record of them that
+    // The handle is retained and joined as the last teardown step. Three
+    // consequences of the old drop-the-handle shape survive that change and are
+    // spelled out here, because this comment is the only record of them that
     // ships — the documents analysing them are gitignored.
     //
-    // 1. `cancel` is observed only between runs, so quitting during a long run
-    //    waits for that run. The continuation after it is then dropped unpolled
-    //    at runtime drop, so the run deletes and commits but never records
-    //    `last_cleanup_ms` and never logs. The next process starts from an
-    //    older timestamp and cleans once more than it needed to — idempotent,
-    //    but a shutdown that silently removes thousands of rows is alarming to
-    //    meet without this note.
-    // 2. The `process::exit(3)` on a poisoned capture engine runs no
-    //    destructors, so none of that waiting happens at all. A run in flight
+    // 1. The `process::exit(3)` on a poisoned capture engine runs no
+    //    destructors, so the join below never runs. A run in flight
     //    there dies after its unlinks and before its commit: files gone, rows
     //    left pointing at nothing. The next scheduled run repairs that on its
     //    own — the row is expired by definition, so it is re-selected and
     //    removed (see docs/guides/storage-engine.md, "Stranded rows repair
     //    themselves"). HEU-624 added counters that make the condition visible,
     //    not a repair.
-    // 3. A worker panic ends the loop, so retention stays off for the rest of
+    // 2. A worker panic ends the loop, so retention stays off for the rest of
     //    the process lifetime with one log line as the only signal.
-    // 4. A run holds one of the four pooled connections for its whole duration,
+    // 3. A run holds one of the four pooled connections for its whole duration,
     //    not per batch. Steady state is seconds; the first enforcement run took
     //    minutes. An exhausted pool surfaces as `StorageError::Pool` after
     //    r2d2's 30s default — survivable for the loop, which reschedules, but a
@@ -652,18 +640,21 @@ async fn main() -> Result<()> {
     //    NOT log "database is locked" or "busy", so a grep for those does not
     //    rule it out.
     //
-    // HEU-630 closes the first with a stop flag that lets an in-flight run end
-    // between batches, plus a join it adds at the end of teardown. There is no
-    // join today.
-    let cleanup_ops = Arc::new(retention_task::StorageCleanupOps::new(Arc::clone(&storage)));
-    let cleanup_cancel = cancel.clone();
-    // The loop returns `Result`, and dropping the handle discards it. That is
-    // intentional for now — HEU-630 keeps the handle, joins it at the end of
-    // teardown, and sets `shutdown_failed` on an Err. Do not "simplify" the
-    // return type away in the meantime.
-    tokio::spawn(retention_task::run_cleanup_loop(
+    // The predicate below reads the same `cancel` the loop selects on, so
+    // `cancel.cancel()` is the only shutdown signal and there is no second flag
+    // to order against it. An in-flight run ends at its next batch boundary
+    // rather than running to completion.
+    let cleanup_stop: chronicle_storage::StopSignal = {
+        let c = cancel.clone();
+        std::sync::Arc::new(move || c.is_cancelled())
+    };
+    let cleanup_ops = Arc::new(retention_task::StorageCleanupOps::new(
+        Arc::clone(&storage),
+        cleanup_stop,
+    ));
+    let cleanup_handle = tokio::spawn(retention_task::run_cleanup_loop(
         cleanup_ops,
-        cleanup_cancel,
+        cancel.clone(),
     ));
 
     // --- Event loop: serve mic toggles until a shutdown signal arrives ---
@@ -1028,6 +1019,14 @@ async fn main() -> Result<()> {
                 }
             }
         }
+    }
+
+    // Last, deliberately. `cancel.cancel()` raised the stop predicate at the
+    // top of teardown, so the in-flight batch has been winding down through
+    // every step above and this wait is normally already satisfied.
+    const CLEANUP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+    if join_cleanup_task(cleanup_handle, CLEANUP_GRACE).await {
+        shutdown_failed = true;
     }
 
     log::info!("chronicle-daemon stopped");

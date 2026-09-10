@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chronicle_ipc::CancellationToken;
-use chronicle_storage::{CleanupOutcome, CleanupStats, Storage, StorageError};
+use chronicle_storage::{CleanupOutcome, CleanupStats, StopSignal, Storage, StorageError};
 
 /// How long after startup the first run may fire.
 ///
@@ -92,11 +92,12 @@ pub(crate) trait CleanupOps: Send + Sync {
 /// The production implementation, over the real [`Storage`].
 pub(crate) struct StorageCleanupOps {
     storage: Arc<Storage>,
+    stop: StopSignal,
 }
 
 impl StorageCleanupOps {
-    pub(crate) fn new(storage: Arc<Storage>) -> Self {
-        Self { storage }
+    pub(crate) fn new(storage: Arc<Storage>, stop: StopSignal) -> Self {
+        Self { storage, stop }
     }
 }
 
@@ -107,7 +108,9 @@ impl CleanupOps for StorageCleanupOps {
     }
 
     async fn run_cleanup(&self) -> Result<CleanupStats, StorageError> {
-        self.storage.run_cleanup().await
+        self.storage
+            .run_cleanup_interruptible(Arc::clone(&self.stop))
+            .await
     }
 
     async fn read_last_cleanup(&self) -> Result<Option<String>, StorageError> {
@@ -726,7 +729,7 @@ mod loop_tests {
         assert_eq!(ops.run_count(), 1);
 
         // The task ends on its own, without anyone cancelling it, AND it ends
-        // in a failed state — that Err is what HEU-630's join will turn into a
+        // in a failed state — that Err is what the join in `main` turns into a
         // nonzero exit code. A loop that stopped but returned Ok would look
         // like an orderly shutdown.
         let outcome = tokio::time::timeout(Duration::from_secs(1), task)
@@ -771,8 +774,9 @@ mod loop_tests {
         // it reads the token later than the select structurally can, narrowing
         // the window where cancel lands after the select resolves on the sleep
         // branch but before `run_cleanup()` is entered. It cannot close that
-        // window — nothing observes the token once a run is under way, which is
-        // HEU-630's stop flag. `biased;` is redundant given the recheck — if the
+        // window, but the window is now bounded rather than open-ended: a run
+        // that starts into it observes the token through its stop predicate and
+        // ends at the next batch boundary. `biased;` is redundant given the
         // deadline branch ever won the coin flip, the recheck breaks
         // immediately — and is kept only because the design names it as a
         // required property.
@@ -800,8 +804,9 @@ mod loop_tests {
         assert_eq!(ops.run_count(), 1, "the first run must be in flight");
         cancel.cancel();
 
-        // The in-flight run finishes (no stop flag until HEU-630), then the
-        // loop must exit rather than sleeping to the next deadline.
+        // The in-flight run ends at its next batch boundary — the fake's
+        // `run_cleanup` ignores the predicate, so here it simply returns — and
+        // then the loop must exit rather than sleeping to the next deadline.
         tokio::time::timeout(Duration::from_secs(120), task)
             .await
             .expect("the loop must exit after the in-flight run returns")
@@ -880,7 +885,7 @@ mod loop_tests {
         // The other half of `is_worker_panic`. A `JoinError` from an aborted
         // task is not a panic and must not be fatal: at shutdown the runtime
         // can abort a queued blocking task, and classifying that as a panic
-        // would turn an orderly exit into a nonzero exit code once HEU-630
+        // would turn an orderly exit into a nonzero exit code, because `main`
         // joins this loop.
         let handle = tokio::spawn(async { std::future::pending::<()>().await });
         handle.abort();
