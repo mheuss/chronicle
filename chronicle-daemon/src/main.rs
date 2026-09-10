@@ -617,15 +617,17 @@ async fn main() -> Result<()> {
     // Retention cleanup. Spawned, never awaited on the startup path: HEU-547
     // was a 249-second startup stall and that shape must not come back.
     //
-    // The handle is retained and joined as the last teardown step. Two
-    // properties of this task are unaffected by that and are spelled out here,
-    // because this comment is the only record of them that ships — the
-    // documents analysing them are gitignored.
+    // The handle is retained and joined as the last teardown step. Two things
+    // about this task are worth knowing anyway, spelled out here because this
+    // comment is the only record of them that ships — the documents analysing
+    // them are gitignored.
     //
     // 1. A worker panic ends the loop, so retention stays off for the rest of
-    //    the process lifetime with one log line as the only signal.
-    // 2. A run holds one of the four pooled connections for its whole duration,
-    //    not per batch. Steady state is seconds; the first enforcement run took
+    //    the process lifetime. The join does surface it: `report` logs a second
+    //    line and the daemon exits nonzero. But that happens at shutdown, which
+    //    may be hours after the panic, and nothing restarts the loop in between.
+    // 2. Unaffected by the join: a run holds one of the four pooled connections
+    //    for its whole duration, not per batch. Steady state is seconds; the first enforcement run took
     //    minutes. An exhausted pool surfaces as `StorageError::Pool` after
     //    r2d2's 30s default — survivable for the loop, which reschedules, but a
     //    pipeline writer that loses a connection drops a capture. Note it does
