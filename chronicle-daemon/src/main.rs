@@ -56,15 +56,20 @@ fn spawn_start_retry(tx: tokio::sync::mpsc::Sender<()>, delay: std::time::Durati
 /// its future without polling it while the blocking pool still waits out the
 /// batch. See docs/development/tokio-shutdown.md.
 ///
-/// `grace` is not a bound on how long a batch takes. `busy_timeout` is 5000 ms,
-/// so a contended commit can outlast any useful grace. It is the point at which
+/// `grace` is not a bound on how long a batch takes — it is the point at which
 /// we stop waiting quietly and say so.
 ///
+/// Assumes the caller has already raised the task's stop signal. The timeout
+/// arm says it is waiting out one batch, which is only true if the run is
+/// already winding down; called without that, it waits out the whole run.
+///
 /// Nothing outside the tests calls this at present, so a non-test build sees it
-/// as dead. Drop the attribute once teardown joins the handle.
-#[cfg_attr(not(test), allow(dead_code))]
+/// as dead. `expect` rather than `allow`: once teardown calls this, the
+/// expectation goes unfulfilled and `-D warnings` fails until the attribute is
+/// deleted. An `allow` would sit here forever with nothing to notice.
+#[cfg_attr(not(test), expect(dead_code))]
 async fn join_cleanup_task(
-    handle: tokio::task::JoinHandle<Result<(), chronicle_storage::StorageError>>,
+    mut handle: tokio::task::JoinHandle<Result<(), chronicle_storage::StorageError>>,
     grace: std::time::Duration,
 ) -> bool {
     fn report(
@@ -83,7 +88,6 @@ async fn join_cleanup_task(
         }
     }
 
-    let mut handle = handle;
     match tokio::time::timeout(grace, &mut handle).await {
         Ok(res) => report(res),
         Err(_) => {
@@ -1310,11 +1314,14 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_cleanup_task_that_outlives_the_grace_is_still_awaited() {
-        // The task finishes AFTER the grace expires. If `timeout` consumed the
-        // handle, this would detach and the assertion below would never see the
-        // task's result. `tokio::time::sleep`, never `advance()` — going idle
-        // auto-advances to the earliest deadline, which is what makes the
-        // timeout fire before the task does.
+        // A late `Err` still reaches the caller. This does NOT on its own
+        // prove the handle is borrowed: an implementation that consumes it and
+        // reports every timeout as a failure returns `true` here too. Its
+        // companion below is the other half — together they bracket the detach.
+        //
+        // `tokio::time::sleep`, never `advance()` — going idle auto-advances to
+        // the earliest deadline, which is what makes the timeout fire before
+        // the task does.
         let handle = tokio::spawn(async {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             Err(chronicle_storage::StorageError::Other(
@@ -1325,6 +1332,23 @@ mod tests {
         assert!(
             join_cleanup_task(handle, std::time::Duration::from_secs(2)).await,
             "the late Err must still reach the caller after the grace expires"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_late_but_successful_cleanup_is_not_reported_as_a_failure() {
+        // The half that actually pins the borrow. A consumed handle detaches
+        // the task, so the caller never learns it succeeded and can only report
+        // the timeout as a failure — which this catches and the test above,
+        // asserting `true`, cannot.
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            Ok(())
+        });
+
+        assert!(
+            !join_cleanup_task(handle, std::time::Duration::from_secs(2)).await,
+            "a task that finishes cleanly after the grace is not a failure"
         );
     }
 }
