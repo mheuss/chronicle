@@ -48,6 +48,53 @@ fn spawn_start_retry(tx: tokio::sync::mpsc::Sender<()>, delay: std::time::Durati
     });
 }
 
+/// Wait for the retention cleanup task, bounded by `grace`, and report whether
+/// it failed.
+///
+/// The handle is borrowed. `tokio::time::timeout` consumes what it is given,
+/// and a consumed `JoinHandle` detaches the task — runtime drop then destroys
+/// its future without polling it while the blocking pool still waits out the
+/// batch. See docs/development/tokio-shutdown.md.
+///
+/// `grace` is not a bound on how long a batch takes. `busy_timeout` is 5000 ms,
+/// so a contended commit can outlast any useful grace. It is the point at which
+/// we stop waiting quietly and say so.
+///
+/// Nothing outside the tests calls this at present, so a non-test build sees it
+/// as dead. Drop the attribute once teardown joins the handle.
+#[cfg_attr(not(test), allow(dead_code))]
+async fn join_cleanup_task(
+    handle: tokio::task::JoinHandle<Result<(), chronicle_storage::StorageError>>,
+    grace: std::time::Duration,
+) -> bool {
+    fn report(
+        res: Result<Result<(), chronicle_storage::StorageError>, tokio::task::JoinError>,
+    ) -> bool {
+        match res {
+            Ok(Ok(())) => false,
+            Ok(Err(e)) => {
+                log::error!("retention cleanup task failed: {e}");
+                true
+            }
+            Err(e) => {
+                log::error!("retention cleanup task panicked: {e}");
+                true
+            }
+        }
+    }
+
+    let mut handle = handle;
+    match tokio::time::timeout(grace, &mut handle).await {
+        Ok(res) => report(res),
+        Err(_) => {
+            log::warn!("cleanup still running after {grace:?}; waiting out its batch");
+            // Re-await ONLY here. Polling a `JoinHandle` after it has returned
+            // `Ready` is a contract violation.
+            report(handle.await)
+        }
+    }
+}
+
 /// Handle a completed provision: persist the variant that just started
 /// serving (AD-10, "persist on success").
 ///
@@ -1247,5 +1294,37 @@ mod tests {
                 "{outcome:?} must end the incident and restore the budget"
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cleanup_task_that_finishes_inside_the_grace_is_not_a_failure() {
+        let handle = tokio::spawn(async { Ok(()) });
+        assert!(!join_cleanup_task(handle, std::time::Duration::from_secs(2)).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_panicking_cleanup_task_sets_shutdown_failed() {
+        let handle = tokio::spawn(async { panic!("worker died") });
+        assert!(join_cleanup_task(handle, std::time::Duration::from_secs(2)).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cleanup_task_that_outlives_the_grace_is_still_awaited() {
+        // The task finishes AFTER the grace expires. If `timeout` consumed the
+        // handle, this would detach and the assertion below would never see the
+        // task's result. `tokio::time::sleep`, never `advance()` — going idle
+        // auto-advances to the earliest deadline, which is what makes the
+        // timeout fire before the task does.
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            Err(chronicle_storage::StorageError::Other(
+                "late failure".into(),
+            ))
+        });
+
+        assert!(
+            join_cleanup_task(handle, std::time::Duration::from_secs(2)).await,
+            "the late Err must still reach the caller after the grace expires"
+        );
     }
 }
