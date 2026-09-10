@@ -51,8 +51,9 @@ pub const MAX_RETENTION_DAYS: i64 = 36_500;
 /// Its error branch is unreachable from its only production caller:
 /// `run_cleanup_interruptible` rejects everything that could overflow before
 /// calling here. The arithmetic stays checked anyway, because a future caller
-/// that skips the bound must not be able to turn a wrap into data loss. It is a separate `fn` so that guard can
-/// be called — and therefore pinned — directly; see
+/// that skips the bound must not be able to turn a wrap into data loss. It is a
+/// separate `fn` so that guard can be called — and therefore pinned — directly;
+/// see
 /// `compute_cutoff_rejects_a_window_that_overflows`.
 fn compute_cutoff(now_millis: i64, retention_days: i64) -> Result<i64> {
     retention_days
@@ -1493,6 +1494,10 @@ mod tests {
         let stats = run_cleanup_interruptible(&conn, &media_mgr, 30, &stop_after(1)).unwrap();
 
         assert_eq!(stats.outcome, CleanupOutcome::StopObserved);
+        assert_eq!(
+            stats.screenshots_deleted, CLEANUP_BATCH_SIZE,
+            "a stopped table must still report the batch it committed"
+        );
         assert_eq!(
             surviving_audio(&conn),
             1,

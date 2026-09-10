@@ -889,7 +889,7 @@ mod tests {
         };
         let storage = Storage::open(config).await.unwrap();
 
-        storage
+        let aged_id = storage
             .insert_screenshot(ScreenshotMetadata {
                 timestamp: chrono::Utc::now().timestamp_millis() - 100 * 86_400 * 1000,
                 display_id: "display1".into(),
@@ -915,6 +915,13 @@ mod tests {
             stats.outcome,
             CleanupOutcome::Completed,
             "the delegating predicate must never report a stop"
+        );
+        // The count alone would pass on a cleanup that miscounted without
+        // touching the table — the same standard `run_cleanup_accepts_the_bound_itself`
+        // states above, applied to the inverse case.
+        assert!(
+            storage.get_screenshot_opt(aged_id).await.unwrap().is_none(),
+            "the expired row must be gone from the table, not merely counted"
         );
     }
 
