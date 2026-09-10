@@ -230,11 +230,14 @@ fn cleanup_media(
         // After the commit, so a batch whose files are already unlinked always
         // has its rows removed before the run returns.
         //
-        // The early return saves one SELECT and nothing else: replace it with
-        // `let _ = stop();` and the next pre-batch check ends the run at the
-        // same boundary, with the same rows gone. What is load-bearing is that
-        // the check sits *here*, after the commit, rather than between the
-        // unlinks and it.
+        // The early return saves one SELECT and nothing else, for a predicate
+        // that stays true once it flips: replace it with `let _ = stop();` and
+        // the next pre-batch check ends the run at the same boundary, with the
+        // same rows gone. A predicate that reverts — `stop_once` in the tests
+        // is one — would run on instead, which is why this is an optimisation
+        // rather than a property to rely on. What is load-bearing is that the
+        // check sits *here*, after the commit, rather than between the unlinks
+        // and it.
         if stop() {
             return Ok(TableCleanup {
                 deleted,
