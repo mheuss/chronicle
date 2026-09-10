@@ -245,8 +245,10 @@ impl MicrophoneCapture {
             // SAFETY: no preconditions.
             unsafe { engine.prepare() };
 
-            // Read after `prepare()`: an uninitialized audio unit has no bound
-            // device to report.
+            // Read beside the log line it feeds, which per Architectural
+            // Decision 2 puts it after `prepare()`. The node is bound well
+            // before here — `outputFormatForBus` above could not have returned
+            // a native format otherwise.
             let device = crate::device::describe(&input);
 
             // The tap is installed and the engine prepared, so this really is
