@@ -78,8 +78,9 @@ fn copy_string_property(
     let mut size = size_of::<*const CFString>() as u32;
 
     // SAFETY: `address` and `size` are live locals; `out` is a live pointer
-    // slot sized to match `size`. The qualifier is empty, which these
-    // selectors permit.
+    // slot sized to match `size`, and both selectors return a `CFStringRef`, so
+    // what CoreAudio writes there is a valid `*const CFString`. The qualifier is
+    // empty, which these selectors permit.
     let status = unsafe {
         AudioObjectGetPropertyData(
             device,
@@ -92,6 +93,16 @@ fn copy_string_property(
     };
     if status != 0 {
         log::debug!("device lookup: {stage} read failed, OSStatus {status}");
+        return None;
+    }
+
+    // `size` is in/out: CoreAudio overwrites it with what the handler actually
+    // wrote. A handler that writes fewer bytes than the slot holds leaves `out`
+    // non-null but half-initialised, which would reach `from_raw` below and
+    // release garbage. Device property handlers belong to the HAL plugin, which
+    // for a virtual device is third-party code.
+    if size as usize != size_of::<*const CFString>() {
+        log::debug!("device lookup: {stage} reported {size} bytes, expected a CFStringRef");
         return None;
     }
 
@@ -115,9 +126,14 @@ pub(crate) fn describe(node: &AVAudioInputNode) -> InputDevice {
         uid: None,
     };
 
-    // SAFETY: `node` is a live input node owned by the caller's engine.
+    // SAFETY: `AVAudioNode.h` declares the `AUAudioUnit` property non-nullable
+    // inside `NS_ASSUME_NONNULL`, so the send cannot return nil. That matters
+    // because objc2 panics on a nil return here rather than handing back a null
+    // `Retained` — it is the one path on which this function would not return.
     let unit = unsafe { node.AUAudioUnit() };
-    // SAFETY: `unit` is the retained audio unit returned above.
+    // SAFETY: `deviceID` hands back a plain `AUAudioObjectID` with no pointer
+    // obligations. Its only precondition is a receiver of the right class, which
+    // the typed `Retained<AUAudioUnit>` above supplies.
     let device = unsafe { unit.deviceID() };
     if device == kAudioObjectUnknown {
         log::debug!("device lookup: the input node reports no bound device");
