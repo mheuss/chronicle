@@ -179,6 +179,10 @@ pub enum CleanupOutcome {
     Completed,
     /// `retention_days` was zero or negative, so nothing was examined.
     Disabled,
+    /// A stop predicate ended the run before its work was exhausted, so
+    /// expired rows remain. Never persists a checkpoint: the next attempt has
+    /// to pick up what this run left.
+    StopObserved,
 }
 
 /// Summary of what a cleanup or orphan-sweep operation removed.
