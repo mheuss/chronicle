@@ -232,30 +232,41 @@ where
 
         match result {
             Ok(stats) => {
-                if stats.outcome == CleanupOutcome::Completed {
-                    // The log line goes AFTER the write attempt so it cannot
-                    // claim success while the checkpoint silently failed.
-                    match ops.write_last_cleanup(completed_at).await {
-                        Ok(()) => log::info!("retention cleanup finished: {stats:?}"),
-                        // Same reasoning as the read above: `set_config` runs in
-                        // `spawn_blocking` too, and a panic there is a broken
-                        // storage layer, not a checkpoint that failed to stick.
-                        Err(e) if is_worker_panic(&e) => {
-                            log::error!(
-                                "retention cleanup finished: {stats:?}; checkpoint write panicked, stopping the scheduler: {e}"
-                            );
-                            return Err(e);
+                // Exhaustive on purpose: a future `CleanupOutcome` variant must
+                // be a compile error here, not a silent fall-through into the
+                // finished arm that also skips the checkpoint.
+                match stats.outcome {
+                    CleanupOutcome::Completed => {
+                        // The log line goes AFTER the write attempt so it cannot
+                        // claim success while the checkpoint silently failed.
+                        match ops.write_last_cleanup(completed_at).await {
+                            Ok(()) => log::info!("retention cleanup finished: {stats:?}"),
+                            // Same reasoning as the read above: `set_config` runs
+                            // in `spawn_blocking` too, and a panic there is a
+                            // broken storage layer, not a checkpoint that failed
+                            // to stick.
+                            Err(e) if is_worker_panic(&e) => {
+                                log::error!(
+                                    "retention cleanup finished: {stats:?}; checkpoint write panicked, stopping the scheduler: {e}"
+                                );
+                                return Err(e);
+                            }
+                            Err(e) => log::warn!(
+                                "retention cleanup finished: {stats:?}; {LAST_CLEANUP_KEY} not recorded: {e}"
+                            ),
                         }
-                        Err(e) => log::warn!(
-                            "retention cleanup finished: {stats:?}; {LAST_CLEANUP_KEY} not recorded: {e}"
-                        ),
                     }
-                } else if stats.outcome == CleanupOutcome::StopObserved {
-                    log::info!(
-                        "retention cleanup stopped at shutdown, expired rows remain: {stats:?}"
-                    );
-                } else {
-                    log::info!("retention cleanup finished: {stats:?}");
+                    // Says what the run did, not what it infers about the
+                    // database. A stop can land on the audio table's pre-batch
+                    // check with nothing expired there, or after a final batch
+                    // that happened to empty the table, so "rows remain" would
+                    // not be true of every run reaching here.
+                    CleanupOutcome::StopObserved => log::info!(
+                        "retention cleanup stopped at shutdown, no checkpoint recorded: {stats:?}"
+                    ),
+                    CleanupOutcome::Disabled => {
+                        log::info!("retention cleanup finished: {stats:?}")
+                    }
                 }
             }
             Err(e) if is_worker_panic(&e) => {
@@ -635,7 +646,8 @@ mod loop_tests {
 
         assert!(
             ops.writes.lock().unwrap().is_empty(),
-            "an interrupted run has eligible rows left and must not suppress the next attempt"
+            "an interrupted run may have eligible rows left and must not suppress \
+             the next attempt"
         );
     }
 
