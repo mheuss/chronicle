@@ -229,6 +229,12 @@ fn cleanup_media(
 
         // After the commit, so a batch whose files are already unlinked always
         // has its rows removed before the run returns.
+        //
+        // The early return saves one SELECT and nothing else: replace it with
+        // `let _ = stop();` and the next pre-batch check ends the run at the
+        // same boundary, with the same rows gone. What is load-bearing is that
+        // the check sits *here*, after the commit, rather than between the
+        // unlinks and it.
         if stop() {
             return Ok(TableCleanup {
                 deleted,
@@ -392,7 +398,7 @@ mod tests {
     use crate::{audio, screenshots};
     use rusqlite::trace::{TraceEvent, TraceEventCodes};
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Arc, Mutex};
 
     /// Serializes every test that drives a `trace_v2` hook. The hooks below are
@@ -1822,58 +1828,46 @@ mod tests {
 
     #[test]
     fn a_run_stops_within_one_batch_of_the_signal() {
-        // NFR-1. The isolated tests above pin each check separately; this one
-        // drives a real multi-batch loop and asserts the bound the design
-        // claims.
+        // NFR-1. The isolated tests above each pin one check at one arrival
+        // point; this sweeps every arrival point across the first three
+        // batches and asserts the bound itself at each.
         //
-        // The predicate is the production shape: a shared flag read by the
-        // loop, flipped by something outside it. In the daemon that flag is a
-        // `CancellationToken`; here it is the `AtomicBool` a token wraps, so
-        // the storage crate needs no tokio-util dependency to test the
-        // property.
-        let conn = setup_db();
-        let (_dir, mgr) = temp_media_mgr();
-        let total = CLEANUP_BATCH_SIZE * 5;
-        for i in 0..total {
-            insert_aged_shot_with_file(&conn, &mgr, i);
+        // `stop_after(n)` is false for calls 0..n-1 and true from n on, and the
+        // loop makes two calls per batch — pre-batch, then post-commit. So the
+        // run stops on call n, and which check that is decides how much work
+        // the signal was able to catch:
+        //
+        //   n=1  b1 post-commit  -> batch 1 committed, batch 2 never starts
+        //   n=2  b2 pre-batch    -> same, one batch
+        //   n=3  b2 post-commit  -> batch 2 committed, two batches
+        //   n=4  b3 pre-batch    -> same, two batches
+        //
+        // which is `(n - 1) / 2 + 1` batches. The bound NFR-1 states is that
+        // this never exceeds the batches already committed when the signal
+        // arrived, plus one — true at every n below, including the odd ones
+        // where the signal arrives mid-batch and that batch still finishes.
+        for n in 1..=6 {
+            let conn = setup_db();
+            let (_dir, mgr) = temp_media_mgr();
+            let total = CLEANUP_BATCH_SIZE * 5;
+            for i in 0..total {
+                insert_aged_shot_with_file(&conn, &mgr, i);
+            }
+
+            let stats = run_cleanup_interruptible(&conn, &mgr, 30, &stop_after(n)).unwrap();
+
+            let expected = CLEANUP_BATCH_SIZE * ((n - 1) / 2 + 1);
+            assert_eq!(stats.outcome, CleanupOutcome::StopObserved, "n={n}");
+            assert_eq!(
+                stats.screenshots_deleted, expected,
+                "n={n}: the batch the signal landed in may finish, and no later \
+                 one may start"
+            );
+            assert_eq!(
+                surviving_shots(&conn) as usize,
+                total - expected,
+                "n={n}: the rest of the table must be untouched"
+            );
         }
-
-        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
-        let calls = std::sync::Arc::new(AtomicUsize::new(0));
-
-        // Call 2 is the second batch's pre-batch check, with two checks per
-        // batch: batch 1 pre, batch 1 post-commit, batch 2 pre.
-        const FIRE_ON: usize = 2;
-
-        let stop: crate::StopSignal = {
-            let cancelled = std::sync::Arc::clone(&cancelled);
-            let calls = std::sync::Arc::clone(&calls);
-            std::sync::Arc::new(move || {
-                // Read BEFORE firing, so no call ever observes the signal it
-                // raised. Otherwise the run stops on the raising call itself
-                // and the test measures "stops at the signal" — a strictly
-                // weaker property than the one NFR-1 states.
-                let observed = cancelled.load(AtomicOrdering::SeqCst);
-                if calls.fetch_add(1, AtomicOrdering::Relaxed) == FIRE_ON {
-                    cancelled.store(true, AtomicOrdering::SeqCst);
-                }
-                observed
-            })
-        };
-
-        let stats = run_cleanup_interruptible(&conn, &mgr, 30, &stop).unwrap();
-
-        assert_eq!(stats.outcome, CleanupOutcome::StopObserved);
-        assert_eq!(
-            stats.screenshots_deleted,
-            CLEANUP_BATCH_SIZE * 2,
-            "the signal landed at the start of batch 2, so that batch may \
-             finish and no later one may start — one batch, not five"
-        );
-        assert_eq!(
-            surviving_shots(&conn) as usize,
-            total - CLEANUP_BATCH_SIZE * 2,
-            "and the rest of the table must be untouched"
-        );
     }
 }
