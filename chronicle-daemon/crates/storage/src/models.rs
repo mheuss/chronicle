@@ -168,13 +168,11 @@ pub struct SearchResult {
 /// `an_ordinary_run_reports_completed` in `retention.rs` pins this end to end.
 ///
 /// The scheduled cleanup task (`chronicle-daemon/src/retention_task.rs`) reads
-/// this and persists a checkpoint only on `Completed`. Neither other outcome
-/// may record one, for different reasons: a `Disabled` run examined nothing, so
-/// a checkpoint would delay the first real cleanup by up to a period after
-/// retention is switched back on; a `StopObserved` run stopped before
-/// exhausting its work, so a checkpoint would suppress the next attempt over
-/// rows it never reached. That is the reason this enum exists rather than a
-/// bare success/failure.
+/// this and persists a checkpoint only on `Completed`. A `Disabled` run
+/// examined nothing, and a `StopObserved` run stopped before exhausting its
+/// work; a checkpoint from either would delay the next real cleanup by up to a
+/// period. That is the reason this enum exists rather than a bare
+/// success/failure.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum CleanupOutcome {
     /// Ran to exhaustion — no expired records remain.
@@ -183,14 +181,15 @@ pub enum CleanupOutcome {
     /// `retention_days` was zero or negative, so nothing was examined.
     Disabled,
     /// A stop predicate ended the run before it had exhausted its work. Never
-    /// persists a checkpoint, so the next attempt starts from where the last
-    /// one would have.
+    /// persists a checkpoint, so the next boot's first run is due immediately
+    /// rather than a period out. The checkpoint is a schedule timestamp, not a
+    /// resume position — every run re-selects from the oldest expired row.
     ///
-    /// Usually means expired rows remain, but not always: a stop landing on the
-    /// second table's first check reports this even if that table had nothing
-    /// expired, and so does a final batch that happened to be an exact multiple
-    /// of the batch size. Both over-report in the safe direction — an extra
-    /// cleanup run costs a `SELECT` per table.
+    /// Usually means expired rows remain, but the run cannot always tell: the
+    /// stop is checked before each batch's `SELECT`, so a run that stops there
+    /// never learns whether that table had anything left. It over-reports in
+    /// the safe direction — the cost is one `SELECT` per table on a run that
+    /// finds nothing.
     StopObserved,
 }
 

@@ -93,8 +93,16 @@ ordered teardown that cascades through the system:
 2. `audio_pipeline.stop()` — drops the audio handler and flushes the encoding thread
 3. `bridge_handle.join()` — bridge thread drains and exits, closing `audio_tx`
 4. `await` all async tasks — they exit when their input channels close
+5. `join_cleanup_task(cleanup_handle, CLEANUP_GRACE)` — the retention cleanup
+   loop, joined last so every step above overlaps it
 
-No forced cancellation. Everything drains naturally.
+Cancellation is cooperative, not forced. Most stages drain because their input
+channels close; retention cleanup is the exception, and watches the shared
+token instead. `cancel.cancel()` at the top of teardown raises a stop predicate
+that its batch loop reads, so an in-flight run ends at a batch boundary rather
+than running to completion — leaving expired rows for the next run. Nothing is
+killed mid-batch. `CLEANUP_GRACE` is the point at which a slow run is reported,
+not a deadline: the join re-awaits past it.
 
 ## Key Concepts
 
