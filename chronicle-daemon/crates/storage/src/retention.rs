@@ -392,7 +392,7 @@ mod tests {
     use crate::{audio, screenshots};
     use rusqlite::trace::{TraceEvent, TraceEventCodes};
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Arc, Mutex};
 
     /// Serializes every test that drives a `trace_v2` hook. The hooks below are
@@ -1817,6 +1817,63 @@ mod tests {
             2 * 2 + 1 + 1,
             "two calls per committed batch, plus one per empty probe — pinned \
              exactly, because an upper bound would admit a cached predicate"
+        );
+    }
+
+    #[test]
+    fn a_run_stops_within_one_batch_of_the_signal() {
+        // NFR-1. The isolated tests above pin each check separately; this one
+        // drives a real multi-batch loop and asserts the bound the design
+        // claims.
+        //
+        // The predicate is the production shape: a shared flag read by the
+        // loop, flipped by something outside it. In the daemon that flag is a
+        // `CancellationToken`; here it is the `AtomicBool` a token wraps, so
+        // the storage crate needs no tokio-util dependency to test the
+        // property.
+        let conn = setup_db();
+        let (_dir, mgr) = temp_media_mgr();
+        let total = CLEANUP_BATCH_SIZE * 5;
+        for i in 0..total {
+            insert_aged_shot_with_file(&conn, &mgr, i);
+        }
+
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+
+        // Call 2 is the second batch's pre-batch check, with two checks per
+        // batch: batch 1 pre, batch 1 post-commit, batch 2 pre.
+        const FIRE_ON: usize = 2;
+
+        let stop: crate::StopSignal = {
+            let cancelled = std::sync::Arc::clone(&cancelled);
+            let calls = std::sync::Arc::clone(&calls);
+            std::sync::Arc::new(move || {
+                // Read BEFORE firing, so no call ever observes the signal it
+                // raised. Otherwise the run stops on the raising call itself
+                // and the test measures "stops at the signal" — a strictly
+                // weaker property than the one NFR-1 states.
+                let observed = cancelled.load(AtomicOrdering::SeqCst);
+                if calls.fetch_add(1, AtomicOrdering::Relaxed) == FIRE_ON {
+                    cancelled.store(true, AtomicOrdering::SeqCst);
+                }
+                observed
+            })
+        };
+
+        let stats = run_cleanup_interruptible(&conn, &mgr, 30, &stop).unwrap();
+
+        assert_eq!(stats.outcome, CleanupOutcome::StopObserved);
+        assert_eq!(
+            stats.screenshots_deleted,
+            CLEANUP_BATCH_SIZE * 2,
+            "the signal landed at the start of batch 2, so that batch may \
+             finish and no later one may start — one batch, not five"
+        );
+        assert_eq!(
+            surviving_shots(&conn) as usize,
+            total - CLEANUP_BATCH_SIZE * 2,
+            "and the rest of the table must be untouched"
         );
     }
 }
