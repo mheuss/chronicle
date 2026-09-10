@@ -113,8 +113,8 @@ capture is off by default and toggled from the UI.
 ## Diagnosing a Microphone
 
 Start here when a microphone records silence, near-silence, or empty
-transcripts. The daemon logs the device's native input format once, when it
-installs the tap:
+transcripts. The daemon logs the device's identity and native input format
+once, when it installs the tap:
 
 ```text
 [2026-08-22T22:02:06Z INFO  chronicle_audio::microphone] microphone tap installed (capture starts on mic-on): device_name="Yeti Stereo Microphone" device_uid="AppleUSBAudioEngine:Blue:Yeti:14100000", 2 ch, 48000 Hz, interleaved=false, format=f32
@@ -161,7 +161,7 @@ matches, whatever its level, so a lone crate directive silences every *other*
 crate — `chronicle_daemon`'s own failures included. Lead with a level for
 everything else, as in `RUST_LOG=warn,chronicle_audio=debug`.
 
-Four things to know before you trust what you read:
+Three things to know before you trust what you read:
 
 - **A second daemon on the same data directory will not start.** `IpcServer`
   finds the existing socket and connects to it, and the newcomer exits with
