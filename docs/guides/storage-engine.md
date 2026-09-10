@@ -155,7 +155,10 @@ rather than restarting it.
    arithmetic so a large value cannot wrap it into the future.
 3. For screenshots: select up to 500 rows older than the cutoff, oldest first,
    delete each associated file from disk, then DELETE the rows in one
-   transaction. Repeat until no expired rows remain.
+   transaction. Repeat until no expired rows remain, or until the daemon begins
+   shutting down. A run cut short that way reports
+   `CleanupOutcome::StopObserved`, records no checkpoint, and leaves the rest
+   for the next run.
 4. Same loop for audio segments.
 
 Batching at 500 rows keeps SQLite transactions short, and the DELETE triggers

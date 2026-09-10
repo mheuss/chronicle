@@ -168,10 +168,13 @@ pub struct SearchResult {
 /// `an_ordinary_run_reports_completed` in `retention.rs` pins this end to end.
 ///
 /// The scheduled cleanup task (`chronicle-daemon/src/retention_task.rs`) reads
-/// this and persists a checkpoint only on `Completed`: a run that examined
-/// nothing has none to record, and recording one would delay the first real
-/// cleanup by up to a period after retention is switched back on. That is the
-/// reason this enum exists rather than a bare success/failure.
+/// this and persists a checkpoint only on `Completed`. Neither other outcome
+/// may record one, for different reasons: a `Disabled` run examined nothing, so
+/// a checkpoint would delay the first real cleanup by up to a period after
+/// retention is switched back on; a `StopObserved` run stopped before
+/// exhausting its work, so a checkpoint would suppress the next attempt over
+/// rows it never reached. That is the reason this enum exists rather than a
+/// bare success/failure.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum CleanupOutcome {
     /// Ran to exhaustion — no expired records remain.
@@ -179,9 +182,15 @@ pub enum CleanupOutcome {
     Completed,
     /// `retention_days` was zero or negative, so nothing was examined.
     Disabled,
-    /// A stop predicate ended the run before its work was exhausted, so
-    /// expired rows remain. Never persists a checkpoint: the next attempt has
-    /// to pick up what this run left.
+    /// A stop predicate ended the run before it had exhausted its work. Never
+    /// persists a checkpoint, so the next attempt starts from where the last
+    /// one would have.
+    ///
+    /// Usually means expired rows remain, but not always: a stop landing on the
+    /// second table's first check reports this even if that table had nothing
+    /// expired, and so does a final batch that happened to be an exact multiple
+    /// of the batch size. Both over-report in the safe direction — an extra
+    /// cleanup run costs a `SELECT` per table.
     StopObserved,
 }
 
