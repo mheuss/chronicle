@@ -245,6 +245,10 @@ impl MicrophoneCapture {
             // SAFETY: no preconditions.
             unsafe { engine.prepare() };
 
+            // Read after `prepare()`: an uninitialized audio unit has no bound
+            // device to report.
+            let device = crate::device::describe(&input);
+
             // The tap is installed and the engine prepared, so this really is
             // a tap-install record. Logged here rather than where the format
             // was read because the converter (above) and the tap install can
@@ -256,11 +260,14 @@ impl MicrophoneCapture {
             // with no `RUST_LOG` set. It fires once per tap install, not per
             // callback, which is why a logger is allowed here at all: ADR-013
             // forbids one on the tap block itself.
-            log::info!(
-                "microphone tap installed (capture starts on mic-on): \
-                 {native_channels} ch, {native_rate} Hz, \
-                 interleaved={native_interleaved}, format={native_format_name}"
+            let message = tap_installed_message(
+                &device,
+                native_channels,
+                native_rate,
+                native_interleaved,
+                &native_format_name,
             );
+            log::info!("{message}");
 
             Ok(Self {
                 engine,
