@@ -120,8 +120,9 @@ once, when it installs the tap:
 [2026-08-22T22:02:06Z INFO  chronicle_audio::microphone] microphone tap installed (capture starts on mic-on): device_name="Yeti Stereo Microphone" device_uid="AppleUSBAudioEngine:Blue:Yeti:14100000", 2 ch, 48000 Hz, interleaved=false, format=f32
 ```
 
-It reports the bound device's name and CoreAudio UID, then channel count, sample
-rate, whether samples are interleaved, and the sample format.
+It reports the input device the engine resolved to — its name and CoreAudio UID
+— then channel count, sample rate, whether samples are interleaved, and the
+sample format.
 
 **A `2 ch` mic is the usual reason audio comes back quiet.** The converter is
 built with no `channelMap`, so a 2-to-1 conversion selects channel 0 and

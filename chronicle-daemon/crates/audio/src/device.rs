@@ -13,7 +13,11 @@ use objc2_core_audio::{
 };
 use objc2_core_foundation::{CFRetained, CFString};
 
-/// The bound input device's identity, as far as CoreAudio would report it.
+/// The identity of the input device the engine resolved to.
+///
+/// Not necessarily the device the input node is bound to: that is usually an
+/// aggregate wrapping the default route, and `describe` descends to the member
+/// carrying the input.
 ///
 /// Both fields are `Option` because the two property reads fail independently.
 /// A UID with no name still separates two same-named devices.
@@ -117,15 +121,20 @@ fn copy_string_property(
     Some(unsafe { CFRetained::from_raw(ptr) }.to_string())
 }
 
-/// How many bytes a property currently occupies, or `None` if it is absent.
+/// How many bytes a property currently occupies, or `None` if the read failed.
 ///
-/// A non-aggregate device has no sub-device list at all, so the size read
-/// itself fails. That is the signal the bound device needs no resolving, not an
-/// error worth surfacing.
+/// A device that is not an aggregate has no sub-device list, and the size read
+/// itself fails with `kAudioHardwareUnknownPropertyError` — that is the signal
+/// the bound device needs no resolving. But an unreadable property and an
+/// absent one are the same `None` here, so the `OSStatus` is logged: NFR-6 asks
+/// that a failed lookup be diagnosable without a rebuild, and this is the hop
+/// where a silent failure would put `CADefaultDeviceAggregate` back in the log
+/// line with nothing to explain it.
 fn property_size(
     device: AudioObjectID,
     selector: AudioObjectPropertySelector,
     scope: AudioObjectPropertyScope,
+    stage: &str,
 ) -> Option<usize> {
     let address = AudioObjectPropertyAddress {
         mSelector: selector,
@@ -145,25 +154,31 @@ fn property_size(
             NonNull::from(&mut size),
         )
     };
-    (status == 0).then_some(size as usize)
+    if status != 0 {
+        log::debug!("device lookup: {stage} size read failed, OSStatus {status}");
+        return None;
+    }
+    Some(size as usize)
 }
 
 /// The sub-devices of an aggregate, paired with each one's input stream count.
 ///
-/// Empty for a device that is not an aggregate.
+/// Empty when the device has no readable sub-device list — because it is not an
+/// aggregate, or because any hop of the read failed.
 fn subdevices_with_input_counts(device: AudioObjectID) -> Vec<(AudioObjectID, usize)> {
     let Some(bytes) = property_size(
         device,
         kAudioAggregateDevicePropertyActiveSubDeviceList,
         kAudioObjectPropertyScopeGlobal,
+        "sub-device list",
     ) else {
         return Vec::new();
     };
 
-    let count = bytes / size_of::<AudioObjectID>();
-    if count == 0 {
+    let Some(count) = elements_to_allocate(bytes) else {
+        log::debug!("device lookup: sub-device list reported an implausible {bytes} bytes");
         return Vec::new();
-    }
+    };
 
     let address = AudioObjectPropertyAddress {
         mSelector: kAudioAggregateDevicePropertyActiveSubDeviceList,
@@ -173,10 +188,10 @@ fn subdevices_with_input_counts(device: AudioObjectID) -> Vec<(AudioObjectID, us
     let mut ids = vec![kAudioObjectUnknown; count];
     let mut size = bytes as u32;
 
-    // SAFETY: `count` is non-zero above, so `ids` owns a real allocation and
-    // `as_mut_ptr` is non-null. It holds `count` ids and `size` is that same
-    // byte count, so the out buffer matches what CoreAudio was told it has. The
-    // qualifier is empty, which this selector permits.
+    // SAFETY: `ids` holds `count` ids and `size` is that same byte count, so the
+    // out buffer matches what CoreAudio was told it has. `NonNull::from` on the
+    // slice needs no null justification of its own. The qualifier is empty,
+    // which this selector permits.
     let status = unsafe {
         AudioObjectGetPropertyData(
             device,
@@ -184,7 +199,7 @@ fn subdevices_with_input_counts(device: AudioObjectID) -> Vec<(AudioObjectID, us
             0,
             ptr::null(),
             NonNull::from(&mut size),
-            NonNull::new_unchecked(ids.as_mut_ptr()).cast(),
+            NonNull::from(ids.as_mut_slice()).cast(),
         )
     };
     if status != 0 {
@@ -192,25 +207,26 @@ fn subdevices_with_input_counts(device: AudioObjectID) -> Vec<(AudioObjectID, us
         return Vec::new();
     }
 
-    // Shrinking between the two calls is legitimate — the route can change
-    // underneath us. Growing is not: it would mean CoreAudio wrote past the
-    // buffer it was handed, and the damage is already done. Reject rather than
-    // read what came back. Same reasoning as the size check in
-    // `copy_string_property`.
-    if size as usize > bytes {
+    let Some(keep) = elements_to_keep(bytes, size as usize) else {
         log::debug!(
             "device lookup: sub-device list reported {size} bytes into a {bytes}-byte buffer"
         );
         return Vec::new();
-    }
-    ids.truncate(size as usize / size_of::<AudioObjectID>());
+    };
+    ids.truncate(keep);
 
     ids.into_iter()
         .map(|id| {
+            // A device with no input carries zero input streams and reports
+            // that as a readable size of 0, so `None` here means the read
+            // genuinely failed rather than that the device has no input. Both
+            // end up skipped, but only one is a fault — hence the log inside
+            // `property_size`.
             let bytes = property_size(
                 id,
                 kAudioDevicePropertyStreams,
                 kAudioObjectPropertyScopeInput,
+                "input stream count",
             )
             .unwrap_or(0);
             (id, bytes / size_of::<AudioObjectID>())
@@ -218,10 +234,46 @@ fn subdevices_with_input_counts(device: AudioObjectID) -> Vec<(AudioObjectID, us
         .collect()
 }
 
+/// An aggregate with more members than this is not a case worth serving. The
+/// count comes from the HAL handler, which for a virtual device is third-party
+/// code, and it sizes an allocation.
+const MAX_SUBDEVICES: usize = 64;
+
+/// How many ids to allocate for a sub-device list of `bytes`, or `None` when
+/// that count is implausible.
+///
+/// Separated from the FFI so the arithmetic is testable. An unbounded count
+/// would size an allocation directly from a number the HAL handler chose, and a
+/// failed allocation aborts rather than unwinding — which would take the daemon
+/// down and break NFR-1.
+fn elements_to_allocate(bytes: usize) -> Option<usize> {
+    let count = bytes / size_of::<AudioObjectID>();
+    (1..=MAX_SUBDEVICES).contains(&count).then_some(count)
+}
+
+/// How many ids to keep after CoreAudio reports writing `reported_bytes` into a
+/// buffer of `buffer_bytes`.
+///
+/// Shrinking is legitimate — the route can change between the size call and the
+/// data call. Growing is not: it means the write overran the buffer it was
+/// handed, so `None` rejects the whole read rather than trusting part of it.
+fn elements_to_keep(buffer_bytes: usize, reported_bytes: usize) -> Option<usize> {
+    (reported_bytes <= buffer_bytes).then(|| reported_bytes / size_of::<AudioObjectID>())
+}
+
 /// Picks the sub-device that carries the input.
 ///
 /// A default-device aggregate wraps both halves of the default route, so the
 /// output device is in the list too. Input stream count is what separates them.
+///
+/// When more than one member has input streams this takes the first, and that
+/// is a fallback rather than a decision: `ActiveSubDeviceList` has no documented
+/// ordering, and nothing here can tell which member the route actually reads
+/// from. The default-route aggregate has exactly one input member, so the
+/// ambiguity is unreachable on that path. It becomes reachable if the default
+/// *output* is a device that also carries input — a Bluetooth headset or most
+/// USB interfaces — which is why this is written down rather than left to the
+/// test that pins it.
 fn first_input_subdevice(subdevices: &[(AudioObjectID, usize)]) -> Option<AudioObjectID> {
     subdevices
         .iter()
@@ -229,11 +281,15 @@ fn first_input_subdevice(subdevices: &[(AudioObjectID, usize)]) -> Option<AudioO
         .map(|(id, _)| *id)
 }
 
-/// The identity of the device the engine's input node is bound to.
+/// The identity of the microphone behind the engine's input node.
+///
+/// The node binds to an aggregate wrapping the default route rather than to a
+/// microphone, so this descends to the member carrying the input. A device that
+/// is not an aggregate has no sub-device list and is reported as-is.
 ///
 /// Never fails. Any unreadable field comes back `None` and renders as
-/// `unknown`. Per Architectural Decision 7, this does not fall back to the
-/// system default input device.
+/// `unknown`. Per Architectural Decision 7, a failed lookup does not fall back
+/// to the system default input device — it reports what it has.
 pub(crate) fn describe(node: &AVAudioInputNode) -> InputDevice {
     let absent = InputDevice {
         name: None,
@@ -383,6 +439,87 @@ mod tests {
         );
     }
     #[test]
+    fn an_empty_list_allocates_nothing() {
+        assert_eq!(elements_to_allocate(0), None);
+    }
+
+    #[test]
+    fn a_partial_element_rounds_down_and_is_rejected() {
+        // Three bytes is not one id. Rounding down gives zero, which is not a
+        // plausible list.
+        assert_eq!(elements_to_allocate(3), None);
+    }
+
+    #[test]
+    fn a_normal_list_allocates_its_element_count() {
+        assert_eq!(
+            elements_to_allocate(4 * size_of::<AudioObjectID>()),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn the_ceiling_is_inclusive() {
+        assert_eq!(
+            elements_to_allocate(MAX_SUBDEVICES * size_of::<AudioObjectID>()),
+            Some(MAX_SUBDEVICES)
+        );
+    }
+
+    #[test]
+    fn an_implausible_count_allocates_nothing() {
+        // The byte count comes from the HAL handler and sizes an allocation. A
+        // failed allocation aborts rather than unwinding, which would take the
+        // daemon down.
+        assert_eq!(
+            elements_to_allocate((MAX_SUBDEVICES + 1) * size_of::<AudioObjectID>()),
+            None
+        );
+    }
+
+    #[test]
+    fn keeping_an_exact_report_keeps_everything() {
+        let bytes = 2 * size_of::<AudioObjectID>();
+        assert_eq!(elements_to_keep(bytes, bytes), Some(2));
+    }
+
+    #[test]
+    fn a_shrunk_report_keeps_only_what_was_written() {
+        // The route can change between the size call and the data call.
+        assert_eq!(
+            elements_to_keep(
+                4 * size_of::<AudioObjectID>(),
+                2 * size_of::<AudioObjectID>()
+            ),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn a_report_of_nothing_keeps_nothing() {
+        assert_eq!(elements_to_keep(4 * size_of::<AudioObjectID>(), 0), Some(0));
+    }
+
+    #[test]
+    fn an_over_report_rejects_the_whole_read() {
+        // Growing means the write overran the buffer it was handed, so nothing
+        // in it can be trusted — not even the prefix.
+        assert_eq!(
+            elements_to_keep(
+                2 * size_of::<AudioObjectID>(),
+                3 * size_of::<AudioObjectID>()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_partial_trailing_element_is_dropped() {
+        let bytes = 4 * size_of::<AudioObjectID>();
+        assert_eq!(elements_to_keep(bytes, bytes - 1), Some(3));
+    }
+
+    #[test]
     fn no_subdevices_resolves_to_nothing() {
         assert_eq!(first_input_subdevice(&[]), None);
     }
@@ -410,6 +547,8 @@ mod tests {
 
     #[test]
     fn the_first_of_several_inputs_wins() {
+        // Pins the fallback, not a claim that first is correct. See the doc
+        // comment: with no documented ordering there is nothing better to pick.
         assert_eq!(first_input_subdevice(&[(131, 2), (117, 1)]), Some(131));
     }
 }
