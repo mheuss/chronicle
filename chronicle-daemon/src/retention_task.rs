@@ -250,6 +250,10 @@ where
                             "retention cleanup finished: {stats:?}; {LAST_CLEANUP_KEY} not recorded: {e}"
                         ),
                     }
+                } else if stats.outcome == CleanupOutcome::StopObserved {
+                    log::info!(
+                        "retention cleanup stopped at shutdown, expired rows remain: {stats:?}"
+                    );
                 } else {
                     log::info!("retention cleanup finished: {stats:?}");
                 }
@@ -606,6 +610,33 @@ mod loop_tests {
 
         cancel.cancel();
         task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_interrupted_run_does_not_persist_a_checkpoint() {
+        // The behavior rests on one comparison in the result arm. Mutating it
+        // to `!= Disabled` satisfies every other test in this file while
+        // breaking this requirement, which is why it gets its own test.
+        //
+        // Same construction idiom as
+        // `a_disabled_outcome_reschedules_rather_than_spinning`: `outcome` is a
+        // plain field, set before the `Arc`.
+        let mut fake = FakeOps::new();
+        fake.outcome = CleanupOutcome::StopObserved;
+        let ops = Arc::new(fake);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run_cleanup_loop(Arc::clone(&ops), cancel.clone()));
+
+        tokio::time::sleep(Duration::from_secs(3 * 60 + 1)).await;
+        assert_eq!(ops.run_count(), 1, "the run must have happened");
+
+        cancel.cancel();
+        task.await.unwrap().unwrap();
+
+        assert!(
+            ops.writes.lock().unwrap().is_empty(),
+            "an interrupted run has eligible rows left and must not suppress the next attempt"
+        );
     }
 
     #[tokio::test(start_paused = true)]
