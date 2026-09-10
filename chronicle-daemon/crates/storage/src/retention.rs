@@ -215,8 +215,22 @@ fn cleanup_media(
 
         deleted += count;
 
+        // Exhaustion first. A short batch means the table is empty, so the run
+        // finished its work and reports `Completed` — there is nothing for the
+        // next run to pick up. Only a full batch can leave rows behind, and
+        // only that case reports `StopObserved`.
         if count < CLEANUP_BATCH_SIZE {
             break;
+        }
+
+        // After the commit, so a batch whose files are already unlinked always
+        // has its rows removed before the run returns.
+        if stop() {
+            return Ok(TableCleanup {
+                deleted,
+                freed,
+                stopped: true,
+            });
         }
     }
 
@@ -1543,5 +1557,208 @@ mod tests {
         let stats = run_cleanup_interruptible(&conn, &media_mgr, 30, &stop_after(2)).unwrap();
 
         assert_eq!(stats.outcome, CleanupOutcome::StopObserved);
+    }
+
+    /// A `MediaManager` over a fresh temp directory, plus the directory guard.
+    ///
+    /// `dummy_media_mgr()` cannot be used for these tests: its base is
+    /// `/tmp/chronicle-test-dummy` while row paths point elsewhere, so every
+    /// `delete_file` fails `validate_path` and is swallowed. Nothing is ever
+    /// unlinked and `bytes_freed` stays zero.
+    fn temp_media_mgr() -> (tempfile::TempDir, crate::media::MediaManager) {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = crate::media::MediaManager::new(dir.path().to_path_buf()).unwrap();
+        (dir, mgr)
+    }
+
+    /// Insert one expired screenshot with a real 8-byte file under the
+    /// manager's base directory, and return the path.
+    fn insert_aged_shot_with_file(
+        conn: &Connection,
+        mgr: &crate::media::MediaManager,
+        idx: usize,
+    ) -> PathBuf {
+        let path = mgr
+            .base_dir()
+            .join("screenshots")
+            .join(format!("s{idx}.heif"));
+        // `MediaManager::new` does not create subdirectories, and `write_file`
+        // does not create parents. `validate_path` also canonicalizes the
+        // parent, so it must exist before the write.
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        mgr.write_file(&path, b"12345678").unwrap();
+        let meta = ScreenshotMetadata {
+            timestamp: now_millis() - 100 * 86_400 * 1000,
+            display_id: "display1".into(),
+            app_name: None,
+            app_bundle_id: None,
+            window_title: None,
+            image_path: path.to_string_lossy().into_owned(),
+            ocr_text: None,
+            phash: None,
+            resolution: None,
+        };
+        screenshots::insert(conn, &meta).unwrap();
+        path
+    }
+
+    /// Insert one expired audio segment with a real file under the manager's
+    /// base directory, and return the path. `data` sets the file size, which is
+    /// what `bytes_freed` accumulates.
+    fn insert_aged_audio_with_file(
+        conn: &Connection,
+        mgr: &crate::media::MediaManager,
+        idx: usize,
+        data: &[u8],
+        transcript: Option<String>,
+    ) -> PathBuf {
+        let path = mgr.base_dir().join("audio").join(format!("a{idx}.opus"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        mgr.write_file(&path, data).unwrap();
+        let start = now_millis() - 100 * 86_400 * 1000;
+        let meta = AudioSegmentMetadata {
+            start_timestamp: start,
+            end_timestamp: start + 30_000,
+            source: "mic".into(),
+            audio_path: path.to_string_lossy().into_owned(),
+            transcript,
+            whisper_model: None,
+            language: None,
+        };
+        audio::insert(conn, &meta).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_stopped_run_leaves_no_batch_half_applied() {
+        let conn = setup_db();
+        let (_dir, mgr) = temp_media_mgr();
+        let mut paths = Vec::new();
+        for i in 0..CLEANUP_BATCH_SIZE * 2 {
+            paths.push(insert_aged_shot_with_file(&conn, &mgr, i));
+        }
+
+        // False for the first pre-batch check, false for the first post-commit
+        // check, true from the second pre-batch check on.
+        let stats = run_cleanup_interruptible(&conn, &mgr, 30, &stop_after(2)).unwrap();
+
+        assert_eq!(stats.outcome, CleanupOutcome::StopObserved);
+
+        // Every row still in the table must still have its file. A batch that
+        // unlinked files but never committed its rows would fail this.
+        let survivors: Vec<String> = conn
+            .prepare("SELECT image_path FROM screenshots")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(survivors.len(), CLEANUP_BATCH_SIZE);
+        for p in &survivors {
+            assert!(
+                Path::new(p).exists(),
+                "surviving row {p} has no file: a batch was left half-applied"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_final_batch_reports_completed_even_under_a_stop() {
+        // Drives `cleanup_media` directly rather than the whole run: the claim
+        // is about ONE table's exhaustion break winning over its own
+        // post-commit check. Through `run_cleanup_interruptible` the audio
+        // table's pre-batch check would consume the pending stop and report
+        // `StopObserved` for the run — correctly, but for an unrelated reason,
+        // which would make the assertion untestable here.
+        let conn = setup_db();
+        let (_dir, mgr) = temp_media_mgr();
+        // Fewer than one full batch, so the loop breaks on exhaustion.
+        for i in 0..3 {
+            insert_aged_shot_with_file(&conn, &mgr, i);
+        }
+
+        // True from the second call on. The first pre-batch check passes, the
+        // batch commits, and the exhaustion break fires before any second check.
+        let out =
+            cleanup_media(&conn, &SCREENSHOT_TABLE, &mgr, now_millis(), &stop_after(1)).unwrap();
+
+        assert!(
+            !out.stopped,
+            "an exhausted table has nothing for the next run to pick up"
+        );
+        assert_eq!(out.deleted, 3);
+    }
+
+    #[test]
+    fn a_stopped_run_returns_its_partial_statistics() {
+        // BR-8. Both tables, because `bytes_freed` accumulates across them and
+        // a dropped `+=` on the second table is invisible to a
+        // screenshots-only test.
+        let conn = setup_db();
+        let (_dir, mgr) = temp_media_mgr();
+
+        // Three screenshots: one short batch, so the table exhausts and the run
+        // moves on to audio rather than stopping there.
+        for i in 0..3 {
+            insert_aged_shot_with_file(&conn, &mgr, i);
+        }
+        // Two full batches of audio, so a stop can land after the first commits.
+        for i in 0..CLEANUP_BATCH_SIZE * 2 {
+            insert_aged_audio_with_file(&conn, &mgr, i, b"12345678", None);
+        }
+
+        // Call 1: screenshots pre-batch, false. The table exhausts on its short
+        // batch, so no post-commit check runs there. Call 2: audio pre-batch,
+        // false. Call 3: audio post-commit, true.
+        let stats = run_cleanup_interruptible(&conn, &mgr, 30, &stop_after(2)).unwrap();
+
+        assert_eq!(stats.outcome, CleanupOutcome::StopObserved);
+        assert_eq!(
+            stats.screenshots_deleted, 3,
+            "the exhausted screenshot table must still be counted"
+        );
+        assert_eq!(
+            stats.audio_segments_deleted, CLEANUP_BATCH_SIZE,
+            "and the one committed audio batch"
+        );
+        assert_eq!(
+            stats.bytes_freed,
+            ((3 + CLEANUP_BATCH_SIZE) * 8) as u64,
+            "bytes_freed must accumulate across both tables"
+        );
+    }
+
+    #[test]
+    fn a_batch_costs_at_most_two_predicate_calls() {
+        // NFR-4. The `stop_after(n)` tests above are *sensitive* to the call
+        // count without asserting it: add a third check per batch and they stay
+        // green, because each `n` silently re-targets a different check. This
+        // asserts the count itself.
+        let conn = setup_db();
+        let (_dir, mgr) = temp_media_mgr();
+        for i in 0..CLEANUP_BATCH_SIZE * 2 {
+            insert_aged_shot_with_file(&conn, &mgr, i);
+        }
+
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let stop: crate::StopSignal = {
+            let calls = std::sync::Arc::clone(&calls);
+            std::sync::Arc::new(move || {
+                calls.fetch_add(1, AtomicOrdering::Relaxed);
+                false
+            })
+        };
+
+        let stats = run_cleanup_interruptible(&conn, &mgr, 30, &stop).unwrap();
+
+        assert_eq!(stats.outcome, CleanupOutcome::Completed);
+        // Two committed full batches at two calls each, then one pre-batch
+        // check on the empty probe that ends the loop. The audio table adds one
+        // more pre-batch check before its own empty SELECT.
+        assert_eq!(
+            calls.load(AtomicOrdering::Relaxed),
+            2 * 2 + 1 + 1,
+            "at most two predicate calls per batch, plus one per empty probe"
+        );
     }
 }
