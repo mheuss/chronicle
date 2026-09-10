@@ -622,14 +622,14 @@ async fn main() -> Result<()> {
     // spelled out here, because this comment is the only record of them that
     // ships — the documents analysing them are gitignored.
     //
-    // 1. The `process::exit(3)` on a poisoned capture engine runs no
-    //    destructors, so the join below never runs. A run in flight
-    //    there dies after its unlinks and before its commit: files gone, rows
-    //    left pointing at nothing. The next scheduled run repairs that on its
-    //    own — the row is expired by definition, so it is re-selected and
-    //    removed (see docs/guides/storage-engine.md, "Stranded rows repair
-    //    themselves"). HEU-624 added counters that make the condition visible,
-    //    not a repair.
+    // 1. Only a hard kill now strands a run mid-batch: files unlinked, rows
+    //    left pointing at nothing. Neither `process::exit(3)` reaches that
+    //    state — the startup one fires before this task is spawned, and the
+    //    poisoned-engine one runs after the join below, which waits the batch
+    //    out. The next scheduled run repairs a stranding anyway: the row is
+    //    expired by definition, so it is re-selected and removed (see
+    //    docs/guides/storage-engine.md, "Stranded rows repair themselves").
+    //    HEU-624 added counters that make the condition visible, not a repair.
     // 2. A worker panic ends the loop, so retention stays off for the rest of
     //    the process lifetime with one log line as the only signal.
     // 3. A run holds one of the four pooled connections for its whole duration,
