@@ -173,9 +173,10 @@ fn subdevices_with_input_counts(device: AudioObjectID) -> Vec<(AudioObjectID, us
     let mut ids = vec![kAudioObjectUnknown; count];
     let mut size = bytes as u32;
 
-    // SAFETY: `ids` holds `count` ids and `size` is that same byte count, so the
-    // out buffer matches what CoreAudio was told it has. The qualifier is empty,
-    // which this selector permits.
+    // SAFETY: `count` is non-zero above, so `ids` owns a real allocation and
+    // `as_mut_ptr` is non-null. It holds `count` ids and `size` is that same
+    // byte count, so the out buffer matches what CoreAudio was told it has. The
+    // qualifier is empty, which this selector permits.
     let status = unsafe {
         AudioObjectGetPropertyData(
             device,
@@ -191,8 +192,17 @@ fn subdevices_with_input_counts(device: AudioObjectID) -> Vec<(AudioObjectID, us
         return Vec::new();
     }
 
-    // The list can shrink between the two calls if the route changes underneath
-    // us. Trust what this call reported, not what the first one did.
+    // Shrinking between the two calls is legitimate — the route can change
+    // underneath us. Growing is not: it would mean CoreAudio wrote past the
+    // buffer it was handed, and the damage is already done. Reject rather than
+    // read what came back. Same reasoning as the size check in
+    // `copy_string_property`.
+    if size as usize > bytes {
+        log::debug!(
+            "device lookup: sub-device list reported {size} bytes into a {bytes}-byte buffer"
+        );
+        return Vec::new();
+    }
     ids.truncate(size as usize / size_of::<AudioObjectID>());
 
     ids.into_iter()
