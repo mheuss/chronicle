@@ -5,9 +5,11 @@ use std::ptr::NonNull;
 
 use objc2_avf_audio::AVAudioInputNode;
 use objc2_core_audio::{
-    AudioObjectGetPropertyData, AudioObjectID, AudioObjectPropertyAddress,
-    AudioObjectPropertySelector, kAudioDevicePropertyDeviceUID, kAudioObjectPropertyElementMain,
-    kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal, kAudioObjectUnknown,
+    AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectID,
+    AudioObjectPropertyAddress, AudioObjectPropertyScope, AudioObjectPropertySelector,
+    kAudioAggregateDevicePropertyActiveSubDeviceList, kAudioDevicePropertyDeviceUID,
+    kAudioDevicePropertyStreams, kAudioObjectPropertyElementMain, kAudioObjectPropertyName,
+    kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput, kAudioObjectUnknown,
 };
 use objc2_core_foundation::{CFRetained, CFString};
 
@@ -115,6 +117,108 @@ fn copy_string_property(
     Some(unsafe { CFRetained::from_raw(ptr) }.to_string())
 }
 
+/// How many bytes a property currently occupies, or `None` if it is absent.
+///
+/// A non-aggregate device has no sub-device list at all, so the size read
+/// itself fails. That is the signal the bound device needs no resolving, not an
+/// error worth surfacing.
+fn property_size(
+    device: AudioObjectID,
+    selector: AudioObjectPropertySelector,
+    scope: AudioObjectPropertyScope,
+) -> Option<usize> {
+    let address = AudioObjectPropertyAddress {
+        mSelector: selector,
+        mScope: scope,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut size = 0u32;
+    // SAFETY: `address` and `size` are live locals, and the qualifier is empty,
+    // which these selectors permit. This call only measures — it writes nothing
+    // into a data buffer.
+    let status = unsafe {
+        AudioObjectGetPropertyDataSize(
+            device,
+            NonNull::from(&address),
+            0,
+            ptr::null(),
+            NonNull::from(&mut size),
+        )
+    };
+    (status == 0).then_some(size as usize)
+}
+
+/// The sub-devices of an aggregate, paired with each one's input stream count.
+///
+/// Empty for a device that is not an aggregate.
+fn subdevices_with_input_counts(device: AudioObjectID) -> Vec<(AudioObjectID, usize)> {
+    let Some(bytes) = property_size(
+        device,
+        kAudioAggregateDevicePropertyActiveSubDeviceList,
+        kAudioObjectPropertyScopeGlobal,
+    ) else {
+        return Vec::new();
+    };
+
+    let count = bytes / size_of::<AudioObjectID>();
+    if count == 0 {
+        return Vec::new();
+    }
+
+    let address = AudioObjectPropertyAddress {
+        mSelector: kAudioAggregateDevicePropertyActiveSubDeviceList,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut ids = vec![kAudioObjectUnknown; count];
+    let mut size = bytes as u32;
+
+    // SAFETY: `ids` holds `count` ids and `size` is that same byte count, so the
+    // out buffer matches what CoreAudio was told it has. The qualifier is empty,
+    // which this selector permits.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            device,
+            NonNull::from(&address),
+            0,
+            ptr::null(),
+            NonNull::from(&mut size),
+            NonNull::new_unchecked(ids.as_mut_ptr()).cast(),
+        )
+    };
+    if status != 0 {
+        log::debug!("device lookup: sub-device list read failed, OSStatus {status}");
+        return Vec::new();
+    }
+
+    // The list can shrink between the two calls if the route changes underneath
+    // us. Trust what this call reported, not what the first one did.
+    ids.truncate(size as usize / size_of::<AudioObjectID>());
+
+    ids.into_iter()
+        .map(|id| {
+            let bytes = property_size(
+                id,
+                kAudioDevicePropertyStreams,
+                kAudioObjectPropertyScopeInput,
+            )
+            .unwrap_or(0);
+            (id, bytes / size_of::<AudioObjectID>())
+        })
+        .collect()
+}
+
+/// Picks the sub-device that carries the input.
+///
+/// A default-device aggregate wraps both halves of the default route, so the
+/// output device is in the list too. Input stream count is what separates them.
+fn first_input_subdevice(subdevices: &[(AudioObjectID, usize)]) -> Option<AudioObjectID> {
+    subdevices
+        .iter()
+        .find(|(_, input_streams)| *input_streams > 0)
+        .map(|(id, _)| *id)
+}
+
 /// The identity of the device the engine's input node is bound to.
 ///
 /// Never fails. Any unreadable field comes back `None` and renders as
@@ -139,6 +243,19 @@ pub(crate) fn describe(node: &AVAudioInputNode) -> InputDevice {
         log::debug!("device lookup: the input node reports no bound device");
         return absent;
     }
+
+    // `AVAudioEngine` binds to a private aggregate wrapping the default route,
+    // not to the microphone. Its name is synthetic (`CADefaultDeviceAggregate-
+    // <pid>-0`) and changes every run, so reporting it would defeat the point.
+    // A device that is not an aggregate has no sub-device list and falls
+    // through unchanged.
+    let device = match first_input_subdevice(&subdevices_with_input_counts(device)) {
+        Some(input) => {
+            log::debug!("device lookup: resolved aggregate {device} to input sub-device {input}");
+            input
+        }
+        None => device,
+    };
 
     InputDevice {
         name: copy_string_property(device, kAudioObjectPropertyName, "name"),
@@ -253,5 +370,35 @@ mod tests {
             render_fields(&device(None, Some(r#"a"b"#))),
             r#"device_name="unknown" device_uid="a\"b""#
         );
+    }
+    #[test]
+    fn no_subdevices_resolves_to_nothing() {
+        assert_eq!(first_input_subdevice(&[]), None);
+    }
+
+    #[test]
+    fn a_list_with_no_input_resolves_to_nothing() {
+        // An output-only aggregate is not the microphone's, so falling back to
+        // the bound device is better than naming a speaker.
+        assert_eq!(first_input_subdevice(&[(105, 0), (67, 0)]), None);
+    }
+
+    #[test]
+    fn the_input_subdevice_wins_over_the_output_half() {
+        // The real shape observed on this machine: the mic carries one input
+        // stream, the speakers carry none.
+        assert_eq!(first_input_subdevice(&[(117, 1), (105, 0)]), Some(117));
+    }
+
+    #[test]
+    fn the_input_subdevice_is_found_when_it_is_not_first() {
+        // Ordering is not documented, so a test that only ever puts the input
+        // first would pass on an implementation that returns element zero.
+        assert_eq!(first_input_subdevice(&[(105, 0), (117, 1)]), Some(117));
+    }
+
+    #[test]
+    fn the_first_of_several_inputs_wins() {
+        assert_eq!(first_input_subdevice(&[(131, 2), (117, 1)]), Some(131));
     }
 }
