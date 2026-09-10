@@ -1,4 +1,4 @@
-//! Identity of the audio device the microphone engine is bound to.
+//! Identity of the input device behind the microphone engine's input node.
 
 use std::ptr;
 use std::ptr::NonNull;
@@ -155,7 +155,7 @@ fn property_size(
         )
     };
     if status != 0 {
-        log::debug!("device lookup: {stage} size read failed, OSStatus {status}");
+        log::debug!("device lookup: {stage} size unavailable, OSStatus {status}");
         return None;
     }
     Some(size as usize)
@@ -176,7 +176,9 @@ fn subdevices_with_input_counts(device: AudioObjectID) -> Vec<(AudioObjectID, us
     };
 
     let Some(count) = elements_to_allocate(bytes) else {
-        log::debug!("device lookup: sub-device list reported an implausible {bytes} bytes");
+        // Zero is a real state — an aggregate whose members are all unplugged
+        // reports no *active* ones — so this is not necessarily a fault.
+        log::debug!("device lookup: sub-device list reported {bytes} bytes, not a usable count");
         return Vec::new();
     };
 
@@ -186,7 +188,10 @@ fn subdevices_with_input_counts(device: AudioObjectID) -> Vec<(AudioObjectID, us
         mElement: kAudioObjectPropertyElementMain,
     };
     let mut ids = vec![kAudioObjectUnknown; count];
-    let mut size = bytes as u32;
+    // Not `bytes`: `count` rounded it down to whole ids, so a non-multiple
+    // would tell CoreAudio the buffer is larger than it is.
+    let buffer_bytes = count * size_of::<AudioObjectID>();
+    let mut size = buffer_bytes as u32;
 
     // SAFETY: `ids` holds `count` ids and `size` is that same byte count, so the
     // out buffer matches what CoreAudio was told it has. `NonNull::from` on the
@@ -207,9 +212,9 @@ fn subdevices_with_input_counts(device: AudioObjectID) -> Vec<(AudioObjectID, us
         return Vec::new();
     }
 
-    let Some(keep) = elements_to_keep(bytes, size as usize) else {
+    let Some(keep) = elements_to_keep(buffer_bytes, size as usize) else {
         log::debug!(
-            "device lookup: sub-device list reported {size} bytes into a {bytes}-byte buffer"
+            "device lookup: sub-device list reported {size} bytes into a {buffer_bytes}-byte buffer"
         );
         return Vec::new();
     };
@@ -269,11 +274,11 @@ fn elements_to_keep(buffer_bytes: usize, reported_bytes: usize) -> Option<usize>
 /// When more than one member has input streams this takes the first, and that
 /// is a fallback rather than a decision: `ActiveSubDeviceList` has no documented
 /// ordering, and nothing here can tell which member the route actually reads
-/// from. The default-route aggregate has exactly one input member, so the
-/// ambiguity is unreachable on that path. It becomes reachable if the default
-/// *output* is a device that also carries input — a Bluetooth headset or most
-/// USB interfaces — which is why this is written down rather than left to the
-/// test that pins it.
+/// from. The default-route aggregate has one input member whenever the default
+/// output carries none, which is the common case and where the ambiguity stays
+/// unreachable. It becomes reachable when the default output is a device that
+/// also carries input — a Bluetooth headset, or most USB interfaces — which is
+/// why this is written down rather than left to the test that pins it.
 fn first_input_subdevice(subdevices: &[(AudioObjectID, usize)]) -> Option<AudioObjectID> {
     subdevices
         .iter()
@@ -448,6 +453,14 @@ mod tests {
         // Three bytes is not one id. Rounding down gives zero, which is not a
         // plausible list.
         assert_eq!(elements_to_allocate(3), None);
+    }
+
+    #[test]
+    fn a_single_member_list_allocates_one() {
+        // Pins the floor. Without this, widening the guard to `2..=MAX` passes
+        // every other test — and one member is the case that decides whether a
+        // normal aggregate resolves at all.
+        assert_eq!(elements_to_allocate(size_of::<AudioObjectID>()), Some(1));
     }
 
     #[test]
