@@ -40,9 +40,10 @@ pub use retention::MAX_RETENTION_DAYS;
 /// A predicate the cleanup batch loop calls to ask whether it should stop.
 ///
 /// `Arc<dyn Fn>` rather than a borrow because the value crosses the
-/// `spawn_blocking` boundary and needs `'static + Send + Sync`. The daemon
-/// builds one over its cancellation token; every other caller gets the
-/// never-stop wrapper.
+/// `spawn_blocking` boundary and needs `'static + Send + Sync`. The only
+/// predicate today is the never-stop one [`Storage::run_cleanup`] supplies;
+/// the daemon's, built over its cancellation token, arrives with the shutdown
+/// wiring.
 pub type StopSignal = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// SQLite-backed storage engine for screenshots, audio, and full-text search.
@@ -789,7 +790,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_cleanup_rejects_a_retention_beyond_the_bound() {
-        // The bound is enforced in `retention::run_cleanup`; this asserts the
+        // The bound is enforced in `retention::run_cleanup_interruptible`;
+        // this asserts the
         // error propagates out through the public boundary. See the comment at
         // the validation block above for why it is not re-checked here.
         //
