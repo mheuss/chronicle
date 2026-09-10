@@ -1021,7 +1021,7 @@ async fn main() -> Result<()> {
         // (`ipc_server.shutdown`, `supervisor.shutdown`, the bridge join, the
         // audio-store await) are the ones with no ceiling; the three explicit
         // waits — the provision wait, this one, and CLEANUP_GRACE at the end of
-        // teardown — total 10.2s of the 20s and are the part we actually
+        // teardown — total 10.6s of the 20s and are the part we actually
         // control.
         const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
         // Borrow the handle — do NOT let `timeout` consume it. Dropping a JoinHandle
@@ -1059,12 +1059,21 @@ async fn main() -> Result<()> {
     // Nothing pins this placement. Moving the join up to sit beside
     // `cancel.cancel()` leaves the whole suite green; only a spawned-daemon
     // test would catch it.
-    // Four times the slower of two measured batches (NFR-3): 49.4 ms for 500
-    // screenshots, 39.9 ms for 500 audio segments, on an M-series laptop with a
-    // warm scratch directory. Not a bound on batch duration — `busy_timeout` is
-    // 5000 ms, so a contended commit can outlast any useful grace. This is
-    // where we stop waiting quietly and say so.
-    const CLEANUP_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+    // Four times a measured batch (NFR-3), rounded up to a whole hundred.
+    // Eight runs of 500 rows on an M-series laptop: an idle machine gives
+    // 32-49 ms, and one run with the CPU busy gave 131 ms. Taking the busy
+    // figure, 524.8 ms -> 600 ms.
+    //
+    // Deliberately not the idle number. A machine shutting down is often a
+    // machine under load, so sizing to idle would fire the warning below on
+    // exactly the shutdowns the grace exists for, and a warning that cries wolf
+    // on every busy exit tells nobody anything.
+    //
+    // Not a bound on batch duration either — `busy_timeout` is 5000 ms, so a
+    // contended commit can outlast any grace worth having. This is where we
+    // stop waiting quietly and say so; overshooting costs only the log line,
+    // because the timeout arm never sets `shutdown_failed` on its own.
+    const CLEANUP_GRACE: std::time::Duration = std::time::Duration::from_millis(600);
     if join_cleanup_task(cleanup_handle, CLEANUP_GRACE).await {
         shutdown_failed = true;
     }

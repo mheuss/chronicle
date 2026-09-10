@@ -8,6 +8,10 @@ use crate::error::{Result, StorageError};
 use crate::media::MediaManager;
 use crate::models::{CleanupOutcome, CleanupStats};
 
+/// Rows per batch. Changing this invalidates `CLEANUP_GRACE` in
+/// `chronicle-daemon/src/main.rs`, which is four times a measured batch at this
+/// size, and the row counts quoted in the `measure_one_*` tests below. Nothing
+/// gates that — re-run the measurements.
 const CLEANUP_BATCH_SIZE: usize = 500;
 
 /// Descriptor for a media table's columns. Parameterizes generic cleanup/sweep.
@@ -1893,14 +1897,15 @@ mod tests {
         let conn = setup_db();
         let (_dir, mgr) = temp_media_mgr();
         std::fs::create_dir_all(mgr.base_dir().join("screenshots")).unwrap();
+        let image = vec![0u8; 450 * 1024];
         for i in 0..CLEANUP_BATCH_SIZE {
             let path = mgr
                 .base_dir()
                 .join("screenshots")
                 .join(format!("s{i}.heif"));
-            // ~450 KB is this machine's live average: 3.5 GB across 7,943
-            // screenshots, measured 2026-09-10.
-            mgr.write_file(&path, &vec![0u8; 450 * 1024]).unwrap();
+            // 3.5 GB across 7,943 screenshots on this machine, measured
+            // 2026-09-10, is ~460 KiB each; 450 KiB here.
+            mgr.write_file(&path, &image).unwrap();
             let meta = ScreenshotMetadata {
                 timestamp: now_millis() - 100 * 86_400 * 1000,
                 display_id: "display1".into(),
@@ -1920,14 +1925,20 @@ mod tests {
         let out = cleanup_media(&conn, &SCREENSHOT_TABLE, &mgr, now_millis(), &never).unwrap();
         let elapsed = start.elapsed();
 
-        println!("screenshot batch: {} rows in {elapsed:?}", out.deleted);
+        // `freed` too: `cleanup_media` swallows unlink failures as warnings,
+        // so a fixture whose paths fall outside the manager's base would print
+        // an identical row count while measuring no file I/O at all.
+        println!(
+            "screenshot batch: {} rows, {} bytes freed, in {elapsed:?}",
+            out.deleted, out.freed
+        );
     }
 
     /// NFR-3, audio half. HEU-630 gives the production shape as roughly a
     /// third of audio rows carrying transcripts, averaging ~120 characters.
-    /// This seeds 167 of 500 rows with a 132-character string — close enough
-    /// that the FTS delete triggers fire on a realistic fraction, which is all
-    /// the measurement needs.
+    /// This seeds 167 of 500 rows with a 132-character string, so the FTS
+    /// delete triggers index a realistic amount of text — they fire on all 500
+    /// rows either way, since `audio_ad` has no `WHEN` clause.
     #[test]
     #[ignore = "measurement, not a check"]
     fn measure_one_audio_batch() {
@@ -1951,6 +1962,9 @@ mod tests {
         let out = cleanup_media(&conn, &AUDIO_TABLE, &mgr, now_millis(), &never).unwrap();
         let elapsed = start.elapsed();
 
-        println!("audio batch: {} rows in {elapsed:?}", out.deleted);
+        println!(
+            "audio batch: {} rows, {} bytes freed, in {elapsed:?}",
+            out.deleted, out.freed
+        );
     }
 }
