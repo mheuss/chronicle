@@ -634,10 +634,11 @@ async fn main() -> Result<()> {
     // Retention cleanup. Spawned, never awaited on the startup path: HEU-547
     // was a 249-second startup stall and that shape must not come back.
     //
-    // The handle is retained and joined as the last teardown step — on every
-    // path but one: `ctrl_c()`'s `res?` below returns from `main` without
-    // running teardown at all, which detaches the handle. Unreachable on Unix
-    // in practice. Two things
+    // The handle is retained and joined as the last teardown step, unless a
+    // signal `?` below returns from `main` first — registering the SIGTERM
+    // handler, or `ctrl_c()`'s `res?`. Either skips teardown entirely and
+    // detaches the handle. Both are signal-setup failures, so neither is
+    // reachable in practice on Unix. Two things
     // about this task are worth knowing anyway, spelled out here because this
     // comment is the only record of them that ships — the documents analysing
     // them are gitignored.
@@ -1048,9 +1049,10 @@ async fn main() -> Result<()> {
     // Last, deliberately. `cancel.cancel()` raised the stop predicate before
     // every unbounded teardown step, so the in-flight batch has been winding
     // down through all of them and this wait is normally already satisfied.
-    // Not through the provision wait, which runs *before* the cancel and is the
-    // largest single wait in teardown — moving the cancel above it would buy
-    // that time too, at the cost of stopping IPC and the refreshers earlier.
+    // Not through the provision wait, which runs *before* the cancel and is
+    // tied with DRAIN_GRACE for the longest at 5s — moving the cancel above it
+    // would buy that time too, at the cost of stopping IPC and the refreshers
+    // earlier.
     //
     // Nothing pins this placement. Moving the join up to sit beside
     // `cancel.cancel()` leaves the whole suite green; only a spawned-daemon
