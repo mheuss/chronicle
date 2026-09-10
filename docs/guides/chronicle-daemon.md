@@ -117,11 +117,11 @@ transcripts. The daemon logs the device's native input format once, when it
 installs the tap:
 
 ```text
-[2026-08-22T22:02:06Z INFO  chronicle_audio::microphone] microphone tap installed (capture starts on mic-on): 2 ch, 48000 Hz, interleaved=false, format=f32
+[2026-08-22T22:02:06Z INFO  chronicle_audio::microphone] microphone tap installed (capture starts on mic-on): device_name="Yeti Stereo Microphone" device_uid="AppleUSBAudioEngine:Blue:Yeti:14100000", 2 ch, 48000 Hz, interleaved=false, format=f32
 ```
 
-It reports channel count, sample rate, whether samples are interleaved, and the
-sample format.
+It reports the bound device's name and CoreAudio UID, then channel count, sample
+rate, whether samples are interleaved, and the sample format.
 
 **A `2 ch` mic is the usual reason audio comes back quiet.** The converter is
 built with no `channelMap`, so a 2-to-1 conversion selects channel 0 and
@@ -172,11 +172,6 @@ Four things to know before you trust what you read:
 - **Restart between devices.** `MicrophoneCapture` and its converter are built
   once when the pipeline is created, so changing the default input while the
   daemon runs leaves the converter built for the previous device.
-- **The line does not name the device.** Nothing in it identifies which
-  microphone it describes, and two different devices can produce byte-identical
-  output. Confirm the default input in Audio MIDI Setup *before* you read the
-  line, and label it yourself when you record it — otherwise a second
-  measurement is indistinguishable from the first one repeated.
 - **The line appears with the mic off.** The tap is installed eagerly at
   startup; capture begins only when the mic is enabled. Seeing this line is not
   evidence the microphone was live.
@@ -213,7 +208,7 @@ tells you which device is selected.
 | Crate | Purpose | Key External Deps |
 |-------|---------|-------------------|
 | `chronicle-capture` | Screen capture via ScreenCaptureKit | `objc2-screen-capture-kit`, `objc2-app-kit`, `core-graphics` |
-| `chronicle-audio` | Audio capture + Opus encoding | `objc2-avf-audio`, `objc2-screen-capture-kit`, `opus`, `ogg` |
+| `chronicle-audio` | Audio capture + Opus encoding | `objc2-avf-audio`, `objc2-audio-toolbox`, `objc2-core-audio`, `objc2-screen-capture-kit`, `opus`, `ogg` |
 | `chronicle-storage` | SQLite + FTS5 storage engine | `rusqlite` (bundled), `r2d2` |
 | `chronicle-ocr` | Text extraction via Vision framework | `objc2-vision` |
 | `chronicle-transcription` | Local speech-to-text via whisper.cpp | `whisper-rs`, `opus`, `ogg`, `sha1` |
