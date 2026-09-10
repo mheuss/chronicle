@@ -117,7 +117,7 @@ transcripts. The daemon logs the device's identity and native input format
 once, when it installs the tap:
 
 ```text
-[2026-08-22T22:02:06Z INFO  chronicle_audio::microphone] microphone tap installed (capture starts on mic-on): device_name="Yeti Stereo Microphone" device_uid="AppleUSBAudioEngine:Blue:Yeti:<serial>", 2 ch, 48000 Hz, interleaved=false, format=f32
+[2026-08-22T22:02:06Z INFO  chronicle_audio::microphone] microphone tap installed (capture starts on mic-on): device_name="Yeti Stereo Microphone" device_uid="AppleUSBAudioEngine:Generic:Blue Microphones:<serial>:1", 2 ch, 48000 Hz, interleaved=false, format=f32
 ```
 
 It reports the input device you selected — its name and CoreAudio UID — then
@@ -136,9 +136,10 @@ the name is the aggregate. A channel count that disagrees with what Audio MIDI
 Setup shows for the named device is this, not a fault.
 
 **Redact the UID before you paste this line anywhere public.** A real
-`AppleUSBAudioEngine:` UID ends in the device's hardware serial. Replace that
-segment with `<serial>` and say you did — a comparison still holds with both
-sides redacted. `mheuss/chronicle` is a public repository.
+`AppleUSBAudioEngine:` UID carries the device's hardware serial in its
+**second-to-last** segment — the trailing one is an interface index, not a
+secret. Replace the serial with `<serial>` and say you did; a comparison still
+holds with both sides redacted. `mheuss/chronicle` is a public repository.
 
 **A `2 ch` mic is the usual reason audio comes back quiet.** The converter is
 built with no `channelMap`, so a 2-to-1 conversion selects channel 0 and

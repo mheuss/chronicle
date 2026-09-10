@@ -161,10 +161,11 @@ fn property_size(
 
 /// The sub-devices of an aggregate, paired with each one's input stream count.
 ///
-/// `None` means the device has no sub-device list property at all, so it is not
-/// an aggregate and is already the one to name. `Some` of an empty list means it
-/// *is* an aggregate but nothing usable came back — a different situation, and
-/// naming that device would put `CADefaultDeviceAggregate-<pid>-0` in the line.
+/// `None` means no list came back — normally because the device is not an
+/// aggregate, though an unreadable property looks the same. Either way it is the
+/// device to name. `Some` of an empty list means the property *did* read and
+/// held nothing usable, which is the case where naming the device would put
+/// `CADefaultDeviceAggregate-<pid>-0` in the line.
 fn subdevices_with_input_counts(device: AudioObjectID) -> Option<Vec<(AudioObjectID, usize)>> {
     // `?` exits when no list came back — normally because the device is not an
     // aggregate, though `property_size` cannot tell that from a read that
@@ -370,7 +371,9 @@ pub(crate) fn describe(node: &AVAudioInputNode) -> InputDevice {
         // An ordinary path, not a failure: after a route change the node binds
         // straight to a device, which is then already the one to name.
         None => {
-            log::debug!("device lookup: {device} has no sub-device list, naming it as-is");
+            log::debug!(
+                "device lookup: no sub-device list for {device} (see any status above), naming it as-is"
+            );
             device
         }
         Some(subdevices) => match first_input_subdevice(&subdevices) {
