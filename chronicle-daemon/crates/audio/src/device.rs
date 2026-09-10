@@ -44,6 +44,10 @@ fn escape(value: &str) -> String {
     out
 }
 
+/// Renders the device fields for the log line.
+///
+/// A function rather than a `Display` impl: the `unknown` substitution is this
+/// line's policy, not the type's identity.
 pub(crate) fn render_fields(device: &InputDevice) -> String {
     let name = match device.name.as_deref() {
         Some(value) => escape(value),
@@ -233,8 +237,9 @@ fn subdevices_with_input_counts(device: AudioObjectID) -> Option<Vec<(AudioObjec
     Some(counts)
 }
 
-/// The count comes from the HAL handler — third-party code for a virtual
-/// device — and it sizes an allocation.
+/// The most members an aggregate can claim before the count reads as a lie. It
+/// comes from the HAL handler — third-party code for a virtual device — and it
+/// sizes an allocation.
 const MAX_SUBDEVICES: usize = 64;
 
 /// How many ids to allocate for a sub-device list of `bytes`, or `None` when
@@ -328,10 +333,9 @@ fn first_input_subdevice(subdevices: &[(AudioObjectID, usize)]) -> Option<AudioO
 /// the selected default input and prefers the selection when they differ. A
 /// device bound directly is reported as-is.
 ///
-/// It does read the system default, but only as that cross-check — Architectural
-/// Decision 7 forbids falling back to it when the bound-device read *fails*, and
-/// that path still returns `unknown`. Never fails; an unreadable field renders
-/// as `unknown`.
+/// Never fails: an unreadable field renders as `unknown`. The system-default
+/// read is the cross-check only — Architectural Decision 7 forbids falling back
+/// to it when the bound-device read *fails*, and that path returns `unknown`.
 pub(crate) fn describe(node: &AVAudioInputNode) -> InputDevice {
     let absent = InputDevice {
         name: None,
@@ -352,12 +356,10 @@ pub(crate) fn describe(node: &AVAudioInputNode) -> InputDevice {
         return absent;
     }
 
-    // `AVAudioEngine` binds to an aggregate wrapping the default route, not to
-    // the microphone. Its name and UID are both `CADefaultDeviceAggregate-
-    // <pid>-0` — the trailing number is the process id, checked against
-    // `getpid()` — so reporting it names no device and changes every run.
-    // A device that is not an aggregate has no sub-device list and falls
-    // through unchanged.
+    // The node is usually bound to an aggregate wrapping the default route
+    // rather than to the microphone. Its name and UID are both
+    // `CADefaultDeviceAggregate-<pid>-0` — the trailing number is the process
+    // id — so reporting it names no device and changes every run.
     let device = match subdevices_with_input_counts(device) {
         // An ordinary path, not a failure: after a route change the node binds
         // straight to a device, which is then already the one to name.

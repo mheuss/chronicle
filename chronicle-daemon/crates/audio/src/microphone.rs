@@ -245,13 +245,11 @@ impl MicrophoneCapture {
             // SAFETY: no preconditions.
             unsafe { engine.prepare() };
 
-            // Sits beside the log line it feeds, per Architectural Decision 2.
-            // The node is bound well before here — `outputFormatForBus` above
-            // could not have returned a native format otherwise.
-            //
-            // May name a different CoreAudio object than the format fields do:
-            // those come from whatever the node bound, this from the selected
-            // input device. They differ when that selection is an aggregate.
+            // Sits beside the log line it feeds, per Architectural Decision 2 —
+            // not because the unit is uninitialised before here, which
+            // `outputFormatForBus` above already disproves. May name a different
+            // CoreAudio object than the format fields do: those come from
+            // whatever the node bound, this from the selected input device.
             let device = crate::device::describe(&input);
 
             // The tap is installed and the engine prepared, so this really is
