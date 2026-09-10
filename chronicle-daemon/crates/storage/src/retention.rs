@@ -1578,6 +1578,9 @@ mod tests {
     /// The payload both `_with_file` helpers write. `bytes_freed` assertions
     /// read its length rather than repeating the number.
     const FIXTURE_BYTES: &[u8] = b"12345678";
+    // Empty would leave every `bytes_freed` assertion vacuously true, including
+    // BR-8's only cross-table pin, with the suite fully green.
+    const _: () = assert!(!FIXTURE_BYTES.is_empty());
 
     /// Insert one expired screenshot with a real file under the manager's base
     /// directory.
@@ -1690,16 +1693,25 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
 
-        // File existence FIRST. A count assertion here would fire on the
-        // danger-window placement too, but for the wrong reason — the deleted
-        // count going to zero, not a survivor losing its file.
+        // File existence FIRST, so the failure names the invariant. A count
+        // assertion would fire on the danger-window placement too, but for the
+        // wrong reason — the deleted count going to zero, not a survivor losing
+        // its file.
         for p in &survivors {
             assert!(
                 Path::new(p).exists(),
                 "surviving row {p} has no file: the stop landed inside a batch"
             );
         }
-        assert_eq!(survivors.len(), CLEANUP_BATCH_SIZE);
+        // Not redundant with the sibling test: this is what proves a batch
+        // committed at all. Let the fixture drift so the run stops before any
+        // work and the loop above passes over untouched rows — this is the only
+        // assertion left that fails.
+        assert_eq!(
+            survivors.len(),
+            CLEANUP_BATCH_SIZE,
+            "exactly one batch must have committed, or the file loop is vacuous"
+        );
     }
 
     #[test]
