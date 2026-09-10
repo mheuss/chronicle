@@ -1060,9 +1060,10 @@ async fn main() -> Result<()> {
     // `cancel.cancel()` leaves the whole suite green; only a spawned-daemon
     // test would catch it.
     // Four times a measured batch (NFR-3), rounded up to a whole hundred.
-    // Eight runs of 500 rows on an M-series laptop: an idle machine gives
-    // 32-49 ms, and one run with the CPU busy gave 131 ms. Taking the busy
-    // figure, 524.8 ms -> 600 ms.
+    // Eight runs per table of 500 rows on an M-series laptop: idle spans
+    // 29-49 ms across both tables, and the two runs taken with the CPU busy
+    // gave 131 ms and 105 ms. Taking the slowest, 4 x 131.2 = 524.8 -> 600 ms.
+    // Per-run figures are in the plan's Decisions section.
     //
     // Deliberately not the idle number. A machine shutting down is often a
     // machine under load, so sizing to idle would fire the warning below on
