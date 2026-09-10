@@ -166,7 +166,9 @@ fn property_size(
 /// *is* an aggregate but nothing usable came back — a different situation, and
 /// naming that device would put `CADefaultDeviceAggregate-<pid>-0` in the line.
 fn subdevices_with_input_counts(device: AudioObjectID) -> Option<Vec<(AudioObjectID, usize)>> {
-    // `?` here is the not-an-aggregate exit: no sub-device list property.
+    // `?` exits when no list came back — normally because the device is not an
+    // aggregate, though `property_size` cannot tell that from a read that
+    // failed for another reason.
     let bytes = property_size(
         device,
         kAudioAggregateDevicePropertyActiveSubDeviceList,
@@ -237,9 +239,9 @@ fn subdevices_with_input_counts(device: AudioObjectID) -> Option<Vec<(AudioObjec
     Some(counts)
 }
 
-/// The most members an aggregate can claim before the count reads as a lie. It
-/// comes from the HAL handler — third-party code for a virtual device — and it
-/// sizes an allocation.
+/// A bound on the member count, which comes from the HAL handler — third-party
+/// code for a virtual device — and sizes an allocation. 64 is arbitrary: Apple
+/// documents no limit, and it is far above anything observed.
 const MAX_SUBDEVICES: usize = 64;
 
 /// How many ids to allocate for a sub-device list of `bytes`, or `None` when
@@ -333,9 +335,13 @@ fn first_input_subdevice(subdevices: &[(AudioObjectID, usize)]) -> Option<AudioO
 /// the selected default input and prefers the selection when they differ. A
 /// device bound directly is reported as-is.
 ///
-/// Never fails: an unreadable field renders as `unknown`. The system-default
-/// read is the cross-check only — Architectural Decision 7 forbids falling back
-/// to it when the bound-device read *fails*, and that path returns `unknown`.
+/// An unreadable field renders as `unknown` rather than failing the caller. The
+/// one way this does not return is the nil-`AUAudioUnit` panic noted below,
+/// which the header's `NS_ASSUME_NONNULL` contract rules out.
+///
+/// The system-default read is the cross-check only — Architectural Decision 7
+/// forbids falling back to it when the bound-device read *fails*, and that path
+/// returns `unknown`.
 pub(crate) fn describe(node: &AVAudioInputNode) -> InputDevice {
     let absent = InputDevice {
         name: None,
