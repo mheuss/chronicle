@@ -217,8 +217,12 @@ fn cleanup_media(
 
         // Exhaustion first. A short batch means the table is empty, so the run
         // finished its work and reports `Completed` — there is nothing for the
-        // next run to pick up. Only a full batch can leave rows behind, and
-        // only that case reports `StopObserved`.
+        // next run to pick up. A full batch is the only case that *can* leave
+        // rows behind, so it is the only one that reports `StopObserved`. It
+        // over-reports on an exact multiple of the batch size, where the table
+        // is empty but the final batch was full: the run suppresses its own
+        // checkpoint and the next boot cleans early. Detecting that would cost
+        // an extra SELECT per table, which is more than an early re-run costs.
         if count < CLEANUP_BATCH_SIZE {
             break;
         }
@@ -1571,13 +1575,13 @@ mod tests {
         (dir, mgr)
     }
 
-    /// Insert one expired screenshot with a real 8-byte file under the
-    /// manager's base directory, and return the path.
-    fn insert_aged_shot_with_file(
-        conn: &Connection,
-        mgr: &crate::media::MediaManager,
-        idx: usize,
-    ) -> PathBuf {
+    /// The payload both `_with_file` helpers write. `bytes_freed` assertions
+    /// read its length rather than repeating the number.
+    const FIXTURE_BYTES: &[u8] = b"12345678";
+
+    /// Insert one expired screenshot with a real file under the manager's base
+    /// directory.
+    fn insert_aged_shot_with_file(conn: &Connection, mgr: &crate::media::MediaManager, idx: usize) {
         let path = mgr
             .base_dir()
             .join("screenshots")
@@ -1586,7 +1590,7 @@ mod tests {
         // does not create parents. `validate_path` also canonicalizes the
         // parent, so it must exist before the write.
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        mgr.write_file(&path, b"12345678").unwrap();
+        mgr.write_file(&path, FIXTURE_BYTES).unwrap();
         let meta = ScreenshotMetadata {
             timestamp: now_millis() - 100 * 86_400 * 1000,
             display_id: "display1".into(),
@@ -1599,19 +1603,18 @@ mod tests {
             resolution: None,
         };
         screenshots::insert(conn, &meta).unwrap();
-        path
     }
 
     /// Insert one expired audio segment with a real file under the manager's
-    /// base directory, and return the path. `data` sets the file size, which is
-    /// what `bytes_freed` accumulates.
+    /// base directory. `data` sets the file size, which is what `bytes_freed`
+    /// accumulates; `transcript` decides whether the FTS delete triggers fire.
     fn insert_aged_audio_with_file(
         conn: &Connection,
         mgr: &crate::media::MediaManager,
         idx: usize,
         data: &[u8],
         transcript: Option<String>,
-    ) -> PathBuf {
+    ) {
         let path = mgr.base_dir().join("audio").join(format!("a{idx}.opus"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         mgr.write_file(&path, data).unwrap();
@@ -1626,16 +1629,14 @@ mod tests {
             language: None,
         };
         audio::insert(conn, &meta).unwrap();
-        path
     }
 
     #[test]
     fn a_stopped_run_leaves_no_batch_half_applied() {
         let conn = setup_db();
         let (_dir, mgr) = temp_media_mgr();
-        let mut paths = Vec::new();
         for i in 0..CLEANUP_BATCH_SIZE * 2 {
-            paths.push(insert_aged_shot_with_file(&conn, &mgr, i));
+            insert_aged_shot_with_file(&conn, &mgr, i);
         }
 
         // False for the first pre-batch check, false for the first post-commit
@@ -1663,6 +1664,45 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_after_a_commit_leaves_no_batch_half_applied() {
+        // BR-2, and the clause the test above cannot reach. `stop_after(2)`
+        // always ends on a *pre-batch* boundary, so no batch is ever in flight
+        // when it asserts — its file loop holds for every placement of the
+        // check, including one inside the danger window between the unlink loop
+        // and `tx.commit()`. `stop_after(1)` ends on the post-commit boundary
+        // instead, which is the only arrangement that can observe files
+        // unlinked against rows that were never deleted.
+        let conn = setup_db();
+        let (_dir, mgr) = temp_media_mgr();
+        for i in 0..CLEANUP_BATCH_SIZE * 2 {
+            insert_aged_shot_with_file(&conn, &mgr, i);
+        }
+
+        let stats = run_cleanup_interruptible(&conn, &mgr, 30, &stop_after(1)).unwrap();
+
+        assert_eq!(stats.outcome, CleanupOutcome::StopObserved);
+
+        let survivors: Vec<String> = conn
+            .prepare("SELECT image_path FROM screenshots")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        // File existence FIRST. A count assertion here would fire on the
+        // danger-window placement too, but for the wrong reason — the deleted
+        // count going to zero, not a survivor losing its file.
+        for p in &survivors {
+            assert!(
+                Path::new(p).exists(),
+                "surviving row {p} has no file: the stop landed inside a batch"
+            );
+        }
+        assert_eq!(survivors.len(), CLEANUP_BATCH_SIZE);
+    }
+
+    #[test]
     fn a_short_final_batch_reports_completed_even_under_a_stop() {
         // Drives `cleanup_media` directly rather than the whole run: the claim
         // is about ONE table's exhaustion break winning over its own
@@ -1687,6 +1727,7 @@ mod tests {
             "an exhausted table has nothing for the next run to pick up"
         );
         assert_eq!(out.deleted, 3);
+        assert_eq!(out.freed, (3 * FIXTURE_BYTES.len()) as u64);
     }
 
     #[test]
@@ -1704,7 +1745,7 @@ mod tests {
         }
         // Two full batches of audio, so a stop can land after the first commits.
         for i in 0..CLEANUP_BATCH_SIZE * 2 {
-            insert_aged_audio_with_file(&conn, &mgr, i, b"12345678", None);
+            insert_aged_audio_with_file(&conn, &mgr, i, FIXTURE_BYTES, None);
         }
 
         // Call 1: screenshots pre-batch, false. The table exhausts on its short
@@ -1723,7 +1764,7 @@ mod tests {
         );
         assert_eq!(
             stats.bytes_freed,
-            ((3 + CLEANUP_BATCH_SIZE) * 8) as u64,
+            ((3 + CLEANUP_BATCH_SIZE) * FIXTURE_BYTES.len()) as u64,
             "bytes_freed must accumulate across both tables"
         );
     }
@@ -1734,6 +1775,10 @@ mod tests {
         // count without asserting it: add a third check per batch and they stay
         // green, because each `n` silently re-targets a different check. This
         // asserts the count itself.
+        //
+        // Equality rather than `<=`, even though NFR-4 states an upper bound: a
+        // predicate called once per batch and cached satisfies `<=` while
+        // missing every stop that arrives after the SELECT.
         let conn = setup_db();
         let (_dir, mgr) = temp_media_mgr();
         for i in 0..CLEANUP_BATCH_SIZE * 2 {
@@ -1758,7 +1803,8 @@ mod tests {
         assert_eq!(
             calls.load(AtomicOrdering::Relaxed),
             2 * 2 + 1 + 1,
-            "at most two predicate calls per batch, plus one per empty probe"
+            "two calls per committed batch, plus one per empty probe — pinned \
+             exactly, because an upper bound would admit a cached predicate"
         );
     }
 }
