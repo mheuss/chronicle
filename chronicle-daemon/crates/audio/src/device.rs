@@ -117,4 +117,36 @@ mod tests {
             r#"device_name="" device_uid="unknown""#
         );
     }
+
+    #[test]
+    fn escapes_a_tab_in_a_device_name() {
+        // Pins the `\t` arm specifically. Without this, deleting that arm
+        // still passes: tab falls through to the control-character arm and
+        // renders as `\u{0009}`, which nothing asserts on.
+        assert_eq!(
+            render_fields(&device(Some("a\tb"), None)),
+            r#"device_name="a\tb" device_uid="unknown""#
+        );
+    }
+
+    #[test]
+    fn escapes_a_control_character_outside_the_named_set() {
+        // BR-5 covers control characters generally, not just the four with
+        // their own arms. This is the only test holding the catch-all arm in
+        // place.
+        assert_eq!(
+            render_fields(&device(Some("a\u{1}b"), None)),
+            r#"device_name="a\u{0001}b" device_uid="unknown""#
+        );
+    }
+
+    #[test]
+    fn escapes_the_uid_field_too() {
+        // Every other escaping test leaves uid `None`, so the uid arm's call
+        // to `escape` is otherwise unexercised — dropping it would pass.
+        assert_eq!(
+            render_fields(&device(None, Some(r#"a"b"#))),
+            r#"device_name="unknown" device_uid="a\"b""#
+        );
+    }
 }
