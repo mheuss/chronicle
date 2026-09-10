@@ -8,8 +8,9 @@ use objc2_core_audio::{
     AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectID,
     AudioObjectPropertyAddress, AudioObjectPropertyScope, AudioObjectPropertySelector,
     kAudioAggregateDevicePropertyActiveSubDeviceList, kAudioDevicePropertyDeviceUID,
-    kAudioDevicePropertyStreams, kAudioObjectPropertyElementMain, kAudioObjectPropertyName,
-    kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput, kAudioObjectUnknown,
+    kAudioDevicePropertyStreams, kAudioHardwarePropertyDefaultInputDevice,
+    kAudioObjectPropertyElementMain, kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal,
+    kAudioObjectPropertyScopeInput, kAudioObjectSystemObject, kAudioObjectUnknown,
 };
 use objc2_core_foundation::{CFRetained, CFString};
 
@@ -253,6 +254,54 @@ fn elements_to_keep(buffer_bytes: usize, reported_bytes: usize) -> Option<usize>
     (reported_bytes <= buffer_bytes).then(|| reported_bytes / size_of::<AudioObjectID>())
 }
 
+/// The device the user selected as the system default input, if it reads.
+fn default_input_device() -> Option<AudioObjectID> {
+    let address = AudioObjectPropertyAddress {
+        mSelector: kAudioHardwarePropertyDefaultInputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut device = kAudioObjectUnknown;
+    let mut size = size_of::<AudioObjectID>() as u32;
+
+    // SAFETY: `address`, `size` and `device` are live locals, and `device` is an
+    // `AudioObjectID` slot sized to match `size` — which is what this selector
+    // returns. The qualifier is empty, which it permits.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            kAudioObjectSystemObject as AudioObjectID,
+            NonNull::from(&address),
+            0,
+            ptr::null(),
+            NonNull::from(&mut size),
+            NonNull::from(&mut device).cast(),
+        )
+    };
+    if status != 0 {
+        log::debug!("device lookup: default input read failed, OSStatus {status}");
+        return None;
+    }
+    (device != kAudioObjectUnknown).then_some(device)
+}
+
+/// Which device the line should name, given the member resolved out of the
+/// aggregate and the user's selected default input.
+///
+/// Normally they are the same object and this is a no-op. They diverge when the
+/// selected default is itself an aggregate: CoreAudio flattens it into the
+/// engine's aggregate, so the members are physical devices and the user's
+/// choice is nowhere in the list. Naming a member there would report a device
+/// the user did not select, indistinguishable from having selected it directly.
+fn device_to_report(
+    resolved: AudioObjectID,
+    default_input: Option<AudioObjectID>,
+) -> AudioObjectID {
+    match default_input {
+        Some(default) if default != resolved => default,
+        _ => resolved,
+    }
+}
+
 /// Picks the sub-device that carries the input.
 ///
 /// A default-device aggregate wraps both halves of the route, so the output
@@ -300,21 +349,38 @@ pub(crate) fn describe(node: &AVAudioInputNode) -> InputDevice {
     // A device that is not an aggregate has no sub-device list and falls
     // through unchanged.
     let subdevices = subdevices_with_input_counts(device);
-    let device = match first_input_subdevice(&subdevices) {
-        Some(input) => {
-            log::debug!("device lookup: resolved aggregate {device} to input sub-device {input}");
-            input
-        }
-        None => {
-            // The one arm that leaves `CADefaultDeviceAggregate-<pid>-0` in the
-            // line — the symptom this resolution exists to remove. Say how many
-            // members were seen, so an empty list is distinguishable from a
-            // list where none reported input.
-            log::debug!(
-                "device lookup: no input sub-device among {} member(s) of {device}, reporting it as-is",
-                subdevices.len()
-            );
-            device
+    let device = if subdevices.is_empty() {
+        // Not an aggregate. The node is bound straight to a device, so it is
+        // already the one to name.
+        device
+    } else {
+        match first_input_subdevice(&subdevices) {
+            Some(input) => {
+                let report = device_to_report(input, default_input_device());
+                if report == input {
+                    log::debug!(
+                        "device lookup: resolved aggregate {device} to input sub-device {input}"
+                    );
+                } else {
+                    // The selected default is itself an aggregate, flattened
+                    // into this one — naming a member would report a device the
+                    // user did not choose.
+                    log::debug!(
+                        "device lookup: aggregate {device} flattens the selected default {report}; naming the selection, not member {input}"
+                    );
+                }
+                report
+            }
+            None => {
+                // Reporting the aggregate here would put
+                // `CADefaultDeviceAggregate-<pid>-0` in the line, which names
+                // nothing. `unknown` at least says so.
+                log::debug!(
+                    "device lookup: no input among {} member(s) of aggregate {device}",
+                    subdevices.len()
+                );
+                return absent;
+            }
         }
     };
 
@@ -519,6 +585,30 @@ mod tests {
     fn a_partial_trailing_element_is_dropped() {
         let bytes = 4 * size_of::<AudioObjectID>();
         assert_eq!(elements_to_keep(bytes, bytes - 1), Some(3));
+    }
+
+    #[test]
+    fn the_resolved_member_is_named_when_it_is_the_selected_default() {
+        // The ordinary case: the engine's aggregate wraps exactly the device
+        // the user picked, so resolving lands on it.
+        assert_eq!(device_to_report(131, Some(131)), 131);
+    }
+
+    #[test]
+    fn a_flattened_selection_is_named_over_its_member() {
+        // Reproduced on hardware: selecting a user-built aggregate makes
+        // CoreAudio flatten it into the engine's aggregate, so the members are
+        // physical devices and the selection is absent from the list. Naming
+        // member 117 there produced a line byte-identical to selecting 117
+        // directly.
+        assert_eq!(device_to_report(117, Some(173)), 173);
+    }
+
+    #[test]
+    fn an_unreadable_default_leaves_the_resolved_member() {
+        // Better to name the member than to degrade to `unknown` over a
+        // cross-check that did not read.
+        assert_eq!(device_to_report(117, None), 117);
     }
 
     #[test]
