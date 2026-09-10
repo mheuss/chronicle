@@ -163,9 +163,10 @@ rather than restarting it.
    case the run returns without touching them.
 
 Batching at 500 rows keeps SQLite transactions short, and the DELETE triggers
-clean up FTS entries automatically. It also sets the shutdown bound: a stop is
-observed once per batch, and `CLEANUP_GRACE` in the daemon is derived from a
-measured batch at this size, so changing it means re-running that measurement. **Files are deleted before rows.** The two
+clean up FTS entries automatically. It also sets the shutdown bound: a run ends
+within one batch of the stop being raised, and `CLEANUP_GRACE` in the daemon is
+derived from a measured batch at this size, so changing it means re-running that
+measurement. **Files are deleted before rows.** The two
 ways a batch can fail leave different wreckage, and it is worth being precise
 about which:
 
