@@ -123,13 +123,9 @@ fn copy_string_property(
 
 /// How many bytes a property currently occupies, or `None` if the read failed.
 ///
-/// A device that is not an aggregate has no sub-device list, and the size read
-/// itself fails with `kAudioHardwareUnknownPropertyError` — that is the signal
-/// the bound device needs no resolving. But an unreadable property and an
-/// absent one are the same `None` here, so the `OSStatus` is logged: NFR-6 asks
-/// that a failed lookup be diagnosable without a rebuild, and this is the hop
-/// where a silent failure would put `CADefaultDeviceAggregate` back in the log
-/// line with nothing to explain it.
+/// A device that is not an aggregate has no sub-device list, and this read is
+/// where that shows up. An unreadable property and an absent one both land on
+/// `None`, so the `OSStatus` is logged to tell them apart.
 fn property_size(
     device: AudioObjectID,
     selector: AudioObjectPropertySelector,
@@ -222,11 +218,8 @@ fn subdevices_with_input_counts(device: AudioObjectID) -> Vec<(AudioObjectID, us
 
     ids.into_iter()
         .map(|id| {
-            // A device with no input carries zero input streams and reports
-            // that as a readable size of 0, so `None` here means the read
-            // genuinely failed rather than that the device has no input. Both
-            // end up skipped, but only one is a fault — hence the log inside
-            // `property_size`.
+            // A device with no input reports a readable size of 0, so `None`
+            // here is a failed read rather than an absent input.
             let bytes = property_size(
                 id,
                 kAudioDevicePropertyStreams,
@@ -239,46 +232,33 @@ fn subdevices_with_input_counts(device: AudioObjectID) -> Vec<(AudioObjectID, us
         .collect()
 }
 
-/// An aggregate with more members than this is not a case worth serving. The
-/// count comes from the HAL handler, which for a virtual device is third-party
-/// code, and it sizes an allocation.
+/// The count comes from the HAL handler — third-party code for a virtual
+/// device — and it sizes an allocation.
 const MAX_SUBDEVICES: usize = 64;
 
 /// How many ids to allocate for a sub-device list of `bytes`, or `None` when
-/// that count is implausible.
-///
-/// Separated from the FFI so the arithmetic is testable. An unbounded count
-/// would size an allocation directly from a number the HAL handler chose, and a
-/// failed allocation aborts rather than unwinding — which would take the daemon
-/// down and break NFR-1.
+/// that count is implausible. Unbounded, it would size an allocation from a
+/// number the handler chose, and a failed allocation aborts rather than
+/// unwinding.
 fn elements_to_allocate(bytes: usize) -> Option<usize> {
     let count = bytes / size_of::<AudioObjectID>();
     (1..=MAX_SUBDEVICES).contains(&count).then_some(count)
 }
 
 /// How many ids to keep after CoreAudio reports writing `reported_bytes` into a
-/// buffer of `buffer_bytes`.
-///
-/// Shrinking is legitimate — the route can change between the size call and the
-/// data call. Growing is not: it means the write overran the buffer it was
-/// handed, so `None` rejects the whole read rather than trusting part of it.
+/// buffer of `buffer_bytes`. Shrinking is legitimate — the route can change
+/// between the two calls. Growing means the write overran the buffer, so `None`
+/// rejects the read rather than trusting part of it.
 fn elements_to_keep(buffer_bytes: usize, reported_bytes: usize) -> Option<usize> {
     (reported_bytes <= buffer_bytes).then(|| reported_bytes / size_of::<AudioObjectID>())
 }
 
 /// Picks the sub-device that carries the input.
 ///
-/// A default-device aggregate wraps both halves of the default route, so the
-/// output device is in the list too. Input stream count is what separates them.
-///
-/// When more than one member has input streams this takes the first, and that
-/// is a fallback rather than a decision: `ActiveSubDeviceList` has no documented
-/// ordering, and nothing here can tell which member the route actually reads
-/// from. The default-route aggregate has one input member whenever the default
-/// output carries none, which is the common case and where the ambiguity stays
-/// unreachable. It becomes reachable when the default output is a device that
-/// also carries input — a Bluetooth headset, or most USB interfaces — which is
-/// why this is written down rather than left to the test that pins it.
+/// A default-device aggregate wraps both halves of the route, so the output
+/// device is in the list too; input stream count separates them. With more than
+/// one input member this takes the first — a fallback, not a decision, since
+/// `ActiveSubDeviceList` has no documented ordering.
 fn first_input_subdevice(subdevices: &[(AudioObjectID, usize)]) -> Option<AudioObjectID> {
     subdevices
         .iter()
@@ -288,13 +268,11 @@ fn first_input_subdevice(subdevices: &[(AudioObjectID, usize)]) -> Option<AudioO
 
 /// The identity of the microphone behind the engine's input node.
 ///
-/// The node binds to an aggregate wrapping the default route rather than to a
-/// microphone, so this descends to the member carrying the input. A device that
-/// is not an aggregate has no sub-device list and is reported as-is.
+/// The node binds to an aggregate wrapping the default route, so this descends
+/// to the member carrying the input. A non-aggregate is reported as-is.
 ///
-/// Never fails. Any unreadable field comes back `None` and renders as
-/// `unknown`. Per Architectural Decision 7, a failed lookup does not fall back
-/// to the system default input device — it reports what it has.
+/// Never fails. An unreadable field comes back `None` and renders as `unknown`;
+/// per Architectural Decision 7 it does not fall back to the system default.
 pub(crate) fn describe(node: &AVAudioInputNode) -> InputDevice {
     let absent = InputDevice {
         name: None,
