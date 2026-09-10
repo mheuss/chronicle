@@ -23,6 +23,7 @@ objc2-avf-audio = { version = "0.3", features = [
     "AVAudioTypes",
     "AVAudioConverter",
     "block2",
+    "objc2-audio-toolbox",
 ] }
 block2 = "0.6"
 objc2-core-media = { version = "0.3", features = [
@@ -31,6 +32,12 @@ objc2-core-media = { version = "0.3", features = [
     "CMBase",
 ] }
 objc2-core-foundation = "0.3"
+objc2-audio-toolbox = { version = "0.3", default-features = false, features = [
+    "AUAudioUnit",
+] }
+objc2-core-audio = { version = "0.3", default-features = false, features = [
+    "AudioHardware",
+] }
 log = "0.4"
 dispatch2 = "0.3"
 opus = "0.3"
