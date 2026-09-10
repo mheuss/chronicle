@@ -157,8 +157,9 @@ rather than restarting it.
    delete each associated file from disk, then DELETE the rows in one
    transaction. Repeat until no expired rows remain, or until the daemon begins
    shutting down. A run cut short that way reports
-   `CleanupOutcome::StopObserved`, records no checkpoint, and leaves the rest
-   for the next run.
+   `CleanupOutcome::StopObserved` and records no checkpoint, so the next run
+   re-examines what it did not reach — which is usually something, though the
+   outcome over-reports in two cases the variant's own docs describe.
 4. Same loop for audio segments.
 
 Batching at 500 rows keeps SQLite transactions short, and the DELETE triggers
