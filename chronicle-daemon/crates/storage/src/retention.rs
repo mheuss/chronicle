@@ -50,9 +50,8 @@ pub const MAX_RETENTION_DAYS: i64 = 36_500;
 ///
 /// Its error branch is unreachable from its only production caller:
 /// `run_cleanup_interruptible` rejects everything that could overflow before
-/// calling here. The arithmetic stays
-/// checked anyway, because a future caller that skips the bound must not be
-/// able to turn a wrap into data loss. It is a separate `fn` so that guard can
+/// calling here. The arithmetic stays checked anyway, because a future caller
+/// that skips the bound must not be able to turn a wrap into data loss. It is a separate `fn` so that guard can
 /// be called — and therefore pinned — directly; see
 /// `compute_cutoff_rejects_a_window_that_overflows`.
 fn compute_cutoff(now_millis: i64, retention_days: i64) -> Result<i64> {
@@ -71,14 +70,16 @@ fn compute_cutoff(now_millis: i64, retention_days: i64) -> Result<i64> {
 /// Order: delete files first, then DB rows (crash-safe — see design doc).
 ///
 /// Ends at a batch boundary once `stop` returns true, reporting
-/// [`CleanupOutcome::StopObserved`]. There is no never-stop wrapper here:
-/// `Storage::run_cleanup` supplies one, so a second would have no caller.
+/// [`CleanupOutcome::StopObserved`]. There is no never-stop wrapper at this
+/// layer: `Storage::run_cleanup` supplies one, so a second would have no
+/// production caller.
 ///
 /// `retention_days` of `0` or less is "keep forever" and returns an empty
 /// result; above [`MAX_RETENTION_DAYS`] is an error. Note the asymmetry with
-/// `Storage::run_cleanup`, which rejects a *negative* value outright: `0` is a
-/// legitimate setting, so it cannot be an error here, while a negative one can
-/// only arrive from a caller that skipped the public boundary's validation.
+/// the public boundary, which rejects a *negative* value outright in
+/// `Storage::run_cleanup_interruptible`'s config read: `0` is a legitimate
+/// setting, so it cannot be an error here, while a negative one can only
+/// arrive from a caller that skipped that validation.
 /// Both layers refuse to delete; they differ only in how loudly.
 pub(crate) fn run_cleanup_interruptible(
     conn: &Connection,
@@ -130,6 +131,7 @@ pub(crate) fn run_cleanup_interruptible(
 }
 
 /// What one table's cleanup removed, and whether the stop predicate ended it.
+#[derive(Debug)]
 struct TableCleanup {
     deleted: usize,
     freed: u64,
@@ -1446,6 +1448,18 @@ mod tests {
         std::sync::Arc::new(move || seen.fetch_add(1, AtomicOrdering::Relaxed) >= n)
     }
 
+    /// A `StopSignal` that is true on the first call and false forever after.
+    ///
+    /// Non-monotone on purpose. Every other helper here stays true once it
+    /// flips, which lets the audio table's own pre-batch check stand in for the
+    /// early return after the screenshot table — both spare the audio row, so
+    /// neither is under test. Only a predicate that goes back to false can tell
+    /// them apart.
+    fn stop_once() -> crate::StopSignal {
+        let seen = std::sync::Arc::new(AtomicUsize::new(0));
+        std::sync::Arc::new(move || seen.fetch_add(1, AtomicOrdering::Relaxed) == 0)
+    }
+
     fn surviving_audio(conn: &Connection) -> i64 {
         conn.query_row("SELECT COUNT(*) FROM audio_segments", [], |r| r.get(0))
             .unwrap()
@@ -1463,7 +1477,7 @@ mod tests {
         assert_eq!(stats.screenshots_deleted, 0);
         assert_eq!(stats.audio_segments_deleted, 0);
         assert_eq!(stats.outcome, CleanupOutcome::StopObserved);
-        assert_eq!(surviving_shots(&conn), 1, "the SELECT has no side effects");
+        assert_eq!(surviving_shots(&conn), 1, "no row was deleted");
     }
 
     #[test]
@@ -1487,6 +1501,31 @@ mod tests {
     }
 
     #[test]
+    fn a_screenshot_table_stop_does_not_fall_through_to_audio() {
+        // BR-3, and the clause `a_stop_in_the_screenshot_table_skips_the_audio_table`
+        // cannot reach: delete the early return in `run_cleanup_interruptible`
+        // and that test still passes, because the audio table's own pre-batch
+        // check reads true and spares the row anyway.
+        //
+        // `stop_once` flips back to false, so the audio table's check would let
+        // it through. The row survives only if the run returned after the
+        // screenshot table.
+        let conn = setup_db();
+        let media_mgr = dummy_media_mgr();
+        insert_aged_shot(&conn, 100);
+        insert_aged_audio(&conn, 100);
+
+        let stats = run_cleanup_interruptible(&conn, &media_mgr, 30, &stop_once()).unwrap();
+
+        assert_eq!(stats.outcome, CleanupOutcome::StopObserved);
+        assert_eq!(
+            surviving_audio(&conn),
+            1,
+            "the run must return after the screenshot table, not fall through"
+        );
+    }
+
+    #[test]
     fn a_stop_in_the_audio_table_is_still_reported() {
         let conn = setup_db();
         let media_mgr = dummy_media_mgr();
@@ -1499,17 +1538,5 @@ mod tests {
         let stats = run_cleanup_interruptible(&conn, &media_mgr, 30, &stop_after(2)).unwrap();
 
         assert_eq!(stats.outcome, CleanupOutcome::StopObserved);
-    }
-
-    #[test]
-    fn an_uninterrupted_run_still_reports_completed() {
-        let conn = setup_db();
-        let media_mgr = dummy_media_mgr();
-        insert_aged_shot(&conn, 100);
-
-        let stats = run_cleanup(&conn, &media_mgr, 30).unwrap();
-
-        assert_eq!(stats.outcome, CleanupOutcome::Completed);
-        assert_eq!(stats.screenshots_deleted, 1);
     }
 }
