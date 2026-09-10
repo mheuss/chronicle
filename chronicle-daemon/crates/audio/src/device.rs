@@ -1,5 +1,16 @@
 //! Identity of the audio device the microphone engine is bound to.
 
+use std::ptr;
+use std::ptr::NonNull;
+
+use objc2_avf_audio::AVAudioInputNode;
+use objc2_core_audio::{
+    AudioObjectGetPropertyData, AudioObjectID, AudioObjectPropertyAddress,
+    AudioObjectPropertySelector, kAudioDevicePropertyDeviceUID, kAudioObjectPropertyElementMain,
+    kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal, kAudioObjectUnknown,
+};
+use objc2_core_foundation::{CFRetained, CFString};
+
 /// The bound input device's identity, as far as CoreAudio would report it.
 ///
 /// Both fields are `Option` because the two property reads fail independently.
@@ -39,6 +50,84 @@ pub(crate) fn render_fields(device: &InputDevice) -> String {
         None => "unknown".to_string(),
     };
     format!("device_name=\"{name}\" device_uid=\"{uid}\"")
+}
+
+/// Reads one CFString device property.
+///
+/// `kAudioObjectPropertyName` and `kAudioDevicePropertyDeviceUID` both return a
+/// +1 reference: `AudioHardwareBase.h` documents each as "The caller is
+/// responsible for releasing the returned CFObject", unlike a typical CF Get
+/// function. `CFRetained::from_raw` takes that ownership and releases on drop,
+/// so the string is copied out before it falls.
+///
+/// Safe to call with any id. A stale or invalid id is not a Rust safety
+/// violation — CoreAudio answers with `kAudioHardwareBadObjectError`, which
+/// becomes `None` here. Only the FFI call itself is `unsafe`.
+fn copy_string_property(
+    device: AudioObjectID,
+    selector: AudioObjectPropertySelector,
+    stage: &str,
+) -> Option<String> {
+    let address = AudioObjectPropertyAddress {
+        mSelector: selector,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+
+    let mut out: *const CFString = ptr::null();
+    let mut size = size_of::<*const CFString>() as u32;
+
+    // SAFETY: `address` and `size` are live locals; `out` is a live pointer
+    // slot sized to match `size`. The qualifier is empty, which these
+    // selectors permit.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            device,
+            NonNull::from(&address),
+            0,
+            ptr::null(),
+            NonNull::from(&mut size),
+            NonNull::from(&mut out).cast(),
+        )
+    };
+    if status != 0 {
+        log::debug!("device lookup: {stage} read failed, OSStatus {status}");
+        return None;
+    }
+
+    let Some(ptr) = NonNull::new(out.cast_mut()) else {
+        log::debug!("device lookup: {stage} returned null with OSStatus 0");
+        return None;
+    };
+    // SAFETY: the call succeeded and the pointer is non-null, so `ptr` is a
+    // +1 CFString this scope owns.
+    Some(unsafe { CFRetained::from_raw(ptr) }.to_string())
+}
+
+/// The identity of the device the engine's input node is bound to.
+///
+/// Never fails. Any unreadable field comes back `None` and renders as
+/// `unknown`. Per Architectural Decision 7, this does not fall back to the
+/// system default input device.
+pub(crate) fn describe(node: &AVAudioInputNode) -> InputDevice {
+    let absent = InputDevice {
+        name: None,
+        uid: None,
+    };
+
+    // SAFETY: `node` is a live input node owned by the caller's engine.
+    let unit = unsafe { node.AUAudioUnit() };
+    // SAFETY: `unit` is the retained audio unit returned above.
+    let device = unsafe { unit.deviceID() };
+    if device == kAudioObjectUnknown {
+        log::debug!("device lookup: the input node reports no bound device");
+        return absent;
+    }
+
+    InputDevice {
+        name: copy_string_property(device, kAudioObjectPropertyName, "name"),
+        uid: copy_string_property(device, kAudioDevicePropertyDeviceUID, "uid"),
+    }
 }
 
 #[cfg(test)]
