@@ -617,28 +617,32 @@ async fn main() -> Result<()> {
     // Retention cleanup. Spawned, never awaited on the startup path: HEU-547
     // was a 249-second startup stall and that shape must not come back.
     //
-    // The handle is retained and joined as the last teardown step. Three
-    // consequences of the old drop-the-handle shape survive that change and are
-    // spelled out here, because this comment is the only record of them that
-    // ships — the documents analysing them are gitignored.
+    // The handle is retained and joined as the last teardown step. Two
+    // properties of this task are unaffected by that and are spelled out here,
+    // because this comment is the only record of them that ships — the
+    // documents analysing them are gitignored.
     //
-    // 1. Only a hard kill now strands a run mid-batch: files unlinked, rows
-    //    left pointing at nothing. Neither `process::exit(3)` reaches that
-    //    state — the startup one fires before this task is spawned, and the
-    //    poisoned-engine one runs after the join below, which waits the batch
-    //    out. The next scheduled run repairs a stranding anyway: the row is
-    //    expired by definition, so it is re-selected and removed (see
-    //    docs/guides/storage-engine.md, "Stranded rows repair themselves").
-    //    HEU-624 added counters that make the condition visible, not a repair.
-    // 2. A worker panic ends the loop, so retention stays off for the rest of
+    // 1. A worker panic ends the loop, so retention stays off for the rest of
     //    the process lifetime with one log line as the only signal.
-    // 3. A run holds one of the four pooled connections for its whole duration,
+    // 2. A run holds one of the four pooled connections for its whole duration,
     //    not per batch. Steady state is seconds; the first enforcement run took
     //    minutes. An exhausted pool surfaces as `StorageError::Pool` after
     //    r2d2's 30s default — survivable for the loop, which reschedules, but a
     //    pipeline writer that loses a connection drops a capture. Note it does
     //    NOT log "database is locked" or "busy", so a grep for those does not
     //    rule it out.
+    //
+    // Separately, and independent of the join: `cleanup_media` unlinks a
+    // batch's files before deleting its rows, so anything that interrupts it
+    // between the two leaves rows pointing at nothing. A hard kill does that,
+    // and so does an ordinary `tx.commit()` failure — that is a plain
+    // `StorageError`, which `is_worker_panic` does not match, so the loop logs
+    // it and reschedules. Neither `process::exit(3)` is a route: the startup
+    // one fires before this task is spawned, and the poisoned-engine one runs
+    // after the join below. The next scheduled run repairs a stranding anyway —
+    // the row is expired by definition, so it is re-selected and removed (see
+    // docs/guides/storage-engine.md, "Stranded rows repair themselves").
+    // HEU-624 added counters that make the condition visible, not a repair.
     //
     // The predicate below reads the same `cancel` the loop selects on, so
     // `cancel.cancel()` is the only shutdown signal and there is no second flag
@@ -994,8 +998,9 @@ async fn main() -> Result<()> {
         // never the sole consumer of, and is less so now that the provision
         // wait above can add up to 5s. The unbounded steps between them
         // (`ipc_server.shutdown`, `supervisor.shutdown`, the bridge join, the
-        // audio-store await) are the ones with no ceiling; these two explicit
-        // waits total 10s of the 20s and are the part we actually control.
+        // audio-store await) are the ones with no ceiling; the three explicit
+        // waits — the provision wait, this one, and CLEANUP_GRACE at the end of
+        // teardown — total 12s of the 20s and are the part we actually control.
         const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
         // Borrow the handle — do NOT let `timeout` consume it. Dropping a JoinHandle
         // detaches the task, and runtime drop then destroys its future *without
