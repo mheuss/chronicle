@@ -1021,7 +1021,8 @@ async fn main() -> Result<()> {
         // (`ipc_server.shutdown`, `supervisor.shutdown`, the bridge join, the
         // audio-store await) are the ones with no ceiling; the three explicit
         // waits — the provision wait, this one, and CLEANUP_GRACE at the end of
-        // teardown — total 12s of the 20s and are the part we actually control.
+        // teardown — total 10.2s of the 20s and are the part we actually
+        // control.
         const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
         // Borrow the handle — do NOT let `timeout` consume it. Dropping a JoinHandle
         // detaches the task, and runtime drop then destroys its future *without
@@ -1058,7 +1059,12 @@ async fn main() -> Result<()> {
     // Nothing pins this placement. Moving the join up to sit beside
     // `cancel.cancel()` leaves the whole suite green; only a spawned-daemon
     // test would catch it.
-    const CLEANUP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+    // Four times the slower of two measured batches (NFR-3): 49.4 ms for 500
+    // screenshots, 39.9 ms for 500 audio segments, on an M-series laptop with a
+    // warm scratch directory. Not a bound on batch duration — `busy_timeout` is
+    // 5000 ms, so a contended commit can outlast any useful grace. This is
+    // where we stop waiting quietly and say so.
+    const CLEANUP_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
     if join_cleanup_task(cleanup_handle, CLEANUP_GRACE).await {
         shutdown_failed = true;
     }

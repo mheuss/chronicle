@@ -1880,4 +1880,71 @@ mod tests {
             );
         }
     }
+
+    /// NFR-3. Not a check — it asserts nothing and prints a duration.
+    /// `#[ignore]` keeps it out of CI, which is what the design asks for: one
+    /// number, recorded once, not a repeatable benchmark.
+    ///
+    /// Run with:
+    ///   cargo test -p chronicle-storage measure_one_ -- --ignored --nocapture
+    #[test]
+    #[ignore = "measurement, not a check"]
+    fn measure_one_screenshot_batch() {
+        let conn = setup_db();
+        let (_dir, mgr) = temp_media_mgr();
+        std::fs::create_dir_all(mgr.base_dir().join("screenshots")).unwrap();
+        for i in 0..CLEANUP_BATCH_SIZE {
+            let path = mgr
+                .base_dir()
+                .join("screenshots")
+                .join(format!("s{i}.heif"));
+            // 450 KB is the live average: 3.5 GB across 7,943 screenshots.
+            mgr.write_file(&path, &vec![0u8; 450 * 1024]).unwrap();
+            let meta = ScreenshotMetadata {
+                timestamp: now_millis() - 100 * 86_400 * 1000,
+                display_id: "display1".into(),
+                app_name: Some("Terminal".into()),
+                app_bundle_id: Some("com.apple.Terminal".into()),
+                window_title: Some("chronicle".into()),
+                image_path: path.to_string_lossy().into_owned(),
+                ocr_text: Some("lorem ipsum dolor sit amet ".repeat(40)),
+                phash: None,
+                resolution: None,
+            };
+            screenshots::insert(&conn, &meta).unwrap();
+        }
+
+        let never: StopSignal = Arc::new(|| false);
+        let start = std::time::Instant::now();
+        let out = cleanup_media(&conn, &SCREENSHOT_TABLE, &mgr, now_millis(), &never).unwrap();
+        let elapsed = start.elapsed();
+
+        println!("screenshot batch: {} rows in {elapsed:?}", out.deleted);
+    }
+
+    /// NFR-3, audio half. Transcripts on roughly a third of the rows, averaging
+    /// about 120 characters, which is what production looks like.
+    #[test]
+    #[ignore = "measurement, not a check"]
+    fn measure_one_audio_batch() {
+        let conn = setup_db();
+        let (_dir, mgr) = temp_media_mgr();
+        // ~6 KB is one 30-second Opus segment.
+        let data = vec![0u8; 6 * 1024];
+        for i in 0..CLEANUP_BATCH_SIZE {
+            let transcript = if i % 3 == 0 {
+                Some("the quick brown fox jumps over the lazy dog ".repeat(3))
+            } else {
+                None
+            };
+            insert_aged_audio_with_file(&conn, &mgr, i, &data, transcript);
+        }
+
+        let never: StopSignal = Arc::new(|| false);
+        let start = std::time::Instant::now();
+        let out = cleanup_media(&conn, &AUDIO_TABLE, &mgr, now_millis(), &never).unwrap();
+        let elapsed = start.elapsed();
+
+        println!("audio batch: {} rows in {elapsed:?}", out.deleted);
+    }
 }
