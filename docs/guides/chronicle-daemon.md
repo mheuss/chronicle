@@ -96,12 +96,13 @@ ordered teardown that cascades through the system:
 5. `join_cleanup_task(cleanup_handle, CLEANUP_GRACE)` — the retention cleanup
    loop, joined last so every step above overlaps it
 
-Cancellation is cooperative, not forced. Most stages drain because their input
-channels close; retention cleanup is the exception, and watches the shared
-token instead. `cancel.cancel()` at the top of teardown raises a stop predicate
-that its batch loop reads, so an in-flight run ends at a batch boundary rather
-than running to completion. Nothing is killed mid-batch. `CLEANUP_GRACE` is the point at which a slow run is reported,
-not a deadline: the join re-awaits past it.
+Most stages drain because their input channels close. Two do not: the
+provisioning task is aborted outright if its grace expires, and retention
+cleanup watches the shared token instead. `cancel.cancel()` at the top of
+teardown raises a stop predicate that cleanup's batch loop reads, so an
+in-flight run ends at a batch boundary rather than running to completion — it
+is never killed mid-batch. `CLEANUP_GRACE` is the point at which a slow run is
+reported, not a deadline: the join re-awaits past it.
 
 ## Key Concepts
 

@@ -163,10 +163,10 @@ rather than restarting it.
    case the run returns without touching them.
 
 Batching at 500 rows keeps SQLite transactions short, and the DELETE triggers
-clean up FTS entries automatically. It also sets the shutdown bound: a run ends
-within one batch of the stop being raised, and `CLEANUP_GRACE` in the daemon is
-derived from a measured batch at this size, so changing it means re-running that
-measurement. **Files are deleted before rows.** The two
+clean up FTS entries automatically. It also bounds how much work a stop leaves
+in flight: a run ends within one batch of the stop being raised. `CLEANUP_GRACE`
+in the daemon is derived from a measured batch at this size, so changing it
+means re-running that measurement. **Files are deleted before rows.** The two
 ways a batch can fail leave different wreckage, and it is worth being precise
 about which:
 
@@ -198,11 +198,11 @@ The exceptions are settings where cleanup never re-selects the row:
   returns `Disabled` before examining anything. Its guard is actually `<= 0`,
   but a negative value never reaches it: `Storage::run_cleanup_interruptible`
   reads the stored value and rejects `< 0` as an error, and both public entry
-  points go through it. The inner `<= 0` is
-  defence against a caller that skipped that boundary, not a second way to
-  disable cleanup.
-- `retention_days > MAX_RETENTION_DAYS` (36,500) — `run_cleanup` returns `Err`,
-  so no cleanup runs at all until the config is corrected.
+  points go through it. The inner `<= 0` is defence against a caller that
+  skipped that boundary, not a second way to disable cleanup.
+- `retention_days > MAX_RETENTION_DAYS` (36,500) —
+  `retention::run_cleanup_interruptible` returns `Err`, so no cleanup runs at
+  all until the config is corrected.
 - **Raising `retention_days` after a row is stranded.** This is the one you are
   most likely to hit. The cutoff is `now - retention_days * 86_400 * 1000`, so a
   larger window moves it *earlier*: a row stranded at 31 days old under a 30-day
