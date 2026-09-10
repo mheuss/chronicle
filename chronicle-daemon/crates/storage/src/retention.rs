@@ -230,14 +230,14 @@ fn cleanup_media(
         // After the commit, so a batch whose files are already unlinked always
         // has its rows removed before the run returns.
         //
-        // The early return saves one SELECT and nothing else, for a predicate
-        // that stays true once it flips: replace it with `let _ = stop();` and
-        // the next pre-batch check ends the run at the same boundary, with the
-        // same rows gone. A predicate that reverts — `stop_once` in the tests
-        // is one — would run on instead, which is why this is an optimisation
-        // rather than a property to rely on. What is load-bearing is that the
-        // check sits *here*, after the commit, rather than between the unlinks
-        // and it.
+        // The early return saves one SELECT and nothing else: replace it with
+        // `let _ = stop();` and the next pre-batch check ends the run at the
+        // same boundary, with the same rows gone. That holds because the
+        // predicate stays true once it flips, which the daemon's does — a
+        // `CancellationToken` cannot be uncancelled. Only a predicate that
+        // reverted between this check and the next pre-batch one would run on.
+        // What is load-bearing is that the check sits *here*, after the commit,
+        // rather than between the unlinks and it.
         if stop() {
             return Ok(TableCleanup {
                 deleted,
@@ -1831,9 +1831,12 @@ mod tests {
 
     #[test]
     fn a_run_stops_within_one_batch_of_the_signal() {
-        // NFR-1. The isolated tests above each pin one check at one arrival
-        // point; this sweeps every arrival point across the first three
-        // batches and asserts the bound itself at each.
+        // NFR-1, stated executably. The isolated tests above prove each check
+        // exists and stops the run; none of them says what the bound *is*.
+        // This sweeps the six arrival points from batch 1's post-commit check
+        // through batch 4's pre-batch check and asserts the bound at each.
+        // (Batch 1's pre-batch check is `n = 0`, which `(n - 1)` cannot express;
+        // `a_stop_before_any_work_deletes_nothing` covers it.)
         //
         // `stop_after(n)` is false for calls 0..n-1 and true from n on, and the
         // loop makes two calls per batch — pre-batch, then post-commit. So the
@@ -1849,6 +1852,10 @@ mod tests {
         // this never exceeds the batches already committed when the signal
         // arrived, plus one — true at every n below, including the odd ones
         // where the signal arrives mid-batch and that batch still finishes.
+        // NFR-4's two checks per batch, which
+        // `a_batch_costs_at_most_two_predicate_calls` pins.
+        const CHECKS_PER_BATCH: usize = 2;
+
         for n in 1..=6 {
             let conn = setup_db();
             let (_dir, mgr) = temp_media_mgr();
@@ -1859,7 +1866,7 @@ mod tests {
 
             let stats = run_cleanup_interruptible(&conn, &mgr, 30, &stop_after(n)).unwrap();
 
-            let expected = CLEANUP_BATCH_SIZE * ((n - 1) / 2 + 1);
+            let expected = CLEANUP_BATCH_SIZE * ((n - 1) / CHECKS_PER_BATCH + 1);
             assert_eq!(stats.outcome, CleanupOutcome::StopObserved, "n={n}");
             assert_eq!(
                 stats.screenshots_deleted, expected,
