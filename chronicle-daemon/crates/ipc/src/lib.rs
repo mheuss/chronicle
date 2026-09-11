@@ -5,6 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
+mod retention;
+pub use retention::{DEFAULT_RETENTION_DAYS, MAX_RETENTION_DAYS, Rejected, Retention};
+
 // ---------------------------------------------------------------------------
 // Protocol messages
 // ---------------------------------------------------------------------------
