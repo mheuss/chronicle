@@ -228,7 +228,9 @@ fn cleanup_media(
 
         // Placement is load-bearing: after the commit, so a batch whose files
         // are already unlinked always has its rows removed before the run
-        // returns. The early return itself only saves a SELECT.
+        // returns. The early return saves only a SELECT, and only because the
+        // daemon's predicate never flips back to false; one that did would get
+        // a whole extra batch.
         if stop() {
             return Ok(TableCleanup {
                 deleted,
