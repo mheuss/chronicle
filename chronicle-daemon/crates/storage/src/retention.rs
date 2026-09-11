@@ -72,7 +72,9 @@ fn compute_cutoff(now_millis: i64, retention_days: i64) -> Result<i64> {
 }
 
 /// Delete expired records and their media files in batches.
-/// Order: delete files first, then DB rows (crash-safe — see design doc).
+/// Order: delete files first, then DB rows. That is not atomic. What it buys is
+/// that the common failure, one bad unlink, lands in the recoverable direction
+/// rather than the permanent one — see `docs/guides/storage-engine.md`.
 ///
 /// Ends at a batch boundary once `stop` returns true, reporting
 /// [`CleanupOutcome::StopObserved`]. There is no never-stop wrapper outside
@@ -196,7 +198,7 @@ fn cleanup_media(
 
         let count = batch.len();
 
-        // 2. Delete files FIRST (crash-safe: orphan DB rows are easy to detect)
+        // 2. Delete files FIRST — ordering rationale is on the fn docblock.
         for (_, path) in &batch {
             match media_mgr.delete_file(Path::new(path)) {
                 Ok(bytes) => freed += bytes,
