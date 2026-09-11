@@ -328,6 +328,7 @@ dependencies = [
 name = "chronicle-storage"
 version = "0.1.0"
 dependencies = [
+ "chronicle-ipc",
  "chrono",
  "log",
  "r2d2",

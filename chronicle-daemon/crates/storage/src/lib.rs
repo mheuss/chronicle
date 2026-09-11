@@ -769,6 +769,36 @@ mod tests {
         assert_eq!(value, Some("30".to_string()));
     }
 
+    /// The seeded row and `DEFAULT_RETENTION_DAYS` are two spellings of one
+    /// policy — migration 001 writes the literal `'30'`, `chronicle-ipc`
+    /// defines the constant.
+    ///
+    /// Each is already pinned on its own: `get_config_returns_default_value`
+    /// above asserts the seed, and `the_policy_numbers_are_what_the_design_says`
+    /// in `chronicle-ipc` asserts the constant. What neither catches is a
+    /// coordinated change — someone moves the policy number and updates the
+    /// constant's test with it, but leaves `001_initial_schema.sql` behind.
+    /// This is also the only assertion that runs the seeded row through
+    /// `from_stored` rather than comparing strings.
+    #[tokio::test]
+    async fn the_seeded_retention_matches_the_default() {
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Storage::open(config).await.unwrap();
+
+        let seeded = storage.get_config("retention_days").await.unwrap();
+        // Without this, dropping the seed entirely would pass: `from_stored`
+        // maps `None` to the default.
+        assert!(seeded.is_some(), "migration 001 must seed retention_days");
+        assert_eq!(
+            chronicle_ipc::Retention::from_stored(seeded.as_deref()),
+            chronicle_ipc::Retention::default()
+        );
+    }
+
     /// Write a config value straight through the pool, bypassing
     /// `set_config`'s validation.
     ///

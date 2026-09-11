@@ -3,6 +3,8 @@ use std::path::Path;
 
 use rusqlite::{Connection, params};
 
+pub use chronicle_ipc::MAX_RETENTION_DAYS;
+
 use crate::StopSignal;
 use crate::error::{Result, StorageError};
 use crate::media::MediaManager;
@@ -35,19 +37,6 @@ const AUDIO_TABLE: MediaTable = MediaTable {
     path_col: "audio_path",
     subdir: "audio",
 };
-
-/// Largest accepted retention window: 100 years (`100 * 365`).
-///
-/// Past this a value is a configuration error rather than a policy — and left
-/// unchecked, a large enough one wraps the cutoff into the *future* and expires
-/// the entire database. Note that `0` already means "keep forever", so the
-/// intuitive way to ask for that is not a large number.
-///
-/// The exact figure is a policy ceiling, not a numeric limit: 36,500 days is
-/// ~3.15e12 ms against an `i64` ceiling of ~9.2e18, so it leaves six orders of
-/// magnitude of headroom. It is set where it is because a century is already
-/// past any real retention policy, not because larger values stop fitting.
-pub const MAX_RETENTION_DAYS: i64 = 36_500;
 
 /// Timestamp before which records are expired, or an error if the window does
 /// not fit in an `i64`.

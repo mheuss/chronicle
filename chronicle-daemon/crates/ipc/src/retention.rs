@@ -7,7 +7,18 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Largest accepted `retention_days`.
+/// Largest accepted retention window: 100 years (`100 * 365`).
+///
+/// Past this a value is a configuration error rather than a policy. Left
+/// unchecked, a large enough one would wrap the cutoff arithmetic in
+/// `chronicle-storage`'s `compute_cutoff` into the *future* and expire the
+/// entire database. Note that `0` already means "keep forever", so the
+/// intuitive way to ask for that is not a large number.
+///
+/// The exact figure is a policy ceiling, not a numeric limit: 36,500 days is
+/// ~3.15e12 ms against an `i64` ceiling of ~9.2e18, so it leaves six orders of
+/// magnitude of headroom. It is set where it is because a century is already
+/// past any real retention policy, not because larger values stop fitting.
 ///
 /// Applied by [`Retention::classify`] because the cleanup entry point applies
 /// it too. A classifier that did not know the bound would report 36_501 as a
@@ -52,8 +63,9 @@ impl Retention {
     /// as enum variant fields always are, so a caller or a `Deserialize` can
     /// construct a value this function would refuse.
     ///
-    /// The upper bound duplicates the one in `chronicle-storage`'s
-    /// `retention::run_cleanup_interruptible`. HEU-628 considered the same
+    /// The bound *check* here duplicates the one in `chronicle-storage`'s
+    /// `retention::run_cleanup_interruptible`. The constant itself is no longer
+    /// duplicated — that crate re-exports this one. HEU-628 considered the same
     /// duplicate at `Storage::run_cleanup` and left it out: a duplicate there
     /// would have returned the same `Err` as the inner guard, so no assertion
     /// could tell them apart. The reasoning is recorded in
