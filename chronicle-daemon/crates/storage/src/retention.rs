@@ -1784,14 +1784,9 @@ mod tests {
 
     #[test]
     fn a_batch_costs_at_most_two_predicate_calls() {
-        // NFR-4. The `stop_after(n)` tests above are *sensitive* to the call
-        // count without asserting it: add a third check per batch and they stay
-        // green, because each `n` silently re-targets a different check. This
-        // asserts the count itself.
-        //
-        // Equality rather than `<=`, even though NFR-4 states an upper bound: a
-        // predicate called once per batch and cached satisfies `<=` while
-        // missing every stop that arrives after the SELECT.
+        // NFR-4. Equality rather than `<=`, even though NFR-4 states an upper
+        // bound: a predicate called once per batch and cached satisfies `<=`
+        // while missing every stop that arrives after the SELECT.
         let conn = setup_db();
         let (_dir, mgr) = temp_media_mgr();
         for i in 0..CLEANUP_BATCH_SIZE * 2 {
