@@ -654,10 +654,9 @@ async fn main() -> Result<()> {
     // on the next run; see docs/guides/storage-engine.md, "Stranded rows repair
     // themselves". HEU-624 added counters that make it visible, not a repair.
     //
-    // The predicate below reads the same `cancel` the loop selects on, so
-    // `cancel.cancel()` is the only shutdown signal and there is no second flag
-    // to order against it. An in-flight run ends at its next batch boundary
-    // rather than running to completion.
+    // An in-flight run ends at its next batch boundary rather than running to
+    // completion — see `cancellation_stop_signal` for why `cancel` alone
+    // drives that.
     let cleanup_ops = Arc::new(retention_task::StorageCleanupOps::new(
         Arc::clone(&storage),
         cancellation_stop_signal(&cancel),
@@ -1004,12 +1003,13 @@ async fn main() -> Result<()> {
         // never the sole consumer of, and is less so now that the provision
         // wait above can add up to 5s. The unbounded steps between them
         // (`ipc_server.shutdown`, `supervisor.shutdown`, the bridge join, the
-        // audio-store await) are the ones with no ceiling. Neither is this one:
-        // only the provision wait actually bounds anything, because it aborts
-        // its task on expiry. This grace and CLEANUP_GRACE both re-await after
-        // the timeout, so they are the point at which we say the wait is long,
-        // not a limit on it. Only the provision wait's 5s is a real ceiling;
-        // the other 5.6s is a reporting threshold.
+        // audio-store await) are the ones with no ceiling. Neither is this one.
+        // The three graces differ in what expiry does. The provision wait
+        // aborts its task, though not a `spawn_blocking` load already running.
+        // This one raises `stop_transcription`, so the loop abandons whatever
+        // is still queued. CLEANUP_GRACE raises nothing at all — its signal
+        // went up at `cancel.cancel()` long before — which makes it the only
+        // one of the three that is purely a reporting threshold.
         const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
         // Borrow the handle — do NOT let `timeout` consume it. Dropping a JoinHandle
         // detaches the task, and runtime drop then destroys its future *without
@@ -1043,10 +1043,16 @@ async fn main() -> Result<()> {
     // would buy that time too, at the cost of stopping IPC and the refreshers
     // earlier.
     //
-    // Four times a measured batch (NFR-3), rounded to a whole hundred: eight
+    // Four times a measured batch (NFR-3), rounded up to a whole hundred: eight
     // runs per table of 500 rows (`CLEANUP_BATCH_SIZE`) spanned 29-49 ms idle
-    // and 131 ms under load, so 4 x 131.2 -> 600 ms. Sized to the loaded
-    // figure, because a machine shutting down is often a busy one.
+    // and 131 ms under load, so 4 x 131.2 = 524.8, rounded up to 600 ms. Sized
+    // to the loaded figure, because a machine shutting down is often a busy
+    // one.
+    //
+    // Do not raise this to silence the "cleanup running long" warning. No
+    // value here bounds anything: `busy_timeout` is 5000 ms
+    // (`crates/storage/src/schema.rs`), so a contended commit can outlast any
+    // grace, and the timeout arm re-awaits to completion either way.
     const CLEANUP_GRACE: std::time::Duration = std::time::Duration::from_millis(600);
     if join_cleanup_task(cleanup_handle, CLEANUP_GRACE).await {
         shutdown_failed = true;

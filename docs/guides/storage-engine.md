@@ -157,16 +157,18 @@ rather than restarting it.
    delete each associated file from disk, then DELETE the rows in one
    transaction. Repeat until no expired rows remain, or until the daemon begins
    shutting down. A run cut short reports `CleanupOutcome::StopObserved` and
-   leaves `last_cleanup_ms` alone, so the next boot cleans early instead of
-   waiting out a full period.
+   leaves `last_cleanup_ms` alone. That makes the next boot clean early instead
+   of waiting out a full period.
 4. Same loop for audio segments. If the screenshot pass stopped, the run
    returns without touching them.
 
 Batching at 500 rows keeps SQLite transactions short, and the DELETE triggers
-clean up FTS entries automatically. It also decides how much work a shutdown
-can leave in flight: a run ends within one batch of the daemon starting to shut
-down. `CLEANUP_GRACE` in the daemon is derived from a measured batch of 500
-rows, so changing the batch size means re-measuring it.
+clean up FTS entries automatically. It also bounds how much work a shutdown leaves
+in flight. A run ends within one batch of `cancel.cancel()`, plus at most one
+connection checkout and at most one `busy_timeout`. Those two terms are small
+in the ordinary case, but a run blocked in `pool.get()` waits r2d2's 30 second
+default. `CLEANUP_GRACE` in the daemon is derived from a measured batch of 500
+rows. Changing the batch size means re-measuring it.
 
 **Files are deleted before rows.** The two
 ways a batch can fail leave different wreckage, and it is worth being precise
@@ -198,9 +200,10 @@ The exceptions are settings where cleanup never re-selects the row:
 
 - `retention_days = 0` ("keep forever") — `retention::run_cleanup_interruptible`
   returns `Disabled` before examining anything. Its guard is actually `<= 0`,
-  but a negative value never reaches it: `Storage::run_cleanup_interruptible`
-  reads the stored value and rejects `< 0` as an error, and the only other
-  public entry point, `Storage::run_cleanup`, delegates straight to it. The
+  but a negative value never reaches it. `Storage::run_cleanup_interruptible`
+  reads the stored value and rejects `< 0` as an error. `Storage::run_cleanup`
+  is the only other public entry point, and it delegates straight to
+  `run_cleanup_interruptible`. The
   inner `<= 0` is defence against a caller that skipped that boundary, not a
   second way to disable cleanup.
 - `retention_days > MAX_RETENTION_DAYS` (36,500) —

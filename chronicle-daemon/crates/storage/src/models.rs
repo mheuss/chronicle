@@ -169,9 +169,9 @@ pub struct SearchResult {
 ///
 /// The scheduled cleanup task (`chronicle-daemon/src/retention_task.rs`) reads
 /// this and persists a checkpoint only on `Completed`. A `Disabled` run
-/// examined nothing, and a `StopObserved` run stopped before exhausting its
-/// work; a checkpoint from either would delay the next real cleanup by up to a
-/// period. That is the reason this enum exists rather than a bare
+/// examined nothing, and a `StopObserved` run may have stopped before
+/// exhausting its work; a checkpoint from either would delay the next real
+/// cleanup by up to a period. That is the reason this enum exists rather than a bare
 /// success/failure.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum CleanupOutcome {
@@ -180,14 +180,13 @@ pub enum CleanupOutcome {
     Completed,
     /// `retention_days` was zero or negative, so nothing was examined.
     Disabled,
-    /// A stop predicate ended the run before it had exhausted its work. Never
-    /// persists a checkpoint, so the next boot's first run is due immediately
-    /// rather than a period out. The checkpoint is a schedule timestamp, not a
-    /// resume position — every run re-selects from the oldest expired row.
+    /// A stop predicate ended the run at a batch boundary. The checkpoint is a
+    /// schedule timestamp, not a resume position — every run re-selects from
+    /// the oldest expired row.
     ///
     /// Does not guarantee expired rows remain — a stop can land before a
     /// table's first `SELECT`, or after a final batch that emptied it. The
-    /// over-report costs one `SELECT` on the next run.
+    /// over-report costs one redundant cleanup on the next run.
     StopObserved,
 }
 

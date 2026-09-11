@@ -75,9 +75,9 @@ fn compute_cutoff(now_millis: i64, retention_days: i64) -> Result<i64> {
 /// Order: delete files first, then DB rows (crash-safe — see design doc).
 ///
 /// Ends at a batch boundary once `stop` returns true, reporting
-/// [`CleanupOutcome::StopObserved`]. There is no never-stop wrapper at this
-/// layer: `Storage::run_cleanup` supplies one, so a second would have no
-/// production caller.
+/// [`CleanupOutcome::StopObserved`]. There is no never-stop wrapper outside
+/// this file's test module: `Storage::run_cleanup` supplies one, so a second
+/// would have no production caller.
 ///
 /// `retention_days` of `0` or less is "keep forever" and returns an empty
 /// result; above [`MAX_RETENTION_DAYS`] is an error. Note the asymmetry with
