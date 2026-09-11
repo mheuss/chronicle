@@ -40,10 +40,7 @@ pub use retention::MAX_RETENTION_DAYS;
 /// A predicate the cleanup batch loop calls to ask whether it should stop.
 ///
 /// `Arc<dyn Fn>` rather than a borrow because the value crosses the
-/// `spawn_blocking` boundary and needs `'static + Send + Sync`. The daemon
-/// builds one over its cancellation token so a shutdown ends an in-flight run
-/// at a batch boundary; [`Storage::run_cleanup`] supplies a never-stop one for
-/// every other caller.
+/// `spawn_blocking` boundary and needs `'static + Send + Sync`.
 pub type StopSignal = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// SQLite-backed storage engine for screenshots, audio, and full-text search.
@@ -916,9 +913,6 @@ mod tests {
             CleanupOutcome::Completed,
             "the delegating predicate must never report a stop"
         );
-        // The count alone would pass on a cleanup that miscounted without
-        // touching the table — the same standard `run_cleanup_accepts_the_bound_itself`
-        // states above, applied to the inverse case.
         assert!(
             storage.get_screenshot_opt(aged_id).await.unwrap().is_none(),
             "the expired row must be gone from the table, not merely counted"

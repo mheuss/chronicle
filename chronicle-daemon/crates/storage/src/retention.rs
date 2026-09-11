@@ -135,7 +135,6 @@ pub(crate) fn run_cleanup_interruptible(
     Ok(stats)
 }
 
-/// What one table's cleanup removed, and whether the stop predicate ended it.
 #[derive(Debug)]
 struct TableCleanup {
     deleted: usize,
@@ -219,29 +218,17 @@ fn cleanup_media(
 
         deleted += count;
 
-        // Exhaustion first. A short batch means the table is empty, so the run
-        // finished its work and reports `Completed` — there is nothing for the
-        // next run to pick up. A full batch is the only case that *can* leave
-        // rows behind, so it is the only one that reports `StopObserved`. It
-        // over-reports on an exact multiple of the batch size, where the table
-        // is empty but the final batch was full: the run suppresses its own
-        // checkpoint and the next boot cleans early. Detecting that would cost
-        // an extra SELECT per table, which is more than an early re-run costs.
+        // Exhaustion beats the stop: a short batch empties the table, so there
+        // is nothing for the next run to pick up. An exact multiple of the
+        // batch size over-reports `StopObserved`; detecting that costs an extra
+        // SELECT per table, more than the early re-run it would save.
         if count < CLEANUP_BATCH_SIZE {
             break;
         }
 
-        // After the commit, so a batch whose files are already unlinked always
-        // has its rows removed before the run returns.
-        //
-        // The early return saves one SELECT and nothing else: replace it with
-        // `let _ = stop();` and the next pre-batch check ends the run at the
-        // same boundary, with the same rows gone. That holds because the
-        // predicate stays true once it flips, which the daemon's does — a
-        // `CancellationToken` cannot be uncancelled. Only a predicate that
-        // reverted between this check and the next pre-batch one would run on.
-        // What is load-bearing is that the check sits *here*, after the commit,
-        // rather than between the unlinks and it.
+        // Placement is load-bearing: after the commit, so a batch whose files
+        // are already unlinked always has its rows removed before the run
+        // returns. The early return itself only saves a SELECT.
         if stop() {
             return Ok(TableCleanup {
                 deleted,
@@ -1482,11 +1469,8 @@ mod tests {
 
     /// A `StopSignal` that is true on the first call and false forever after.
     ///
-    /// Non-monotone on purpose. Every other helper here stays true once it
-    /// flips, which lets the audio table's own pre-batch check stand in for the
-    /// early return after the screenshot table — both spare the audio row, so
-    /// neither is under test. Only a predicate that goes back to false can tell
-    /// them apart.
+    /// Non-monotone on purpose — see
+    /// `a_screenshot_table_stop_does_not_fall_through_to_audio`.
     fn stop_once() -> crate::StopSignal {
         let seen = std::sync::Arc::new(AtomicUsize::new(0));
         std::sync::Arc::new(move || seen.fetch_add(1, AtomicOrdering::Relaxed) == 0)
@@ -1835,29 +1819,15 @@ mod tests {
 
     #[test]
     fn a_run_stops_within_one_batch_of_the_signal() {
-        // NFR-1, stated executably. The isolated tests above prove each check
-        // exists and stops the run; none of them says what the bound *is*.
-        // This sweeps the six arrival points from batch 1's post-commit check
-        // through batch 4's pre-batch check and asserts the bound at each.
-        // (Batch 1's pre-batch check is `n = 0`, which `(n - 1)` cannot express;
-        // `a_stop_before_any_work_deletes_nothing` covers it.)
-        //
-        // `stop_after(n)` is false for calls 0..n-1 and true from n on, and the
-        // loop makes two calls per batch — pre-batch, then post-commit. So the
-        // run stops on call n, and which check that is decides how much work
-        // the signal was able to catch:
-        //
-        //   n=1  b1 post-commit  -> batch 1 committed, batch 2 never starts
-        //   n=2  b2 pre-batch    -> same, one batch
-        //   n=3  b2 post-commit  -> batch 2 committed, two batches
-        //   n=4  b3 pre-batch    -> same, two batches
-        //
-        // which is `(n - 1) / 2 + 1` batches. The bound NFR-1 states is that
-        // this never exceeds the batches already committed when the signal
-        // arrived, plus one — true at every n below, including the odd ones
-        // where the signal arrives mid-batch and that batch still finishes.
-        // NFR-4's two checks per batch, which
-        // `a_batch_costs_at_most_two_predicate_calls` pins.
+        // NFR-1, stated executably: a run never deletes more than the batches
+        // already committed when the signal arrived, plus one. Sweeps the six
+        // arrival points from batch 1's post-commit check to batch 4's
+        // pre-batch. (Batch 1's pre-batch check is `n = 0`, which `(n - 1)`
+        // cannot express; `a_stop_before_any_work_deletes_nothing` covers it.)
+        // The derivation of the expected count is in the plan.
+
+        // Two checks per batch is NFR-4, pinned by
+        // `a_batch_costs_at_most_two_predicate_calls`.
         const CHECKS_PER_BATCH: usize = 2;
 
         for n in 1..=6 {

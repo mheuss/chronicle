@@ -185,14 +185,9 @@ pub enum CleanupOutcome {
     /// rather than a period out. The checkpoint is a schedule timestamp, not a
     /// resume position — every run re-selects from the oldest expired row.
     ///
-    /// Usually means expired rows remain, but not always, and the two check
-    /// sites miss it differently. A run stopping at the pre-batch check never
-    /// ran that table's `SELECT`, so it cannot know whether anything was left.
-    /// A run stopping at the post-commit check has just deleted a full batch,
-    /// which may have been the last one — the loop breaks early only on a short
-    /// batch, so an exact multiple of the batch size looks the same as more
-    /// work pending. Both over-report in the safe direction: the cost is one
-    /// `SELECT` per table on a run that finds nothing.
+    /// Does not guarantee expired rows remain — a stop can land before a
+    /// table's first `SELECT`, or after a final batch that emptied it. The
+    /// over-report costs one `SELECT` on the next run.
     StopObserved,
 }
 

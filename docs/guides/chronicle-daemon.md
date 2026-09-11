@@ -94,15 +94,18 @@ ordered teardown that cascades through the system:
 3. `bridge_handle.join()` — bridge thread drains and exits, closing `audio_tx`
 4. `await` all async tasks — they exit when their input channels close
 5. `join_cleanup_task(cleanup_handle, CLEANUP_GRACE)` — the retention cleanup
-   loop, joined last so every step above overlaps it
+   loop, joined last so it keeps winding down while steps 1-4 drain
 
-Most stages drain because their input channels close. Two do not: the
-provisioning task is aborted outright if its grace expires, and retention
-cleanup watches the shared token instead. `cancel.cancel()` at the top of
-teardown raises a stop predicate that cleanup's batch loop reads, so an
-in-flight run ends at a batch boundary rather than running to completion — it
-is never killed mid-batch. `CLEANUP_GRACE` is the point at which a slow run is
-reported, not a deadline: the join re-awaits past it.
+Of the steps above, only retention cleanup does not drain on a closing
+channel. It watches the cancellation token instead. `cancel.cancel()` at the
+top of teardown sets that token, and the batch loop checks it before each batch
+and again after each commit, so an in-flight run ends at the next batch
+boundary instead of running to completion.
+
+`CLEANUP_GRACE` is not a deadline. When it expires the join logs that cleanup
+is running long, then keeps waiting. Earlier in teardown, before the steps
+above, the provisioning wait does abort its task outright — that is the one
+place shutdown forces anything.
 
 ## Key Concepts
 

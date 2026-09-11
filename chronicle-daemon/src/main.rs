@@ -634,15 +634,8 @@ async fn main() -> Result<()> {
     // Retention cleanup. Spawned, never awaited on the startup path: HEU-547
     // was a 249-second startup stall and that shape must not come back.
     //
-    // The handle is retained and joined as the last teardown step, unless a
-    // signal `?` below returns from `main` first — registering the SIGTERM
-    // handler, or `ctrl_c()`'s `res?`. Either skips teardown entirely and
-    // detaches the handle. Both are signal-setup failures, so neither is
-    // reachable in practice on Unix.
-    //
-    // Two things about this task are worth knowing anyway, spelled out here
-    // because this comment is the only record of them that ships — the
-    // documents analysing them are gitignored.
+    // The handle is retained and joined as the last teardown step. Two things
+    // about this task are worth knowing anyway:
     //
     // 1. A worker panic ends the loop, so retention stays off for the rest of
     //    the process lifetime. The join does surface it: `report` logs a second
@@ -657,17 +650,9 @@ async fn main() -> Result<()> {
     //    NOT log "database is locked" or "busy", so a grep for those does not
     //    rule it out.
     //
-    // Separately, and independent of the join: `cleanup_media` unlinks a
-    // batch's files before deleting its rows, so anything that interrupts it
-    // between the two leaves rows pointing at nothing. A hard kill does that,
-    // and so does an ordinary `tx.commit()` failure — that is a plain
-    // `StorageError`, which `is_worker_panic` does not match, so the loop logs
-    // it and reschedules. Neither `process::exit(3)` is a route: the startup
-    // one fires before this task is spawned, and the poisoned-engine one runs
-    // after the join below. The next scheduled run repairs a stranding anyway —
-    // the row is expired by definition, so it is re-selected and removed (see
-    // docs/guides/storage-engine.md, "Stranded rows repair themselves").
-    // HEU-624 added counters that make the condition visible, not a repair.
+    // Stranded rows — files unlinked, rows not yet deleted — repair themselves
+    // on the next run; see docs/guides/storage-engine.md, "Stranded rows repair
+    // themselves". HEU-624 added counters that make it visible, not a repair.
     //
     // The predicate below reads the same `cancel` the loop selects on, so
     // `cancel.cancel()` is the only shutdown signal and there is no second flag
@@ -1023,8 +1008,8 @@ async fn main() -> Result<()> {
         // only the provision wait actually bounds anything, because it aborts
         // its task on expiry. This grace and CLEANUP_GRACE both re-await after
         // the timeout, so they are the point at which we say the wait is long,
-        // not a limit on it. Of the three, 5s is a real ceiling and 5.6s is a
-        // reporting threshold.
+        // not a limit on it. Only the provision wait's 5s is a real ceiling;
+        // the other 5.6s is a reporting threshold.
         const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
         // Borrow the handle — do NOT let `timeout` consume it. Dropping a JoinHandle
         // detaches the task, and runtime drop then destroys its future *without
@@ -1058,24 +1043,10 @@ async fn main() -> Result<()> {
     // would buy that time too, at the cost of stopping IPC and the refreshers
     // earlier.
     //
-    // Nothing pins this placement. Moving the join up to sit beside
-    // `cancel.cancel()` leaves the whole suite green; only a spawned-daemon
-    // test would catch it.
-    // Four times a measured batch (NFR-3), rounded up to a whole hundred.
-    // Eight runs per table of 500 rows (`CLEANUP_BATCH_SIZE`) on an M-series
-    // laptop: those spanned 29-49 ms idle, and 131 ms / 105 ms with a second
-    // copy of the same test suite running. Taking the slowest, 4 x 131.2 =
-    // 524.8 -> 600 ms. Per-run figures are in the plan's Decisions section.
-    //
-    // This constant cannot make shutdown slower or faster. `timeout` returns
-    // the moment the handle resolves, and both arms then await it to
-    // completion — so the grace decides one thing only: the batch duration at
-    // which we tell the operator cleanup is running long. Sizing it to the
-    // idle figure would fire that warning on any loaded shutdown, which is
-    // exactly when it should mean something.
-    //
-    // It is not a bound on batch duration either: `busy_timeout` is 5000 ms,
-    // so a contended commit can outlast any grace worth having.
+    // Four times a measured batch (NFR-3), rounded to a whole hundred: eight
+    // runs per table of 500 rows (`CLEANUP_BATCH_SIZE`) spanned 29-49 ms idle
+    // and 131 ms under load, so 4 x 131.2 -> 600 ms. Sized to the loaded
+    // figure, because a machine shutting down is often a busy one.
     const CLEANUP_GRACE: std::time::Duration = std::time::Duration::from_millis(600);
     if join_cleanup_task(cleanup_handle, CLEANUP_GRACE).await {
         shutdown_failed = true;

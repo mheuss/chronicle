@@ -259,11 +259,8 @@ where
                             ),
                         }
                     }
-                    // Says what the run did, not what it infers about the
-                    // database. A stop can land on the audio table's pre-batch
-                    // check with nothing expired there, or after a final batch
-                    // that happened to empty the table, so "rows remain" would
-                    // not be true of every run reaching here.
+                    // Reports what the run did, not what it implies about the
+                    // database — `StopObserved` does not mean rows remain.
                     CleanupOutcome::StopObserved => log::info!(
                         "retention cleanup stopped at shutdown, no checkpoint recorded: {stats:?}"
                     ),
