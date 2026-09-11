@@ -48,6 +48,68 @@ fn spawn_start_retry(tx: tokio::sync::mpsc::Sender<()>, delay: std::time::Durati
     });
 }
 
+/// A [`StopSignal`](chronicle_storage::StopSignal) that is true once `cancel`
+/// has been cancelled.
+///
+/// Reads the daemon's own token rather than a second flag, so `cancel.cancel()`
+/// stays the only shutdown signal and there is no store-before-cancel ordering
+/// to get right. Called once per batch boundary from a `spawn_blocking` worker;
+/// `is_cancelled()` takes a mutex, which is both cheap at that rate and a
+/// happens-before edge against `cancel()`.
+fn cancellation_stop_signal(
+    cancel: &chronicle_ipc::CancellationToken,
+) -> chronicle_storage::StopSignal {
+    let cancel = cancel.clone();
+    std::sync::Arc::new(move || cancel.is_cancelled())
+}
+
+/// Wait for the retention cleanup task, bounded by `grace`, and report whether
+/// it failed.
+///
+/// The handle is borrowed. `tokio::time::timeout` consumes what it is given,
+/// and a consumed `JoinHandle` detaches the task — runtime drop then destroys
+/// its future without polling it while the blocking pool still waits out the
+/// batch. See docs/development/tokio-shutdown.md.
+///
+/// `grace` is not a bound on how long a batch takes — it is the point at which
+/// we stop waiting quietly and say so.
+///
+/// Assumes the caller has already raised the task's stop signal. Called
+/// without that, the post-grace wait runs out the whole remaining run rather
+/// than the batch it is already on.
+async fn join_cleanup_task(
+    mut handle: tokio::task::JoinHandle<Result<(), chronicle_storage::StorageError>>,
+    grace: std::time::Duration,
+) -> bool {
+    fn report(
+        res: Result<Result<(), chronicle_storage::StorageError>, tokio::task::JoinError>,
+    ) -> bool {
+        match res {
+            Ok(Ok(())) => false,
+            Ok(Err(e)) => {
+                log::error!("retention cleanup task failed: {e}");
+                true
+            }
+            Err(e) => {
+                log::error!("retention cleanup task panicked: {e}");
+                true
+            }
+        }
+    }
+
+    match tokio::time::timeout(grace, &mut handle).await {
+        Ok(res) => report(res),
+        Err(_) => {
+            // Not necessarily a batch: a run blocked in `pool.get()` waits
+            // r2d2's 30s default, well past launchd's ExitTimeOut.
+            log::warn!("cleanup still running after {grace:?}; waiting for it to finish");
+            // Re-await ONLY here. Polling a `JoinHandle` after it has returned
+            // `Ready` is a contract violation.
+            report(handle.await)
+        }
+    }
+}
+
 /// Handle a completed provision: persist the variant that just started
 /// serving (AD-10, "persist on success").
 ///
@@ -572,47 +634,36 @@ async fn main() -> Result<()> {
     // Retention cleanup. Spawned, never awaited on the startup path: HEU-547
     // was a 249-second startup stall and that shape must not come back.
     //
-    // The handle is deliberately dropped, and four consequences follow. They
-    // are spelled out here because this comment is the only record of them that
-    // ships — the documents analysing them are gitignored.
+    // The handle is retained and joined as the last teardown step. Two things
+    // about this task are worth knowing anyway:
     //
-    // 1. `cancel` is observed only between runs, so quitting during a long run
-    //    waits for that run. The continuation after it is then dropped unpolled
-    //    at runtime drop, so the run deletes and commits but never records
-    //    `last_cleanup_ms` and never logs. The next process starts from an
-    //    older timestamp and cleans once more than it needed to — idempotent,
-    //    but a shutdown that silently removes thousands of rows is alarming to
-    //    meet without this note.
-    // 2. The `process::exit(3)` on a poisoned capture engine runs no
-    //    destructors, so none of that waiting happens at all. A run in flight
-    //    there dies after its unlinks and before its commit: files gone, rows
-    //    left pointing at nothing. The next scheduled run repairs that on its
-    //    own — the row is expired by definition, so it is re-selected and
-    //    removed (see docs/guides/storage-engine.md, "Stranded rows repair
-    //    themselves"). HEU-624 added counters that make the condition visible,
-    //    not a repair.
-    // 3. A worker panic ends the loop, so retention stays off for the rest of
-    //    the process lifetime with one log line as the only signal.
-    // 4. A run holds one of the four pooled connections for its whole duration,
-    //    not per batch. Steady state is seconds; the first enforcement run took
-    //    minutes. An exhausted pool surfaces as `StorageError::Pool` after
-    //    r2d2's 30s default — survivable for the loop, which reschedules, but a
-    //    pipeline writer that loses a connection drops a capture. Note it does
+    // 1. A worker panic ends the loop, so retention stays off for the rest of
+    //    the process lifetime. The join does surface it: `report` logs a second
+    //    line and the daemon exits nonzero. But that happens at shutdown, which
+    //    may be hours after the panic, and nothing restarts the loop in between.
+    // 2. Unaffected by the join: a run holds one of the four pooled
+    //    connections for its whole duration, not per batch. Steady state is
+    //    seconds; the first enforcement run took minutes. An exhausted pool
+    //    surfaces as `StorageError::Pool` after r2d2's 30s default —
+    //    survivable for the loop, which reschedules, but a pipeline writer
+    //    that loses a connection drops a capture. Note it does
     //    NOT log "database is locked" or "busy", so a grep for those does not
     //    rule it out.
     //
-    // HEU-630 closes the first with a stop flag that lets an in-flight run end
-    // between batches, plus a join it adds at the end of teardown. There is no
-    // join today.
-    let cleanup_ops = Arc::new(retention_task::StorageCleanupOps::new(Arc::clone(&storage)));
-    let cleanup_cancel = cancel.clone();
-    // The loop returns `Result`, and dropping the handle discards it. That is
-    // intentional for now — HEU-630 keeps the handle, joins it at the end of
-    // teardown, and sets `shutdown_failed` on an Err. Do not "simplify" the
-    // return type away in the meantime.
-    tokio::spawn(retention_task::run_cleanup_loop(
+    // Stranded rows — files unlinked, rows not yet deleted — repair themselves
+    // on the next run; see docs/guides/storage-engine.md, "Stranded rows repair
+    // themselves". HEU-624 added counters that make it visible, not a repair.
+    //
+    // An in-flight run ends at its next batch boundary rather than running to
+    // completion — see `cancellation_stop_signal` for why `cancel` alone
+    // drives that.
+    let cleanup_ops = Arc::new(retention_task::StorageCleanupOps::new(
+        Arc::clone(&storage),
+        cancellation_stop_signal(&cancel),
+    ));
+    let cleanup_handle = tokio::spawn(retention_task::run_cleanup_loop(
         cleanup_ops,
-        cleanup_cancel,
+        cancel.clone(),
     ));
 
     // --- Event loop: serve mic toggles until a shutdown signal arrives ---
@@ -952,8 +1003,13 @@ async fn main() -> Result<()> {
         // never the sole consumer of, and is less so now that the provision
         // wait above can add up to 5s. The unbounded steps between them
         // (`ipc_server.shutdown`, `supervisor.shutdown`, the bridge join, the
-        // audio-store await) are the ones with no ceiling; these two explicit
-        // waits total 10s of the 20s and are the part we actually control.
+        // audio-store await) are the ones with no ceiling. Neither is this one.
+        // The three graces differ in what expiry does. The provision wait
+        // aborts its task, though not a `spawn_blocking` load already running.
+        // This one raises `stop_transcription`, so the loop abandons whatever
+        // is still queued. CLEANUP_GRACE raises nothing at all — its signal
+        // went up at `cancel.cancel()` long before — which makes it the only
+        // one of the three that is purely a reporting threshold.
         const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
         // Borrow the handle — do NOT let `timeout` consume it. Dropping a JoinHandle
         // detaches the task, and runtime drop then destroys its future *without
@@ -977,6 +1033,29 @@ async fn main() -> Result<()> {
                 }
             }
         }
+    }
+
+    // Last, deliberately. `cancel.cancel()` raised the stop predicate before
+    // every unbounded teardown step, so the in-flight batch has been winding
+    // down through all of them and this wait is normally already satisfied.
+    // Not through the provision wait, which runs *before* the cancel and is
+    // tied with DRAIN_GRACE for the longest at 5s — moving the cancel above it
+    // would buy that time too, at the cost of stopping IPC and the refreshers
+    // earlier.
+    //
+    // Four times a measured batch (NFR-3), rounded up to a whole hundred: eight
+    // runs per table of 500 rows (`CLEANUP_BATCH_SIZE`) spanned 29-49 ms idle
+    // and 131 ms under load, so 4 x 131.2 = 524.8, rounded up to 600 ms. Sized
+    // to the loaded figure, because a machine shutting down is often a busy
+    // one.
+    //
+    // Do not raise this to silence the "cleanup running long" warning. No
+    // value here bounds anything: `busy_timeout` is 5000 ms
+    // (`crates/storage/src/schema.rs`), so a contended commit can outlast any
+    // grace, and the timeout arm re-awaits to completion either way.
+    const CLEANUP_GRACE: std::time::Duration = std::time::Duration::from_millis(600);
+    if join_cleanup_task(cleanup_handle, CLEANUP_GRACE).await {
+        shutdown_failed = true;
     }
 
     log::info!("chronicle-daemon stopped");
@@ -1247,5 +1326,76 @@ mod tests {
                 "{outcome:?} must end the incident and restore the budget"
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cleanup_task_that_finishes_inside_the_grace_is_not_a_failure() {
+        let handle = tokio::spawn(async { Ok(()) });
+        assert!(!join_cleanup_task(handle, std::time::Duration::from_secs(2)).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_panicking_cleanup_task_sets_shutdown_failed() {
+        let handle = tokio::spawn(async { panic!("worker died") });
+        assert!(join_cleanup_task(handle, std::time::Duration::from_secs(2)).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cleanup_task_that_outlives_the_grace_is_still_awaited() {
+        // A late `Err` still reaches the caller. This does NOT on its own
+        // prove the handle is borrowed: an implementation that consumes it and
+        // reports every timeout as a failure returns `true` here too. Its
+        // companion below is the other half — together they bracket the detach.
+        //
+        // It is load-bearing on its own terms too: the only test of the
+        // `Ok(Err(..))` classification arm. Delete it and that arm can return
+        // `false`, so a cleanup that failed with a real StorageError exits 0.
+        //
+        // `tokio::time::sleep`, never `advance()` — going idle auto-advances to
+        // the earliest deadline, which is what makes the timeout fire before
+        // the task does.
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            Err(chronicle_storage::StorageError::Other(
+                "late failure".into(),
+            ))
+        });
+
+        assert!(
+            join_cleanup_task(handle, std::time::Duration::from_secs(2)).await,
+            "the late Err must still reach the caller after the grace expires"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_late_but_successful_cleanup_is_not_reported_as_a_failure() {
+        // The other half of the bracket. A consumed handle detaches
+        // the task, so the caller never learns it succeeded and can only report
+        // the timeout as a failure — which this catches and the test above,
+        // asserting `true`, cannot.
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            Ok(())
+        });
+
+        assert!(
+            !join_cleanup_task(handle, std::time::Duration::from_secs(2)).await,
+            "a task that finishes cleanly after the grace is not a failure"
+        );
+    }
+
+    #[test]
+    fn the_stop_signal_follows_its_token() {
+        // Two asserts, because the predicate has exactly two states and an
+        // inverted `is_cancelled()` passes either one alone. Nothing else in
+        // the suite reads this predicate: `FakeOps` ignores it, so a flipped
+        // sense would leave the whole workspace green and cleanup would refuse
+        // to run at all while the daemon was healthy.
+        let cancel = chronicle_ipc::CancellationToken::new();
+        let stop = cancellation_stop_signal(&cancel);
+
+        assert!(!stop(), "must not stop before cancellation");
+        cancel.cancel();
+        assert!(stop(), "must stop once cancelled");
     }
 }

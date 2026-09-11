@@ -3,10 +3,15 @@ use std::path::Path;
 
 use rusqlite::{Connection, params};
 
+use crate::StopSignal;
 use crate::error::{Result, StorageError};
 use crate::media::MediaManager;
 use crate::models::{CleanupOutcome, CleanupStats};
 
+/// Rows per batch. Changing this invalidates `CLEANUP_GRACE` in
+/// `chronicle-daemon/src/main.rs`, which is four times a measured batch at this
+/// size, and the row counts quoted in the `measure_one_*` tests below. Nothing
+/// gates that — re-run the measurements.
 const CLEANUP_BATCH_SIZE: usize = 500;
 
 /// Descriptor for a media table's columns. Parameterizes generic cleanup/sweep.
@@ -48,10 +53,11 @@ pub const MAX_RETENTION_DAYS: i64 = 36_500;
 /// not fit in an `i64`.
 ///
 /// Its error branch is unreachable from its only production caller:
-/// `run_cleanup` rejects everything that could overflow before calling here. The arithmetic stays
-/// checked anyway, because a future caller that skips the bound must not be
-/// able to turn a wrap into data loss. It is a separate `fn` so that guard can
-/// be called — and therefore pinned — directly; see
+/// `run_cleanup_interruptible` rejects everything that could overflow before
+/// calling here. The arithmetic stays checked anyway, because a future caller
+/// that skips the bound must not be able to turn a wrap into data loss. It is a
+/// separate `fn` so that guard can be called — and therefore pinned — directly;
+/// see
 /// `compute_cutoff_rejects_a_window_that_overflows`.
 fn compute_cutoff(now_millis: i64, retention_days: i64) -> Result<i64> {
     retention_days
@@ -66,18 +72,27 @@ fn compute_cutoff(now_millis: i64, retention_days: i64) -> Result<i64> {
 }
 
 /// Delete expired records and their media files in batches.
-/// Order: delete files first, then DB rows (crash-safe — see design doc).
+/// Order: delete files first, then DB rows. That is not atomic. What it buys is
+/// that the common failure, one bad unlink, lands in the recoverable direction
+/// rather than the permanent one — see `docs/guides/storage-engine.md`.
+///
+/// Ends at a batch boundary once `stop` returns true, reporting
+/// [`CleanupOutcome::StopObserved`]. There is no never-stop wrapper outside
+/// this file's test module: `Storage::run_cleanup` supplies one, so a second
+/// would have no production caller.
 ///
 /// `retention_days` of `0` or less is "keep forever" and returns an empty
 /// result; above [`MAX_RETENTION_DAYS`] is an error. Note the asymmetry with
-/// `Storage::run_cleanup`, which rejects a *negative* value outright: `0` is a
-/// legitimate setting, so it cannot be an error here, while a negative one can
-/// only arrive from a caller that skipped the public boundary's validation.
+/// the public boundary, which rejects a *negative* value outright in
+/// `Storage::run_cleanup_interruptible`'s config read: `0` is a legitimate
+/// setting, so it cannot be an error here, while a negative one can only
+/// arrive from a caller that skipped that validation.
 /// Both layers refuse to delete; they differ only in how loudly.
-pub(crate) fn run_cleanup(
+pub(crate) fn run_cleanup_interruptible(
     conn: &Connection,
     media_mgr: &MediaManager,
     retention_days: i64,
+    stop: &StopSignal,
 ) -> Result<CleanupStats> {
     if retention_days <= 0 {
         return Ok(CleanupStats {
@@ -104,23 +119,37 @@ pub(crate) fn run_cleanup(
 
     let mut stats = CleanupStats::default();
 
-    let (s_deleted, s_freed) = cleanup_media(conn, &SCREENSHOT_TABLE, media_mgr, cutoff)?;
-    stats.screenshots_deleted += s_deleted;
-    stats.bytes_freed += s_freed;
+    let shots = cleanup_media(conn, &SCREENSHOT_TABLE, media_mgr, cutoff, stop)?;
+    stats.screenshots_deleted += shots.deleted;
+    stats.bytes_freed += shots.freed;
+    if shots.stopped {
+        stats.outcome = CleanupOutcome::StopObserved;
+        return Ok(stats);
+    }
 
-    let (a_deleted, a_freed) = cleanup_media(conn, &AUDIO_TABLE, media_mgr, cutoff)?;
-    stats.audio_segments_deleted += a_deleted;
-    stats.bytes_freed += a_freed;
+    let audio = cleanup_media(conn, &AUDIO_TABLE, media_mgr, cutoff, stop)?;
+    stats.audio_segments_deleted += audio.deleted;
+    stats.bytes_freed += audio.freed;
+    if audio.stopped {
+        stats.outcome = CleanupOutcome::StopObserved;
+    }
 
     Ok(stats)
 }
 
-/// Generic cleanup for one media table. Returns (rows_deleted, bytes_freed).
+#[derive(Debug)]
+struct TableCleanup {
+    deleted: usize,
+    freed: u64,
+    stopped: bool,
+}
+
+/// Generic cleanup for one media table.
 ///
 /// **Single-caller assumption:** This function is not safe for concurrent
 /// execution. The SELECT runs outside the transaction, so a concurrent call
-/// could select the same batch. The daemon calls `run_cleanup` from one
-/// scheduled task (`chronicle-daemon/src/retention_task.rs`) — one task per
+/// could select the same batch. The daemon reaches this from one scheduled
+/// task (`chronicle-daemon/src/retention_task.rs`) — one task per
 /// *process*, which is the dimension that matters now that a caller exists: two
 /// daemons against one database violate this even though each runs a single
 /// task. If it changes, wrap SELECT + file deletion + DB DELETE in a broader
@@ -130,11 +159,22 @@ fn cleanup_media(
     media: &MediaTable,
     media_mgr: &MediaManager,
     cutoff: i64,
-) -> Result<(usize, u64)> {
-    let mut total_deleted = 0usize;
-    let mut total_freed = 0u64;
+    stop: &StopSignal,
+) -> Result<TableCleanup> {
+    let mut deleted = 0usize;
+    let mut freed = 0u64;
 
     loop {
+        // The free exit. A `SELECT` has no side effects, so abandoning here
+        // costs nothing.
+        if stop() {
+            return Ok(TableCleanup {
+                deleted,
+                freed,
+                stopped: true,
+            });
+        }
+
         // 1. Select batch of expired rows
         // `ORDER BY` so an interrupted run removes the oldest data first; the
         // `id` tiebreak makes the order total, so rows sharing a timestamp
@@ -158,10 +198,10 @@ fn cleanup_media(
 
         let count = batch.len();
 
-        // 2. Delete files FIRST (crash-safe: orphan DB rows are easy to detect)
+        // 2. Delete files FIRST — ordering rationale is on the fn docblock.
         for (_, path) in &batch {
             match media_mgr.delete_file(Path::new(path)) {
-                Ok(freed) => total_freed += freed,
+                Ok(bytes) => freed += bytes,
                 Err(e) => {
                     log::warn!("cleanup: failed to delete {}: {}", path, e);
                 }
@@ -178,14 +218,35 @@ fn cleanup_media(
         tx.execute(&delete_sql, id_params.as_slice())?;
         tx.commit()?;
 
-        total_deleted += count;
+        deleted += count;
 
+        // Exhaustion beats the stop: a short batch empties the table, so there
+        // is nothing for the next run to pick up. An exact multiple of the
+        // batch size over-reports `StopObserved`; detecting that costs an extra
+        // SELECT per table, more than the early re-run it would save.
         if count < CLEANUP_BATCH_SIZE {
             break;
         }
+
+        // Placement is load-bearing: after the commit, so a batch whose files
+        // are already unlinked always has its rows removed before the run
+        // returns. The early return saves only a SELECT, and only because the
+        // daemon's predicate never flips back to false; one that did would get
+        // a whole extra batch.
+        if stop() {
+            return Ok(TableCleanup {
+                deleted,
+                freed,
+                stopped: true,
+            });
+        }
     }
 
-    Ok((total_deleted, total_freed))
+    Ok(TableCleanup {
+        deleted,
+        freed,
+        stopped: false,
+    })
 }
 
 /// Walk media directories and delete files not tracked in the database.
@@ -335,8 +396,8 @@ mod tests {
     use crate::{audio, screenshots};
     use rusqlite::trace::{TraceEvent, TraceEventCodes};
     use std::path::PathBuf;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{Arc, Mutex};
 
     /// Serializes every test that drives a `trace_v2` hook. The hooks below are
     /// bare `fn` pointers (rusqlite cannot take a closure), so they must reach
@@ -1381,5 +1442,498 @@ mod tests {
         let stats = run_cleanup(&conn, &media_mgr, 30).unwrap();
         assert_eq!(stats.screenshots_deleted, 1);
         assert_eq!(surviving_shots(&conn), 0);
+    }
+
+    // --- interruptible cleanup (HEU-630) ---
+
+    /// Run to exhaustion. Production reaches this through
+    /// `Storage::run_cleanup`, which supplies the same never-stop predicate.
+    fn run_cleanup(
+        conn: &Connection,
+        media_mgr: &MediaManager,
+        retention_days: i64,
+    ) -> Result<CleanupStats> {
+        let never: StopSignal = Arc::new(|| false);
+        run_cleanup_interruptible(conn, media_mgr, retention_days, &never)
+    }
+
+    /// A `StopSignal` that is true from the first call.
+    fn stop_now() -> crate::StopSignal {
+        std::sync::Arc::new(|| true)
+    }
+
+    /// A `StopSignal` that returns false for the first `n` calls, then true.
+    ///
+    /// The predicate captures, so a mid-run stop needs no process-global static
+    /// and no `HOOK_LOCK`. These tests run under the parallel harness.
+    fn stop_after(n: usize) -> crate::StopSignal {
+        let seen = std::sync::Arc::new(AtomicUsize::new(0));
+        std::sync::Arc::new(move || seen.fetch_add(1, AtomicOrdering::Relaxed) >= n)
+    }
+
+    /// A `StopSignal` that is true on the first call and false forever after.
+    ///
+    /// Non-monotone on purpose — see
+    /// `a_screenshot_table_stop_does_not_fall_through_to_audio`.
+    fn stop_once() -> crate::StopSignal {
+        let seen = std::sync::Arc::new(AtomicUsize::new(0));
+        std::sync::Arc::new(move || seen.fetch_add(1, AtomicOrdering::Relaxed) == 0)
+    }
+
+    fn surviving_audio(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM audio_segments", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_stop_before_any_work_deletes_nothing() {
+        let conn = setup_db();
+        let media_mgr = dummy_media_mgr();
+        insert_aged_shot(&conn, 100);
+        insert_aged_audio(&conn, 100);
+
+        let stats = run_cleanup_interruptible(&conn, &media_mgr, 30, &stop_now()).unwrap();
+
+        assert_eq!(stats.screenshots_deleted, 0);
+        assert_eq!(stats.audio_segments_deleted, 0);
+        assert_eq!(stats.outcome, CleanupOutcome::StopObserved);
+        assert_eq!(surviving_shots(&conn), 1, "no row was deleted");
+    }
+
+    #[test]
+    fn a_stop_in_the_screenshot_table_skips_the_audio_table() {
+        let conn = setup_db();
+        let media_mgr = dummy_media_mgr();
+        for _ in 0..CLEANUP_BATCH_SIZE + 1 {
+            insert_aged_shot(&conn, 100);
+        }
+        insert_aged_audio(&conn, 100);
+
+        // False once (the screenshot table's first pre-batch check), then true.
+        let stats = run_cleanup_interruptible(&conn, &media_mgr, 30, &stop_after(1)).unwrap();
+
+        assert_eq!(stats.outcome, CleanupOutcome::StopObserved);
+        assert_eq!(
+            stats.screenshots_deleted, CLEANUP_BATCH_SIZE,
+            "a stopped table must still report the batch it committed"
+        );
+        assert_eq!(
+            surviving_audio(&conn),
+            1,
+            "the audio table must not be touched after a screenshot-table stop"
+        );
+    }
+
+    #[test]
+    fn a_screenshot_table_stop_does_not_fall_through_to_audio() {
+        // BR-3, and the clause `a_stop_in_the_screenshot_table_skips_the_audio_table`
+        // cannot reach: delete the early return in `run_cleanup_interruptible`
+        // and that test still passes, because the audio table's own pre-batch
+        // check reads true and spares the row anyway.
+        //
+        // `stop_once` flips back to false, so the audio table's check would let
+        // it through. The row survives only if the run returned after the
+        // screenshot table.
+        let conn = setup_db();
+        let media_mgr = dummy_media_mgr();
+        insert_aged_shot(&conn, 100);
+        insert_aged_audio(&conn, 100);
+
+        let stats = run_cleanup_interruptible(&conn, &media_mgr, 30, &stop_once()).unwrap();
+
+        assert_eq!(stats.outcome, CleanupOutcome::StopObserved);
+        assert_eq!(
+            surviving_audio(&conn),
+            1,
+            "the run must return after the screenshot table, not fall through"
+        );
+    }
+
+    #[test]
+    fn a_stop_in_the_audio_table_is_still_reported() {
+        let conn = setup_db();
+        let media_mgr = dummy_media_mgr();
+        for _ in 0..CLEANUP_BATCH_SIZE + 1 {
+            insert_aged_audio(&conn, 100);
+        }
+
+        // False for the screenshot table's one check (it selects nothing and
+        // breaks), false for the audio table's first, then true.
+        let stats = run_cleanup_interruptible(&conn, &media_mgr, 30, &stop_after(2)).unwrap();
+
+        assert_eq!(stats.outcome, CleanupOutcome::StopObserved);
+    }
+
+    /// A `MediaManager` over a fresh temp directory, plus the directory guard.
+    ///
+    /// `dummy_media_mgr()` cannot be used for these tests: its base is
+    /// `/tmp/chronicle-test-dummy` while row paths point elsewhere, so every
+    /// `delete_file` fails `validate_path` and is swallowed. Nothing is ever
+    /// unlinked and `bytes_freed` stays zero.
+    fn temp_media_mgr() -> (tempfile::TempDir, crate::media::MediaManager) {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = crate::media::MediaManager::new(dir.path().to_path_buf()).unwrap();
+        (dir, mgr)
+    }
+
+    /// The payload both `_with_file` helpers write. `bytes_freed` assertions
+    /// read its length rather than repeating the number.
+    const FIXTURE_BYTES: &[u8] = b"12345678";
+    // Empty would leave every `bytes_freed` assertion vacuously true, including
+    // BR-8's only cross-table pin, with the suite fully green.
+    const _: () = assert!(!FIXTURE_BYTES.is_empty());
+
+    /// Insert one expired screenshot with a real file under the manager's base
+    /// directory.
+    fn insert_aged_shot_with_file(conn: &Connection, mgr: &crate::media::MediaManager, idx: usize) {
+        let path = mgr
+            .base_dir()
+            .join("screenshots")
+            .join(format!("s{idx}.heif"));
+        // `MediaManager::new` does not create subdirectories, and `write_file`
+        // does not create parents. `validate_path` also canonicalizes the
+        // parent, so it must exist before the write.
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        mgr.write_file(&path, FIXTURE_BYTES).unwrap();
+        let meta = ScreenshotMetadata {
+            timestamp: now_millis() - 100 * 86_400 * 1000,
+            display_id: "display1".into(),
+            app_name: None,
+            app_bundle_id: None,
+            window_title: None,
+            image_path: path.to_string_lossy().into_owned(),
+            ocr_text: None,
+            phash: None,
+            resolution: None,
+        };
+        screenshots::insert(conn, &meta).unwrap();
+    }
+
+    /// Insert one expired audio segment with a real file under the manager's
+    /// base directory. `data` sets the file size, which is what `bytes_freed`
+    /// accumulates; `transcript` decides whether the FTS delete triggers fire.
+    fn insert_aged_audio_with_file(
+        conn: &Connection,
+        mgr: &crate::media::MediaManager,
+        idx: usize,
+        data: &[u8],
+        transcript: Option<String>,
+    ) {
+        let path = mgr.base_dir().join("audio").join(format!("a{idx}.opus"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        mgr.write_file(&path, data).unwrap();
+        let start = now_millis() - 100 * 86_400 * 1000;
+        let meta = AudioSegmentMetadata {
+            start_timestamp: start,
+            end_timestamp: start + 30_000,
+            source: "mic".into(),
+            audio_path: path.to_string_lossy().into_owned(),
+            transcript,
+            whisper_model: None,
+            language: None,
+        };
+        audio::insert(conn, &meta).unwrap();
+    }
+
+    #[test]
+    fn a_stopped_run_leaves_no_batch_half_applied() {
+        let conn = setup_db();
+        let (_dir, mgr) = temp_media_mgr();
+        for i in 0..CLEANUP_BATCH_SIZE * 2 {
+            insert_aged_shot_with_file(&conn, &mgr, i);
+        }
+
+        // False for the first pre-batch check, false for the first post-commit
+        // check, true from the second pre-batch check on.
+        let stats = run_cleanup_interruptible(&conn, &mgr, 30, &stop_after(2)).unwrap();
+
+        assert_eq!(stats.outcome, CleanupOutcome::StopObserved);
+
+        // Every row still in the table must still have its file. A batch that
+        // unlinked files but never committed its rows would fail this.
+        let survivors: Vec<String> = conn
+            .prepare("SELECT image_path FROM screenshots")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(survivors.len(), CLEANUP_BATCH_SIZE);
+        for p in &survivors {
+            assert!(
+                Path::new(p).exists(),
+                "surviving row {p} has no file: a batch was left half-applied"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stop_after_a_commit_leaves_no_batch_half_applied() {
+        // BR-2, and the clause the test above cannot reach. `stop_after(2)`
+        // always ends on a *pre-batch* boundary, so no batch is ever in flight
+        // when it asserts — its file loop holds for every placement of the
+        // check, including one inside the danger window between the unlink loop
+        // and `tx.commit()`. `stop_after(1)` ends on the post-commit boundary
+        // instead, which is the only arrangement that can observe files
+        // unlinked against rows that were never deleted.
+        let conn = setup_db();
+        let (_dir, mgr) = temp_media_mgr();
+        for i in 0..CLEANUP_BATCH_SIZE * 2 {
+            insert_aged_shot_with_file(&conn, &mgr, i);
+        }
+
+        let stats = run_cleanup_interruptible(&conn, &mgr, 30, &stop_after(1)).unwrap();
+
+        assert_eq!(stats.outcome, CleanupOutcome::StopObserved);
+
+        let survivors: Vec<String> = conn
+            .prepare("SELECT image_path FROM screenshots")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        // File existence FIRST, so the failure names the invariant. A count
+        // assertion would fire on the danger-window placement too, but for the
+        // wrong reason — the deleted count going to zero, not a survivor losing
+        // its file.
+        for p in &survivors {
+            assert!(
+                Path::new(p).exists(),
+                "surviving row {p} has no file: the stop landed inside a batch"
+            );
+        }
+        // Not redundant with the sibling test: this is what proves a batch
+        // committed at all. Let the fixture drift so the run stops before any
+        // work and the loop above passes over untouched rows — this is the only
+        // assertion left that fails.
+        assert_eq!(
+            survivors.len(),
+            CLEANUP_BATCH_SIZE,
+            "exactly one batch must have committed, or the file loop is vacuous"
+        );
+    }
+
+    #[test]
+    fn a_short_final_batch_reports_completed_even_under_a_stop() {
+        // Drives `cleanup_media` directly rather than the whole run: the claim
+        // is about ONE table's exhaustion break winning over its own
+        // post-commit check. Through `run_cleanup_interruptible` the audio
+        // table's pre-batch check would consume the pending stop and report
+        // `StopObserved` for the run — correctly, but for an unrelated reason,
+        // which would make the assertion untestable here.
+        let conn = setup_db();
+        let (_dir, mgr) = temp_media_mgr();
+        // Fewer than one full batch, so the loop breaks on exhaustion.
+        for i in 0..3 {
+            insert_aged_shot_with_file(&conn, &mgr, i);
+        }
+
+        // True from the second call on. The first pre-batch check passes, the
+        // batch commits, and the exhaustion break fires before any second check.
+        let out =
+            cleanup_media(&conn, &SCREENSHOT_TABLE, &mgr, now_millis(), &stop_after(1)).unwrap();
+
+        assert!(
+            !out.stopped,
+            "an exhausted table has nothing for the next run to pick up"
+        );
+        assert_eq!(out.deleted, 3);
+        assert_eq!(out.freed, (3 * FIXTURE_BYTES.len()) as u64);
+    }
+
+    #[test]
+    fn a_stopped_run_returns_its_partial_statistics() {
+        // BR-8. Both tables, because `bytes_freed` accumulates across them and
+        // a dropped `+=` on the second table is invisible to a
+        // screenshots-only test.
+        let conn = setup_db();
+        let (_dir, mgr) = temp_media_mgr();
+
+        // Three screenshots: one short batch, so the table exhausts and the run
+        // moves on to audio rather than stopping there.
+        for i in 0..3 {
+            insert_aged_shot_with_file(&conn, &mgr, i);
+        }
+        // Two full batches of audio, so a stop can land after the first commits.
+        for i in 0..CLEANUP_BATCH_SIZE * 2 {
+            insert_aged_audio_with_file(&conn, &mgr, i, FIXTURE_BYTES, None);
+        }
+
+        // Call 1: screenshots pre-batch, false. The table exhausts on its short
+        // batch, so no post-commit check runs there. Call 2: audio pre-batch,
+        // false. Call 3: audio post-commit, true.
+        let stats = run_cleanup_interruptible(&conn, &mgr, 30, &stop_after(2)).unwrap();
+
+        assert_eq!(stats.outcome, CleanupOutcome::StopObserved);
+        assert_eq!(
+            stats.screenshots_deleted, 3,
+            "the exhausted screenshot table must still be counted"
+        );
+        assert_eq!(
+            stats.audio_segments_deleted, CLEANUP_BATCH_SIZE,
+            "and the one committed audio batch"
+        );
+        assert_eq!(
+            stats.bytes_freed,
+            ((3 + CLEANUP_BATCH_SIZE) * FIXTURE_BYTES.len()) as u64,
+            "bytes_freed must accumulate across both tables"
+        );
+    }
+
+    #[test]
+    fn a_batch_costs_at_most_two_predicate_calls() {
+        // NFR-4. Equality rather than `<=`, even though NFR-4 states an upper
+        // bound: a predicate called once per batch and cached satisfies `<=`
+        // while missing every stop that arrives after the SELECT.
+        let conn = setup_db();
+        let (_dir, mgr) = temp_media_mgr();
+        for i in 0..CLEANUP_BATCH_SIZE * 2 {
+            insert_aged_shot_with_file(&conn, &mgr, i);
+        }
+
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let stop: crate::StopSignal = {
+            let calls = std::sync::Arc::clone(&calls);
+            std::sync::Arc::new(move || {
+                calls.fetch_add(1, AtomicOrdering::Relaxed);
+                false
+            })
+        };
+
+        let stats = run_cleanup_interruptible(&conn, &mgr, 30, &stop).unwrap();
+
+        assert_eq!(stats.outcome, CleanupOutcome::Completed);
+        // Two committed full batches at two calls each, then one pre-batch
+        // check on the empty probe that ends the loop. The audio table adds one
+        // more pre-batch check before its own empty SELECT.
+        assert_eq!(
+            calls.load(AtomicOrdering::Relaxed),
+            2 * 2 + 1 + 1,
+            "two calls per committed batch, plus one per empty probe — pinned \
+             exactly, because an upper bound would admit a cached predicate"
+        );
+    }
+
+    #[test]
+    fn a_run_stops_within_one_batch_of_the_signal() {
+        // NFR-1, stated executably: a run never deletes more than the batches
+        // already committed when the signal arrived, plus one. Sweeps the six
+        // arrival points from batch 1's post-commit check to batch 4's
+        // pre-batch. (Batch 1's pre-batch check is `n = 0`, which `(n - 1)`
+        // cannot express; `a_stop_before_any_work_deletes_nothing` covers it.)
+        // The derivation of the expected count is in the plan.
+
+        // Two checks per batch is NFR-4, pinned by
+        // `a_batch_costs_at_most_two_predicate_calls`.
+        const CHECKS_PER_BATCH: usize = 2;
+
+        for n in 1..=6 {
+            let conn = setup_db();
+            let (_dir, mgr) = temp_media_mgr();
+            let total = CLEANUP_BATCH_SIZE * 5;
+            for i in 0..total {
+                insert_aged_shot_with_file(&conn, &mgr, i);
+            }
+
+            let stats = run_cleanup_interruptible(&conn, &mgr, 30, &stop_after(n)).unwrap();
+
+            let expected = CLEANUP_BATCH_SIZE * ((n - 1) / CHECKS_PER_BATCH + 1);
+            assert_eq!(stats.outcome, CleanupOutcome::StopObserved, "n={n}");
+            assert_eq!(
+                stats.screenshots_deleted, expected,
+                "n={n}: the batch the signal landed in may finish, and no later \
+                 one may start"
+            );
+            assert_eq!(
+                surviving_shots(&conn) as usize,
+                total - expected,
+                "n={n}: the rest of the table must be untouched"
+            );
+        }
+    }
+
+    /// NFR-3. Not a check — it asserts nothing and prints a duration.
+    /// `#[ignore]` keeps it out of CI, which is what the design asks for: one
+    /// number, recorded once, not a repeatable benchmark.
+    ///
+    /// Run with:
+    ///   cargo test -p chronicle-storage measure_one_ -- --ignored --nocapture
+    #[test]
+    #[ignore = "measurement, not a check"]
+    fn measure_one_screenshot_batch() {
+        let conn = setup_db();
+        let (_dir, mgr) = temp_media_mgr();
+        std::fs::create_dir_all(mgr.base_dir().join("screenshots")).unwrap();
+        let image = vec![0u8; 450 * 1024];
+        for i in 0..CLEANUP_BATCH_SIZE {
+            let path = mgr
+                .base_dir()
+                .join("screenshots")
+                .join(format!("s{i}.heif"));
+            // `du -sh` says 3.5G across 7,943 screenshots on this machine,
+            // measured 2026-09-10 — binary, so ~462 KiB each; 450 KiB here.
+            mgr.write_file(&path, &image).unwrap();
+            let meta = ScreenshotMetadata {
+                timestamp: now_millis() - 100 * 86_400 * 1000,
+                display_id: "display1".into(),
+                app_name: Some("Terminal".into()),
+                app_bundle_id: Some("com.apple.Terminal".into()),
+                window_title: Some("chronicle".into()),
+                image_path: path.to_string_lossy().into_owned(),
+                ocr_text: Some("lorem ipsum dolor sit amet ".repeat(40)),
+                phash: None,
+                resolution: None,
+            };
+            screenshots::insert(&conn, &meta).unwrap();
+        }
+
+        let never: StopSignal = Arc::new(|| false);
+        let start = std::time::Instant::now();
+        let out = cleanup_media(&conn, &SCREENSHOT_TABLE, &mgr, now_millis(), &never).unwrap();
+        let elapsed = start.elapsed();
+
+        // `freed` too: `cleanup_media` swallows unlink failures as warnings,
+        // so a fixture whose paths fall outside the manager's base would print
+        // an identical row count while measuring no file I/O at all.
+        println!(
+            "screenshot batch: {} rows, {} bytes freed, in {elapsed:?}",
+            out.deleted, out.freed
+        );
+    }
+
+    /// NFR-3, audio half. HEU-630 gives the production shape as roughly a
+    /// third of audio rows carrying transcripts, averaging ~120 characters.
+    /// This seeds 167 of 500 rows with a 132-character string, so the FTS
+    /// delete triggers index a realistic amount of text — they fire on all 500
+    /// rows either way, since `audio_ad` has no `WHEN` clause.
+    #[test]
+    #[ignore = "measurement, not a check"]
+    fn measure_one_audio_batch() {
+        let conn = setup_db();
+        let (_dir, mgr) = temp_media_mgr();
+        // ~6 KB is one 30-second Opus segment at this daemon's encoder
+        // settings. Not re-measured here; the live figure is not readable
+        // without touching the user's recordings.
+        let data = vec![0u8; 6 * 1024];
+        for i in 0..CLEANUP_BATCH_SIZE {
+            let transcript = if i % 3 == 0 {
+                Some("the quick brown fox jumps over the lazy dog ".repeat(3))
+            } else {
+                None
+            };
+            insert_aged_audio_with_file(&conn, &mgr, i, &data, transcript);
+        }
+
+        let never: StopSignal = Arc::new(|| false);
+        let start = std::time::Instant::now();
+        let out = cleanup_media(&conn, &AUDIO_TABLE, &mgr, now_millis(), &never).unwrap();
+        let elapsed = start.elapsed();
+
+        println!(
+            "audio batch: {} rows, {} bytes freed, in {elapsed:?}",
+            out.deleted, out.freed
+        );
     }
 }

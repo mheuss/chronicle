@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chronicle_ipc::CancellationToken;
-use chronicle_storage::{CleanupOutcome, CleanupStats, Storage, StorageError};
+use chronicle_storage::{CleanupOutcome, CleanupStats, StopSignal, Storage, StorageError};
 
 /// How long after startup the first run may fire.
 ///
@@ -92,11 +92,12 @@ pub(crate) trait CleanupOps: Send + Sync {
 /// The production implementation, over the real [`Storage`].
 pub(crate) struct StorageCleanupOps {
     storage: Arc<Storage>,
+    stop: StopSignal,
 }
 
 impl StorageCleanupOps {
-    pub(crate) fn new(storage: Arc<Storage>) -> Self {
-        Self { storage }
+    pub(crate) fn new(storage: Arc<Storage>, stop: StopSignal) -> Self {
+        Self { storage, stop }
     }
 }
 
@@ -107,7 +108,9 @@ impl CleanupOps for StorageCleanupOps {
     }
 
     async fn run_cleanup(&self) -> Result<CleanupStats, StorageError> {
-        self.storage.run_cleanup().await
+        self.storage
+            .run_cleanup_interruptible(Arc::clone(&self.stop))
+            .await
     }
 
     async fn read_last_cleanup(&self) -> Result<Option<String>, StorageError> {
@@ -232,26 +235,38 @@ where
 
         match result {
             Ok(stats) => {
-                if stats.outcome == CleanupOutcome::Completed {
-                    // The log line goes AFTER the write attempt so it cannot
-                    // claim success while the checkpoint silently failed.
-                    match ops.write_last_cleanup(completed_at).await {
-                        Ok(()) => log::info!("retention cleanup finished: {stats:?}"),
-                        // Same reasoning as the read above: `set_config` runs in
-                        // `spawn_blocking` too, and a panic there is a broken
-                        // storage layer, not a checkpoint that failed to stick.
-                        Err(e) if is_worker_panic(&e) => {
-                            log::error!(
-                                "retention cleanup finished: {stats:?}; checkpoint write panicked, stopping the scheduler: {e}"
-                            );
-                            return Err(e);
+                // Exhaustive on purpose: a future `CleanupOutcome` variant must
+                // be a compile error here, not a silent fall-through into the
+                // finished arm that also skips the checkpoint.
+                match stats.outcome {
+                    CleanupOutcome::Completed => {
+                        // The log line goes AFTER the write attempt so it cannot
+                        // claim success while the checkpoint silently failed.
+                        match ops.write_last_cleanup(completed_at).await {
+                            Ok(()) => log::info!("retention cleanup finished: {stats:?}"),
+                            // Same reasoning as the read above: `set_config` runs
+                            // in `spawn_blocking` too, and a panic there is a
+                            // broken storage layer, not a checkpoint that failed
+                            // to stick.
+                            Err(e) if is_worker_panic(&e) => {
+                                log::error!(
+                                    "retention cleanup finished: {stats:?}; checkpoint write panicked, stopping the scheduler: {e}"
+                                );
+                                return Err(e);
+                            }
+                            Err(e) => log::warn!(
+                                "retention cleanup finished: {stats:?}; {LAST_CLEANUP_KEY} not recorded: {e}"
+                            ),
                         }
-                        Err(e) => log::warn!(
-                            "retention cleanup finished: {stats:?}; {LAST_CLEANUP_KEY} not recorded: {e}"
-                        ),
                     }
-                } else {
-                    log::info!("retention cleanup finished: {stats:?}");
+                    // Reports what the run did, not what it implies about the
+                    // database — `StopObserved` does not mean rows remain.
+                    CleanupOutcome::StopObserved => log::info!(
+                        "retention cleanup stopped at shutdown, no checkpoint recorded: {stats:?}"
+                    ),
+                    CleanupOutcome::Disabled => {
+                        log::info!("retention cleanup finished: {stats:?}")
+                    }
                 }
             }
             Err(e) if is_worker_panic(&e) => {
@@ -609,6 +624,34 @@ mod loop_tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn an_interrupted_run_does_not_persist_a_checkpoint() {
+        // The behavior rests on one comparison in the result arm. Mutating it
+        // to `!= Disabled` satisfies every other test in this file while
+        // breaking this requirement, which is why it gets its own test.
+        //
+        // Same construction idiom as
+        // `a_disabled_outcome_reschedules_rather_than_spinning`: `outcome` is a
+        // plain field, set before the `Arc`.
+        let mut fake = FakeOps::new();
+        fake.outcome = CleanupOutcome::StopObserved;
+        let ops = Arc::new(fake);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run_cleanup_loop(Arc::clone(&ops), cancel.clone()));
+
+        tokio::time::sleep(Duration::from_secs(3 * 60 + 1)).await;
+        assert_eq!(ops.run_count(), 1, "the run must have happened");
+
+        cancel.cancel();
+        task.await.unwrap().unwrap();
+
+        assert!(
+            ops.writes.lock().unwrap().is_empty(),
+            "an interrupted run may have eligible rows left and must not suppress \
+             the next attempt"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_disabled_outcome_reschedules_rather_than_spinning() {
         // Without reschedule-before-inspect, a Disabled run records no
         // timestamp, leaves the deadline in the past, and the loop hammers the
@@ -683,7 +726,7 @@ mod loop_tests {
         assert_eq!(ops.run_count(), 1);
 
         // The task ends on its own, without anyone cancelling it, AND it ends
-        // in a failed state — that Err is what HEU-630's join will turn into a
+        // in a failed state — that Err is what the join in `main` turns into a
         // nonzero exit code. A loop that stopped but returned Ok would look
         // like an orderly shutdown.
         let outcome = tokio::time::timeout(Duration::from_secs(1), task)
@@ -728,11 +771,12 @@ mod loop_tests {
         // it reads the token later than the select structurally can, narrowing
         // the window where cancel lands after the select resolves on the sleep
         // branch but before `run_cleanup()` is entered. It cannot close that
-        // window — nothing observes the token once a run is under way, which is
-        // HEU-630's stop flag. `biased;` is redundant given the recheck — if the
-        // deadline branch ever won the coin flip, the recheck breaks
-        // immediately — and is kept only because the design names it as a
-        // required property.
+        // window, but the window is now bounded rather than open-ended: a run
+        // that starts into it observes the token through its stop predicate and
+        // ends at the next batch boundary. `biased;` is redundant given the
+        // recheck — if the deadline branch ever won the coin flip, the recheck
+        // breaks immediately — and is kept only because the design names it as
+        // a required property.
         //
         // The reachable race is a deschedule, not a zero `wait`: `wait` is
         // floored at the start delay and every reschedule is a full period out,
@@ -757,8 +801,9 @@ mod loop_tests {
         assert_eq!(ops.run_count(), 1, "the first run must be in flight");
         cancel.cancel();
 
-        // The in-flight run finishes (no stop flag until HEU-630), then the
-        // loop must exit rather than sleeping to the next deadline.
+        // The in-flight run ends at its next batch boundary — the fake's
+        // `run_cleanup` ignores the predicate, so here it simply returns — and
+        // then the loop must exit rather than sleeping to the next deadline.
         tokio::time::timeout(Duration::from_secs(120), task)
             .await
             .expect("the loop must exit after the in-flight run returns")
@@ -837,7 +882,7 @@ mod loop_tests {
         // The other half of `is_worker_panic`. A `JoinError` from an aborted
         // task is not a panic and must not be fatal: at shutdown the runtime
         // can abort a queued blocking task, and classifying that as a panic
-        // would turn an orderly exit into a nonzero exit code once HEU-630
+        // would turn an orderly exit into a nonzero exit code, because `main`
         // joins this loop.
         let handle = tokio::spawn(async { std::future::pending::<()>().await });
         handle.abort();
@@ -938,5 +983,42 @@ mod loop_tests {
 
         cancel.cancel();
         task.await.unwrap().unwrap();
+    }
+
+    /// The production adapter, which every other test in this file bypasses.
+    ///
+    /// `FakeOps` implements `CleanupOps` directly, so nothing else here reaches
+    /// `StorageCleanupOps` at all — and it is the only place that decides
+    /// whether the interruptible variant is called. Swap
+    /// `run_cleanup_interruptible` back to `run_cleanup` and the whole
+    /// workspace stays green apart from a dead-field lint, which vanishes the
+    /// moment someone deletes the field too.
+    #[tokio::test]
+    async fn the_production_ops_honour_their_stop_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            Storage::open(chronicle_storage::StorageConfig {
+                base_dir: dir.path().to_path_buf(),
+                pool_size: 2,
+            })
+            .await
+            .unwrap(),
+        );
+
+        // Explicit rather than riding the `QueryReturnedNoRows => 30` fallback
+        // in `Storage::run_cleanup_interruptible`: this test's precondition is
+        // that the run reaches the batch loop at all, and borrowing that from
+        // another module's default would make it fail for an unrelated reason
+        // if the default ever became 0.
+        storage.set_config("retention_days", "30").await.unwrap();
+
+        let ops = StorageCleanupOps::new(storage, Arc::new(|| true));
+        let stats = ops.run_cleanup().await.unwrap();
+
+        assert_eq!(
+            stats.outcome,
+            CleanupOutcome::StopObserved,
+            "an always-true predicate must reach the batch loop"
+        );
     }
 }

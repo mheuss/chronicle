@@ -161,17 +161,18 @@ pub struct SearchResult {
 /// `Completed` is the `Default`, and that attribute is load-bearing. Two paths
 /// build their stats with `..CleanupStats::default()` and never assign
 /// `outcome`: `Storage::sweep_orphans`, and — the one that matters —
-/// `retention::run_cleanup`'s success path. Move `#[default]` to `Disabled` and
-/// every ordinary cleanup run reports `Disabled`, so the scheduled task stops
-/// writing checkpoints and each restart re-runs cleanup immediately instead of
-/// honouring the period. `an_ordinary_run_reports_completed` in `retention.rs`
-/// pins this end to end.
+/// `retention::run_cleanup_interruptible`'s success path. Move `#[default]` to
+/// `Disabled` and every ordinary cleanup run reports `Disabled`, so the
+/// scheduled task stops writing checkpoints and each restart re-runs cleanup
+/// immediately instead of honouring the period.
+/// `an_ordinary_run_reports_completed` in `retention.rs` pins this end to end.
 ///
 /// The scheduled cleanup task (`chronicle-daemon/src/retention_task.rs`) reads
-/// this and persists a checkpoint only on `Completed`: a run that examined
-/// nothing has none to record, and recording one would delay the first real
-/// cleanup by up to a period after retention is switched back on. That is the
-/// reason this enum exists rather than a bare success/failure.
+/// this and persists a checkpoint only on `Completed`. A `Disabled` run
+/// examined nothing, and a `StopObserved` run may have stopped before
+/// exhausting its work; a checkpoint from either would delay the next real
+/// cleanup by up to a period. That is the reason this enum exists rather than a bare
+/// success/failure.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum CleanupOutcome {
     /// Ran to exhaustion — no expired records remain.
@@ -179,6 +180,14 @@ pub enum CleanupOutcome {
     Completed,
     /// `retention_days` was zero or negative, so nothing was examined.
     Disabled,
+    /// A stop predicate ended the run at a batch boundary. The checkpoint is a
+    /// schedule timestamp, not a resume position — every run re-selects from
+    /// the oldest expired row.
+    ///
+    /// Does not guarantee expired rows remain — a stop can land before a
+    /// table's first `SELECT`, or after a final batch that emptied it. The
+    /// over-report costs one redundant cleanup on the next run.
+    StopObserved,
 }
 
 /// Summary of what a cleanup or orphan-sweep operation removed.

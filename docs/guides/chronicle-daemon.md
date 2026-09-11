@@ -89,12 +89,28 @@ segment means data loss.
 Triggered by `SIGINT` (Ctrl-C) or `SIGTERM`. Either signal enters the same
 ordered teardown that cascades through the system:
 
-1. `engine.stop()` + `drop(engine)` — stops SCStreams, closes `frame_rx`
+1. `supervisor.shutdown()` — stops SCStream and joins the store/ocr tasks
 2. `audio_pipeline.stop()` — drops the audio handler and flushes the encoding thread
 3. `bridge_handle.join()` — bridge thread drains and exits, closing `audio_tx`
 4. `await` all async tasks — they exit when their input channels close
+5. `join_cleanup_task(cleanup_handle, CLEANUP_GRACE)` — the retention cleanup
+   loop, joined last so it keeps winding down while steps 1-4 drain
 
-No forced cancellation. Everything drains naturally.
+Of the five steps above, only retention cleanup does not drain on a closing
+channel. It watches the cancellation token instead. The capture and storage
+status refreshers watch the same token, but they are spawned detached and no
+step joins them. `cancel.cancel()` sets that
+token. It fires after the provisioning wait and the channel closes, and before
+every unbounded step. The batch loop checks the token before each batch and
+again after each commit. An in-flight run therefore ends at the next batch
+boundary instead of running to completion.
+
+`CLEANUP_GRACE` is not a deadline. When it expires the join logs that cleanup
+is running long, then keeps waiting. Two other waits do force work to stop.
+The provisioning wait, earlier in teardown, aborts its task. `DRAIN_GRACE` in
+step 4 raises `stop_transcription`, and the transcribe loop then abandons what
+is still queued. `CLEANUP_GRACE` is the only one whose expiry raises nothing,
+because `cancel.cancel()` already raised its signal.
 
 ## Key Concepts
 

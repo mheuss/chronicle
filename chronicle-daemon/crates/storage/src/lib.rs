@@ -4,6 +4,7 @@
 //! audio transcripts. Manages on-disk media files (screenshots, audio).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -35,6 +36,12 @@ pub use models::{
 /// the more precise path and says where the bound is enforced. This re-export
 /// exists for callers outside the crate, which cannot see that module.
 pub use retention::MAX_RETENTION_DAYS;
+
+/// A predicate the cleanup batch loop calls to ask whether it should stop.
+///
+/// `Arc<dyn Fn>` rather than a borrow because the value crosses the
+/// `spawn_blocking` boundary and needs `'static + Send + Sync`.
+pub type StopSignal = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// SQLite-backed storage engine for screenshots, audio, and full-text search.
 pub struct Storage {
@@ -381,7 +388,17 @@ impl Storage {
     // --- Retention operations ---
 
     /// Delete records and media files older than the configured retention period.
+    ///
+    /// Runs to exhaustion. Use [`Storage::run_cleanup_interruptible`] to let a
+    /// run end early at a batch boundary.
     pub async fn run_cleanup(&self) -> Result<CleanupStats> {
+        self.run_cleanup_interruptible(Arc::new(|| false)).await
+    }
+
+    /// As [`Storage::run_cleanup`], but ends at a batch boundary once `stop`
+    /// returns true. See docs/development/tokio-shutdown.md for why the daemon
+    /// signals early and joins late.
+    pub async fn run_cleanup_interruptible(&self, stop: StopSignal) -> Result<CleanupStats> {
         let pool = self.pool.clone();
         let media_mgr = self.media_mgr.clone();
         tokio::task::spawn_blocking(move || {
@@ -405,7 +422,7 @@ impl Storage {
                     }
                     // One enforcement point, pinned where it lives: the upper
                     // bound is deliberately NOT re-checked here.
-                    // `retention::run_cleanup` rejects anything above
+                    // `retention::run_cleanup_interruptible` rejects anything above
                     // `MAX_RETENTION_DAYS` and that error propagates through
                     // this call, so a second check would be *indistinguishable*
                     // from the inner guard by any behavioural assertion —
@@ -416,7 +433,7 @@ impl Storage {
                 Err(rusqlite::Error::QueryReturnedNoRows) => 30,
                 Err(e) => return Err(e.into()),
             };
-            retention::run_cleanup(&conn, &media_mgr, retention_days)
+            retention::run_cleanup_interruptible(&conn, &media_mgr, retention_days, &stop)
         })
         .await?
     }
@@ -526,10 +543,11 @@ impl Storage {
     /// user who set it. Every other key keeps the untyped passthrough
     /// behaviour.
     ///
-    /// This repeats the read-time comparison in `retention::run_cleanup`, and
-    /// deliberately does not make it redundant: a database written by an
-    /// earlier build — or by hand — can already hold an out-of-range value that
-    /// no write path ever saw, and only the read-time bound catches that.
+    /// This repeats the read-time comparison in
+    /// `retention::run_cleanup_interruptible`, and deliberately does not make
+    /// it redundant: a database written by an earlier build — or by hand — can
+    /// already hold an out-of-range value that no write path ever saw, and only
+    /// the read-time bound catches that.
     ///
     /// Delete this guard and `set_config_rejects_an_out_of_range_retention`
     /// fails at its `unwrap_err` — which is what makes it load-bearing where
@@ -769,9 +787,10 @@ mod tests {
 
     #[tokio::test]
     async fn run_cleanup_rejects_a_retention_beyond_the_bound() {
-        // The bound is enforced in `retention::run_cleanup`; this asserts the
-        // error propagates out through the public boundary. See the comment at
-        // the validation block above for why it is not re-checked here.
+        // The bound is enforced in `retention::run_cleanup_interruptible`; this
+        // asserts the error propagates out through the public boundary. See the
+        // comment at the validation block above for why it is not re-checked
+        // here.
         //
         // Pins that the *stored config value* reaches the guard: stub the
         // config read to a constant and this fails.
@@ -850,6 +869,53 @@ mod tests {
         assert!(
             storage.get_screenshot_opt(aged_id).await.unwrap().is_some(),
             "the aged row must still be in the table after cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_cleanup_deletes_through_the_never_stop_predicate() {
+        // Pins the one line the interruptible split rests on:
+        // `run_cleanup` delegating with `Arc::new(|| false)`. Flip that to
+        // `|| true` and production retention stops deleting anything, while
+        // every test in `retention.rs` stays green — they build their own
+        // never-stop predicate and never reach this one.
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Storage::open(config).await.unwrap();
+
+        let aged_id = storage
+            .insert_screenshot(ScreenshotMetadata {
+                timestamp: chrono::Utc::now().timestamp_millis() - 100 * 86_400 * 1000,
+                display_id: "display1".into(),
+                app_name: None,
+                app_bundle_id: None,
+                window_title: None,
+                image_path: dir
+                    .path()
+                    .join("never_stop_aged.heif")
+                    .to_string_lossy()
+                    .into_owned(),
+                ocr_text: None,
+                phash: None,
+                resolution: None,
+            })
+            .await
+            .unwrap();
+
+        let stats = storage.run_cleanup().await.unwrap();
+
+        assert_eq!(stats.screenshots_deleted, 1);
+        assert_eq!(
+            stats.outcome,
+            CleanupOutcome::Completed,
+            "the delegating predicate must never report a stop"
+        );
+        assert!(
+            storage.get_screenshot_opt(aged_id).await.unwrap().is_none(),
+            "the expired row must be gone from the table, not merely counted"
         );
     }
 
