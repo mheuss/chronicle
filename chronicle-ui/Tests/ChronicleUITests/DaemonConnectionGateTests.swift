@@ -64,7 +64,7 @@ struct DaemonConnectionGateTests {
         // Fake daemon: read the request line, then write invalid UTF-8 + LF.
         // 0xFF and 0xFE are invalid as standalone UTF-8 leading bytes.
         let serverTask = blockingServer {
-            _ = readLineSync(from: serverFD)
+            guard readLineSync(from: serverFD) != nil else { return }
             writeAll([0xFF, 0xFE, 0x0A], to: serverFD)
             Darwin.close(serverFD)
         }

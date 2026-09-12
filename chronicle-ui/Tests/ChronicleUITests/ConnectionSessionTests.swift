@@ -198,7 +198,7 @@ struct ConnectionSessionRoutingTests {
         try await withStartedSession { session, serverFD in
             // Read the request, slip an event in front of the response, then answer.
             let server = blockingServer {
-                _ = readLineSync(from: serverFD)
+                guard readLineSync(from: serverFD) != nil else { return }
                 _ = writeAll(#"{"type":"event","event":"capture_changed"}"# + "\n", to: serverFD)
                 _ = writeAll(#"{"type":"status","ok":true}"# + "\n", to: serverFD)
             }
@@ -268,7 +268,7 @@ struct ConnectionSessionRoutingTests {
     func readerErrorReachesCaller() async throws {
         try await withStartedSession { session, serverFD in
             let server = blockingServer {
-                _ = readLineSync(from: serverFD)
+                guard readLineSync(from: serverFD) != nil else { return }
                 _ = writeAll([0xFF, 0xFE, 0x0A], to: serverFD)
             }
             do {

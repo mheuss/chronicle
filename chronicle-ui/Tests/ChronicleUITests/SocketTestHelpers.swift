@@ -33,6 +33,7 @@ func readLineSync(from fd: Int32, maxBytes: Int = 64 * 1024) -> [UInt8]? {
     var byte: UInt8 = 0
     while buffer.count < maxBytes {
         let n = Darwin.read(fd, &byte, 1)
+        if n < 0 && errno == EINTR { continue }
         if n < 0 { return nil }
         if n == 0 { return buffer.isEmpty ? nil : buffer }
         if byte == 0x0A { return buffer }
