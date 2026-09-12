@@ -3,43 +3,6 @@ import Foundation
 import Darwin
 @testable import ChronicleUI
 
-// MARK: - Test helpers (file-private)
-
-@discardableResult
-private func writeAll(_ bytes: [UInt8], to fd: Int32) -> Bool {
-    var offset = 0
-    while offset < bytes.count {
-        let n = bytes.withUnsafeBufferPointer { buf -> Int in
-            Darwin.write(fd, buf.baseAddress!.advanced(by: offset), bytes.count - offset)
-        }
-        if n <= 0 { return false }
-        offset += n
-    }
-    return true
-}
-
-@discardableResult
-private func writeAll(_ string: String, to fd: Int32) -> Bool {
-    writeAll(Array(string.utf8), to: fd)
-}
-
-private func readLineSync(from fd: Int32, maxBytes: Int = 64 * 1024) -> [UInt8]? {
-    var buffer: [UInt8] = []
-    var byte: UInt8 = 0
-    while buffer.count < maxBytes {
-        let n = Darwin.read(fd, &byte, 1)
-        if n <= 0 { return buffer.isEmpty ? nil : buffer }
-        if byte == 0x0A { return buffer }
-        buffer.append(byte)
-    }
-    return buffer
-}
-
-private func respondToOneRequest(on fd: Int32, with response: String) {
-    _ = readLineSync(from: fd)
-    writeAll(response + "\n", to: fd)
-}
-
 @Suite("DaemonConnection new methods", .timeLimit(.minutes(1)))
 @MainActor
 struct DaemonConnectionMethodsTests {
@@ -53,7 +16,7 @@ struct DaemonConnectionMethodsTests {
         let reply = """
         {"type":"search","ok":true,"hits":[{"id":7,"source":"screen","timestamp_ms":1700000000000,"app_name":"X","app_bundle_id":null,"window_title":null,"image_path":"/x.heif","snippet":"hello","rank":-1.0}]}
         """
-        let daemonTask = Task.detached {
+        let daemonTask = blockingServer {
             let reqBytes = readLineSync(from: serverFD)
             let req = reqBytes.flatMap { String(bytes: $0, encoding: .utf8) } ?? ""
             #expect(req.contains("\"type\":\"search\""))
@@ -86,7 +49,7 @@ struct DaemonConnectionMethodsTests {
         let statusReply = """
         {"type":"status","ok":true,"data":{"uptime_secs":1,"version":"t"}}
         """
-        let daemonTask = Task.detached {
+        let daemonTask = blockingServer {
             let reqBytes = readLineSync(from: serverFD)
             let req = reqBytes.flatMap { String(bytes: $0, encoding: .utf8) } ?? ""
             #expect(req.contains("\"type\":\"set_whisper_model\""))
@@ -122,7 +85,7 @@ struct DaemonConnectionMethodsTests {
         let reply = """
         {"type":"get_screenshot","ok":true,"hit":{"id":42,"source":"screen","timestamp_ms":1700000001000,"app_name":"Safari","app_bundle_id":"com.apple.Safari","window_title":"Home","image_path":"/42.heif","snippet":"the quick brown fox","rank":0.0}}
         """
-        let daemonTask = Task.detached {
+        let daemonTask = blockingServer {
             let reqBytes = readLineSync(from: serverFD)
             let req = reqBytes.flatMap { String(bytes: $0, encoding: .utf8) } ?? ""
             #expect(req.contains("\"type\":\"get_screenshot\""))
@@ -146,7 +109,7 @@ struct DaemonConnectionMethodsTests {
         let serverFD = pair.serverFD
 
         let reply = #"{"type":"get_screenshot","ok":true,"hit":null}"#
-        let daemonTask = Task.detached {
+        let daemonTask = blockingServer {
             respondToOneRequest(on: serverFD, with: reply)
             Darwin.close(serverFD)
         }
@@ -166,7 +129,7 @@ struct DaemonConnectionMethodsTests {
         let pauseReply = #"{"type":"pause_capture","ok":true,"paused":true}"#
         let statusReply = #"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"0.1.0"}}"#
 
-        let daemonTask = Task.detached {
+        let daemonTask = blockingServer {
             // First request: pause_capture
             let reqBytes = readLineSync(from: serverFD)
             let req = reqBytes.flatMap { String(bytes: $0, encoding: .utf8) } ?? ""
@@ -193,7 +156,7 @@ struct DaemonConnectionMethodsTests {
         let resumeReply = #"{"type":"resume_capture","ok":true,"paused":false}"#
         let statusReply = #"{"type":"status","ok":true,"data":{"uptime_secs":2,"version":"0.1.0"}}"#
 
-        let daemonTask = Task.detached {
+        let daemonTask = blockingServer {
             // First request: resume_capture
             let reqBytes = readLineSync(from: serverFD)
             let req = reqBytes.flatMap { String(bytes: $0, encoding: .utf8) } ?? ""

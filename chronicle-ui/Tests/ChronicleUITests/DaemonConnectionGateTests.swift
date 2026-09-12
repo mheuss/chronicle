@@ -3,57 +3,6 @@ import Foundation
 import Darwin
 @testable import ChronicleUI
 
-// MARK: - Test helpers
-
-/// Writes all `bytes` to `fd`, looping in case of partial writes.
-@discardableResult
-private func writeAll(_ bytes: [UInt8], to fd: Int32) -> Bool {
-    var offset = 0
-    while offset < bytes.count {
-        let n = bytes.withUnsafeBufferPointer { buf -> Int in
-            Darwin.write(fd, buf.baseAddress!.advanced(by: offset), bytes.count - offset)
-        }
-        if n <= 0 { return false }
-        offset += n
-    }
-    return true
-}
-
-@discardableResult
-private func writeAll(_ string: String, to fd: Int32) -> Bool {
-    writeAll(Array(string.utf8), to: fd)
-}
-
-/// Reads bytes from `fd` until LF (0x0A) or `maxBytes` is hit. Returns the
-/// payload without the trailing LF. Returns nil on read error or EOF before
-/// any bytes were read.
-private func readLineSync(from fd: Int32, maxBytes: Int = 64 * 1024) -> [UInt8]? {
-    var buffer: [UInt8] = []
-    var byte: UInt8 = 0
-    while buffer.count < maxBytes {
-        let n = Darwin.read(fd, &byte, 1)
-        if n <= 0 { return buffer.isEmpty ? nil : buffer }
-        if byte == 0x0A { return buffer }
-        buffer.append(byte)
-    }
-    return buffer
-}
-
-/// Reads one newline-delimited request from `fd`, then writes `response`
-/// followed by LF. Closes neither side.
-private func respondToOneRequest(on fd: Int32, with response: String) {
-    _ = readLineSync(from: fd)
-    writeAll(response + "\n", to: fd)
-}
-
-/// Sets `fd` to non-blocking mode. Used in the FIFO probe.
-@discardableResult
-private func setNonBlocking(_ fd: Int32) -> Bool {
-    let flags = fcntl(fd, F_GETFL, 0)
-    if flags < 0 { return false }
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0
-}
-
 @Suite("DaemonConnection IPC gate", .timeLimit(.minutes(1)))
 @MainActor
 struct DaemonConnectionGateTests {
@@ -62,7 +11,7 @@ struct DaemonConnectionGateTests {
     func testingInitProducesConnected() async throws {
         let pair = try SocketPairHelper.make()
         defer {
-            // serverFD owned by the test, clientFD owned by FileHandle inside conn
+            // serverFD owned by the test, clientFD owned by the session inside conn
             Darwin.close(pair.serverFD)
         }
         let conn = DaemonConnection(testingSocketFD: pair.clientFD)
@@ -114,10 +63,12 @@ struct DaemonConnectionGateTests {
 
         // Fake daemon: read the request line, then write invalid UTF-8 + LF.
         // 0xFF and 0xFE are invalid as standalone UTF-8 leading bytes.
-        let serverTask = Task.detached {
-            _ = readLineSync(from: serverFD)
+        let serverTask = blockingServer {
+            // Before the guard: an early return would otherwise leave the
+            // client with no response and no EOF, which hangs the run.
+            defer { Darwin.close(serverFD) }
+            guard readLineSync(from: serverFD) != nil else { return }
             writeAll([0xFF, 0xFE, 0x0A], to: serverFD)
-            Darwin.close(serverFD)
         }
 
         do {
@@ -139,7 +90,7 @@ struct DaemonConnectionGateTests {
         let serverFD = pair.serverFD
 
         let validResponse = #"{"type":"status","ok":true,"data":{"uptime_secs":42,"version":"0.1.0"}}"#
-        let serverTask = Task.detached {
+        let serverTask = blockingServer {
             respondToOneRequest(on: serverFD, with: validResponse)
             Darwin.close(serverFD)
         }
@@ -162,7 +113,7 @@ struct DaemonConnectionGateTests {
         // Valid UTF-8, valid JSON, but does NOT match StatusResponse OR
         // ErrorResponse schemas — so we exit through the catch arm.
         let badResponse = #"{"unexpected":"shape"}"#
-        let serverTask = Task.detached {
+        let serverTask = blockingServer {
             respondToOneRequest(on: serverFD, with: badResponse)
             Darwin.close(serverFD)
         }
@@ -191,7 +142,7 @@ struct DaemonConnectionGateTests {
         // No `code` key: a daemon predating the field must still decode, which
         // is why `ErrorResponse.code` is Optional.
         let errorResponse = #"{"type":"error","ok":false,"message":"internal failure"}"#
-        let serverTask = Task.detached {
+        let serverTask = blockingServer {
             respondToOneRequest(on: serverFD, with: errorResponse)
             Darwin.close(serverFD)
         }
@@ -224,6 +175,9 @@ struct DaemonConnectionGateTests {
 
         // Server task returns true if it observed early request-2 bytes
         // (i.e., FIFO is broken). Returns false under correct FIFO behavior.
+        // Stays detached: this probe sets the fd non-blocking and waits with
+        // Task.sleep, so it never parks a cooperative thread the way the
+        // blocking servers do.
         let serverTask: Task<Bool, Never> = Task.detached {
             // 1. Read first request line, busy-looping on EAGAIN.
             var byte: UInt8 = 0
@@ -312,7 +266,8 @@ struct DaemonConnectionGateTests {
         // Fake daemon never replies — first request will hang in readLine.
         // We enqueue a second request behind it, close the server peer to
         // unblock the first task's read with EOF, then disconnect, and
-        // assert the second one throws notConnected (generation mismatch).
+        // assert the second one throws notConnected, because the session it
+        // captured is no longer the connection's.
 
         let firstTask = Task { try await conn.requestStatus() }
         // Give the first request enough time to take the queue head and start
@@ -328,14 +283,14 @@ struct DaemonConnectionGateTests {
         // chain wrapper that secondTask awaits on.
         Darwin.close(serverFD)
 
-        // Now disconnect. closeSocket() bumps connectionGeneration. By the
-        // time secondTask resumes from `await prev?.value`, its captured
-        // myGeneration no longer matches → throws notConnected.
+        // Now disconnect. closeSocket() drops the session. By the time
+        // secondTask resumes from `await prev?.value`, the session it captured
+        // is no longer the connection's → throws notConnected.
         conn.disconnect()
 
         do {
             _ = try await secondTask.value
-            Issue.record("Expected throw — generation should have changed")
+            Issue.record("Expected throw — the session should have been replaced")
         } catch IPCError.notConnected {
             // expected
         } catch {
