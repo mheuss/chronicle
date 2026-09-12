@@ -14,9 +14,11 @@ struct ConnectionSessionLifecycleTests {
         let pair = try SocketPairHelper.make()
         let session = ConnectionSession(fd: pair.clientFD, maxResponseSize: 64 * 1024)
         defer {
-            // No test here starts a real reader, so nothing is parked on
-            // clientFD and marking the reader exited is accurate. Without it a
-            // test that calls markReaderStarted() leaks clientFD for the run.
+            // Correct only while no test here starts a real reader: marking
+            // the reader exited is what lets close() release clientFD, and a
+            // test with a thread actually parked on it would be closed out from
+            // under that thread. Without the line, a test that calls
+            // markReaderStarted() leaks clientFD for the run instead.
             session.markReaderExited()
             session.close()
             session.closeIfDone()

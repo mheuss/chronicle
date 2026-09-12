@@ -64,7 +64,9 @@ final class ConnectionSession {
     /// continuation: `onCancel` fires synchronously, and the MainActor task it
     /// enqueues cannot run until registration has happened. Adding an `await`
     /// anywhere before `finishedWaiters[id] = cont` hangs this call forever.
-    /// `alreadyCancelledWaiterReturns` is what catches that.
+    /// `alreadyCancelledWaiterReturns` is what hangs when that happens — the
+    /// suite's time limit cannot convert it into a failure, so a stalled
+    /// `swift test` with no results is the symptom to read it by.
     func waitUntilFinished() async {
         if state == .finished { return }
         let id = nextWaiterID
