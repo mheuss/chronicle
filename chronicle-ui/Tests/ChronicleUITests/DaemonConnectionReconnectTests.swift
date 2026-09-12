@@ -24,7 +24,7 @@ actor AsyncGate {
 /// Records the socketpairs a test's factory hands out, on the MainActor.
 @MainActor
 final class FactoryLog {
-    private var pairs: [(clientFD: Int32, serverFD: Int32)] = []
+    private(set) var pairs: [(clientFD: Int32, serverFD: Int32)] = []
     var count: Int { pairs.count }
 
     func make() throws -> Int32 {
@@ -33,9 +33,10 @@ final class FactoryLog {
         return pair.clientFD
     }
 
-    /// The client side belongs to the session that was handed it.
-    func closeServers() {
-        for pair in pairs { Darwin.close(pair.serverFD) }
+    /// The client side belongs to the session that was handed it. `index`
+    /// skips the pairs whose server a test already closed itself.
+    func closeServers(from index: Int = 0) {
+        for pair in pairs.dropFirst(index) { Darwin.close(pair.serverFD) }
     }
 }
 
@@ -63,6 +64,7 @@ struct DaemonConnectionReconnectTests {
         let pair = try SocketPairHelper.make()
         let conn = DaemonConnection(testingSocketFD: pair.clientFD)
         let serverFD = pair.serverFD
+        defer { Darwin.close(serverFD) }
 
         // The gate holds the first response so the checkpoint below lands
         // while a request is definitely outstanding. Without it, both requests
@@ -71,6 +73,9 @@ struct DaemonConnectionReconnectTests {
         // semaphore rather than an actor: `blockingServer` runs its body on the
         // dispatch global queue, off any task, so it cannot await.
         let gate = DispatchSemaphore(value: 0)
+        // Runs before the close above, so a throw releases the server thread
+        // rather than parking it on an untimed wait for the rest of the run.
+        defer { gate.signal() }
         let reply = #"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"0.0.1"}}"# + "\n"
         let server = blockingServer {
             guard readLineSync(from: serverFD) != nil else { return }
@@ -89,7 +94,7 @@ struct DaemonConnectionReconnectTests {
         // requestQueue registers the second waiter too, and only elapsed time
         // gives it the chance to.
         await waitUntil { conn.sessionForTesting?.waiterCountForTesting == 1 }
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(for: .milliseconds(200))
         #expect(conn.sessionForTesting?.waiterCountForTesting == 1,
                 "requestQueue must keep exactly one request outstanding")
 
@@ -98,14 +103,18 @@ struct DaemonConnectionReconnectTests {
         _ = await server.value
 
         conn.disconnect()
-        Darwin.close(serverFD)
     }
 
     @Test("disconnect during establishment leaves nothing open")
     func disconnectDuringEstablishmentClosesTheDescriptor() async throws {
         let pair = try SocketPairHelper.make()
         let serverFD = pair.serverFD
+        defer { Darwin.close(serverFD) }
         let gate = AsyncGate()
+        // Runs before the close above. A throw before `open()` below would
+        // otherwise leave the connect task parked on the gate, holding the
+        // client descriptor for the rest of the run.
+        defer { Task { await gate.open() } }
         let conn = DaemonConnection(connectionFactory: {
             await gate.wait()                 // hold establishment open
             return pair.clientFD
@@ -132,6 +141,10 @@ struct DaemonConnectionReconnectTests {
         }
         #expect(await peer.value == 0, "the descriptor was left open after disconnect")
 
-        Darwin.close(serverFD)
+        // BR-14's other half — that no reader ran — is not asserted. The
+        // session `connect()` builds here is local to it, and a session whose
+        // reader HAD started reaches the same EOF anyway, because `close()`
+        // shuts the descriptor down and the woken reader closes it. The two
+        // are indistinguishable from the peer.
     }
 }

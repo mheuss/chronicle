@@ -99,7 +99,7 @@ final class DaemonConnection {
             socklen_t(MemoryLayout<Int32>.size)
         )
         precondition(result == 0, "SO_NOSIGPIPE failed in testing init: errno=\(errno)")
-        self.connectionFactory = { throw IPCError.notConnected }
+        self.connectionFactory = { preconditionFailure("testing connections do not reconnect") }
         let session = ConnectionSession(fd: fd, maxResponseSize: Self.maxResponseSize)
         session.start()
         self.session = session
@@ -133,6 +133,11 @@ final class DaemonConnection {
                 } catch is CancellationError {
                     break
                 } catch {
+                    // Only this task's own session is ours to close. A
+                    // cancelled task is one `disconnect()` already cleaned up
+                    // after, and by the time its error unwinds a newer
+                    // `connect()` may have published a session of its own.
+                    guard !Task.isCancelled else { break }
                     closeSocket()
                     state = .disconnected
                     try? await Task.sleep(for: delay)
@@ -290,10 +295,13 @@ final class DaemonConnection {
         return response.paused
     }
 
-    /// Generic request helper. ALL request methods must route through this —
-    /// it is the only caller of `ConnectionSession.send`, so a future request
-    /// method cannot accidentally bypass FIFO serialization or the session
-    /// check, and the live session keeps at most one waiter (design AD-8).
+    /// Generic request helper. Every request method routes through this, and
+    /// the `requestQueue` chain below is the only thing keeping one request
+    /// outstanding at a time — which is what holds design AD-8, at most one
+    /// waiter on a live session. That rests on this being the sole production
+    /// caller of `ConnectionSession.send`, not on the type system: `send` is
+    /// internal on a separate type, so a method reaching for it directly would
+    /// compile and would put a second waiter on the session.
     ///
     /// The unstructured `Task` here is intentional: caller cancellation must
     /// not abort socket I/O mid-write/read, or we'd leave the newline-delimited
@@ -315,8 +323,7 @@ final class DaemonConnection {
         }
         // The Task closure inherits @MainActor from this enclosing context, so
         // accesses to `self.session`/`encoder`/`decoder` below are
-        // actor-isolated and require no `await` — only the socket I/O on the
-        // session suspends.
+        // actor-isolated and require no `await`.
         let task = Task<Res, Error> {
             _ = await prev?.value  // wait for predecessor
             // Session identity replaces the generation counter: a request that
