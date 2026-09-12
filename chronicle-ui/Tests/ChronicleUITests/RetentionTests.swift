@@ -85,6 +85,29 @@ struct RetentionDecodingTests {
         #expect(r == .unknown)
     }
 
+    @Test("a days object with a wrongly typed value degrades instead of throwing")
+    func daysWithWrongTypedValue() throws {
+        // NFR-3's wording covers unrecognized kinds. This is the seam at the one
+        // recognized kind that carries a payload — unreachable from today's Rust,
+        // which always serialises a u32, but live the moment Days's field widens.
+        for bad in [#"{"kind":"days","value":"forever"}"#,
+                    #"{"kind":"days","value":-1}"#,
+                    #"{"kind":"days","value":30.5}"#] {
+            let r = try decode(bad)
+            #expect(r == .unknown, "\(bad)")
+        }
+    }
+
+    @Test("a malformed days payload does not take the enclosing status down")
+    func malformedDaysDoesNotBreakTheEnclosingBlock() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let json = statusJSON(retention: #"{"kind":"days","value":"forever"}"#)
+        let resp = try decoder.decode(StatusResponse.self, from: Data(json.utf8))
+        #expect(resp.data.storage?.retention == .unknown)
+        #expect(resp.data.storage?.screenshotCount == 3)
+    }
+
     @Test("an absent retention block leaves the rest of the status decodable")
     func absentRetentionDecodes() throws {
         // Optional on the decoder, not on the wire: a daemon too old to send

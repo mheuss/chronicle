@@ -624,13 +624,19 @@ enum Retention: Sendable, Equatable, Decodable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(String.self, forKey: .kind) {
         case "days":
-            // A days object without a value is malformed, not a day count.
-            // Inventing a number here would be the display lie this replaced.
-            guard let v = try c.decodeIfPresent(UInt32.self, forKey: .value) else {
+            // `try?`, not `try`: a days object whose value is absent, null, or
+            // the wrong type is malformed, not a day count. Throwing here would
+            // take the whole StatusData decode with it and land in the reconnect
+            // loop (HEU-725), which reads as a crashing daemon. Inventing a
+            // number would be the display lie this type replaced. `.unknown`
+            // renders as "Unavailable", which is neither.
+            // `try?` on an Optional-returning call flattens, so this one guard
+            // covers the throw and the absent key together.
+            guard let value = try? c.decodeIfPresent(UInt32.self, forKey: .value) else {
                 self = .unknown
                 return
             }
-            self = .days(v)
+            self = .days(value)
         case "disabled":
             self = .disabled
         case "invalid":
