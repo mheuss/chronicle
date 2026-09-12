@@ -207,7 +207,7 @@ The exceptions are settings where cleanup never re-selects the row:
 - `retention_days = 0` ("keep forever") — `Storage::run_cleanup_interruptible`
   classifies the stored value and returns `Disabled` without examining anything.
   The inner `retention::run_cleanup_interruptible` has its own `<= 0` guard.
-  That guard has been unreachable from production since HEU-625. It exists as
+  That guard has been unreachable from production since CHR-33. It exists as
   defence against a caller that skips the public boundary.
 - `retention_days > MAX_RETENTION_DAYS` (36,500), negative, or unparseable —
   the public boundary reports `CleanupOutcome::ConfigInvalid` and no cleanup
@@ -220,7 +220,7 @@ The exceptions are settings where cleanup never re-selects the row:
   policy is newer than a 365-day cutoff, and is not re-selected until it is 365
   days old.
 
-This is why HEU-624 ships a counter rather than a repair. On the one database
+This is why CHR-34 ships a counter rather than a repair. On the one database
 anyone had measured at the time — a single developer machine on 2026-08-26,
 13,028 rows — none were missing their file. That is a single observation, not a
 property of the system, which is precisely why the daemon now counts rather than
@@ -258,7 +258,7 @@ inserting its row, so reading the set first would delete a capture whose file
 landed before the walk reached its directory but whose row had not committed
 yet. Covering indexes on the two path columns (migration 002) keep the query off
 the table itself. This narrows the race but does not close it, and it is not safe
-across processes (HEU-591). See `docs/use-cases/storage.md` for the full
+across processes (CHR-45). See `docs/use-cases/storage.md` for the full
 rationale.
 
 ## How to run tests

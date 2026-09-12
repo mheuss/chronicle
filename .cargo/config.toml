@@ -1,7 +1,7 @@
 # Lives at the repo root on purpose. Cargo finds config by walking up from the
 # directory it is invoked in and does not follow --manifest-path, so a file
 # under chronicle-daemon/ was invisible to any build started from the root
-# (HEU-672). From here it applies anywhere inside the repo.
+# (CHR-130). From here it applies anywhere inside the repo.
 
 # ScreenCaptureKit depends on libswift_Concurrency.dylib, which is referenced
 # via @rpath. Without an rpath the binary (and test binaries) crash at launch
@@ -17,6 +17,6 @@ rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]
 # cmake_minimum_required(VERSION 3.1). CMake 4 removed support for minimums
 # below 3.5, so configure aborts and no build — debug or release — gets past
 # it. The crate is unmaintained (RUSTSEC-2026-0150), so no upstream fix is
-# coming; HEU-500 tracks moving off it.
+# coming; CHR-55 tracks moving off it.
 [env]
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"

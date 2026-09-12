@@ -227,7 +227,7 @@ final class DaemonConnection {
     }
 
     /// Search the daemon's OCR index. Returns up to `limit` screen-only hits
-    /// ranked by relevance. Audio results are added in HEU-470.
+    /// ranked by relevance. Audio results are added in CHR-76.
     ///
     /// `limit`/`offset` are clamped into `UInt32` — the wire protocol uses
     /// `u32`, and the unchecked `UInt32(_:)` initializer would trap on a
@@ -476,7 +476,7 @@ enum MicState: String, Codable, Sendable {
     /// reached through an optional, but that is no protection — a present key
     /// whose value fails to decode throws instead of degrading to nil, and the
     /// throw kills the whole StatusResponse. Same reasoning as
-    /// `TranscriptionState.unknown`; formal policy is HEU-456.
+    /// `TranscriptionState.unknown`; formal policy is CHR-77.
     case unknown
 
     init(from decoder: Decoder) throws {
@@ -574,7 +574,7 @@ struct StorageStats: Decodable, Sendable {
     ///
     /// The pair is sampled rather than read atomically, so a ratio above 1.0
     /// is sampling skew, not data. That is a property of the current Rust
-    /// implementation as of HEU-624, not of the wire format — the source of
+    /// implementation as of CHR-34, not of the wire format — the source of
     /// truth is `PipelineCounters::snapshot` in chronicle-daemon.
     let mediaServed: UInt64?
     /// Of `mediaServed`, how many had no file on disk.
@@ -622,7 +622,7 @@ enum Retention: Sendable, Equatable, Decodable {
         switch try c.decode(String.self, forKey: .kind) {
         case "days":
             // `try?`, not `try`: a malformed value is not a day count, and
-            // throwing would take StatusData into the HEU-725 reconnect loop.
+            // throwing would take StatusData into the CHR-6 reconnect loop.
             // The flattening means this one guard also covers an absent key.
             guard let value = try? c.decodeIfPresent(UInt32.self, forKey: .value) else {
                 self = .unknown
@@ -644,7 +644,7 @@ enum TranscriptionState: String, Codable, Sendable {
     /// A state this UI doesn't know yet (newer daemon). Decoding to a
     /// fallback keeps the whole StatusResponse alive — a closed enum would
     /// throw and take status polling dark. Formal cross-version policy is
-    /// HEU-456; views treat .unknown like .ready (no banner, no row alarm).
+    /// CHR-77; views treat .unknown like .ready (no banner, no row alarm).
     case unknown
 
     init(from decoder: Decoder) throws {
@@ -731,11 +731,11 @@ struct SearchHit: Codable, Sendable, Identifiable, Hashable {
 enum SearchHitSource: String, Codable, Sendable {
     case screen
     /// A hit source this UI doesn't know yet. Rust reserves
-    /// `SearchHitSource::Audio` for HEU-470, and `SearchHit.source` is not
+    /// `SearchHitSource::Audio` for CHR-76, and `SearchHit.source` is not
     /// optional — a closed enum here would throw and take the entire
     /// SearchResponse down, so one audio hit would blank out every screen hit
     /// beside it and search would go dark. Degrade instead. Formal policy is
-    /// HEU-456; this only guards decoding.
+    /// CHR-77; this only guards decoding.
     case unknown
 
     init(from decoder: Decoder) throws {

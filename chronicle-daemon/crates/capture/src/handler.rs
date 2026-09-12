@@ -36,7 +36,7 @@ pub(crate) struct CaptureOutputHandlerIvars {
     scale_factor: f64,
     frames_captured: Arc<AtomicU64>,
     frames_dropped: Arc<AtomicU64>,
-    /// Per-display count of frames skipped for having no image buffer (HEU-493).
+    /// Per-display count of frames skipped for having no image buffer (CHR-60).
     null_buffer_frames: AtomicU64,
     /// Process-lifetime drop counters, shared across every engine the daemon
     /// builds. Distinct from `frames_dropped`, which stays per-engine because
@@ -73,7 +73,7 @@ define_class!(
             // ScreenCaptureKit delivers frames with no image buffer during cold
             // display init (boot/wake) — there are no pixels to encode. Skip them
             // here so they never reach the pipeline, which would otherwise log an
-            // error and bump frames_failed (HEU-493).
+            // error and bump frames_failed (CHR-60).
             let Some(px_buf) = pixel_buffer::get_image_buffer(sample_buffer) else {
                 let n = ivars.null_buffer_frames.fetch_add(1, Ordering::Relaxed) + 1;
                 if should_warn(n) {

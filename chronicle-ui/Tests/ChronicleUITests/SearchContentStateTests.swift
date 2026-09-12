@@ -4,7 +4,7 @@ import Testing
 
 @Suite("SearchPopoverView content state")
 struct SearchContentStateTests {
-    // The core of HEU-478: a daemon/IPC error must read as a failure, never as
+    // The core of CHR-68: a daemon/IPC error must read as a failure, never as
     // a clean "No matches".
     @Test("daemon error surfaces the failure message, not no-matches")
     func errorBeatsNoMatches() {

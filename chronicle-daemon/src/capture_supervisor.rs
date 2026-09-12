@@ -1,7 +1,7 @@
 //! Owns the capture runtime and reconciles it against two independent
 //! stop reasons: user pause and system sleep.
 //!
-//! Display sleep is intentionally not a separate flag — see HEU-496 for the
+//! Display sleep is intentionally not a separate flag — see CHR-57 for the
 //! Apple-Silicon-specific investigation. The supervisor's two-flag design
 //! cleanly accommodates re-adding display sleep later (the existing
 //! `set_system_asleep` pattern generalizes to a `set_display_asleep` setter
@@ -33,7 +33,7 @@ enum ReconcileAction {
 
 /// Pure decision over the run predicate and the current run state. The
 /// predicate itself is defined once — `CaptureSupervisor::should_run` — so a
-/// future flag (e.g. HEU-496's `display_asleep`) is added in exactly one
+/// future flag (e.g. CHR-57's `display_asleep`) is added in exactly one
 /// place.
 fn decide(should_run: bool, running: bool) -> ReconcileAction {
     match (should_run, running) {
@@ -47,7 +47,7 @@ fn decide(should_run: bool, running: bool) -> ReconcileAction {
 /// `StartFailed { partial_teardown: true }` to `exit(3)`; other callers log.
 ///
 /// `must_use`: discarding an outcome silently skips the StartRetry arm/reset
-/// bookkeeping (`note_reconcile_outcome`) — exactly the bug class HEU-575
+/// bookkeeping (`note_reconcile_outcome`) — exactly the bug class CHR-136
 /// exists to prevent. Tests that genuinely don't care use `let _ =`.
 #[must_use]
 #[derive(Debug, PartialEq, Eq)]
@@ -279,7 +279,7 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     /// path writes a single boolean (`capture_paused`), nothing more.
     ///
     /// Returns the reconcile outcome so the event loop can arm a retry when
-    /// a resume's Start fails (HEU-575).
+    /// a resume's Start fails (CHR-136).
     pub async fn set_user_paused(
         &mut self,
         paused: bool,
@@ -306,7 +306,7 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     /// Clear `system_asleep` and reconcile. Transient — never persisted.
     ///
     /// Returns the reconcile outcome so the event loop can arm a retry when
-    /// the wake's Start fails (HEU-575).
+    /// the wake's Start fails (CHR-136).
     pub async fn set_system_awake(&mut self, audio: &'a AudioPipeline) -> ReconcileOutcome {
         self.system_asleep = false;
         log::info!("set_system_awake: cleared system_asleep");
@@ -647,7 +647,7 @@ mod tests {
         assert!(!settings::read_capture_paused(dir.path()));
         // Positive coverage of the run predicate: both flags clear must mean
         // run. This is the assertion that catches an inverted flag when
-        // HEU-496 extends should_run() with display_asleep.
+        // CHR-57 extends should_run() with display_asleep.
         assert!(supervisor.should_run(), "both flags clear must mean run");
 
         let outcome = supervisor.set_system_asleep(true, &audio).await;

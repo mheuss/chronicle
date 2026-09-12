@@ -185,7 +185,7 @@ pub(crate) async fn run_reporter_with_sink<F, S>(
 
 /// The level the reporter logs at.
 ///
-/// Named and pinned by a test rather than inlined: HEU-653 exists because
+/// Named and pinned by a test rather than inlined: CHR-22 exists because
 /// `warn!`/`info!` lines were invisible, so the level *is* the deliverable.
 /// Dropping it to `debug!` would leave the daemon silent by default under the
 /// `warn,chronicle=info` filter, and every test would still pass.
@@ -213,8 +213,8 @@ pub(crate) fn counter_reader(
 
 /// How often the reporter reads the counters.
 ///
-/// Timing resolution *inside* a drop burst is HEU-548's job, not this
-/// ticket's, so 30 s is the right granularity for what HEU-653 owns.
+/// Timing resolution *inside* a drop burst is CHR-53's job, not this
+/// ticket's, so 30 s is the right granularity for what CHR-22 owns.
 pub(crate) const REPORT_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[cfg(test)]
@@ -349,7 +349,7 @@ mod tests {
     #[test]
     fn report_period_is_thirty_seconds() {
         // Pinned deliberately: the design argues 30 s is right because burst
-        // timing inside a drop storm is HEU-548's scope, not this ticket's.
+        // timing inside a drop storm is CHR-53's scope, not this ticket's.
         assert_eq!(REPORT_PERIOD, std::time::Duration::from_secs(30));
     }
 

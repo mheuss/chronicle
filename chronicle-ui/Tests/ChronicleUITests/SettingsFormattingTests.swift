@@ -94,7 +94,7 @@ struct SettingsFormattingTests {
             downloadBytes: nil, downloadTotalBytes: nil, models: [])
     }
 
-    // MARK: - Disk usage / missing media (HEU-624)
+    // MARK: - Disk usage / missing media (CHR-34)
 
     @Test("Disk usage omits the missing clause when none are missing")
     func diskUsageOmitsClauseWhenZero() {

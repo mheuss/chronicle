@@ -267,7 +267,7 @@ mod tests {
         );
 
         // language is cleared with the transcript, so a migrated legacy row
-        // matches what the pipeline now writes for the same state (HEU-620).
+        // matches what the pipeline now writes for the same state (CHR-38).
         assert_eq!(
             col(1, "language"),
             None,
@@ -585,7 +585,7 @@ mod tests {
         // whether the planner uses it, and "the planner uses it" is the entire
         // point of migration 002. Without this, dropping the index or changing
         // the sweep's query shape puts the daemon back to a multi-minute
-        // startup stall with every test still green. See HEU-547.
+        // startup stall with every test still green. See CHR-54.
         for (sql, index) in [
             (
                 "SELECT image_path FROM screenshots",

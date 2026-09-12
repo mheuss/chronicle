@@ -116,7 +116,7 @@ because `cancel.cancel()` already raised its signal.
 
 **Two-process architecture:** The daemon and UI are separate
 processes. If the UI crashes, capture continues. Persistent install at login
-is deferred to packaging work (see HEU-448).
+is deferred to packaging work (see CHR-81).
 
 **Async OCR (and future transcription):** Capture and storage are the
 critical path. OCR already runs behind the main ingestion loop, and any future
@@ -160,7 +160,7 @@ holds with both sides redacted. `mheuss/chronicle` is a public repository.
 **A `2 ch` mic is the usual reason audio comes back quiet.** The converter is
 built with no `channelMap`, so a 2-to-1 conversion selects channel 0 and
 discards channel 1 — it does not mix them. If the device puts most of its level
-on channel 1, that level never reaches the recording. HEU-651 measured this on a
+on channel 1, that level never reaches the recording. CHR-24 measured this on a
 Blue Yeti: its channel 0 runs 7.7-7.9 dB below its channel 1, and the converter
 output was bit-identical to channel 0. A mic that duplicates its channels, like
 the EMEET SmartCam, is unaffected.

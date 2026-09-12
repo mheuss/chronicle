@@ -22,7 +22,7 @@ pub enum Request {
         enabled: bool,
     },
     /// Search the OCR index for screen-only results.
-    /// Audio results are added in HEU-470.
+    /// Audio results are added in CHR-76.
     Search {
         query: String,
         limit: u32,
@@ -35,7 +35,7 @@ pub enum Request {
         id: i64,
     },
     /// Pause screen + audio capture. Persists across daemon restarts via
-    /// the settings file. Mic toggle (HEU-330) remains a separate granular
+    /// the settings file. Mic toggle (CHR-103) remains a separate granular
     /// control; pause is the master switch.
     PauseCapture,
     /// Resume capture. Mic is restored to its persisted `mic_enabled`
@@ -101,14 +101,14 @@ impl MicState {
 ///
 /// Only ever decoded by a same-version client over the live IPC socket, so
 /// the `Error.code` field is required (no `#[serde(default)]`). Cross-version
-/// decoding is out of scope until protocol version negotiation (HEU-456).
+/// decoding is out of scope until protocol version negotiation (CHR-77).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 // `Response::Status` is inherently the fat variant: it carries the whole
 // StatusData block while most variants carry an ok flag. Boxing it would add a
 // heap allocation per response and churn every construction and match site, for
 // a warning with no runtime consequence on a type that is built once per
-// request and immediately serialized. HEU-624's two counters pushed the gap
+// request and immediately serialized. CHR-34's two counters pushed the gap
 // from 200 to 216 bytes and tripped the default threshold.
 #[allow(clippy::large_enum_variant)]
 pub enum Response {
@@ -208,7 +208,7 @@ pub struct AudioStats {
     pub mic_state: MicState,
 }
 
-/// Provisioning lifecycle for the whisper model (HEU-475, design §2.1).
+/// Provisioning lifecycle for the whisper model (CHR-71, design §2.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TranscriptionState {
@@ -276,7 +276,7 @@ pub struct StorageStats {
     /// Replaced a bare day count, which could not say "off" or "unusable".
     /// `None` is a third thing it could not say: the daemon failed to read the
     /// setting and is not claiming a policy. The UI renders that as
-    /// "Unavailable" rather than a number. See HEU-625 and ADR-015.
+    /// "Unavailable" rather than a number. See CHR-33 and ADR-015.
     pub retention: Option<Retention>,
     /// Media rows served over IPC this process lifetime. The denominator for
     /// `media_absent` — a bare absent count cannot be interpreted without it.
@@ -300,14 +300,14 @@ pub struct StorageStats {
     ///
     /// It also counts *serve events*, not distinct rows — the same missing file
     /// served a hundred times counts a hundred times. Read a large value
-    /// against `media_served` before concluding anything from HEU-624's
+    /// against `media_served` before concluding anything from CHR-34's
     /// interpretation table.
     pub media_absent: u64,
 }
 
 /// One search result row. Mirrors the storage-layer `SearchResult` shape,
 /// flattened for wire transport. Audio fields are deliberately omitted in
-/// HEU-242; they'll be added alongside `SearchHitSource::Audio` in HEU-470.
+/// CHR-121; they'll be added alongside `SearchHitSource::Audio` in CHR-76.
 ///
 /// `Eq` is intentionally not derived: `rank: f64` can be NaN and `Eq`'s
 /// reflexivity would be violated. Tests use `assert_eq!` which only needs
@@ -327,7 +327,7 @@ pub struct SearchHit {
     pub rank: f64,
 }
 
-/// Backing source of a search hit. `Audio` is reserved for HEU-470.
+/// Backing source of a search hit. `Audio` is reserved for CHR-76.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchHitSource {
@@ -693,14 +693,14 @@ mod tests {
         assert_eq!(v["retention"]["kind"], "days");
         assert_eq!(v["retention"]["value"], 30);
         // Both counters ship, and ship together: an absent count with no
-        // denominator is uninterpretable. See HEU-624 BR-2.
+        // denominator is uninterpretable. See CHR-34 BR-2.
         assert_eq!(v["media_served"], 900);
         assert_eq!(v["media_absent"], 3);
     }
 
     #[test]
     fn the_storage_block_carries_retention_not_a_day_count() {
-        // The breaking half of HEU-625. `retention_days` is gone, so a UI built
+        // The breaking half of CHR-33. `retention_days` is gone, so a UI built
         // before this cannot decode StorageStats at all — accepted per AD-2
         // because the .app ships both halves together.
         let disabled = StorageStats {
@@ -742,7 +742,7 @@ mod tests {
     fn an_unread_retention_is_null_rather_than_a_day_count() {
         // The daemon failing to read the setting is not a policy. Collapsing
         // this to a default would put a number the daemon never read in front
-        // of the user, which is the defect HEU-625 removes.
+        // of the user, which is the defect CHR-33 removes.
         let unread = StorageStats {
             retention: None,
             ..StorageStats::default()

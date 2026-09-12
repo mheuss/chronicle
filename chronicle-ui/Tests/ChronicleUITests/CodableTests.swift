@@ -158,7 +158,7 @@ struct CodableTests {
 
     @Test("StorageStats decodes when the new media counters are absent")
     func storageStatsDecodesWithoutMediaCounters() throws {
-        // An older daemon that predates HEU-624. The WHOLE storage block must
+        // An older daemon that predates CHR-34. The WHOLE storage block must
         // still decode — a non-optional field here would take disk usage and
         // retention down with it.
         let json = """
@@ -199,8 +199,8 @@ struct CodableTests {
     @Test("An old UI decoder ignores the new media counters")
     func oldUIDecoderIgnoresMediaCounters() throws {
         // Reverse direction, narrowly: an old UI ignores keys a new daemon
-        // ADDED. It does not cover a key the daemon REMOVED — HEU-625 dropped
-        // retention_days, and an old UI fed a real post-HEU-625 status would
+        // ADDED. It does not cover a key the daemon REMOVED — CHR-33 dropped
+        // retention_days, and an old UI fed a real post-CHR-33 status would
         // keyNotFound on the non-optional retentionDays below and lose the
         // whole block. That is accepted (design Risk 1) and unpinned; this
         // fixture is a shape no daemon sends any more.
@@ -452,7 +452,7 @@ struct CodableTests {
         // A future daemon may add a 7th state. A closed enum would throw and
         // kill the WHOLE StatusResponse decode (status polling goes dark) —
         // decode to .unknown instead. Recorded decision from the Task 2
-        // wire-type review; formal cross-version policy is HEU-456.
+        // wire-type review; formal cross-version policy is CHR-77.
         let json = """
         {"type":"status","ok":true,"data":{"uptime_secs":5,"version":"0.1.0",
          "transcription":{"state":"defragmenting","variant":"base",
@@ -501,12 +501,12 @@ struct CodableTests {
     // The fix must ship BEFORE the daemon emits the new value: it only
     // protects UIs built after it. Fixing it alongside the daemon change
     // protects nothing, because the UI that breaks is the one already
-    // installed. Formal negotiation is HEU-456; this is just the decoder
+    // installed. Formal negotiation is CHR-77; this is just the decoder
     // being careful.
 
     @Test("Unknown search hit source degrades, not throws")
     func unknownSearchHitSourceDegrades() throws {
-        // Rust reserves SearchHitSource::Audio for HEU-470. `source` is
+        // Rust reserves SearchHitSource::Audio for CHR-76. `source` is
         // non-optional, so a closed enum here takes the entire SearchResponse
         // down and search goes dark — every hit lost, not just the audio one.
         let json = """

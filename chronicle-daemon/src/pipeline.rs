@@ -189,12 +189,12 @@ fn warn_abandoned_queue(abandoned: usize) {
 /// Transcribe persisted audio segments off the tokio runtime and store the text.
 ///
 /// Heavy work (Opus decode + whisper) runs inside `spawn_blocking` so it never
-/// starves tokio workers (cf. HEU-480). Each pulled job is processed to
+/// starves tokio workers (cf. CHR-66). Each pulled job is processed to
 /// completion before the next `recv`, so at most one whisper call is in flight
 /// (sequential). An empty result is **recorded as an attempt** — `whisper_model`
 /// set, `transcript` and `language` NULL — so blank text still never reaches
 /// `audio_fts` while the row stays distinguishable from one that was never
-/// transcribed (HEU-620). It is deliberately not skipped; see the comment on the
+/// transcribed (CHR-38). It is deliberately not skipped; see the comment on the
 /// empty branch below.
 ///
 /// **Shutdown contract — this loop must outlive `audio_store_loop`.** It exits
@@ -219,7 +219,7 @@ fn warn_abandoned_queue(abandoned: usize) {
 ///
 /// The engine is resolved from the handle **once per job** and held for that
 /// whole job, so a model swap takes effect on the next segment and the
-/// transcript is produced and stamped by the same engine (HEU-589). A job
+/// transcript is produced and stamped by the same engine (CHR-47). A job
 /// that arrives while the handle is empty is skipped as idle — matching the
 /// sink's `Disabled` semantics — not treated as a failure.
 pub async fn transcribe_loop(
@@ -233,7 +233,7 @@ pub async fn transcribe_loop(
     while let Some(job) = rx.recv().await {
         // Resolve per job and hold for the whole job: the transcript is
         // produced AND stamped by the engine that ran it — a swap mid-queue
-        // affects the next job, never the current one (HEU-589).
+        // affects the next job, never the current one (CHR-47).
         let Some(engine) = engine.get() else {
             // Benign race with the sink's is_loaded gate: idle, not failing —
             // same "Disabled" semantics, no counter.
@@ -293,7 +293,7 @@ pub async fn transcribe_loop(
                 // with a NULL transcript rather than skipping the write: skipping
                 // also discards the fact that we tried, leaving the row
                 // indistinguishable from one that was never transcribed, which
-                // makes a backfill scheduler re-queue it forever (HEU-620).
+                // makes a backfill scheduler re-queue it forever (CHR-38).
                 let (stored, language) = if text.is_empty() {
                     log::debug!(
                         "no usable speech in segment {} — recording the attempt",
@@ -1519,7 +1519,7 @@ mod tests {
             seg.whisper_model.as_deref(),
             Some("base"),
             "but the attempt IS recorded; without this a backfill scheduler \
-             re-queues silent segments forever (HEU-620)"
+             re-queues silent segments forever (CHR-38)"
         );
         assert!(
             seg.language.is_none(),
@@ -1666,7 +1666,7 @@ mod tests {
     /// are frequently silent, so a realistic shutdown yields a *run* of
     /// no-speech results, and a `continue` there would jump straight back to
     /// `recv` past the flag — defeating the grace bound in precisely the case
-    /// it exists for. Since HEU-620 that path writes a NULL transcript rather
+    /// it exists for. Since CHR-38 that path writes a NULL transcript rather
     /// than skipping, which is what the per-segment assertions below pin.
     #[tokio::test]
     async fn transcribe_loop_stops_after_empty_transcript() {
@@ -1684,7 +1684,7 @@ mod tests {
             .await
             .unwrap();
         // Whitespace only — trims to empty, so every job takes the no-speech
-        // path (a NULL-transcript write since HEU-620, not a skip).
+        // path (a NULL-transcript write since CHR-38, not a skip).
         let engine = handle_with(base_engine("   "));
         let (tx, rx) = mpsc::channel(4);
         for id in [row_id, queued_id] {

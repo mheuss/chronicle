@@ -3,7 +3,7 @@
 //! One deadline governs the loop: sleep until it, run, recompute. There is no
 //! `tokio::time::interval` and no separate due check, and adding either back
 //! would reintroduce a scheduling bug — three earlier designs did exactly that.
-//! See HEU-629 before changing the shape here.
+//! See CHR-31 before changing the shape here.
 //!
 //! The wait is computed from the wall clock but slept on tokio's timer, which
 //! is monotonic. On macOS that timer is `CLOCK_UPTIME_RAW`, which does not
@@ -24,7 +24,7 @@ use chronicle_storage::{CleanupOutcome, CleanupStats, StopSignal, Storage, Stora
 ///
 /// Short enough that an ordinary session reaches it. A session shorter than
 /// this never cleans — an accepted residual gap. The original 15 minutes was
-/// guarding against HEU-547's 249-second startup stall, which is fixed.
+/// guarding against CHR-54's 249-second startup stall, which is fixed.
 pub(crate) const CLEANUP_START_DELAY: Duration = Duration::from_secs(3 * 60);
 
 /// Time from one run finishing to the next starting.

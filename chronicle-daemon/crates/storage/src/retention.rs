@@ -73,7 +73,7 @@ fn compute_cutoff(now_millis: i64, retention_days: i64) -> Result<i64> {
 /// `retention_days` of `0` or less is "keep forever" and returns an empty
 /// result; above [`MAX_RETENTION_DAYS`] is an error.
 ///
-/// Neither branch is reachable from production since HEU-625 — the public
+/// Neither branch is reachable from production since CHR-33 — the public
 /// boundary in `Storage::run_cleanup_interruptible` refuses both cases before
 /// calling in, so only the test module reaches them. `0` is "keep forever"
 /// rather than an error because it is a legitimate setting; a negative here can
@@ -95,7 +95,7 @@ pub(crate) fn run_cleanup_interruptible(
         // because a caller that swallows the `Err` would otherwise leave
         // retention silently never running while disk grows.
         //
-        // Unreachable from the scheduled path since HEU-625:
+        // Unreachable from the scheduled path since CHR-33:
         // `Storage::run_cleanup_interruptible` refuses an above-bound value
         // before calling in, and logs it there. Only a caller that skips that
         // boundary reaches this line.
@@ -283,7 +283,7 @@ fn sweep_media_orphans(
     // file-then-row gap spans the walk-to-SELECT interval: the file makes the
     // list and the row misses the set. Note this is also less forgiving than the
     // per-file COUNT(*) this replaced, where each row had until its own file's
-    // turn in the loop — minutes, which was the HEU-547 bug.
+    // turn in the loop — minutes, which was the CHR-54 bug.
     //
     // Tolerability rests on two assumptions, and only the first holds today:
     //   1. HOLDS, in-process: the sole production caller is main.rs:89, awaited
@@ -292,7 +292,7 @@ fn sweep_media_orphans(
     //   2. DOES NOT HOLD, cross-process: the only single-instance guard is the
     //      socket probe in IpcServer::start (main.rs:215), which runs long after
     //      the sweep, so a second daemon sweeps the shared media directory while
-    //      the first is capturing. Tracked as HEU-591. The symptom is worse than
+    //      the first is capturing. Tracked as CHR-45. The symptom is worse than
     //      a lost file — neither insert checks that the file still exists, so the
     //      row still commits and leaves a row pointing at nothing, plus an OCR or
     //      transcription job that can never succeed.
@@ -300,7 +300,7 @@ fn sweep_media_orphans(
     // `sweep_walks_before_reading_tracked_set` pins the ordering.
     //
     // The age guard below NARROWS that window. It does not close it, and
-    // HEU-591 stays open. A genuine orphan is left behind by a crash, so it
+    // CHR-45 stays open. A genuine orphan is left behind by a crash, so it
     // predates the sweep that finds it; a capture still being written does not.
     //
     // With the guard, deletion requires BOTH: the file's last write predates
@@ -338,7 +338,7 @@ fn sweep_media_orphans(
     // idx_<table>_<path_col> (migration 002), so this reads the index rather
     // than scanning the table. Previously this function ran one
     // `SELECT COUNT(*)` per file on disk, which is O(files x rows) — see
-    // HEU-547.
+    // CHR-54.
     let tracked: HashSet<String> = {
         let select_sql = format!("SELECT {} FROM {}", media.path_col, media.table);
         let mut stmt = conn.prepare(&select_sql)?;
@@ -1002,7 +1002,7 @@ mod tests {
     /// An untracked file that is newer than the sweep is a capture in flight, not
     /// an orphan — the pipeline writes the file before committing its row, so
     /// deleting it destroys a real capture. This guard is what keeps the sweep's
-    /// residual race (HEU-591) from costing data.
+    /// residual race (CHR-45) from costing data.
     ///
     /// The fixture stamps the file's mtime forward rather than racing the sweep.
     /// That is deliberate: the file has to be present when the walk enumerates it
@@ -1110,7 +1110,7 @@ mod tests {
         assert!(!audio_path.exists(), "audio file should be deleted");
     }
 
-    // --- retention_days bounds (HEU-628) ---
+    // --- retention_days bounds (CHR-37) ---
 
     /// Insert one screenshot `age_days` old.
     fn insert_aged_shot(conn: &Connection, age_days: i64) {
@@ -1149,7 +1149,7 @@ mod tests {
         audio::insert(conn, &meta).unwrap();
     }
 
-    // --- cleanup outcome (HEU-629) ---
+    // --- cleanup outcome (CHR-31) ---
 
     #[test]
     fn a_disabled_retention_reports_disabled() {
@@ -1185,7 +1185,7 @@ mod tests {
         assert_eq!(stats.screenshots_deleted, 1);
     }
 
-    // --- batch ordering (HEU-629) ---
+    // --- batch ordering (CHR-31) ---
 
     #[test]
     fn cleanup_keeps_only_rows_inside_the_window() {
@@ -1309,7 +1309,7 @@ mod tests {
         // outside `dummy_media_mgr`'s base, so every `delete_file` fails
         // `validate_path` and is swallowed by the warn in `cleanup_media`.
         // `bytes_freed` accumulating across batches is therefore still
-        // uncovered — stats are HEU-631's, don't read this as covering them.
+        // uncovered — stats are CHR-29's, don't read this as covering them.
         assert_eq!(stats.bytes_freed, 0, "no file here is actually reclaimable");
     }
 
@@ -1437,7 +1437,7 @@ mod tests {
         assert_eq!(surviving_shots(&conn), 0);
     }
 
-    // --- interruptible cleanup (HEU-630) ---
+    // --- interruptible cleanup (CHR-30) ---
 
     /// Run to exhaustion. Production reaches this through
     /// `Storage::run_cleanup`, which supplies the same never-stop predicate.
@@ -1896,7 +1896,7 @@ mod tests {
         );
     }
 
-    /// NFR-3, audio half. HEU-630 gives the production shape as roughly a
+    /// NFR-3, audio half. CHR-30 gives the production shape as roughly a
     /// third of audio rows carrying transcripts, averaging ~120 characters.
     /// This seeds 167 of 500 rows with a 132-character string, so the FTS
     /// delete triggers index a realistic amount of text — they fire on all 500

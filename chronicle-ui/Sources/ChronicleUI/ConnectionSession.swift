@@ -23,7 +23,7 @@ final class ConnectionSession {
     private var finishedWaiters: [Int: CheckedContinuation<Void, Never>] = [:]
     private var nextWaiterID = 0
 
-    /// The reserved `type` value marking a daemon-initiated message. HEU-386
+    /// The reserved `type` value marking a daemon-initiated message. CHR-93
     /// ships the Rust side and the test that the two agree.
     nonisolated static let eventDiscriminator = "event"
 
