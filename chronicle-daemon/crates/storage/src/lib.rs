@@ -403,37 +403,43 @@ impl Storage {
         let media_mgr = self.media_mgr.clone();
         tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
-            let retention_days: i64 = match conn.query_row(
+            let stored: Option<String> = match conn.query_row(
                 "SELECT value FROM config WHERE key = 'retention_days'",
                 [],
-                |row| {
-                    let val: String = row.get(0)?;
-                    Ok(val)
-                },
+                |row| row.get(0),
             ) {
-                Ok(val) => {
-                    let days = val.parse::<i64>().map_err(|e| {
-                        StorageError::Other(format!("invalid retention_days value: {e}"))
-                    })?;
-                    if days < 0 {
-                        return Err(StorageError::Other(
-                            "retention_days must be non-negative".into(),
-                        ));
-                    }
-                    // One enforcement point, pinned where it lives: the upper
-                    // bound is deliberately NOT re-checked here.
-                    // `retention::run_cleanup_interruptible` rejects anything above
-                    // `MAX_RETENTION_DAYS` and that error propagates through
-                    // this call, so a second check would be *indistinguishable*
-                    // from the inner guard by any behavioural assertion —
-                    // reachable, but delete it and nothing fails. See
-                    // `run_cleanup_rejects_a_retention_beyond_the_bound` below.
-                    days
-                }
-                Err(rusqlite::Error::QueryReturnedNoRows) => 30,
+                Ok(val) => Some(val),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
                 Err(e) => return Err(e.into()),
             };
-            retention::run_cleanup_interruptible(&conn, &media_mgr, retention_days, &stop)
+
+            match chronicle_ipc::Retention::from_stored(stored.as_deref()) {
+                chronicle_ipc::Retention::Days { value } => {
+                    retention::run_cleanup_interruptible(&conn, &media_mgr, i64::from(value), &stop)
+                }
+                chronicle_ipc::Retention::Disabled => Ok(CleanupStats {
+                    outcome: CleanupOutcome::Disabled,
+                    ..CleanupStats::default()
+                }),
+                chronicle_ipc::Retention::Invalid => {
+                    // `from_stored(None)` is the default, never `Invalid`, so
+                    // this arm is only reached with a row present.
+                    let raw = stored.as_deref().unwrap_or_default();
+                    // Bounded because a hand-written row can hold a string of
+                    // any length and the log applies no limit — the same hazard
+                    // that keeps the value off the wire. 64 chars, not bytes;
+                    // `{:?}` escaping can expand what is emitted further.
+                    let mut shown: String = raw.chars().take(64).collect();
+                    if raw.chars().count() > 64 {
+                        shown.push('…');
+                    }
+                    log::warn!("retention_days is not a usable value ({shown:?}); cleanup skipped");
+                    Ok(CleanupStats {
+                        outcome: CleanupOutcome::ConfigInvalid,
+                        ..CleanupStats::default()
+                    })
+                }
+            }
         })
         .await?
     }
@@ -538,9 +544,9 @@ impl Storage {
     ///
     /// `retention_days` is validated here and nowhere else on the write path.
     /// This is the only writer, so an out-of-range value cannot reach the table
-    /// — which matters because the scheduled cleanup task would otherwise fail
-    /// identically every period, and a value nothing reads is invisible to the
-    /// user who set it. Every other key keeps the untyped passthrough
+    /// — which matters because the scheduled cleanup task would otherwise
+    /// refuse the same value every period without deleting anything, and a
+    /// value nothing reads is invisible to the user who set it. Every other key keeps the untyped passthrough
     /// behaviour.
     ///
     /// The rules are not restated here. `Retention::classify` owns them, and
@@ -548,19 +554,18 @@ impl Storage {
     /// reports *which* rule was broken, and each reason keeps the substring
     /// `set_config_rejects_an_out_of_range_retention` pins.
     ///
-    /// Two readers still parse the stored string by hand rather than calling
-    /// `classify`, and they do not even agree with each other:
-    /// `Storage::run_cleanup_interruptible` uses `i64::from_str` and errors on
-    /// a bad value, while `parse_retention_days` in `chronicle-daemon` uses
-    /// `u32::from_str` and falls back to 30 with a warning. Task 4 of HEU-625
-    /// converts the first, Task 6 removes the second. Neither trims, which is
-    /// why this guard stores the value trimmed.
+    /// `Storage::run_cleanup_interruptible` reaches the same rules through
+    /// `Retention::from_stored`. One reader still parses by hand:
+    /// `parse_retention_days` in `chronicle-daemon` uses `u32::from_str` and
+    /// falls back to 30 with a warning rather than refusing. HEU-625's Task 6
+    /// removes it. It does not trim, which is why this guard stores the value
+    /// trimmed.
     ///
-    /// Read-time checks are deliberately not redundant with this one: a
+    /// The read-time check is deliberately not redundant with this one: a
     /// database written by an earlier build — or by hand — can already hold a
-    /// value no write path ever saw. The non-negative and unparseable checks
-    /// live in `Storage::run_cleanup_interruptible`; the upper bound lives one
-    /// layer further in, in `retention::run_cleanup_interruptible`.
+    /// value no write path ever saw. It refuses differently, reporting
+    /// `CleanupOutcome::ConfigInvalid` rather than an error, because a cleanup
+    /// run that finds a bad setting has nothing to fail at.
     ///
     /// Delete this guard and `set_config_rejects_an_out_of_range_retention`
     /// fails at its `unwrap_err` — which is what makes it load-bearing where
@@ -583,12 +588,11 @@ impl Storage {
             }));
         }
         // Store `retention_days` trimmed. `classify` trims to decide, so a
-        // padded value is accepted at write time — and every reader parses the
-        // stored string itself. `Storage::run_cleanup_interruptible` uses
-        // `i64::from_str` and `parse_retention_days` in the daemon uses
-        // `u32::from_str`; neither trims, and a padded row would make them
-        // disagree with the guard and with each other. Normalising here means
-        // no reader ever sees the padding, including ones added later.
+        // padded value is accepted at write time, and `parse_retention_days` in
+        // the daemon parses the stored string with `u32::from_str`, which does
+        // not. A padded row would make it disagree with this guard and with
+        // cleanup. Normalising at the single writer covers every reader,
+        // including ones added later.
         let pool = self.pool.clone();
         let key = key.to_string();
         let value = if key == "retention_days" {
@@ -794,14 +798,15 @@ mod tests {
     /// The guard must not bless a value its readers refuse.
     ///
     /// `Retention::classify` trims, so routing the guard through it made
-    /// `set_config(" 30 ")` succeed — while both readers parse the stored
-    /// string without trimming and would have refused it. The guard now stores
-    /// the trimmed form, so the question never reaches a reader.
+    /// `set_config(" 30 ")` succeed while every reader still parsed the stored
+    /// string untrimmed and would have refused it. The guard stores the trimmed
+    /// form, so the question never reaches a reader. `parse_retention_days` in
+    /// `chronicle-daemon` is the last one that still parses by hand.
     ///
-    /// Asserting the stored value rather than a cleanup outcome is deliberate:
-    /// Task 4 turns a refused value from `Err` into
-    /// `Ok(CleanupOutcome::ConfigInvalid)`, which would make an `is_ok` check
-    /// here vacuous.
+    /// The outcome is asserted rather than `is_ok` because a refused value is
+    /// now `Ok(CleanupOutcome::ConfigInvalid)`: `run_cleanup` returns `Err`
+    /// only on a pool or SQLite fault, so `is_ok` would pass even if the reader
+    /// refused what the guard wrote.
     #[tokio::test]
     async fn the_write_guard_accepts_what_the_read_path_accepts() {
         let dir = tempdir().unwrap();
@@ -817,10 +822,12 @@ mod tests {
             Some("30".to_string()),
             "the guard must store the trimmed form, or every reader must trim"
         );
-        storage
-            .run_cleanup()
-            .await
-            .expect("the reader must accept what the guard wrote");
+        let stats = storage.run_cleanup().await.unwrap();
+        assert_eq!(
+            stats.outcome,
+            CleanupOutcome::Completed,
+            "the reader must accept what the guard wrote"
+        );
     }
 
     /// The seeded row and `DEFAULT_RETENTION_DAYS` are two spellings of one
@@ -869,35 +876,173 @@ mod tests {
         .unwrap();
     }
 
-    #[tokio::test]
-    async fn run_cleanup_rejects_a_retention_beyond_the_bound() {
-        // The bound is enforced in `retention::run_cleanup_interruptible`; this
-        // asserts the error propagates out through the public boundary. See the
-        // comment at the validation block above for why it is not re-checked
-        // here.
-        //
-        // Pins that the *stored config value* reaches the guard: stub the
-        // config read to a constant and this fails.
-        // `run_cleanup_accepts_the_bound_itself` pins the same wiring from the
-        // accepting side.
+    /// Insert one screenshot and one audio segment, both older than the 30-day
+    /// default, and materialise their files. Returns the two row ids.
+    ///
+    /// A `*_deleted == 0` assertion against an empty table also holds for an
+    /// implementation that deletes everything, so the rows are what give the
+    /// zero counts meaning. Both tables are seeded because `cleanup_media` runs
+    /// separately over the screenshot and audio tables — a screenshot-only
+    /// fixture cannot catch an audio-only regression.
+    async fn seed_one_expired_row_per_table(
+        storage: &Storage,
+        dir: &std::path::Path,
+    ) -> (i64, i64) {
+        let aged = chrono::Utc::now().timestamp_millis() - 400 * 86_400 * 1000;
+
+        let image_path = dir.join("expired_for_refusal_test.heif");
+        std::fs::write(&image_path, b"x").unwrap();
+        let shot_id = storage
+            .insert_screenshot(ScreenshotMetadata {
+                timestamp: aged,
+                display_id: "display1".into(),
+                app_name: None,
+                app_bundle_id: None,
+                window_title: None,
+                image_path: image_path.to_string_lossy().into_owned(),
+                ocr_text: None,
+                phash: None,
+                resolution: None,
+            })
+            .await
+            .unwrap();
+
+        let audio_path = dir.join("expired_for_refusal_test.opus");
+        std::fs::write(&audio_path, b"x").unwrap();
+        let audio_id = storage
+            .insert_audio_segment(AudioSegmentMetadata {
+                start_timestamp: aged,
+                end_timestamp: aged + 30_000,
+                source: "mic".into(),
+                audio_path: audio_path.to_string_lossy().into_owned(),
+                transcript: None,
+                whisper_model: None,
+                language: None,
+            })
+            .await
+            .unwrap();
+
+        (shot_id, audio_id)
+    }
+
+    /// Every way `Retention::classify` can refuse a stored value, and what
+    /// cleanup does with each.
+    ///
+    /// All three seed past `set_config`, whose guard rejects these values. They
+    /// cover what happens when a database ALREADY holds one — a hand edit, or a
+    /// build older than the guard. Do not "simplify" them back to `set_config`:
+    /// that deletes the only coverage of the read path.
+    ///
+    /// These replace `run_cleanup_rejects_a_retention_beyond_the_bound` and
+    /// `run_cleanup_errors_on_a_negative_stored_retention`, which asserted
+    /// `is_err()`. Two properties they pinned are kept here deliberately:
+    ///
+    /// - The *stored* value reaches the guard. Stub the config read to a
+    ///   constant and these fail.
+    /// - Each refusal reason is distinguishable at the boundary. Relaxing
+    ///   `days < 0` used to leave the suite green, because the inner `<= 0`
+    ///   guard made a negative a no-op either way; the layers differed only in
+    ///   how loudly they refused. Delete `classify`'s `Negative` arm now and
+    ///   `-1` classifies as `Days { value: 4_294_967_295 }`, which the inner
+    ///   bound rejects as `Err` — so `run_cleanup().unwrap()` panics here.
+    async fn assert_refused_value_deletes_nothing(stored: &str) {
         let dir = tempdir().unwrap();
         let config = StorageConfig {
             base_dir: dir.path().to_path_buf(),
             pool_size: 2,
         };
         let storage = Storage::open(config).await.unwrap();
+        let (shot_id, audio_id) = seed_one_expired_row_per_table(&storage, dir.path()).await;
 
-        // Seeded past `set_config`, whose guard now rejects this value. This
-        // test covers the READ-time guard — what protects a database that
-        // already holds an out-of-range value. Do not "simplify" it back to
-        // `set_config`: that deletes the only coverage of that path.
-        seed_config(
-            &storage,
-            "retention_days",
-            &(retention::MAX_RETENTION_DAYS + 1).to_string(),
+        seed_config(&storage, "retention_days", stored);
+
+        let stats = storage.run_cleanup().await.unwrap();
+        assert_eq!(
+            stats.outcome,
+            CleanupOutcome::ConfigInvalid,
+            "stored={stored:?}"
         );
+        assert_eq!(stats.screenshots_deleted, 0, "stored={stored:?}");
+        assert_eq!(stats.audio_segments_deleted, 0, "stored={stored:?}");
+        assert!(
+            storage.get_screenshot_opt(shot_id).await.unwrap().is_some(),
+            "an expired screenshot must survive a refused retention; stored={stored:?}"
+        );
+        assert!(
+            storage.get_audio_segment(audio_id).await.is_ok(),
+            "an expired audio segment must survive a refused retention; stored={stored:?}"
+        );
+    }
 
-        assert!(storage.run_cleanup().await.is_err());
+    #[tokio::test]
+    async fn a_retention_beyond_the_bound_deletes_nothing() {
+        assert_refused_value_deletes_nothing(&(retention::MAX_RETENTION_DAYS + 1).to_string())
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_negative_stored_retention_deletes_nothing() {
+        assert_refused_value_deletes_nothing("-1").await;
+    }
+
+    #[tokio::test]
+    async fn an_unparseable_stored_retention_deletes_nothing() {
+        assert_refused_value_deletes_nothing("soon").await;
+    }
+
+    #[tokio::test]
+    async fn an_absent_retention_row_cleans_at_the_default() {
+        // `from_stored(None)` is the 30-day default, not a refusal. Nothing
+        // tested this before HEU-625, which is how `parse_retention_days`'s doc
+        // came to assert the opposite of what migration 001 does.
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Storage::open(config).await.unwrap();
+        let (shot_id, _audio_id) = seed_one_expired_row_per_table(&storage, dir.path()).await;
+
+        {
+            let conn = storage.pool.get().unwrap();
+            conn.execute("DELETE FROM config WHERE key = 'retention_days'", [])
+                .unwrap();
+        }
+
+        let stats = storage.run_cleanup().await.unwrap();
+        assert_eq!(stats.outcome, CleanupOutcome::Completed);
+        assert_eq!(stats.screenshots_deleted, 1);
+        assert!(
+            storage.get_screenshot_opt(shot_id).await.unwrap().is_none(),
+            "an absent row means the default retention, so an expired row goes"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_retention_deletes_nothing_at_the_boundary() {
+        // `Storage::run_cleanup_interruptible` short-circuits `Disabled` rather
+        // than calling the inner function, so the inner test at
+        // `retention.rs:a_disabled_retention_reports_disabled` no longer covers
+        // this path. Change the arm to `Completed` and, without this, the suite
+        // stays green while the scheduler starts checkpointing a disabled
+        // policy.
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Storage::open(config).await.unwrap();
+        let (shot_id, _audio_id) = seed_one_expired_row_per_table(&storage, dir.path()).await;
+
+        storage.set_config("retention_days", "0").await.unwrap();
+
+        let stats = storage.run_cleanup().await.unwrap();
+        assert_eq!(stats.outcome, CleanupOutcome::Disabled);
+        assert_eq!(stats.screenshots_deleted, 0);
+        assert!(
+            storage.get_screenshot_opt(shot_id).await.unwrap().is_some(),
+            "zero means keep forever"
+        );
     }
 
     #[tokio::test]
@@ -1000,35 +1145,6 @@ mod tests {
         assert!(
             storage.get_screenshot_opt(aged_id).await.unwrap().is_none(),
             "the expired row must be gone from the table, not merely counted"
-        );
-    }
-
-    #[tokio::test]
-    async fn run_cleanup_errors_on_a_negative_stored_retention() {
-        // Pins the read-path negative check, which had no test of its own:
-        // relaxing `days < 0` in `run_cleanup`'s validation left the whole
-        // suite green, because the inner `<= 0` guard makes a negative a no-op
-        // either way. The two layers differ only in how loudly they refuse —
-        // Err here, `Disabled` there — and that difference is the thing this
-        // asserts.
-        //
-        // Added with the write-time guard because the write guard makes this
-        // MORE fragile, not less: negatives can no longer be stored through
-        // `set_config`, so the read check now looks like dead code to anyone
-        // who does not know a hand-edited database can still contain one.
-        let dir = tempdir().unwrap();
-        let config = StorageConfig {
-            base_dir: dir.path().to_path_buf(),
-            pool_size: 2,
-        };
-        let storage = Storage::open(config).await.unwrap();
-
-        seed_config(&storage, "retention_days", "-1");
-
-        assert!(
-            storage.run_cleanup().await.is_err(),
-            "a negative stored value must error at the public boundary, not \
-             quietly no-op"
         );
     }
 

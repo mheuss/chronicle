@@ -178,8 +178,22 @@ pub enum CleanupOutcome {
     /// Ran to exhaustion — no expired records remain.
     #[default]
     Completed,
-    /// `retention_days` was zero or negative, so nothing was examined.
+    /// `retention_days` was zero, so nothing was examined.
+    ///
+    /// Through `Storage::run_cleanup` a negative value does not reach here:
+    /// `Retention::classify` refuses it at the public boundary and the run
+    /// reports [`CleanupOutcome::ConfigInvalid`]. The inner
+    /// `retention::run_cleanup_interruptible` still maps a negative to this
+    /// variant for callers that skip that boundary, which the test module does.
     Disabled,
+    /// The stored `retention_days` was refused by `Retention::classify` — not a
+    /// number, negative, or above `MAX_RETENTION_DAYS`.
+    ///
+    /// Nothing was examined and nothing was deleted. Like the other non-
+    /// `Completed` variants it is not a checkpointable result — the scheduled
+    /// task writes `last_cleanup_ms` only on `Completed`, so the next run
+    /// retries rather than skipping a period.
+    ConfigInvalid,
     /// A stop predicate ended the run at a batch boundary. The checkpoint is a
     /// schedule timestamp, not a resume position — every run re-selects from
     /// the oldest expired row.

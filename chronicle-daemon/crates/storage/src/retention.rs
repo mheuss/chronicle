@@ -71,12 +71,18 @@ fn compute_cutoff(now_millis: i64, retention_days: i64) -> Result<i64> {
 /// would have no production caller.
 ///
 /// `retention_days` of `0` or less is "keep forever" and returns an empty
-/// result; above [`MAX_RETENTION_DAYS`] is an error. Note the asymmetry with
-/// the public boundary, which rejects a *negative* value outright in
-/// `Storage::run_cleanup_interruptible`'s config read: `0` is a legitimate
-/// setting, so it cannot be an error here, while a negative one can only
-/// arrive from a caller that skipped that validation.
-/// Both layers refuse to delete; they differ only in how loudly.
+/// result; above [`MAX_RETENTION_DAYS`] is an error.
+///
+/// Neither branch is reachable from production since HEU-625, for two
+/// different reasons. `Storage::run_cleanup_interruptible` short-circuits
+/// `Retention::Disabled` without calling in, so a zero never arrives. It
+/// refuses a negative or above-bound value as `CleanupOutcome::ConfigInvalid`
+/// before calling in, so neither arrives either. Only a caller that skips that
+/// boundary — the test module — reaches these arms.
+///
+/// The asymmetry between them is deliberate and predates that: `0` is a
+/// legitimate setting, so it cannot be an error here, while a negative one is
+/// a caller bug. Both refuse to delete; they differ only in how loudly.
 pub(crate) fn run_cleanup_interruptible(
     conn: &Connection,
     media_mgr: &MediaManager,
@@ -90,11 +96,14 @@ pub(crate) fn run_cleanup_interruptible(
         });
     }
     if retention_days > MAX_RETENTION_DAYS {
-        // This log line is defence in depth; the `Err` below is the primary
-        // signal. Kept because a caller that swallows the `Err` would otherwise
-        // leave retention silently never running while disk grows. The
-        // scheduled tick logs the error itself too, so the condition is
-        // reported twice per period rather than once.
+        // Defence in depth; the `Err` below is the primary signal. Kept
+        // because a caller that swallows the `Err` would otherwise leave
+        // retention silently never running while disk grows.
+        //
+        // Unreachable from the scheduled path since HEU-625:
+        // `Storage::run_cleanup_interruptible` refuses an above-bound value
+        // before calling in, and logs it there. Only a caller that skips that
+        // boundary reaches this line.
         log::warn!(
             "retention_days {retention_days} exceeds maximum {MAX_RETENTION_DAYS}; \
              skipping cleanup"
