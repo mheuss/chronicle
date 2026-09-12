@@ -601,19 +601,12 @@ struct StorageStats: Decodable, Sendable {
 /// What the daemon's `retention_days` setting means, as sent by
 /// `chronicle-ipc`'s `Retention`.
 ///
-/// `Decodable` only, by design — nothing in the UI encodes a status response.
-/// Swift's synthesized enum encoding would emit `{"days":{"_0":30}}`, nothing
-/// like the wire, so a fixture round-trip would need a hand-written
-/// `encode(to:)` rather than a `Codable` conformance.
+/// `Decodable` only — nothing in the UI encodes a status response, and Swift's
+/// synthesized encoding would emit `{"days":{"_0":30}}`, nothing like the wire.
 ///
-/// Replaced a bare `retentionDays: UInt32`, which could not say "off" or
-/// "unusable" — zero rendered as "0 days" when it means keep forever.
-///
-/// The decoder is hand-written. A synthesized one reads every declared field
-/// regardless of `kind`, so a future variant carrying a wrongly typed payload
-/// would throw and take the whole `StatusData` decode with it. Reading the
-/// payload only under the kind that declares it is what makes the `.unknown`
-/// fallback actually hold.
+/// The decoder is hand-written: a synthesized one reads every declared field
+/// regardless of `kind`, so a future variant with a wrongly typed payload would
+/// throw and take the whole `StatusData` decode with it.
 enum Retention: Sendable, Equatable, Decodable {
     case days(UInt32)
     case disabled

@@ -24,22 +24,14 @@ use crate::capture_supervisor::{CaptureSupervisor, ReconcileOutcome, StartRetry}
 
 /// Read the configured retention for the status snapshot.
 ///
-/// `on_error` is what to report when the read fails. A failed query is a
-/// database fault, not a verdict on the setting, so the caller supplies
-/// something it already believes rather than letting this invent a value: the
-/// refresher passes what it last published, and boot passes the default
-/// because there is nothing earlier. Reporting the default from a failed read
-/// would be a claim about the user's configuration made because a query
-/// failed.
+/// A failed query is a database fault, not a verdict on the setting, so
+/// `on_error` — what the caller already believes — is returned rather than a
+/// default. The refresher passes what it last published; boot passes the
+/// default because there is nothing earlier.
 ///
-/// The call sites used to discard the error with `.ok().flatten()`. This logs
-/// it.
-///
-/// The unparseable-value warning moved rather than disappearing. The deleted
-/// `parse_retention_days` warned here every 30 seconds; the value is now named
-/// once per cleanup run by `Storage::run_cleanup_interruptible`, which still
-/// has the raw string. A daemon that runs for under `CLEANUP_START_DELAY`
-/// therefore never mentions a corrupt setting.
+/// The unparseable-value warning that `parse_retention_days` used to log here
+/// every 30 seconds now fires once per cleanup run, in
+/// `Storage::run_cleanup_interruptible`, which still has the raw string.
 async fn retention_for_snapshot(
     storage: &Storage,
     on_error: chronicle_ipc::Retention,

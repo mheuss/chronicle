@@ -387,20 +387,12 @@ impl Storage {
 
     // --- Retention operations ---
 
-    /// The configured retention, parsed.
+    /// The configured retention, parsed. `Storage::run_cleanup_interruptible`
+    /// does not use this — it needs the raw string, not just the verdict — but
+    /// both go through `Retention::from_stored`.
     ///
-    /// The read-path entry point for callers outside this crate.
-    ///
-    /// `Storage::run_cleanup_interruptible` does not call this. It reads the
-    /// row itself, because it runs inside `spawn_blocking` on a pooled
-    /// connection and needs the raw string for its warning. It reaches the same
-    /// rules through `Retention::from_stored`, so the two cannot disagree about
-    /// what a stored value means — one rule, read twice.
-    ///
-    /// An `Err` here is a database fault, not a verdict on the setting. A
-    /// caller must not report it as [`chronicle_ipc::Retention::Invalid`] —
-    /// that would say the user's configuration is broken because a read
-    /// failed, which is the class of defect HEU-625 exists to remove.
+    /// An `Err` here is a database fault, not an invalid setting; do not map it
+    /// to [`chronicle_ipc::Retention::Invalid`].
     pub async fn retention(&self) -> Result<chronicle_ipc::Retention> {
         Ok(chronicle_ipc::Retention::from_stored(
             self.get_config("retention_days").await?.as_deref(),
@@ -562,33 +554,20 @@ impl Storage {
 
     /// Write a configuration value, creating or replacing the key.
     ///
-    /// `retention_days` is validated here and nowhere else on the write path.
-    /// This is the only writer, so an out-of-range value cannot reach the table
-    /// — which matters because the scheduled cleanup task would otherwise
-    /// refuse the same value every period without deleting anything, and a
-    /// value nothing reads is invisible to the user who set it. Every other key keeps the untyped passthrough
-    /// behaviour.
+    /// `retention_days` is validated here and nowhere else on the write path,
+    /// so an out-of-range value cannot reach the table and break the scheduled
+    /// cleanup silently. Every other key keeps the untyped passthrough.
     ///
-    /// The rules are not restated here. `Retention::classify` owns them, and
-    /// this guard calls it. What the guard adds is the message: `classify`
-    /// reports *which* rule was broken, and each reason keeps the substring
-    /// `set_config_rejects_an_out_of_range_retention` pins.
+    /// `Retention::classify` owns the rules; this guard calls it and turns the
+    /// reason into a message, each keeping the substring
+    /// `set_config_rejects_an_out_of_range_retention` pins. Every reader goes
+    /// through `Retention::from_stored`, so the rules are stated once.
     ///
-    /// Every reader reaches the same rules. `Storage::run_cleanup_interruptible`
-    /// and `Storage::retention` both go through `Retention::from_stored`, and
-    /// nothing parses the stored string by hand any more.
-    ///
-    /// The read-time check is deliberately not redundant with this one: a
-    /// database written by an earlier build — or by hand — can already hold a
-    /// value no write path ever saw. It refuses differently, reporting
-    /// `CleanupOutcome::ConfigInvalid` rather than an error, because a cleanup
-    /// run that finds a bad setting has nothing to fail at.
+    /// The read-time check is not redundant with this one: a database written
+    /// by an earlier build, or by hand, can hold a value this guard never saw.
     ///
     /// Delete this guard and `set_config_rejects_an_out_of_range_retention`
-    /// fails at its `unwrap_err` — which is what makes it load-bearing where
-    /// HEU-628's proposed outer bound was not. The `get_config` assertion
-    /// beside it catches a different mutation: a guard that returns `Err`
-    /// *after* writing, which asserting the error alone would wave through.
+    /// fails.
     pub async fn set_config(&self, key: &str, value: &str) -> Result<()> {
         if key == "retention_days"
             && let Err(reason) = chronicle_ipc::Retention::classify(value)
@@ -858,18 +837,12 @@ mod tests {
 
     /// The guard must not bless a value its readers refuse.
     ///
-    /// `Retention::classify` trims, so routing the guard through it made
-    /// `set_config(" 30 ")` succeed while one reader — the daemon's since
-    /// deleted `parse_retention_days` — still parsed the stored string with
-    /// `u32::from_str`, which does not trim. It did not refuse a padded value;
-    /// it warned and reported 30, so a configured 7 would have read as 30 in
-    /// the UI. The guard stores the trimmed form, so the question never reaches
-    /// a reader, and since Task 6 no reader parses the string by hand anyway.
+    /// The guard must not bless a value its readers refuse. `Retention::classify`
+    /// trims and the guard stores the trimmed form, so a padded `" 30 "` cannot
+    /// reach a reader that does not.
     ///
-    /// The outcome is asserted rather than `is_ok` because a refused value is
-    /// now `Ok(CleanupOutcome::ConfigInvalid)`: `run_cleanup` returns `Err`
-    /// only on a pool or SQLite fault, so `is_ok` would pass even if the reader
-    /// refused what the guard wrote.
+    /// Asserted on `outcome`, not `is_ok`: a refused value is now
+    /// `Ok(CleanupOutcome::ConfigInvalid)`, so `is_ok` would not catch it.
     #[tokio::test]
     async fn the_write_guard_accepts_what_the_read_path_accepts() {
         let dir = tempdir().unwrap();
@@ -894,16 +867,10 @@ mod tests {
     }
 
     /// The seeded row and `DEFAULT_RETENTION_DAYS` are two spellings of one
-    /// policy — migration 001 writes the literal `'30'`, `chronicle-ipc`
-    /// defines the constant.
-    ///
-    /// Each is already pinned on its own: `get_config_returns_default_value`
-    /// above asserts the seed, and `the_policy_numbers_are_what_the_design_says`
-    /// in `chronicle-ipc` asserts the constant. What neither catches is a
-    /// coordinated change — someone moves the policy number and updates the
-    /// constant's test with it, but leaves `001_initial_schema.sql` behind.
-    /// This is also the only assertion that runs the seeded row through
-    /// `from_stored` rather than comparing strings.
+    /// policy, each pinned separately elsewhere. What neither catches is a
+    /// coordinated change that updates the constant but leaves
+    /// `001_initial_schema.sql` behind. Also the only assertion that runs the
+    /// seeded row through `from_stored` rather than comparing strings.
     #[tokio::test]
     async fn the_seeded_retention_matches_the_default() {
         let dir = tempdir().unwrap();
@@ -991,23 +958,15 @@ mod tests {
     /// Every way `Retention::classify` can refuse a stored value, and what
     /// cleanup does with each.
     ///
-    /// All three seed past `set_config`, whose guard rejects these values. They
-    /// cover what happens when a database ALREADY holds one — a hand edit, or a
-    /// build older than the guard. Do not "simplify" them back to `set_config`:
-    /// that deletes the only coverage of the read path.
+    /// Seeded past `set_config` to cover a database that already holds a bad
+    /// value — a hand edit, or a build older than the guard. Do not simplify
+    /// them back to `set_config`; that drops the only coverage of the read path.
     ///
-    /// These replace `run_cleanup_rejects_a_retention_beyond_the_bound` and
-    /// `run_cleanup_errors_on_a_negative_stored_retention`, which asserted
-    /// `is_err()`. Two properties they pinned are kept here deliberately:
-    ///
-    /// - The *stored* value reaches the guard. Stub the config read to a
-    ///   constant and these fail.
-    /// - Each refusal reason is distinguishable at the boundary. Relaxing
-    ///   `days < 0` used to leave the suite green, because the inner `<= 0`
-    ///   guard made a negative a no-op either way; the layers differed only in
-    ///   how loudly they refused. Delete `classify`'s `Negative` arm now and
-    ///   `-1` classifies as `Days { value: 4_294_967_295 }`, which the inner
-    ///   bound rejects as `Err` — so `run_cleanup().unwrap()` panics here.
+    /// Replaces `run_cleanup_rejects_a_retention_beyond_the_bound` and
+    /// `run_cleanup_errors_on_a_negative_stored_retention`. Each refusal reason
+    /// stays distinguishable: delete `classify`'s `Negative` arm and `-1`
+    /// classifies as `Days { value: 4_294_967_295 }`, which panics here rather
+    /// than passing silently.
     async fn assert_refused_value_deletes_nothing(stored: &str) {
         let dir = tempdir().unwrap();
         let config = StorageConfig {

@@ -7,22 +7,11 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Largest accepted retention window: 100 years (`100 * 365`).
-///
-/// Past this a value is a configuration error rather than a policy. Left
-/// unchecked, a large enough one would wrap the cutoff arithmetic in
-/// `chronicle-storage`'s `compute_cutoff` into the *future* and expire the
-/// entire database. Note that `0` already means "keep forever", so the
-/// intuitive way to ask for that is not a large number.
-///
-/// The exact figure is a policy ceiling, not a numeric limit: 36,500 days is
-/// ~3.15e12 ms against an `i64` ceiling of ~9.2e18, so it leaves six orders of
-/// magnitude of headroom. It is set where it is because a century is already
-/// past any real retention policy, not because larger values stop fitting.
-///
-/// Applied by [`Retention::classify`] because the cleanup entry point applies
-/// it too. A classifier that did not know the bound would report 36_501 as a
-/// day count while cleanup refused to run.
+/// Largest accepted retention window: 100 years. Past this a value is a config
+/// error, not a policy — unchecked, a large enough one would wrap
+/// `compute_cutoff`'s arithmetic into the future and expire the whole database.
+/// `0` already means "keep forever", so it is not the intuitive spelling for
+/// that.
 pub const MAX_RETENTION_DAYS: i64 = 36_500;
 
 /// Retention when the config row is absent.
@@ -56,24 +45,14 @@ impl Default for Retention {
 }
 
 impl Retention {
-    /// The only place the rules are stated. [`Retention::parse`] and
-    /// [`Retention::from_stored`] delegate here rather than restating them.
+    /// The only place these rules are stated; `parse` and `from_stored`
+    /// delegate here. `Days`'s field is public, so this is not the only way to
+    /// build a `Retention` — a caller or `Deserialize` can still bypass it.
     ///
-    /// It is not the only way to build a `Retention`: `Days`'s field is public,
-    /// as enum variant fields always are, so a caller or a `Deserialize` can
-    /// construct a value this function would refuse.
-    ///
-    /// The bound *check* here duplicates the one in `chronicle-storage`'s
-    /// `retention::run_cleanup_interruptible`. The constant itself is no longer
-    /// duplicated — that crate re-exports this one. HEU-628 considered the same
-    /// duplicate at `Storage::run_cleanup` and left it out: a duplicate there
-    /// would have returned the same `Err` as the inner guard, so no assertion
-    /// could tell them apart. The reasoning is recorded in
-    /// `docs/development/storage.md`, "Two guards on one invariant means the
-    /// outer one is untestable", and at the site — which HEU-630 moved into
-    /// `Storage::run_cleanup_interruptible`.
-    ///
-    /// This one is distinguishable. Delete the arm and
+    /// The bound check deliberately duplicates the one in `chronicle-storage`'s
+    /// `run_cleanup_interruptible`; see docs/development/storage.md, "Two guards
+    /// on one invariant means the outer one is untestable", for when that is
+    /// legitimate. Delete the arm and
     /// `one_past_the_bound_is_refused_as_above_max` fails.
     pub fn classify(raw: &str) -> Result<Self, Rejected> {
         let n: i64 = raw.trim().parse().map_err(|_| Rejected::NotANumber)?;

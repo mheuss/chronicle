@@ -142,8 +142,6 @@ struct RetentionCopyTests {
         // assertion is what pins that.
         let hasDigit = text.contains(where: \.isNumber)
         #expect(!hasDigit, "BR-2: an invalid setting must not read as a number — \(text)")
-        // The a11y rule for an error message: name the field and describe what
-        // follows from it, not just "Invalid".
         // Identifies the field, per docs/standards/accessibility.md: the row
         // label is a sibling Text, so VoiceOver reads this string alone.
         #expect(text.contains("Retention"))
