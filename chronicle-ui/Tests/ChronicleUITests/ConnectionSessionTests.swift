@@ -250,8 +250,12 @@ struct ConnectionSessionRoutingTests {
         // The counter sits on the line after the syscall, so it reads 1 whether
         // or not the close happened. NFR-1 needs the descriptor itself.
         #expect(session.descriptorCloseCountForTesting == 1)
-        #expect(fcntl(pair.clientFD, F_GETFD) == -1)
-        #expect(errno == EBADF)
+        // Both captured before asserting: `#expect` runs code of its own, which
+        // can overwrite `errno` between the syscall and the read.
+        let probe = fcntl(pair.clientFD, F_GETFD)
+        let probeErrno = errno
+        #expect(probe == -1)
+        #expect(probeErrno == EBADF)
     }
 
     @Test("a response containing type event in a snippet goes to the caller")

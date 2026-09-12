@@ -37,7 +37,7 @@ func readLineSync(from fd: Int32, maxBytes: Int = 64 * 1024) -> [UInt8]? {
         if byte == 0x0A { return buffer }
         buffer.append(byte)
     }
-    return buffer
+    return nil   // hit maxBytes with no LF: not a whole line
 }
 
 /// Reads one newline-delimited request from `fd`, then writes `response`

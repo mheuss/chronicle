@@ -223,16 +223,19 @@ struct DaemonConnectionReconnectTests {
             return fd
         })
         conn.connect()
+        await waitUntil { conn.sessionForTesting != nil }
+        let first = conn.sessionForTesting
+
         await waitUntil(ticks: 300) { log.count >= 2 }
         #expect(log.count >= 2, "heartbeat failure did not reconnect: \(log.count) attempts")
 
         // This session never EOFs on its own — its peer stays open — so
-        // connect()'s backoff tail is the only thing that can close it. The
-        // close is not synchronous: the tail shuts the descriptor down and the
-        // woken reader is what closes it, so this has to be a bounded wait.
-        await waitUntil { fcntl(log.pairs[0].clientFD, F_GETFD) == -1 }
-        #expect(fcntl(log.pairs[0].clientFD, F_GETFD) == -1,
-                "the previous session's descriptor leaked")
+        // connect()'s backoff tail is the only thing that can close it.
+        // `.finished` is reached only after Darwin.close(fd) runs, and unlike a
+        // probe on the descriptor number it cannot be fooled by the kernel
+        // handing that number to the next socketpair in this parallel suite.
+        await waitUntil { first?.state == .finished }
+        #expect(first?.state == .finished, "the previous session was never closed")
 
         conn.disconnect()
     }
