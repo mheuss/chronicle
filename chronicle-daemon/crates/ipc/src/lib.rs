@@ -271,9 +271,11 @@ pub struct StorageStats {
     pub audio_segment_count: u64,
     /// Unix millis of the oldest record, or None if the database is empty.
     pub oldest_entry_ms: Option<i64>,
-    /// Retention period from `storage::get_config("retention_days")`, defaulting
-    /// to 30 if unset/invalid.
-    pub retention_days: u32,
+    /// What the configured retention means, parsed by `Retention::classify`.
+    ///
+    /// Replaced a bare day count, which could not say "off" or "unusable".
+    /// See HEU-625 and ADR-015.
+    pub retention: Retention,
     /// Media rows served over IPC this process lifetime. The denominator for
     /// `media_absent` — a bare absent count cannot be interpreted without it.
     ///
@@ -675,7 +677,7 @@ mod tests {
             screenshot_count: 100,
             audio_segment_count: 10,
             oldest_entry_ms: Some(1_700_000_000_000),
-            retention_days: 30,
+            retention: Retention::Days { value: 30 },
             media_served: 900,
             media_absent: 3,
         };
@@ -686,11 +688,52 @@ mod tests {
         assert_eq!(v["screenshot_count"], 100);
         assert_eq!(v["audio_segment_count"], 10);
         assert_eq!(v["oldest_entry_ms"], 1_700_000_000_000_i64);
-        assert_eq!(v["retention_days"], 30);
+        assert_eq!(v["retention"]["kind"], "days");
+        assert_eq!(v["retention"]["value"], 30);
         // Both counters ship, and ship together: an absent count with no
         // denominator is uninterpretable. See HEU-624 BR-2.
         assert_eq!(v["media_served"], 900);
         assert_eq!(v["media_absent"], 3);
+    }
+
+    #[test]
+    fn the_storage_block_carries_retention_not_a_day_count() {
+        // The breaking half of HEU-625. `retention_days` is gone, so a UI built
+        // before this cannot decode StorageStats at all — accepted per AD-2
+        // because the .app ships both halves together.
+        let disabled = StorageStats {
+            retention: Retention::Disabled,
+            ..StorageStats::default()
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&disabled).unwrap()).unwrap();
+        assert_eq!(v["retention"]["kind"], "disabled");
+        assert!(
+            v.get("retention_days").is_none(),
+            "the old field must not ship alongside the new one: {v}"
+        );
+
+        let days = StorageStats {
+            retention: Retention::Days { value: 7 },
+            ..StorageStats::default()
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&days).unwrap()).unwrap();
+        assert_eq!(v["retention"]["kind"], "days");
+        assert_eq!(v["retention"]["value"], 7);
+        assert!(v.get("retention_days").is_none(), "{v}");
+
+        // Invalid must reach the wire too. A `skip_serializing_if` added later
+        // to keep "bad data" from the UI would pass every other test in the
+        // tree and silently turn the invalid copy into "Unavailable".
+        let invalid = StorageStats {
+            retention: Retention::Invalid,
+            ..StorageStats::default()
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&invalid).unwrap()).unwrap();
+        assert_eq!(v["retention"]["kind"], "invalid");
+        assert!(v.get("retention_days").is_none(), "{v}");
     }
 
     #[test]
@@ -701,7 +744,7 @@ mod tests {
             screenshot_count: 0,
             audio_segment_count: 0,
             oldest_entry_ms: None,
-            retention_days: 30,
+            retention: Retention::Days { value: 30 },
             media_served: 0,
             media_absent: 0,
         };

@@ -26,11 +26,11 @@ use crate::capture_supervisor::{CaptureSupervisor, ReconcileOutcome, StartRetry}
 ///
 /// `on_error` is what to report when the read fails. A failed query is a
 /// database fault, not a verdict on the setting, so the caller supplies
-/// something it already believes rather than letting this invent a number:
-/// the refresher passes the value it last published, and boot passes the
-/// default because there is nothing earlier. Reporting the default from a
-/// failed read would be a claim about the user's configuration made because a
-/// query failed — the same shape as reporting `Invalid`, only quieter.
+/// something it already believes rather than letting this invent a value: the
+/// refresher passes what it last published, and boot passes the default
+/// because there is nothing earlier. Reporting the default from a failed read
+/// would be a claim about the user's configuration made because a query
+/// failed.
 ///
 /// The call sites used to discard the error with `.ok().flatten()`. This logs
 /// it.
@@ -40,29 +40,18 @@ use crate::capture_supervisor::{CaptureSupervisor, ReconcileOutcome, StartRetry}
 /// once per cleanup run by `Storage::run_cleanup_interruptible`, which still
 /// has the raw string. A daemon that runs for under `CLEANUP_START_DELAY`
 /// therefore never mentions a corrupt setting.
-///
-/// Still returns a `u32` because `StorageStatusSnapshot` carries one. Task 7
-/// replaces that field with the typed value and this helper goes with it.
-async fn retention_for_snapshot(storage: &Storage, on_error: u32) -> u32 {
-    let retention = match storage.retention().await {
+async fn retention_for_snapshot(
+    storage: &Storage,
+    on_error: chronicle_ipc::Retention,
+) -> chronicle_ipc::Retention {
+    match storage.retention().await {
         Ok(r) => r,
         Err(e) => {
-            log::warn!("status: reading retention_days failed, keeping {on_error}: {e}");
-            return on_error;
-        }
-    };
-    match retention {
-        chronicle_ipc::Retention::Days { value } => value,
-        // Both misreport until Task 7 puts the typed value on the wire, because
-        // a u32 cannot say "off" or "unusable". `Disabled` reporting 30 is the
-        // bug in HEU-625's title. `Invalid` reporting 30 is worse: the UI shows
-        // a policy while cleanup skips entirely and the database grows.
-        //
-        // Note this also changes what an out-of-range stored value reports. The
-        // old `u32::from_str` returned 36501 for "36501"; `classify` refuses it
-        // above MAX_RETENTION_DAYS, so it now reads as the default here.
-        chronicle_ipc::Retention::Disabled | chronicle_ipc::Retention::Invalid => {
-            chronicle_ipc::DEFAULT_RETENTION_DAYS
+            log::warn!(
+                "status: reading retention_days failed, keeping the last known \
+                 value ({on_error:?}): {e}"
+            );
+            on_error
         }
     }
 }
@@ -330,15 +319,24 @@ async fn main() -> Result<()> {
                 screenshot_count: s.screenshot_count,
                 audio_segment_count: s.audio_segment_count,
                 oldest_entry_ms: s.oldest_entry,
-                retention_days: retention_for_snapshot(
-                    &storage,
-                    chronicle_ipc::DEFAULT_RETENTION_DAYS,
-                )
-                .await,
+                retention: retention_for_snapshot(&storage, chronicle_ipc::Retention::default())
+                    .await,
             },
             Err(e) => {
+                // `status()` failing says nothing about the retention setting,
+                // so read it anyway rather than publishing a defaulted 30-day
+                // policy the daemon never looked at. The IPC server starts
+                // immediately below, so a Status landing in this window would
+                // otherwise be served that claim for up to one refresh period.
                 log::warn!("initial storage status read failed: {e}");
-                crate::ipc_handler::StorageStatusSnapshot::default()
+                crate::ipc_handler::StorageStatusSnapshot {
+                    retention: retention_for_snapshot(
+                        &storage,
+                        chronicle_ipc::Retention::default(),
+                    )
+                    .await,
+                    ..Default::default()
+                }
             }
         };
         storage_status_snapshot.store(Arc::new(snapshot));
@@ -645,7 +643,7 @@ async fn main() -> Result<()> {
                             // than to the default: a transient read failure
                             // must not flip a configured 90 to 30 and back on
                             // the next tick.
-                            let previous = storage_refresher_snapshot.load().retention_days;
+                            let previous = storage_refresher_snapshot.load().retention;
                             let retention = retention_for_snapshot(
                                 &storage_refresher_storage,
                                 previous,
@@ -657,7 +655,7 @@ async fn main() -> Result<()> {
                                 screenshot_count: s.screenshot_count,
                                 audio_segment_count: s.audio_segment_count,
                                 oldest_entry_ms: s.oldest_entry,
-                                retention_days: retention,
+                                retention,
                             };
                             storage_refresher_snapshot.store(Arc::new(snap));
                         }

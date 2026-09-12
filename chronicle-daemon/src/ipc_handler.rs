@@ -81,27 +81,14 @@ pub struct CaptureStatusSnapshot {
 /// Cached storage status snapshot. Written every 30s by the storage
 /// refresher task in `main()`. Read by `RequestHandler::handle` on every
 /// `Status` request — no per-request directory walk.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct StorageStatusSnapshot {
     pub db_size_bytes: u64,
     pub total_disk_usage_bytes: u64,
     pub screenshot_count: u64,
     pub audio_segment_count: u64,
     pub oldest_entry_ms: Option<i64>,
-    pub retention_days: u32,
-}
-
-impl Default for StorageStatusSnapshot {
-    fn default() -> Self {
-        Self {
-            db_size_bytes: 0,
-            total_disk_usage_bytes: 0,
-            screenshot_count: 0,
-            audio_segment_count: 0,
-            oldest_entry_ms: None,
-            retention_days: 30,
-        }
-    }
+    pub retention: chronicle_ipc::Retention,
 }
 
 /// Daemon-side request handler.
@@ -359,7 +346,7 @@ impl RequestHandler for DaemonHandler {
                             screenshot_count: storage.screenshot_count,
                             audio_segment_count: storage.audio_segment_count,
                             oldest_entry_ms: storage.oldest_entry_ms,
-                            retention_days: storage.retention_days,
+                            retention: storage.retention,
                             media_served: c.media_served,
                             media_absent: c.media_absent,
                         },
@@ -636,14 +623,17 @@ mod tests {
     }
 
     #[test]
-    fn storage_status_snapshot_default_has_zeroes() {
+    fn storage_status_snapshot_default_is_zeroes_and_the_default_retention() {
         let snap = StorageStatusSnapshot::default();
         assert_eq!(snap.db_size_bytes, 0);
         assert_eq!(snap.total_disk_usage_bytes, 0);
         assert_eq!(snap.screenshot_count, 0);
         assert_eq!(snap.audio_segment_count, 0);
         assert_eq!(snap.oldest_entry_ms, None);
-        assert_eq!(snap.retention_days, 30);
+        // The literal, not `Retention::default()` — that would assert X == X
+        // now that the impl is derived, and nothing else in the tree pins what
+        // a defaulted snapshot claims about retention.
+        assert_eq!(snap.retention, chronicle_ipc::Retention::Days { value: 30 });
     }
 
     #[test]
@@ -1561,7 +1551,7 @@ mod tests {
             screenshot_count: 50,
             audio_segment_count: 5,
             oldest_entry_ms: Some(1_700_000_000_000),
-            retention_days: 14,
+            retention: chronicle_ipc::Retention::Days { value: 14 },
         }));
         capture_paused.store(true, std::sync::atomic::Ordering::Release);
 
@@ -1580,6 +1570,9 @@ mod tests {
         assert_eq!(data.storage.screenshot_count, 50);
         assert_eq!(data.storage.audio_segment_count, 5);
         assert_eq!(data.storage.oldest_entry_ms, Some(1_700_000_000_000));
-        assert_eq!(data.storage.retention_days, 14);
+        assert_eq!(
+            data.storage.retention,
+            chronicle_ipc::Retention::Days { value: 14 }
+        );
     }
 }
