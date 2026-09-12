@@ -773,7 +773,7 @@ struct PauseResumeResponse: Codable, Sendable {
 
 // MARK: - Errors
 
-enum IPCError: Error, LocalizedError {
+enum IPCError: Error, LocalizedError, Equatable {
     case socketCreationFailed(errno: Int32)
     case pathTooLong
     case connectionFailed(errno: Int32)
