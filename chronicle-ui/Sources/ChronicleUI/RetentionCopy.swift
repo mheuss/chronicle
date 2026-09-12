@@ -17,8 +17,9 @@ enum RetentionCopy {
     /// nothing, so the first can only become true by moving this onto a view —
     /// which is when the annotation starts earning its place.
     nonisolated static func text(for retention: Retention?) -> String {
-        // `nil` is a daemon too old to send the field. It says nothing about
-        // the setting, so it must not claim one.
+        // `nil` is a daemon that could not read the setting, or one too old to
+        // send the field. Neither says what the policy is, so this must not
+        // claim one.
         guard let retention else { return "Unavailable" }
 
         // Exhaustive with no `default:` arm — NFR-2. A variant added to
