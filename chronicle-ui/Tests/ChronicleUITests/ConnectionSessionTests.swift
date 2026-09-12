@@ -14,7 +14,12 @@ struct ConnectionSessionLifecycleTests {
         let pair = try SocketPairHelper.make()
         let session = ConnectionSession(fd: pair.clientFD, maxResponseSize: 64 * 1024)
         defer {
-            session.close()           // closes clientFD once nothing holds it
+            // No test here starts a real reader, so nothing is parked on
+            // clientFD and marking the reader exited is accurate. Without it a
+            // test that calls markReaderStarted() leaks clientFD for the run.
+            session.markReaderExited()
+            session.close()
+            session.closeIfDone()
             Darwin.close(pair.serverFD)
         }
         try await body(session, pair.serverFD)
@@ -51,6 +56,7 @@ struct ConnectionSessionLifecycleTests {
     func firstTerminalCauseWins() async throws {
         try await withSession { session, _ in
             session.fail(IPCError.invalidUTF8)
+            session.fail(IPCError.responseTooLarge)
             session.close()
             #expect(session.terminalError as? IPCError == IPCError.invalidUTF8)
         }
@@ -70,6 +76,8 @@ struct ConnectionSessionLifecycleTests {
         try await withSession { session, _ in
             let waiter = Task { await session.waitUntilFinished() }
             try await Task.sleep(for: .milliseconds(20))
+            #expect(session.finishedWaiterCountForTesting == 1,
+                    "without a registered waiter this passes on the latch instead")
             session.close()
             await waiter.value
         }
@@ -94,6 +102,38 @@ struct ConnectionSessionLifecycleTests {
             await waiter.value
             session.close()          // a double resume traps here
             #expect(session.state == .finished)
+        }
+    }
+
+    @Test("a waiter entering already cancelled still returns")
+    func alreadyCancelledWaiterReturns() async throws {
+        try await withSession { session, _ in
+            let waiter = Task {
+                // Cancellation ends the sleep, so waitUntilFinished is entered
+                // on a task that is already cancelled. That ordering hangs if
+                // anything ever suspends before the continuation registers.
+                try? await Task.sleep(for: .seconds(60))
+                await session.waitUntilFinished()
+            }
+            try await Task.sleep(for: .milliseconds(20))
+            waiter.cancel()
+            await waiter.value
+        }
+    }
+
+    @Test("close while the reader is live leaves the descriptor open")
+    func closeWithLiveReaderHoldsDescriptor() async throws {
+        try await withSession { session, _ in
+            session.markReaderStarted()
+            session.close()
+            #expect(session.state == .closing)
+            #expect(session.descriptorCloseCountForTesting == 0,
+                    "closing the fd with a thread parked on it is the AD-3 hazard")
+
+            session.markReaderExited()
+            session.closeIfDone()
+            #expect(session.state == .finished)
+            #expect(session.descriptorCloseCountForTesting == 1)
         }
     }
 }

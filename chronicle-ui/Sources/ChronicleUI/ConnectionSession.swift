@@ -1,11 +1,10 @@
-import Foundation
 import Darwin
 
 /// One connection's descriptor, reader, and waiting callers.
 ///
-/// Created `live`, leaves `live` exactly once, ends `finished`. Two edges reach
-/// `closing`: `close()`, and the reader exiting on its own. The second is the
-/// common one — a daemon restart takes it.
+/// Created `live`, leaves `live` exactly once, ends `finished`. `close()` is
+/// the edge into `closing`, and the descriptor is released only once nothing
+/// holds it.
 @MainActor
 final class ConnectionSession {
     enum State { case live, closing, finished }
@@ -26,6 +25,7 @@ final class ConnectionSession {
     #if DEBUG
     private(set) var shutdownCountForTesting = 0
     private(set) var descriptorCloseCountForTesting = 0
+    var finishedWaiterCountForTesting: Int { finishedWaiters.count }
     #endif
 
     init(fd: Int32, maxResponseSize: Int) {
@@ -38,13 +38,11 @@ final class ConnectionSession {
     func close() {
         guard state == .live else { return }
         state = .closing
-        terminalError = terminalError ?? IPCError.notConnected
+        let cause = terminalError ?? IPCError.notConnected
+        terminalError = cause
         if !readerStarted { readerExited = true }
-        shutdown(fd, SHUT_RDWR)
-        #if DEBUG
-        shutdownCountForTesting += 1
-        #endif
-        resumeAllWaiters(with: terminalError!)
+        shutdownDescriptor()
+        resumeAllWaiters(with: cause)
         closeIfDone()
     }
 
@@ -60,6 +58,13 @@ final class ConnectionSession {
     /// Latched, so a completion landing before the caller registers is not
     /// missed. Cancellation-aware, so this can never be the unresumed
     /// continuation that hangs a task group.
+    ///
+    /// A task that is ALREADY cancelled on entry survives only because nothing
+    /// suspends between installing the handler and registering the
+    /// continuation: `onCancel` fires synchronously, and the MainActor task it
+    /// enqueues cannot run until registration has happened. Adding an `await`
+    /// anywhere before `finishedWaiters[id] = cont` hangs this call forever.
+    /// `alreadyCancelledWaiterReturns` is what catches that.
     func waitUntilFinished() async {
         if state == .finished { return }
         let id = nextWaiterID
@@ -97,10 +102,18 @@ final class ConnectionSession {
         for (_, cont) in waiters { cont.resume() }
     }
 
-    /// Task 3 replaces this with the event stream's `finish()`.
+    /// The only `shutdown` call site, so the DEBUG counter cannot drift from it.
+    private func shutdownDescriptor() {
+        shutdown(fd, SHUT_RDWR)
+        #if DEBUG
+        shutdownCountForTesting += 1
+        #endif
+    }
+
+    /// No event stream yet, so there is nothing to finish.
     private func finishStream() {}
 
-    /// Task 3 gives this a body once request waiters exist.
+    /// No request waiters yet, so there is nothing to fail.
     private func resumeAllWaiters(with error: Error) {}
 
     func markReaderStarted() { readerStarted = true }
