@@ -64,7 +64,6 @@ struct DaemonConnectionReconnectTests {
         let pair = try SocketPairHelper.make()
         let conn = DaemonConnection(testingSocketFD: pair.clientFD)
         let serverFD = pair.serverFD
-        defer { Darwin.close(serverFD) }
 
         // The gate holds the first response so the checkpoint below lands
         // while a request is definitely outstanding. Without it, both requests
@@ -73,11 +72,15 @@ struct DaemonConnectionReconnectTests {
         // semaphore rather than an actor: `blockingServer` runs its body on the
         // dispatch global queue, off any task, so it cannot await.
         let gate = DispatchSemaphore(value: 0)
-        // Runs before the close above, so a throw releases the server thread
-        // rather than parking it on an untimed wait for the rest of the run.
+        // A throw anywhere below releases the server thread rather than leaving
+        // it parked on an untimed wait for the rest of the run.
         defer { gate.signal() }
         let reply = #"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"0.0.1"}}"# + "\n"
         let server = blockingServer {
+            // The server owns serverFD. Closing it from the test instead would
+            // free the number back to the next socketpair in this parallel
+            // suite while this thread was still inside a read.
+            defer { Darwin.close(serverFD) }
             guard readLineSync(from: serverFD) != nil else { return }
             gate.wait()
             writeAll(reply, to: serverFD)
@@ -109,11 +112,16 @@ struct DaemonConnectionReconnectTests {
     func disconnectDuringEstablishmentClosesTheDescriptor() async throws {
         let pair = try SocketPairHelper.make()
         let serverFD = pair.serverFD
+        // Neither `SocketPairHelper` nor `init(connectionFactory:)` sets this,
+        // where `init(testingSocketFD:)` would. Without it, a run cancelled
+        // before `disconnect()` below releases the factory into a live
+        // connection whose peer the next defer has closed, and the heartbeat
+        // write takes the whole test process down with SIGPIPE.
+        #expect(setNoSigPipe(pair.clientFD))
         defer { Darwin.close(serverFD) }
         let gate = AsyncGate()
-        // Runs before the close above. A throw before `open()` below would
-        // otherwise leave the connect task parked on the gate, holding the
-        // client descriptor for the rest of the run.
+        // Releases the connect task, which a throw before `open()` below would
+        // otherwise leave parked on the gate holding the client descriptor.
         defer { Task { await gate.open() } }
         let conn = DaemonConnection(connectionFactory: {
             await gate.wait()                 // hold establishment open
