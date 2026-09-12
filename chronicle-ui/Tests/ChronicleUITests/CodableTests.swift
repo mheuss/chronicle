@@ -110,7 +110,7 @@ struct CodableTests {
               "screenshot_count": 1024,
               "audio_segment_count": 32,
               "oldest_entry_ms": null,
-              "retention_days": 30
+              "retention": {"kind": "days", "value": 30}
             }
           }
         }
@@ -165,7 +165,7 @@ struct CodableTests {
         {"type":"status","ok":true,"data":{"uptime_secs":42,"version":"0.1.0",
         "storage":{"db_size_bytes":1,"total_disk_usage_bytes":2,
         "screenshot_count":3,"audio_segment_count":4,"oldest_entry_ms":null,
-        "retention_days":30}}}
+        "retention":{"kind":"days","value":30}}}}
         """
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
@@ -185,7 +185,8 @@ struct CodableTests {
         {"type":"status","ok":true,"data":{"uptime_secs":42,"version":"0.1.0",
         "storage":{"db_size_bytes":1,"total_disk_usage_bytes":2,
         "screenshot_count":3,"audio_segment_count":4,"oldest_entry_ms":null,
-        "retention_days":30,"media_served":900,"media_absent":3}}}
+        "retention":{"kind":"days","value":30},"media_served":900,
+        "media_absent":3}}}
         """
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
@@ -197,9 +198,13 @@ struct CodableTests {
 
     @Test("An old UI decoder ignores the new media counters")
     func oldUIDecoderIgnoresMediaCounters() throws {
-        // Reverse direction: a new daemon's extra keys must not break an older
-        // UI. Stub mirrors StorageStats exactly as it existed BEFORE this task.
-        struct OldStorageStats: Codable {
+        // Reverse direction, narrowly: an old UI ignores keys a new daemon
+        // ADDED. It does not cover a key the daemon REMOVED — HEU-625 dropped
+        // retention_days, and an old UI fed a real post-HEU-625 status would
+        // keyNotFound on the non-optional retentionDays below and lose the
+        // whole block. That is accepted (design Risk 1) and unpinned; this
+        // fixture is a shape no daemon sends any more.
+        struct OldStorageStats: Decodable {
             let dbSizeBytes: UInt64
             let totalDiskUsageBytes: UInt64
             let screenshotCount: UInt64
@@ -315,7 +320,8 @@ struct CodableTests {
           "audio":{"segments_persisted":0,"mic_state":"off"},
           "storage":{"db_size_bytes":1024,"total_disk_usage_bytes":2048,
             "screenshot_count":50,"audio_segment_count":5,
-            "oldest_entry_ms":1700000000000,"retention_days":14}
+            "oldest_entry_ms":1700000000000,
+            "retention":{"kind":"days","value":14}}
         }}
         """
         let decoder = JSONDecoder()
@@ -327,7 +333,7 @@ struct CodableTests {
         #expect(capture.state == "paused")
         #expect(storage.totalDiskUsageBytes == 2048)
         #expect(storage.screenshotCount == 50)
-        #expect(storage.retentionDays == 14)
+        #expect(storage.retention == .days(14))
         #expect(storage.oldestEntryMs == 1_700_000_000_000)
     }
 
@@ -378,7 +384,7 @@ struct CodableTests {
         // NFR-7, reverse direction: an old UI must ignore a new daemon's extra
         // fields. Stub mirrors StatusData exactly as it exists BEFORE this task
         // (no `transcription` property).
-        struct OldStatusData: Codable {
+        struct OldStatusData: Decodable {
             let uptimeSecs: UInt64
             let version: String
             let capture: CaptureStats?
@@ -386,7 +392,7 @@ struct CodableTests {
             let audio: AudioStats?
             let storage: StorageStats?
         }
-        struct OldStatusResponse: Codable {
+        struct OldStatusResponse: Decodable {
             let type: String
             let ok: Bool
             let data: OldStatusData

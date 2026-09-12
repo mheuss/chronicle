@@ -505,7 +505,7 @@ struct SetMicEnabledResponse: Codable, Sendable {
     let state: MicState
 }
 
-struct StatusResponse: Codable, Sendable {
+struct StatusResponse: Decodable, Sendable {
     let type: String
     let ok: Bool
     let data: StatusData
@@ -533,7 +533,7 @@ struct StatusResponse: Codable, Sendable {
     }
 }
 
-struct StatusData: Codable, Sendable {
+struct StatusData: Decodable, Sendable {
     let uptimeSecs: UInt64
     let version: String
     let capture: CaptureStats?
@@ -565,13 +565,16 @@ struct AudioStats: Codable, Sendable {
     let micState: MicState
 }
 
-struct StorageStats: Codable, Sendable {
+struct StorageStats: Decodable, Sendable {
     let dbSizeBytes: UInt64
     let totalDiskUsageBytes: UInt64
     let screenshotCount: UInt64
     let audioSegmentCount: UInt64
     let oldestEntryMs: Int64?
-    let retentionDays: UInt32
+    /// What the configured retention means. Optional on the decoder, NOT on
+    /// the wire — Rust sends it non-optionally, and a daemon too old to send
+    /// it degrades this one row rather than the whole status block.
+    let retention: Retention?
     /// Optional on the decoder, NOT on the wire — Rust sends these
     /// non-optionally. An older daemon omits them, and a non-optional field
     /// here would fail the decode of this entire block, taking disk usage and
@@ -593,6 +596,56 @@ struct StorageStats: Codable, Sendable {
     /// counts serve events, not distinct rows. Copy shown to a user should not
     /// present a non-zero reading as a failure.
     let mediaAbsent: UInt64?
+}
+
+/// What the daemon's `retention_days` setting means, as sent by
+/// `chronicle-ipc`'s `Retention`.
+///
+/// `Decodable` only, by design — nothing in the UI encodes a status response.
+/// Swift's synthesized enum encoding would emit `{"days":{"_0":30}}`, nothing
+/// like the wire, so a fixture round-trip would need a hand-written
+/// `encode(to:)` rather than a `Codable` conformance.
+///
+/// Replaced a bare `retentionDays: UInt32`, which could not say "off" or
+/// "unusable" — zero rendered as "0 days" when it means keep forever.
+///
+/// The decoder is hand-written. A synthesized one reads every declared field
+/// regardless of `kind`, so a future variant carrying a wrongly typed payload
+/// would throw and take the whole `StatusData` decode with it. Reading the
+/// payload only under the kind that declares it is what makes the `.unknown`
+/// fallback actually hold.
+enum Retention: Sendable, Equatable, Decodable {
+    case days(UInt32)
+    case disabled
+    case invalid
+    /// A kind this UI doesn't know yet (newer daemon). Same rule as
+    /// `TranscriptionState`, `MicState` and `SearchHitSource` — see
+    /// docs/use-cases/ipc-compat.md.
+    case unknown
+
+    private enum CodingKeys: String, CodingKey {
+        case kind, value
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(String.self, forKey: .kind) {
+        case "days":
+            // A days object without a value is malformed, not a day count.
+            // Inventing a number here would be the display lie this replaced.
+            guard let v = try c.decodeIfPresent(UInt32.self, forKey: .value) else {
+                self = .unknown
+                return
+            }
+            self = .days(v)
+        case "disabled":
+            self = .disabled
+        case "invalid":
+            self = .invalid
+        default:
+            self = .unknown
+        }
+    }
 }
 
 enum TranscriptionState: String, Codable, Sendable {

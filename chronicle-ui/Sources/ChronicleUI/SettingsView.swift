@@ -431,7 +431,7 @@ struct SettingsView: View {
 
     private var retentionText: String {
         guard let storage = connection.lastStatus?.data.storage else { return "—" }
-        return "\(storage.retentionDays) days"
+        return RetentionCopy.text(for: storage.retention)
     }
 
     private var oldestText: String {
