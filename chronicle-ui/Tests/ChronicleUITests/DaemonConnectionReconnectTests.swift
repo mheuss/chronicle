@@ -40,6 +40,15 @@ final class FactoryLog {
     }
 }
 
+/// Holds the semaphores gating each spawned test server, so a test can release
+/// every one it created — including servers spawned by later reconnects.
+@MainActor
+final class GateBox {
+    private var gates: [DispatchSemaphore] = []
+    func append(_ g: DispatchSemaphore) { gates.append(g) }
+    func releaseAll() { for g in gates { g.signal() } }
+}
+
 @Suite("DaemonConnection reconnect", .timeLimit(.minutes(1)))
 @MainActor
 struct DaemonConnectionReconnectTests {
@@ -199,10 +208,20 @@ struct DaemonConnectionReconnectTests {
     @Test("a heartbeat failure on a live socket reconnects")
     func heartbeatFailureReconnects() async throws {
         let log = FactoryLog()
+        // Every server this factory spawns parks until released, so a throw
+        // cannot strand one on an untimed wait.
+        let gates = GateBox()
+        defer { gates.releaseAll() }
         let conn = DaemonConnection(connectionFactory: {
             let fd = try log.make()
             #expect(setNoSigPipe(fd))
             let serverFD = log.pairs.last!.serverFD
+            // Held until the test has captured the session below. Without it
+            // the reply lands, the monitor throws and the backoff tail closes
+            // the session inside a few milliseconds — faster than waitUntil's
+            // 10 ms poll, so `sessionForTesting` reads nil about half the time.
+            let captured = DispatchSemaphore(value: 0)
+            gates.append(captured)
             // Valid JSON of the wrong shape: no `type`, so it reaches the
             // waiter, the decode fails and monitorConnection throws. The
             // second read holds the peer OPEN afterwards, which is what makes
@@ -217,6 +236,7 @@ struct DaemonConnectionReconnectTests {
                 // back to the next socketpair while this thread is in a read.
                 defer { Darwin.close(serverFD) }
                 guard readLineSync(from: serverFD) != nil else { return }
+                captured.wait()
                 writeAll(#"{"unexpected":"shape"}"# + "\n", to: serverFD)
                 _ = readLineSync(from: serverFD)   // park, keeping the peer open
             }
@@ -225,6 +245,8 @@ struct DaemonConnectionReconnectTests {
         conn.connect()
         await waitUntil { conn.sessionForTesting != nil }
         let first = conn.sessionForTesting
+        #expect(first != nil, "never observed a live session to watch")
+        gates.releaseAll()   // now let the malformed reply through
 
         await waitUntil(ticks: 300) { log.count >= 2 }
         #expect(log.count >= 2, "heartbeat failure did not reconnect: \(log.count) attempts")

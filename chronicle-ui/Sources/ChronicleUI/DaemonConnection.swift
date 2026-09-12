@@ -324,10 +324,12 @@ final class DaemonConnection {
             _ = await prev?.value  // wait for predecessor
             // Session identity replaces the generation counter: a request that
             // waited through a reconnect is holding the previous session.
-            // Defence in depth, and deliberately unpinned — `closeSocket()`
-            // always closes a session before replacing it, so `send`'s own
-            // `state == .live` guard throws the same error on every path that
-            // reaches here. No test can tell the two apart.
+            // This is the live throw site on that path, not a backstop:
+            // measured with a sentinel error, `queuedRequestAfterDisconnect`
+            // throws from here, and only falls through to `send`'s own
+            // `state == .live` guard if this one is removed. Both raise
+            // `notConnected`, so no test can tell which fired — unpinnable, but
+            // not unused.
             guard self.session === mySession else {
                 throw IPCError.notConnected
             }

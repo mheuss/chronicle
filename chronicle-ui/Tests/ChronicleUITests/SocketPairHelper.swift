@@ -26,6 +26,13 @@ enum SocketPairHelper {
             Darwin.close(fds[1])
             throw Error.receiveTimeoutFailed(errno: timeoutErrno)
         }
+        // Server side only, for the same reason as the timeout above. A test
+        // server that writes after the client has gone otherwise takes the
+        // whole process down with SIGPIPE rather than failing one test —
+        // measured, a write to a shut-down peer exits 141. The client side is
+        // left bare so `socketHasNoSigPipeOption` still proves production sets
+        // it there.
+        _ = setNoSigPipe(fds[1])
         return (clientFD: fds[0], serverFD: fds[1])
     }
 }
