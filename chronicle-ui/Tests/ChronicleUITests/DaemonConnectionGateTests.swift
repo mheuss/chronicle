@@ -63,7 +63,7 @@ struct DaemonConnectionGateTests {
 
         // Fake daemon: read the request line, then write invalid UTF-8 + LF.
         // 0xFF and 0xFE are invalid as standalone UTF-8 leading bytes.
-        let serverTask = Task.detached {
+        let serverTask = blockingServer {
             _ = readLineSync(from: serverFD)
             writeAll([0xFF, 0xFE, 0x0A], to: serverFD)
             Darwin.close(serverFD)
@@ -88,7 +88,7 @@ struct DaemonConnectionGateTests {
         let serverFD = pair.serverFD
 
         let validResponse = #"{"type":"status","ok":true,"data":{"uptime_secs":42,"version":"0.1.0"}}"#
-        let serverTask = Task.detached {
+        let serverTask = blockingServer {
             respondToOneRequest(on: serverFD, with: validResponse)
             Darwin.close(serverFD)
         }
@@ -111,7 +111,7 @@ struct DaemonConnectionGateTests {
         // Valid UTF-8, valid JSON, but does NOT match StatusResponse OR
         // ErrorResponse schemas — so we exit through the catch arm.
         let badResponse = #"{"unexpected":"shape"}"#
-        let serverTask = Task.detached {
+        let serverTask = blockingServer {
             respondToOneRequest(on: serverFD, with: badResponse)
             Darwin.close(serverFD)
         }
@@ -140,7 +140,7 @@ struct DaemonConnectionGateTests {
         // No `code` key: a daemon predating the field must still decode, which
         // is why `ErrorResponse.code` is Optional.
         let errorResponse = #"{"type":"error","ok":false,"message":"internal failure"}"#
-        let serverTask = Task.detached {
+        let serverTask = blockingServer {
             respondToOneRequest(on: serverFD, with: errorResponse)
             Darwin.close(serverFD)
         }
@@ -173,6 +173,9 @@ struct DaemonConnectionGateTests {
 
         // Server task returns true if it observed early request-2 bytes
         // (i.e., FIFO is broken). Returns false under correct FIFO behavior.
+        // Stays detached: this probe sets the fd non-blocking and waits with
+        // Task.sleep, so it never parks a cooperative thread the way the
+        // blocking servers do.
         let serverTask: Task<Bool, Never> = Task.detached {
             // 1. Read first request line, busy-looping on EAGAIN.
             var byte: UInt8 = 0

@@ -16,7 +16,7 @@ struct DaemonConnectionMethodsTests {
         let reply = """
         {"type":"search","ok":true,"hits":[{"id":7,"source":"screen","timestamp_ms":1700000000000,"app_name":"X","app_bundle_id":null,"window_title":null,"image_path":"/x.heif","snippet":"hello","rank":-1.0}]}
         """
-        let daemonTask = Task.detached {
+        let daemonTask = blockingServer {
             let reqBytes = readLineSync(from: serverFD)
             let req = reqBytes.flatMap { String(bytes: $0, encoding: .utf8) } ?? ""
             #expect(req.contains("\"type\":\"search\""))
@@ -49,7 +49,7 @@ struct DaemonConnectionMethodsTests {
         let statusReply = """
         {"type":"status","ok":true,"data":{"uptime_secs":1,"version":"t"}}
         """
-        let daemonTask = Task.detached {
+        let daemonTask = blockingServer {
             let reqBytes = readLineSync(from: serverFD)
             let req = reqBytes.flatMap { String(bytes: $0, encoding: .utf8) } ?? ""
             #expect(req.contains("\"type\":\"set_whisper_model\""))
@@ -85,7 +85,7 @@ struct DaemonConnectionMethodsTests {
         let reply = """
         {"type":"get_screenshot","ok":true,"hit":{"id":42,"source":"screen","timestamp_ms":1700000001000,"app_name":"Safari","app_bundle_id":"com.apple.Safari","window_title":"Home","image_path":"/42.heif","snippet":"the quick brown fox","rank":0.0}}
         """
-        let daemonTask = Task.detached {
+        let daemonTask = blockingServer {
             let reqBytes = readLineSync(from: serverFD)
             let req = reqBytes.flatMap { String(bytes: $0, encoding: .utf8) } ?? ""
             #expect(req.contains("\"type\":\"get_screenshot\""))
@@ -109,7 +109,7 @@ struct DaemonConnectionMethodsTests {
         let serverFD = pair.serverFD
 
         let reply = #"{"type":"get_screenshot","ok":true,"hit":null}"#
-        let daemonTask = Task.detached {
+        let daemonTask = blockingServer {
             respondToOneRequest(on: serverFD, with: reply)
             Darwin.close(serverFD)
         }
@@ -129,7 +129,7 @@ struct DaemonConnectionMethodsTests {
         let pauseReply = #"{"type":"pause_capture","ok":true,"paused":true}"#
         let statusReply = #"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"0.1.0"}}"#
 
-        let daemonTask = Task.detached {
+        let daemonTask = blockingServer {
             // First request: pause_capture
             let reqBytes = readLineSync(from: serverFD)
             let req = reqBytes.flatMap { String(bytes: $0, encoding: .utf8) } ?? ""
@@ -156,7 +156,7 @@ struct DaemonConnectionMethodsTests {
         let resumeReply = #"{"type":"resume_capture","ok":true,"paused":false}"#
         let statusReply = #"{"type":"status","ok":true,"data":{"uptime_secs":2,"version":"0.1.0"}}"#
 
-        let daemonTask = Task.detached {
+        let daemonTask = blockingServer {
             // First request: resume_capture
             let reqBytes = readLineSync(from: serverFD)
             let req = reqBytes.flatMap { String(bytes: $0, encoding: .utf8) } ?? ""

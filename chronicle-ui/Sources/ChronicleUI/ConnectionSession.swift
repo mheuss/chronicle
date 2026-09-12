@@ -33,6 +33,7 @@ final class ConnectionSession {
     private let eventContinuation: AsyncStream<String>.Continuation
     private var readerTask: Task<Void, Never>?
     private var waiters: [CheckedContinuation<String, Error>] = []
+    private var lastWrite: Task<Void, Never>?
 
     private let io: IO
 
@@ -40,6 +41,7 @@ final class ConnectionSession {
     private(set) var shutdownCountForTesting = 0
     private(set) var descriptorCloseCountForTesting = 0
     private(set) var eventsYieldedForTesting = 0
+    private(set) var droppedResponsesForTesting = 0
     var finishedWaiterCountForTesting: Int { finishedWaiters.count }
     var waiterCountForTesting: Int { waiters.count }
     var writesInFlightForTesting: Int { writesInFlight }
@@ -102,15 +104,29 @@ final class ConnectionSession {
     /// session: `IO.write` loops until every byte is out, so a failure can
     /// leave a partial line on the wire and the daemon reading a truncated
     /// request.
+    ///
+    /// Writes are chained, so concurrent callers queue rather than interleave.
+    /// Two `IO.write` loops on one stream socket would split each other's
+    /// payloads across syscalls; and because `waiters` is ordered by
+    /// registration, unordered writes would also hand one caller another's
+    /// response — silently, since the protocol carries no correlation id.
+    ///
+    /// Cancellation is deliberately ignored, as in `start()`. A cancelled
+    /// caller's request is already on the wire and the daemon will answer it,
+    /// so dropping its waiter would misalign every response after it. The
+    /// caller waits for an answer it no longer wants; it does not corrupt the
+    /// stream for anyone else.
     func send(_ line: String) async throws -> String {
         guard state == .live else { throw IPCError.notConnected }
         return try await withCheckedThrowingContinuation { cont in
             waiters.append(cont)
-            // A count, not a flag: `send` admits concurrent callers, and a flag
-            // would let the first completion clear it while a second write
-            // still holds the descriptor.
+            // A count, not a flag: a queued write still holds the descriptor,
+            // and a flag would let the first completion clear it while the
+            // next one is still to come.
             writesInFlight += 1
-            Task { [self] in
+            let previousWrite = lastWrite
+            let write = Task { [self] in
+                _ = await previousWrite?.value
                 // close() may have landed between the registration above and
                 // this task's turn. It calls shutdown() synchronously, so the
                 // write would fail anyway — but resting on another method's
@@ -128,6 +144,7 @@ final class ConnectionSession {
                 writesInFlight -= 1
                 closeIfDone()
             }
+            lastWrite = write
         }
     }
 
@@ -162,6 +179,9 @@ final class ConnectionSession {
             // Never the line itself: a response can carry an FTS5 snippet of
             // the user's screen.
             NSLog("ChronicleUI: dropping unsolicited response line")
+            #if DEBUG
+            droppedResponsesForTesting += 1
+            #endif
             return
         }
         waiters.removeFirst().resume(returning: line)

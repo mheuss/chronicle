@@ -61,3 +61,44 @@ func setNoSigPipe(_ fd: Int32) -> Bool {
     var on: Int32 = 1
     return setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size)) == 0
 }
+
+/// Bounds every blocking `read` on `fd`, so a test whose bytes never arrive
+/// fails on its assertion instead of parking a thread for the whole run.
+@discardableResult
+func setReceiveTimeout(_ fd: Int32, seconds: Int32) -> Bool {
+    var tv = timeval(tv_sec: Int(seconds), tv_usec: 0)
+    return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size)) == 0
+}
+
+/// Runs a blocking socket-server body off the Swift concurrency cooperative
+/// pool, returning a `Task` so callers can still `await` it.
+///
+/// `Task.detached` is the trap this exists to avoid. It parks the blocking
+/// `read`/`write` on a cooperative-pool thread, and that pool is only about as
+/// wide as the core count. Enough blocked servers and the concurrency runtime
+/// deadlocks outright — including the MainActor work that would have unblocked
+/// them. Diagnosed on HEU-724 with `sample`: every stalled thread sat in
+/// `readLineSync` on `com.apple.root.default-qos.cooperative`. The dispatch
+/// global pool grows instead of deadlocking, so blocking on it is safe.
+func blockingServer<T: Sendable>(_ body: @escaping @Sendable () -> T) -> Task<T, Never> {
+    Task {
+        await withCheckedContinuation { (cont: CheckedContinuation<T, Never>) in
+            DispatchQueue.global().async { cont.resume(returning: body()) }
+        }
+    }
+}
+
+/// Polls until `condition` holds, or gives up after `ticks` 10 ms waits.
+///
+/// A fixed sleep is a guess about how fast the reader drains under a loaded
+/// parallel suite, and it guesses wrong often enough to flake. This converts
+/// that into a bounded wait, so a genuine regression still fails the caller's
+/// assertion rather than passing on a lucky schedule.
+@MainActor
+func waitUntil(ticks: Int = 200, _ condition: @MainActor () -> Bool) async {
+    var n = 0
+    while !condition() && n < ticks {
+        try? await Task.sleep(for: .milliseconds(10))
+        n += 1
+    }
+}

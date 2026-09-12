@@ -160,7 +160,7 @@ struct ConnectionSessionRoutingTests {
     /// Answer exactly one request on `fd`. Reads the request first, so the
     /// response lands after the caller has registered its waiter.
     private func respond(on fd: Int32, with response: String) -> Task<Void, Never> {
-        Task.detached {
+        blockingServer {
             _ = readLineSync(from: fd)
             _ = writeAll(response + "\n", to: fd)
         }
@@ -180,7 +180,7 @@ struct ConnectionSessionRoutingTests {
     func idleEventDoesNotDisturbNextRequest() async throws {
         try await withStartedSession { session, serverFD in
             _ = writeAll(#"{"type":"event","event":"capture_changed"}"# + "\n", to: serverFD)
-            try await Task.sleep(for: .milliseconds(20))   // let the reader take it
+            await waitUntil { session.eventsYieldedForTesting == 1 }
             // Without this the test passes even with routing deleted: the event
             // would hit the empty-waiter drop and the send below still works.
             #expect(session.eventsYieldedForTesting == 1)
@@ -196,7 +196,7 @@ struct ConnectionSessionRoutingTests {
     func eventMidRequestDoesNotBecomeTheResponse() async throws {
         try await withStartedSession { session, serverFD in
             // Read the request, slip an event in front of the response, then answer.
-            let server = Task.detached {
+            let server = blockingServer {
                 _ = readLineSync(from: serverFD)
                 _ = writeAll(#"{"type":"event","event":"capture_changed"}"# + "\n", to: serverFD)
                 _ = writeAll(#"{"type":"status","ok":true}"# + "\n", to: serverFD)
@@ -212,7 +212,11 @@ struct ConnectionSessionRoutingTests {
     func unsolicitedResponseIsDropped() async throws {
         try await withStartedSession { session, serverFD in
             _ = writeAll(#"{"type":"status","ok":true}"# + "\n", to: serverFD)
-            try await Task.sleep(for: .milliseconds(50))
+            // The send below must not start until the reader has dropped this
+            // line. Otherwise it registers a waiter first and is handed the
+            // stale line as its own response.
+            await waitUntil { session.droppedResponsesForTesting == 1 }
+            #expect(session.droppedResponsesForTesting == 1)
 
             // The counter, not an await on the stream: awaiting a stream that
             // is correctly empty would hang rather than fail.
@@ -262,7 +266,7 @@ struct ConnectionSessionRoutingTests {
     @Test("a reader error reaches the waiting caller unchanged")
     func readerErrorReachesCaller() async throws {
         try await withStartedSession { session, serverFD in
-            let server = Task.detached {
+            let server = blockingServer {
                 _ = readLineSync(from: serverFD)
                 _ = writeAll([0xFF, 0xFE, 0x0A], to: serverFD)
             }
@@ -390,6 +394,40 @@ struct ConnectionSessionWriteTests {
         }
         #expect(session.waiterCountForTesting == 0)
         Darwin.close(pair.serverFD)
+    }
+
+    @Test("concurrent sends do not interleave on the wire")
+    func concurrentSendsDoNotInterleave() async throws {
+        let pair = try SocketPairHelper.make()
+        setNoSigPipe(pair.clientFD)
+        let session = ConnectionSession(fd: pair.clientFD, maxResponseSize: 64 * 1024)
+        let serverFD = pair.serverFD
+        // Without this the reader below parks forever when the writes do not
+        // land, hanging the whole run instead of failing this test.
+        setReceiveTimeout(serverFD, seconds: 10)
+
+        // Each payload is far past net.local.stream.sendspace (8 KB on macOS),
+        // so each write is many partial writes. Two unchained IO.write loops
+        // split each other's payload and neither line arrives homogeneous.
+        let size = 100_000
+        let first = Task { try await session.send(String(repeating: "x", count: size) + "\n") }
+        let second = Task { try await session.send(String(repeating: "y", count: size) + "\n") }
+
+        let reader = blockingServer { () -> [Bool] in
+            var intact: [Bool] = []
+            for _ in 0..<2 {
+                guard let line = readLineSync(from: serverFD, maxBytes: 4 * size) else { break }
+                intact.append(line.count == size && Set(line).count == 1)
+            }
+            return intact
+        }
+        #expect(await reader.value == [true, true],
+                "a line came back mixed, so two write loops interleaved")
+
+        session.close()
+        _ = try? await first.value
+        _ = try? await second.value
+        Darwin.close(serverFD)
     }
 
     @Test("two overlapping sends both hold the descriptor")
