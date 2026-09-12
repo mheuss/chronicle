@@ -571,9 +571,10 @@ struct StorageStats: Decodable, Sendable {
     let screenshotCount: UInt64
     let audioSegmentCount: UInt64
     let oldestEntryMs: Int64?
-    /// What the configured retention means. Optional on the decoder, NOT on
-    /// the wire — Rust sends it non-optionally, and a daemon too old to send
-    /// it degrades this one row rather than the whole status block.
+    /// What the configured retention means. `nil` two ways: the daemon sent
+    /// `null` because it could not read `retention_days`, or a daemon too old
+    /// to send the field omitted it. Either way this one row degrades rather
+    /// than the whole status block.
     let retention: Retention?
     /// Optional on the decoder, NOT on the wire — Rust sends these
     /// non-optionally. An older daemon omits them, and a non-optional field
@@ -607,6 +608,11 @@ struct StorageStats: Decodable, Sendable {
 /// The decoder is hand-written: a synthesized one reads every declared field
 /// regardless of `kind`, so a future variant with a wrongly typed payload would
 /// throw and take the whole `StatusData` decode with it.
+///
+/// That covers the payload only. A `retention` that is not an object, or a
+/// `kind` absent or not a string, still throws, deliberately: either means the
+/// peer is not the daemon we think it is. `MicState`, `TranscriptionState`,
+/// `DaemonErrorCode` and `SearchHitSource` all draw the same line.
 enum Retention: Sendable, Equatable, Decodable {
     case days(UInt32)
     case disabled
@@ -625,11 +631,9 @@ enum Retention: Sendable, Equatable, Decodable {
         switch try c.decode(String.self, forKey: .kind) {
         case "days":
             // `try?`, not `try`: a days object whose value is absent, null, or
-            // the wrong type is malformed, not a day count. Throwing here would
-            // take the whole StatusData decode with it and land in the reconnect
-            // loop (HEU-725), which reads as a crashing daemon. Inventing a
-            // number would be the display lie this type replaced. `.unknown`
-            // renders as "Unavailable", which is neither.
+            // the wrong type is malformed, not a day count. Throwing would land
+            // in the reconnect loop (HEU-725) and read as a crashing daemon;
+            // inventing a number would be the display lie this type replaced.
             // `try?` on an Optional-returning call flattens, so this one guard
             // covers the throw and the absent key together.
             guard let value = try? c.decodeIfPresent(UInt32.self, forKey: .value) else {

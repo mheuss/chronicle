@@ -147,15 +147,18 @@ hours after each run finishes. The last completed run's time is stored in the
 rather than restarting it.
 
 1. Read `retention_days` from the `config` table and classify it with
-   `Retention::classify`. The key is seeded at 30, and an absent key also falls
-   back to 30. `0` disables cleanup entirely.
+   `Retention::from_stored`. That function delegates to `Retention::classify`
+   for the rules. It supplies the fallback when the key is absent. The key is
+   seeded at 30, and an absent key also falls back to 30. `0` disables cleanup
+   entirely.
+   An accepted value gives the cutoff: `now - retention_days * 86400 * 1000`,
+   with checked arithmetic so a large value cannot wrap it into the future.
 2. A value that is not a number, is negative, or is above 36,500 days is
-   *refused*, not an error: the run reports `CleanupOutcome::ConfigInvalid`,
-   deletes nothing, writes no checkpoint, and logs the offending value at
-   `warn`. The next scheduled run retries. Grep the log for
-   `retention_days is not a usable value` — there is no error-level line.
-   Then compute the cutoff: `now - retention_days * 86400 * 1000`, with checked
-   arithmetic so a large value cannot wrap it into the future.
+   *refused*, not treated as an error. The run reports
+   `CleanupOutcome::ConfigInvalid`, deletes nothing, writes no checkpoint, and
+   logs the offending value at `warn`. The next scheduled run retries. Grep the
+   log for `retention_days is not a usable value`. There is no error-level
+   line.
 3. For screenshots: select up to 500 rows older than the cutoff, oldest first,
    delete each associated file from disk, then DELETE the rows in one
    transaction. Repeat until no expired rows remain, or until the daemon begins
@@ -203,13 +206,13 @@ The exceptions are settings where cleanup never re-selects the row:
 
 - `retention_days = 0` ("keep forever") — `Storage::run_cleanup_interruptible`
   classifies the stored value and returns `Disabled` without examining anything.
-  The inner `retention::run_cleanup_interruptible` has its own `<= 0` guard,
-  unreachable from production since HEU-625, kept as defence against a caller
-  that skips the public boundary.
+  The inner `retention::run_cleanup_interruptible` has its own `<= 0` guard.
+  That guard has been unreachable from production since HEU-625. It exists as
+  defence against a caller that skips the public boundary.
 - `retention_days > MAX_RETENTION_DAYS` (36,500), negative, or unparseable —
   the public boundary reports `CleanupOutcome::ConfigInvalid` and no cleanup
   runs until the config is corrected. The bound is enforced by
-  `Retention::classify`; the inner `Err` for the same case is unreachable from
+  `Retention::classify`. The inner `Err` for the same case is unreachable from
   production.
 - **Raising `retention_days` after a row is stranded.** This is the one you are
   most likely to hit. The cutoff is `now - retention_days * 86_400 * 1000`, so a

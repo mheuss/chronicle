@@ -110,8 +110,8 @@ struct RetentionDecodingTests {
 
     @Test("an absent retention block leaves the rest of the status decodable")
     func absentRetentionDecodes() throws {
-        // Optional on the decoder, not on the wire: a daemon too old to send
-        // the field degrades one row instead of the whole poll.
+        // A daemon too old to send the field omits it. A current daemon that
+        // cannot read `retention_days` sends null instead — see the test below.
         let json = """
             {"db_size_bytes":1,"total_disk_usage_bytes":2,"screenshot_count":3,
              "audio_segment_count":4,"oldest_entry_ms":null}
@@ -121,6 +121,20 @@ struct RetentionDecodingTests {
         let stats = try decoder.decode(StorageStats.self, from: Data(json.utf8))
         #expect(stats.retention == nil)
         #expect(stats.screenshotCount == 3)
+    }
+
+    @Test("an explicit null retention decodes to nil, not a throw")
+    func nullRetentionDecodes() throws {
+        // The one case 513d10a added to the wire. Rust pins the emit side; this
+        // pins the read. Without it nothing fails if the field gains
+        // `skip_serializing_if` in Rust, or if this block's synthesized decoder
+        // is replaced by a hand-written one calling `decode(Retention.self)`.
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let json = statusJSON(retention: "null")
+        let resp = try decoder.decode(StatusResponse.self, from: Data(json.utf8))
+        #expect(resp.data.storage?.retention == nil)
+        #expect(resp.data.storage?.screenshotCount == 3)
     }
 }
 
