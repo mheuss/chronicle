@@ -69,15 +69,12 @@ struct DaemonConnectionReconnectTests {
         let conn = DaemonConnection(testingSocketFD: pair.clientFD)
         let serverFD = pair.serverFD
 
-        // The gate holds the first response so the checkpoint below lands
-        // while a request is definitely outstanding. Without it, both requests
-        // can finish on a local socketpair before the check runs, and the
-        // assertion passes without ever having observed the window. A
-        // semaphore rather than an actor: `blockingServer` runs its body on the
-        // dispatch global queue, off any task, so it cannot await.
+        // Holds the first response so the checkpoint below lands while a
+        // request is definitely outstanding; without it both can finish first
+        // and the assertion never observes the window. A semaphore because
+        // `blockingServer`'s body runs off any task and cannot await.
         let gate = DispatchSemaphore(value: 0)
-        // A throw anywhere below releases the server thread rather than leaving
-        // it parked on an untimed wait for the rest of the run.
+        // A throw below must not leave the server parked on an untimed wait.
         defer { gate.signal() }
         let reply = #"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"0.0.1"}}"# + "\n"
         let server = blockingServer {
@@ -95,11 +92,9 @@ struct DaemonConnectionReconnectTests {
         async let first = conn.requestStatus()
         async let second = conn.requestStatus()
 
-        // Two waits, because the assertion has two halves. `waitUntil` covers
-        // the positive one — the first waiter has to exist before a count of 1
-        // means anything. The settle covers the negative one: a broken
-        // requestQueue registers the second waiter too, and only elapsed time
-        // gives it the chance to.
+        // `waitUntil` for the positive half — a count of 1 means nothing until
+        // the first waiter exists. The settle for the negative half: only
+        // elapsed time gives a broken requestQueue the chance to register.
         await waitUntil { conn.sessionForTesting?.waiterCountForTesting == 1 }
         try await Task.sleep(for: .milliseconds(200))
         #expect(conn.sessionForTesting?.waiterCountForTesting == 1,
@@ -116,11 +111,9 @@ struct DaemonConnectionReconnectTests {
     func disconnectDuringEstablishmentClosesTheDescriptor() async throws {
         let pair = try SocketPairHelper.make()
         let serverFD = pair.serverFD
-        // Neither `SocketPairHelper` nor `init(connectionFactory:)` sets this,
-        // where `init(testingSocketFD:)` would. Without it, a run cancelled
-        // before `disconnect()` below releases the factory into a live
-        // connection whose peer the next defer has closed, and the heartbeat
-        // write takes the whole test process down with SIGPIPE.
+        // Nothing on this path sets SO_NOSIGPIPE. Without it, a cancelled run
+        // releases the factory into a connection whose peer the next defer has
+        // closed, and the heartbeat write kills the test process.
         #expect(setNoSigPipe(pair.clientFD))
         defer { Darwin.close(serverFD) }
         let gate = AsyncGate()
@@ -139,13 +132,10 @@ struct DaemonConnectionReconnectTests {
 
         #expect(conn.sessionForTesting == nil)
 
-        // Read from the peer rather than probing the client fd directly. A
-        // closed fd number is handed straight back out to the next socketpair
-        // in this parallel suite, so a probe on that number can succeed against
-        // some other test's socket. The peer is exact instead: `close()` on a
-        // session whose reader never started shuts the descriptor down and
-        // closes it in the same call, so EOF arrives; a `connect()` that
-        // dropped the session on the floor would leave this read waiting out
+        // Read the peer, never the client fd: a closed fd number goes straight
+        // back to the next socketpair in this parallel suite, so a probe on it
+        // can succeed against another test's socket. EOF here is exact —
+        // dropping the session instead leaves this read to expire on
         // SO_RCVTIMEO and return -1.
         let peer = blockingServer { () -> Int in
             var byte: UInt8 = 0
@@ -153,11 +143,8 @@ struct DaemonConnectionReconnectTests {
         }
         #expect(await peer.value == 0, "the descriptor was left open after disconnect")
 
-        // BR-14's other half — that no reader ran — is not asserted. The
-        // session `connect()` builds here is local to it, and a session whose
-        // reader HAD started reaches the same EOF anyway, because `close()`
-        // shuts the descriptor down and the woken reader closes it. The two
-        // are indistinguishable from the peer.
+        // BR-14's other half — that no reader ran — is not asserted: a started
+        // reader reaches the same EOF, so the two are indistinguishable here.
     }
 
     @Test("an idle end of file reconnects without waiting for the heartbeat")
@@ -165,9 +152,8 @@ struct DaemonConnectionReconnectTests {
         let log = FactoryLog()
         let conn = DaemonConnection(connectionFactory: {
             let fd = try log.make()
-            // Nothing on this path sets SO_NOSIGPIPE, and a write to a peer the
-            // teardown has closed would kill the test process rather than fail
-            // a test. See disconnectDuringEstablishmentClosesTheDescriptor.
+            // Nothing on this path sets SO_NOSIGPIPE; a write to a closed peer
+            // would kill the test process rather than fail a test.
             #expect(setNoSigPipe(fd))
             // Answer the first heartbeat so monitorConnection enters its 30s
             // sleep. Closing the peer before this would test a blocked
@@ -180,22 +166,16 @@ struct DaemonConnectionReconnectTests {
             return fd
         })
         conn.connect()
-        // `lastStatus` rather than `log.count`, and this is the load-bearing
-        // wait: it proves the heartbeat round trip completed, which puts
-        // monitorConnection into its 30s sleep and means pair 0's server is
-        // past its read, so the close below cannot free a descriptor number
-        // out from under a parked one. An implementation that never runs the
-        // heartbeat at all never sets this and burns the whole budget here.
+        // `lastStatus`, not `log.count`: it proves the round trip completed, so
+        // monitorConnection is in its 30s sleep and pair 0's server is past its
+        // read — the close below cannot free a number out from under one.
         await waitUntil { conn.lastStatus != nil }
         #expect(conn.lastStatus != nil, "the heartbeat never completed; the wait below proves nothing")
 
-        // Headroom, not a derived bound: one reconnect cycle costs about a
-        // second (the backoff floor), so an implementation that cycles a
-        // healthy connection at all shows up here even under a loaded parallel
-        // suite. A cycler slower than this window still slips through, and
-        // nothing here can catch one. That is a different failure from the 30
-        // second stall this task removes — that one is a slow reconnect AFTER
-        // the peer dies, and the budget below is what catches it.
+        // Headroom, not a derived bound: a cycle costs about a second (the
+        // backoff floor), so anything cycling a healthy connection shows up
+        // here. A slower cycler still slips through. The 30 second stall this
+        // task removes is a different failure, caught by the budget below.
         try await Task.sleep(for: .milliseconds(2500))
         #expect(log.count == 1, "a healthy connection must not reconnect")
 
@@ -216,15 +196,10 @@ struct DaemonConnectionReconnectTests {
             let fd = try log.make()
             #expect(setNoSigPipe(fd))
             let serverFD = log.pairs.last!.serverFD
-            // Valid JSON of the wrong shape. It carries no `type`, so it
-            // reaches the waiter; the decode then fails and monitorConnection
-            // throws — the child swallows it and returns, and that return
-            // is what `group.next()` observes.
-            // This test does not pin `cancelAll()` — measured, it passes
-            // without it, because the server below closes its own descriptor
-            // and that EOF finishes the session's child. What it pins is
-            // BR-13: a heartbeat failure on a live socket reconnects.
-            // `idleEOFReconnectsPromptly` is what pins `cancelAll()`.
+            // Valid JSON of the wrong shape: no `type`, so it reaches the
+            // waiter, the decode fails and monitorConnection throws. Pins
+            // BR-13 only — measured, this passes without `cancelAll()`,
+            // because the server's own close finishes the session's child.
             _ = blockingServer {
                 // The server owns serverFD, so the test cannot free the number
                 // back to the next socketpair while this thread is in a read.

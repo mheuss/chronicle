@@ -62,16 +62,10 @@ final class ConnectionSession {
 
     /// Start reading.
     ///
-    /// The reader ignores cancellation: it parks in a blocking `read` that
-    /// cancellation cannot interrupt, and exiting early would close a
-    /// descriptor a thread is still on. `close()` is the only way to stop it.
-    /// The reader captures `self` strongly, so releasing the last external
-    /// reference cannot strand a thread parked in `read` on a descriptor
-    /// nothing will ever close. That is a retain cycle — session holds task,
-    /// task holds session — and `close()` is what breaks it: `shutdown` wakes
-    /// the reader, the reader exits, the closure's capture is released. Hosts
-    /// must call `close()` rather than rely on ARC. `DaemonConnection` makes
-    /// the same trade for the same reason.
+    /// The reader parks in a blocking `read` that cancellation cannot
+    /// interrupt, and it holds `self` strongly. `close()` is the only thing
+    /// that stops it — releasing the last reference instead strands a thread
+    /// on a descriptor nothing will close.
     func start() {
         guard !readerStarted, state == .live else { return }
         readerStarted = true
@@ -99,24 +93,13 @@ final class ConnectionSession {
 
     /// Send one line and wait for its response.
     ///
-    /// The waiter is registered BEFORE the write, so a response cannot arrive
-    /// before there is somewhere to put it. A failed write fails the whole
-    /// session: `IO.write` loops until every byte is out, so a failure can
-    /// leave a partial line on the wire and the daemon reading a truncated
-    /// request.
-    ///
-    /// Writes are chained, so concurrent callers queue rather than interleave.
-    /// Two `IO.write` loops on one stream socket would split each other's
-    /// payloads across syscalls; and because `waiters` is ordered by
-    /// registration, unordered writes would also hand one caller another's
-    /// response — silently, since the protocol carries no correlation id.
-    ///
-    /// Cancellation is deliberately ignored, as in `start()`. A cancelled
-    /// caller's request still goes out — the write task is unstructured, so
-    /// cancelling the caller does not cancel it — and the daemon answers every
-    /// request it receives. Dropping the waiter would therefore misalign every
-    /// response after it. The caller waits for an answer it no longer wants; it
-    /// does not corrupt the stream for anyone else.
+    /// The waiter is registered before the write, so a response cannot arrive
+    /// with nowhere to go. Writes are chained because two write loops on one
+    /// stream socket interleave payloads and, since `waiters` is ordered by
+    /// registration, hand callers each other's responses — silently, as the
+    /// protocol carries no correlation id. Cancellation is ignored, as in
+    /// `start()`: the write goes out regardless, so dropping the waiter would
+    /// misalign every response after it.
     func send(_ line: String) async throws -> String {
         guard state == .live else { throw IPCError.notConnected }
         return try await withCheckedThrowingContinuation { cont in
@@ -229,18 +212,11 @@ final class ConnectionSession {
 
     /// Wait for `finished`.
     ///
-    /// Latched, so a completion landing before the caller registers is not
-    /// missed. Cancellation-aware, so this can never be the unresumed
-    /// continuation that hangs a task group.
-    ///
-    /// A task that is ALREADY cancelled on entry survives only because nothing
-    /// suspends between installing the handler and registering the
-    /// continuation: `onCancel` fires synchronously, and the MainActor task it
-    /// enqueues cannot run until registration has happened. Adding an `await`
-    /// anywhere before `finishedWaiters[id] = cont` hangs this call forever.
-    /// `alreadyCancelledWaiterReturns` is what hangs when that happens — the
-    /// suite's time limit cannot convert it into a failure, so a stalled
-    /// `swift test` with no results is the symptom to read it by.
+    /// Latched, so a completion landing before registration is not missed, and
+    /// cancellation-aware so it cannot become the unresumed continuation that
+    /// hangs a task group. Nothing may suspend between installing the handler
+    /// and `finishedWaiters[id] = cont`: an `await` there hangs this call
+    /// forever, and the suite's time limit cannot convert that into a failure.
     func waitUntilFinished() async {
         if state == .finished { return }
         let id = nextWaiterID

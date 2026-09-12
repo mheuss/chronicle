@@ -22,11 +22,9 @@ func writeAll(_ string: String, to fd: Int32) -> Bool {
     writeAll(Array(string.utf8), to: fd)
 }
 
-/// Reads bytes from `fd` until LF (0x0A) or `maxBytes` is hit. Returns the
-/// payload without the trailing LF. Returns nil on read error or EOF before
-/// any bytes were read.
-/// A read error — including the `SO_RCVTIMEO` expiry `SocketPairHelper` sets —
-/// returns nil rather than the bytes read so far, so a caller cannot mistake a
+/// Reads bytes from `fd` until LF (0x0A) or `maxBytes`. Returns the payload
+/// without the trailing LF, or nil on a read error — including the
+/// `SO_RCVTIMEO` expiry `SocketPairHelper` sets — so a caller cannot mistake a
 /// truncated line for a whole one. An orderly EOF still yields what arrived.
 func readLineSync(from fd: Int32, maxBytes: Int = 64 * 1024) -> [UInt8]? {
     var buffer: [UInt8] = []
@@ -81,14 +79,11 @@ func setReceiveTimeout(_ fd: Int32, seconds: Int32) -> Bool {
 /// Runs a blocking socket-server body off the Swift concurrency cooperative
 /// pool, returning a `Task` so callers can still `await` it.
 ///
-/// The trap this exists to avoid is running `body()` directly inside a task —
-/// detached or not. That parks the blocking `read`/`write` on a cooperative-pool
-/// thread, and that pool is only about as wide as the core count. Enough blocked
-/// servers and the concurrency runtime deadlocks outright, including the
-/// MainActor work that would have unblocked them. Diagnosed on HEU-724 with
-/// `sample`: every stalled thread sat in `readLineSync` on
-/// `com.apple.root.default-qos.cooperative`. The dispatch global pool grows
-/// instead of deadlocking, so blocking on it is safe.
+/// Running `body()` inside a task instead — detached or not — parks its
+/// blocking syscall on the cooperative pool, which is about as wide as the core
+/// count. Enough blocked servers deadlock the runtime outright, including the
+/// MainActor work that would have unblocked them. `DispatchQueue.global()`
+/// grows instead, so blocking on it is safe.
 func blockingServer<T: Sendable>(_ body: @escaping @Sendable () -> T) -> Task<T, Never> {
     Task {
         await withCheckedContinuation { (cont: CheckedContinuation<T, Never>) in

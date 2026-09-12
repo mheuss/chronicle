@@ -46,12 +46,8 @@ final class DaemonConnection {
     /// Establishes a connection and returns a connected descriptor.
     ///
     /// Injected because the production path resolves `Self.socketPath`, a
-    /// static pointing at the real socket — without a seam the reconnect and
-    /// teardown requirements cannot be tested at all.
-    ///
-    /// `@MainActor` is load-bearing in both directions: the reconnect tests
-    /// mutate MainActor state from inside the factory, and the session is
-    /// published on the MainActor immediately after it returns.
+    /// static pointing at the real socket — without this seam the reconnect
+    /// and teardown requirements cannot be tested.
     private let connectionFactory: @MainActor @Sendable () async throws -> Int32
 
     #if DEBUG
@@ -297,13 +293,11 @@ final class DaemonConnection {
         return response.paused
     }
 
-    /// Generic request helper. Every request method routes through this, and
-    /// the `requestQueue` chain below is the only thing keeping one request
-    /// outstanding at a time — which is what holds design AD-8, at most one
-    /// waiter on a live session. That rests on this being the sole production
-    /// caller of `ConnectionSession.send`, not on the type system: `send` is
-    /// internal on a separate type, so a method reaching for it directly would
-    /// compile and would put a second waiter on the session.
+    /// Generic request helper. Its `requestQueue` chain keeps one request
+    /// outstanding at a time, which is what holds AD-8 — at most one waiter on
+    /// a live session. That rests on this being the sole production caller of
+    /// `ConnectionSession.send`, not on the type system: `send` is internal, so
+    /// a method reaching for it directly would compile and break the invariant.
     ///
     /// The unstructured `Task` here is intentional: caller cancellation must
     /// not abort socket I/O mid-write/read, or we'd leave the newline-delimited
@@ -420,13 +414,10 @@ final class DaemonConnection {
     /// Run the heartbeat and the session's completion against each other, and
     /// end the connection when either finishes.
     ///
-    /// The monitor's error is swallowed inside the child, and the `try?`
-    /// cannot move outward. `cancelAll` below makes `CancellationError` the
-    /// ordinary way the monitor ends, and `connect()` reads that error as "stop
-    /// reconnecting" — so letting it escape does not reach the backoff tail, it
-    /// leaves the loop for good. Measured: making this group throwing and
-    /// propagating fails `idleEOFReconnectsPromptly` with one attempt and no
-    /// reconnect.
+    /// The monitor's error is swallowed here and must stay swallowed:
+    /// `cancelAll` makes `CancellationError` the ordinary way it ends, and
+    /// `connect()` reads that error as "stop reconnecting", so propagating it
+    /// leaves the reconnect loop for good rather than reaching the backoff.
     private func raceHeartbeatAgainstSession(_ racedSession: ConnectionSession) async {
         await withTaskGroup(of: Void.self) { group in
             group.addTask {
@@ -437,17 +428,12 @@ final class DaemonConnection {
             }
 
             _ = await group.next()
-            // `cancelAll` is what makes an idle end of file prompt:
-            // monitorConnection spends almost all its time in a 30 second
-            // Task.sleep, and without this a session that finishes just after a
-            // successful heartbeat waits out the rest of that sleep — the delay
-            // this whole feature exists to remove. `idleEOFReconnectsPromptly`
-            // fails when it is removed.
-            //
-            // It is also the only thing left that frees the other child: if the
-            // monitor exits first on a session that is still live, nothing else
-            // resumes `waitUntilFinished`. No test is in that shape today, so
-            // that half is reasoning rather than a measurement.
+            // Without this, a session that finishes just after a heartbeat
+            // waits out the rest of monitorConnection's 30 second sleep — the
+            // delay this feature removes. `idleEOFReconnectsPromptly` fails
+            // when it is removed. It is also the only thing that frees the
+            // other child when the monitor exits first, though no test is in
+            // that shape today.
             group.cancelAll()
             await group.waitForAll()
         }
