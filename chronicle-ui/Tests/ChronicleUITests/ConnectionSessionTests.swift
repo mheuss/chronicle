@@ -161,7 +161,8 @@ struct ConnectionSessionRoutingTests {
     /// response lands after the caller has registered its waiter.
     private func respond(on fd: Int32, with response: String) -> Task<Void, Never> {
         blockingServer {
-            _ = readLineSync(from: fd)
+            // Only if a request arrived. See respondToOneRequest.
+            guard readLineSync(from: fd) != nil else { return }
             _ = writeAll(response + "\n", to: fd)
         }
     }
@@ -334,6 +335,7 @@ struct ConnectionSessionWriteTests {
         } catch {
             #expect(error as? IPCError == IPCError.notConnected)
         }
+        await session.waitUntilFinished()
         Darwin.close(pair.serverFD)
     }
 
@@ -429,6 +431,7 @@ struct ConnectionSessionWriteTests {
         session.close()
         _ = try? await first.value
         _ = try? await second.value
+        await session.waitUntilFinished()
         Darwin.close(serverFD)
     }
 

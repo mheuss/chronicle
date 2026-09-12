@@ -25,12 +25,16 @@ func writeAll(_ string: String, to fd: Int32) -> Bool {
 /// Reads bytes from `fd` until LF (0x0A) or `maxBytes` is hit. Returns the
 /// payload without the trailing LF. Returns nil on read error or EOF before
 /// any bytes were read.
+/// A read error — including the `SO_RCVTIMEO` expiry `SocketPairHelper` sets —
+/// returns nil rather than the bytes read so far, so a caller cannot mistake a
+/// truncated line for a whole one. An orderly EOF still yields what arrived.
 func readLineSync(from fd: Int32, maxBytes: Int = 64 * 1024) -> [UInt8]? {
     var buffer: [UInt8] = []
     var byte: UInt8 = 0
     while buffer.count < maxBytes {
         let n = Darwin.read(fd, &byte, 1)
-        if n <= 0 { return buffer.isEmpty ? nil : buffer }
+        if n < 0 { return nil }
+        if n == 0 { return buffer.isEmpty ? nil : buffer }
         if byte == 0x0A { return buffer }
         buffer.append(byte)
     }
@@ -39,8 +43,11 @@ func readLineSync(from fd: Int32, maxBytes: Int = 64 * 1024) -> [UInt8]? {
 
 /// Reads one newline-delimited request from `fd`, then writes `response`
 /// followed by LF. Closes neither side.
+/// Answers only if a request actually arrived. Replying anyway would hand the
+/// client an unsolicited line its waiter is already registered for, so a test
+/// whose code under test never wrote a request would pass on that reply.
 func respondToOneRequest(on fd: Int32, with response: String) {
-    _ = readLineSync(from: fd)
+    guard readLineSync(from: fd) != nil else { return }
     writeAll(response + "\n", to: fd)
 }
 
@@ -73,20 +80,16 @@ func setReceiveTimeout(_ fd: Int32, seconds: Int32) -> Bool {
 /// Runs a blocking socket-server body off the Swift concurrency cooperative
 /// pool, returning a `Task` so callers can still `await` it.
 ///
-/// `Task.detached` is the trap this exists to avoid. It parks the blocking
-/// `read`/`write` on a cooperative-pool thread, and that pool is only about as
-/// wide as the core count. Enough blocked servers and the concurrency runtime
-/// deadlocks outright — including the MainActor work that would have unblocked
-/// them. Diagnosed on HEU-724 with `sample`: every stalled thread sat in
-/// `readLineSync` on `com.apple.root.default-qos.cooperative`. The dispatch
-/// global pool grows instead of deadlocking, so blocking on it is safe.
+/// The trap this exists to avoid is running `body()` directly inside a task —
+/// detached or not. That parks the blocking `read`/`write` on a cooperative-pool
+/// thread, and that pool is only about as wide as the core count. Enough blocked
+/// servers and the concurrency runtime deadlocks outright, including the
+/// MainActor work that would have unblocked them. Diagnosed on HEU-724 with
+/// `sample`: every stalled thread sat in `readLineSync` on
+/// `com.apple.root.default-qos.cooperative`. The dispatch global pool grows
+/// instead of deadlocking, so blocking on it is safe.
 func blockingServer<T: Sendable>(_ body: @escaping @Sendable () -> T) -> Task<T, Never> {
-    // Detached on purpose. A plain `Task` would inherit the calling suite's
-    // MainActor and not reach the dispatch hop until the MainActor next
-    // yields, making the helper's correctness depend on each caller. Detached
-    // costs nothing here because this body suspends immediately rather than
-    // blocking — the blocking happens on the dispatch queue.
-    Task.detached {
+    Task {
         await withCheckedContinuation { (cont: CheckedContinuation<T, Never>) in
             DispatchQueue.global().async { cont.resume(returning: body()) }
         }

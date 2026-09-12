@@ -6,6 +6,7 @@ import Darwin
 enum SocketPairHelper {
     enum Error: Swift.Error {
         case socketpairFailed(errno: Int32)
+        case receiveTimeoutFailed(errno: Int32)
     }
 
     static func make() throws -> (clientFD: Int32, serverFD: Int32) {
@@ -19,7 +20,12 @@ enum SocketPairHelper {
         // arrive otherwise parks a thread for the whole run, and the suite's
         // .timeLimit cannot convert that into a failure: it works by
         // cancellation, which a thread inside read() never observes.
-        setReceiveTimeout(fds[1], seconds: 10)
+        guard setReceiveTimeout(fds[1], seconds: 10) else {
+            let timeoutErrno = errno
+            Darwin.close(fds[0])
+            Darwin.close(fds[1])
+            throw Error.receiveTimeoutFailed(errno: timeoutErrno)
+        }
         return (clientFD: fds[0], serverFD: fds[1])
     }
 }
