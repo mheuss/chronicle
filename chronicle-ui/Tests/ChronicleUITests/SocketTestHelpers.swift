@@ -81,7 +81,12 @@ func setReceiveTimeout(_ fd: Int32, seconds: Int32) -> Bool {
 /// `readLineSync` on `com.apple.root.default-qos.cooperative`. The dispatch
 /// global pool grows instead of deadlocking, so blocking on it is safe.
 func blockingServer<T: Sendable>(_ body: @escaping @Sendable () -> T) -> Task<T, Never> {
-    Task {
+    // Detached on purpose. A plain `Task` would inherit the calling suite's
+    // MainActor and not reach the dispatch hop until the MainActor next
+    // yields, making the helper's correctness depend on each caller. Detached
+    // costs nothing here because this body suspends immediately rather than
+    // blocking — the blocking happens on the dispatch queue.
+    Task.detached {
         await withCheckedContinuation { (cont: CheckedContinuation<T, Never>) in
             DispatchQueue.global().async { cont.resume(returning: body()) }
         }

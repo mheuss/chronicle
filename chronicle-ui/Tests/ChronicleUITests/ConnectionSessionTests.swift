@@ -363,8 +363,9 @@ struct ConnectionSessionWriteTests {
         #expect(session.state == .closing, "must not finish while a write holds the fd")
         #expect(session.descriptorCloseCountForTesting == 0)
 
-        // Closing the peer lets the aborted write unwind, which releases the
-        // close. It does not complete — shutdown() already broke it.
+        // close() already broke the write via shutdown(); measured, a blocked
+        // write returns EPIPE from shutdown alone with no peer close at all.
+        // This line just returns the peer descriptor.
         Darwin.close(pair.serverFD)
         _ = try? await sendTask.value
         await session.waitUntilFinished()
@@ -393,6 +394,7 @@ struct ConnectionSessionWriteTests {
             #expect(error as? IPCError == IPCError.notConnected)
         }
         #expect(session.waiterCountForTesting == 0)
+        await session.waitUntilFinished()
         Darwin.close(pair.serverFD)
     }
 
@@ -402,13 +404,13 @@ struct ConnectionSessionWriteTests {
         setNoSigPipe(pair.clientFD)
         let session = ConnectionSession(fd: pair.clientFD, maxResponseSize: 64 * 1024)
         let serverFD = pair.serverFD
-        // Without this the reader below parks forever when the writes do not
-        // land, hanging the whole run instead of failing this test.
-        setReceiveTimeout(serverFD, seconds: 10)
 
-        // Each payload is far past net.local.stream.sendspace (8 KB on macOS),
-        // so each write is many partial writes. Two unchained IO.write loops
-        // split each other's payload and neither line arrives homogeneous.
+        // Each payload is far past net.local.stream.sendspace (8192 on macOS),
+        // so the kernel copies it in chunks as the reader drains. Measured: a
+        // blocking 100 KB write() still returns 100000 in ONE syscall, so
+        // IO.write's loop never iterates — the interleaving happens below it.
+        // Unserialized, two such writes alternate chunks and neither line
+        // arrives homogeneous.
         let size = 100_000
         let first = Task { try await session.send(String(repeating: "x", count: size) + "\n") }
         let second = Task { try await session.send(String(repeating: "y", count: size) + "\n") }

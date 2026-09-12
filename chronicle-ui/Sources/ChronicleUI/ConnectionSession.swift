@@ -112,10 +112,13 @@ final class ConnectionSession {
     /// response — silently, since the protocol carries no correlation id.
     ///
     /// Cancellation is deliberately ignored, as in `start()`. A cancelled
-    /// caller's request is already on the wire and the daemon will answer it,
-    /// so dropping its waiter would misalign every response after it. The
-    /// caller waits for an answer it no longer wants; it does not corrupt the
-    /// stream for anyone else.
+    /// caller's request still goes out — the write task is unstructured, so
+    /// cancelling the caller does not cancel it — and the daemon answers every
+    /// request it receives. Dropping the waiter would therefore misalign every
+    /// response after it. Cancelling the waiter and its queued write together
+    /// would be alignment-safe, but only before that write starts, so it is not
+    /// a rule this method can state. The caller waits for an answer it no
+    /// longer wants; it does not corrupt the stream for anyone else.
     func send(_ line: String) async throws -> String {
         guard state == .live else { throw IPCError.notConnected }
         return try await withCheckedThrowingContinuation { cont in
@@ -170,8 +173,10 @@ final class ConnectionSession {
                 #if DEBUG
                 eventsYieldedForTesting += 1
                 #endif
-            default:
+            case .dropped:
                 NSLog("ChronicleUI: event stream full, dropping an event")
+            default:
+                NSLog("ChronicleUI: event stream already finished, dropping an event")
             }
             return
         }
