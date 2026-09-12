@@ -22,19 +22,48 @@ use chronicle_storage::{Storage, StorageConfig};
 
 use crate::capture_supervisor::{CaptureSupervisor, ReconcileOutcome, StartRetry};
 
-/// Parse a `retention_days` setting from the config table. An unset key uses
-/// the 30-day default; an unparseable value also falls back to 30 with a warn.
+/// Read the configured retention for the status snapshot.
 ///
-/// The `None` case stays silent: the storage refresher calls this every 30 s,
-/// and default configs have no `retention_days` key — logging on each tick
-/// would spam at info level forever.
-fn parse_retention_days(s: Option<String>) -> u32 {
-    match s {
-        Some(v) => v.parse::<u32>().unwrap_or_else(|_| {
-            log::warn!("settings: invalid retention_days={v:?}, defaulting to 30");
-            30
-        }),
-        None => 30,
+/// `on_error` is what to report when the read fails. A failed query is a
+/// database fault, not a verdict on the setting, so the caller supplies
+/// something it already believes rather than letting this invent a number:
+/// the refresher passes the value it last published, and boot passes the
+/// default because there is nothing earlier. Reporting the default from a
+/// failed read would be a claim about the user's configuration made because a
+/// query failed — the same shape as reporting `Invalid`, only quieter.
+///
+/// The call sites used to discard the error with `.ok().flatten()`. This logs
+/// it.
+///
+/// The unparseable-value warning moved rather than disappearing. The deleted
+/// `parse_retention_days` warned here every 30 seconds; the value is now named
+/// once per cleanup run by `Storage::run_cleanup_interruptible`, which still
+/// has the raw string. A daemon that runs for under `CLEANUP_START_DELAY`
+/// therefore never mentions a corrupt setting.
+///
+/// Still returns a `u32` because `StorageStatusSnapshot` carries one. Task 7
+/// replaces that field with the typed value and this helper goes with it.
+async fn retention_for_snapshot(storage: &Storage, on_error: u32) -> u32 {
+    let retention = match storage.retention().await {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("status: reading retention_days failed, keeping {on_error}: {e}");
+            return on_error;
+        }
+    };
+    match retention {
+        chronicle_ipc::Retention::Days { value } => value,
+        // Both misreport until Task 7 puts the typed value on the wire, because
+        // a u32 cannot say "off" or "unusable". `Disabled` reporting 30 is the
+        // bug in HEU-625's title. `Invalid` reporting 30 is worse: the UI shows
+        // a policy while cleanup skips entirely and the database grows.
+        //
+        // Note this also changes what an out-of-range stored value reports. The
+        // old `u32::from_str` returned 36501 for "36501"; `classify` refuses it
+        // above MAX_RETENTION_DAYS, so it now reads as the default here.
+        chronicle_ipc::Retention::Disabled | chronicle_ipc::Retention::Invalid => {
+            chronicle_ipc::DEFAULT_RETENTION_DAYS
+        }
     }
 }
 
@@ -301,9 +330,11 @@ async fn main() -> Result<()> {
                 screenshot_count: s.screenshot_count,
                 audio_segment_count: s.audio_segment_count,
                 oldest_entry_ms: s.oldest_entry,
-                retention_days: parse_retention_days(
-                    storage.get_config("retention_days").await.ok().flatten(),
-                ),
+                retention_days: retention_for_snapshot(
+                    &storage,
+                    chronicle_ipc::DEFAULT_RETENTION_DAYS,
+                )
+                .await,
             },
             Err(e) => {
                 log::warn!("initial storage status read failed: {e}");
@@ -610,10 +641,16 @@ async fn main() -> Result<()> {
                 _ = ticker.tick() => {
                     match storage_refresher_storage.status().await {
                         Ok(s) => {
-                            let retention = parse_retention_days(
-                                storage_refresher_storage
-                                    .get_config("retention_days").await.ok().flatten(),
-                            );
+                            // Fall back to what is already published rather
+                            // than to the default: a transient read failure
+                            // must not flip a configured 90 to 30 and back on
+                            // the next tick.
+                            let previous = storage_refresher_snapshot.load().retention_days;
+                            let retention = retention_for_snapshot(
+                                &storage_refresher_storage,
+                                previous,
+                            )
+                            .await;
                             let snap = crate::ipc_handler::StorageStatusSnapshot {
                                 db_size_bytes: s.db_size_bytes,
                                 total_disk_usage_bytes: s.total_disk_usage_bytes,

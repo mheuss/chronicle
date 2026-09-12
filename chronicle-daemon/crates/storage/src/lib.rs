@@ -387,6 +387,26 @@ impl Storage {
 
     // --- Retention operations ---
 
+    /// The configured retention, parsed.
+    ///
+    /// The read-path entry point for callers outside this crate.
+    ///
+    /// `Storage::run_cleanup_interruptible` does not call this. It reads the
+    /// row itself, because it runs inside `spawn_blocking` on a pooled
+    /// connection and needs the raw string for its warning. It reaches the same
+    /// rules through `Retention::from_stored`, so the two cannot disagree about
+    /// what a stored value means — one rule, read twice.
+    ///
+    /// An `Err` here is a database fault, not a verdict on the setting. A
+    /// caller must not report it as [`chronicle_ipc::Retention::Invalid`] —
+    /// that would say the user's configuration is broken because a read
+    /// failed, which is the class of defect HEU-625 exists to remove.
+    pub async fn retention(&self) -> Result<chronicle_ipc::Retention> {
+        Ok(chronicle_ipc::Retention::from_stored(
+            self.get_config("retention_days").await?.as_deref(),
+        ))
+    }
+
     /// Delete records and media files older than the configured retention period.
     ///
     /// Runs to exhaustion. Use [`Storage::run_cleanup_interruptible`] to let a
@@ -554,12 +574,9 @@ impl Storage {
     /// reports *which* rule was broken, and each reason keeps the substring
     /// `set_config_rejects_an_out_of_range_retention` pins.
     ///
-    /// `Storage::run_cleanup_interruptible` reaches the same rules through
-    /// `Retention::from_stored`. One reader still parses by hand:
-    /// `parse_retention_days` in `chronicle-daemon` uses `u32::from_str` and
-    /// falls back to 30 with a warning rather than refusing. HEU-625's Task 6
-    /// removes it. It does not trim, which is why this guard stores the value
-    /// trimmed.
+    /// Every reader reaches the same rules. `Storage::run_cleanup_interruptible`
+    /// and `Storage::retention` both go through `Retention::from_stored`, and
+    /// nothing parses the stored string by hand any more.
     ///
     /// The read-time check is deliberately not redundant with this one: a
     /// database written by an earlier build — or by hand — can already hold a
@@ -588,11 +605,11 @@ impl Storage {
             }));
         }
         // Store `retention_days` trimmed. `classify` trims to decide, so a
-        // padded value is accepted at write time, and `parse_retention_days` in
-        // the daemon parses the stored string with `u32::from_str`, which does
-        // not. A padded row would make it disagree with this guard and with
-        // cleanup. Normalising at the single writer covers every reader,
-        // including ones added later.
+        // padded value is accepted at write time. Every reader goes through
+        // `classify` today and would handle the padding anyway; normalising
+        // here is what makes it harmless for a reader added later that parses
+        // the string itself. The daemon had exactly such a reader when this
+        // guard started calling `classify`, and a padded row read back as 30.
         let pool = self.pool.clone();
         let key = key.to_string();
         let value = if key == "retention_days" {
@@ -795,13 +812,59 @@ mod tests {
         assert_eq!(value, Some("30".to_string()));
     }
 
+    #[tokio::test]
+    async fn the_retention_accessor_returns_the_parsed_value() {
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Storage::open(config).await.unwrap();
+
+        // A `Days` case, or the accessor could return a fixed variant and both
+        // of the cases below would still pass.
+        storage.set_config("retention_days", "7").await.unwrap();
+        assert_eq!(
+            storage.retention().await.unwrap(),
+            chronicle_ipc::Retention::Days { value: 7 }
+        );
+
+        storage.set_config("retention_days", "0").await.unwrap();
+        assert_eq!(
+            storage.retention().await.unwrap(),
+            chronicle_ipc::Retention::Disabled
+        );
+
+        seed_config(&storage, "retention_days", "soon");
+        assert_eq!(
+            storage.retention().await.unwrap(),
+            chronicle_ipc::Retention::Invalid
+        );
+
+        // An absent row is the default, not a refusal. Without this a body that
+        // maps `None` to `Invalid` passes — which is the accessor's own doc
+        // being violated, since that would report a broken setting where there
+        // is none.
+        {
+            let conn = storage.pool.get().unwrap();
+            conn.execute("DELETE FROM config WHERE key = 'retention_days'", [])
+                .unwrap();
+        }
+        assert_eq!(
+            storage.retention().await.unwrap(),
+            chronicle_ipc::Retention::default()
+        );
+    }
+
     /// The guard must not bless a value its readers refuse.
     ///
     /// `Retention::classify` trims, so routing the guard through it made
-    /// `set_config(" 30 ")` succeed while every reader still parsed the stored
-    /// string untrimmed and would have refused it. The guard stores the trimmed
-    /// form, so the question never reaches a reader. `parse_retention_days` in
-    /// `chronicle-daemon` is the last one that still parses by hand.
+    /// `set_config(" 30 ")` succeed while one reader — the daemon's since
+    /// deleted `parse_retention_days` — still parsed the stored string with
+    /// `u32::from_str`, which does not trim. It did not refuse a padded value;
+    /// it warned and reported 30, so a configured 7 would have read as 30 in
+    /// the UI. The guard stores the trimmed form, so the question never reaches
+    /// a reader, and since Task 6 no reader parses the string by hand anyway.
     ///
     /// The outcome is asserted rather than `is_ok` because a refused value is
     /// now `Ok(CleanupOutcome::ConfigInvalid)`: `run_cleanup` returns `Err`
@@ -993,8 +1056,11 @@ mod tests {
     #[tokio::test]
     async fn an_absent_retention_row_cleans_at_the_default() {
         // `from_stored(None)` is the 30-day default, not a refusal. Nothing
-        // tested this before HEU-625, which is how `parse_retention_days`'s doc
-        // came to assert the opposite of what migration 001 does.
+        // tested this before HEU-625, which is how the daemon's old
+        // `parse_retention_days` came to carry a doc asserting that default
+        // configs have no `retention_days` key — the opposite of what migration
+        // 001 does. That function is gone; this is what replaced its untested
+        // assumption.
         let dir = tempdir().unwrap();
         let config = StorageConfig {
             base_dir: dir.path().to_path_buf(),
