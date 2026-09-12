@@ -47,7 +47,11 @@ struct DaemonConnectionReconnectTests {
     @Test("connect uses the injected factory")
     func connectUsesInjectedFactory() async throws {
         let log = FactoryLog()
-        let conn = DaemonConnection(connectionFactory: { try log.make() })
+        let conn = DaemonConnection(connectionFactory: {
+            let fd = try log.make()
+            #expect(setNoSigPipe(fd))
+            return fd
+        })
         conn.connect()
         await waitUntil { log.count >= 1 }
         #expect(log.count >= 1)
@@ -164,7 +168,7 @@ struct DaemonConnectionReconnectTests {
             // Nothing on this path sets SO_NOSIGPIPE, and a write to a peer the
             // teardown has closed would kill the test process rather than fail
             // a test. See disconnectDuringEstablishmentClosesTheDescriptor.
-            _ = setNoSigPipe(fd)
+            #expect(setNoSigPipe(fd))
             // Answer the first heartbeat so monitorConnection enters its 30s
             // sleep. Closing the peer before this would test a blocked
             // request instead, which is a different path.
@@ -176,16 +180,21 @@ struct DaemonConnectionReconnectTests {
             return fd
         })
         conn.connect()
-        // `lastStatus` rather than `log.count`: it proves the heartbeat round
-        // trip completed, which both puts monitorConnection into its sleep and
-        // means pair 0's server body has returned, so the close below cannot
-        // free a descriptor number out from under a parked read.
+        // `lastStatus` rather than `log.count`, and this is the load-bearing
+        // wait: it proves the heartbeat round trip completed, which puts
+        // monitorConnection into its 30s sleep and means pair 0's server is
+        // past its read, so the close below cannot free a descriptor number
+        // out from under a parked one. An implementation that never runs the
+        // heartbeat at all never sets this and burns the whole budget here.
         await waitUntil { conn.lastStatus != nil }
+        #expect(conn.lastStatus != nil, "the heartbeat never completed; the wait below proves nothing")
 
-        // Longer than the 1 second backoff floor. Without this the test is
-        // satisfied by anything that reconnects within the budget below —
-        // including a bare timer that ignores why the connection died.
-        try await Task.sleep(for: .milliseconds(1500))
+        // A reconnect costs race-return time plus the 1 second backoff floor,
+        // so this rejects any implementation that cycles a healthy connection
+        // in under 2.5 seconds — a 1 second timer included. It does not reject
+        // an arbitrarily slow one; nothing here can. The 30 second stall this
+        // task removes is caught by the budget after the close, not by this.
+        try await Task.sleep(for: .milliseconds(2500))
         #expect(log.count == 1, "a healthy connection must not reconnect")
 
         // The monitor is now asleep. Close the peer and require a prompt
@@ -203,16 +212,16 @@ struct DaemonConnectionReconnectTests {
         let log = FactoryLog()
         let conn = DaemonConnection(connectionFactory: {
             let fd = try log.make()
-            _ = setNoSigPipe(fd)
+            #expect(setNoSigPipe(fd))
             let serverFD = log.pairs.last!.serverFD
             // Valid JSON of the wrong shape. It carries no `type`, so it
             // reaches the waiter; the decode then fails and monitorConnection
             // throws, and that throw is what returns from `group.next()`.
-            // Measured: this test still passes with `cancelAll()` deleted,
-            // because `close()` shuts the descriptor down and the woken reader
-            // finishes the session's child too. Only
-            // `idleEOFReconnectsPromptly` pins `cancelAll()`; this one pins
-            // BR-13, that a heartbeat failure on a live socket reconnects.
+            // This test does not pin `cancelAll()` — measured, it passes
+            // without it, because the server below closes its own descriptor
+            // and that EOF finishes the session's child. What it pins is
+            // BR-13: a heartbeat failure on a live socket reconnects.
+            // `idleEOFReconnectsPromptly` is what pins `cancelAll()`.
             _ = blockingServer {
                 // The server owns serverFD, so the test cannot free the number
                 // back to the next socketpair while this thread is in a read.
@@ -234,7 +243,7 @@ struct DaemonConnectionReconnectTests {
         let log = FactoryLog()
         let conn = DaemonConnection(connectionFactory: {
             let fd = try log.make()
-            _ = setNoSigPipe(fd)
+            #expect(setNoSigPipe(fd))
             return fd
         })
         conn.connect()
