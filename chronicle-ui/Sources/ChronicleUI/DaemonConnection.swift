@@ -420,9 +420,13 @@ final class DaemonConnection {
     /// Run the heartbeat and the session's completion against each other, and
     /// end the connection when either finishes.
     ///
-    /// The monitor's error is swallowed rather than propagated: both ways out
-    /// of the loop reach the same backoff tail, and no caller above would act
-    /// on knowing which happened.
+    /// The monitor's error is swallowed inside the child, and the `try?`
+    /// cannot move outward. `cancelAll` below makes `CancellationError` the
+    /// ordinary way the monitor ends, and `connect()` reads that error as "stop
+    /// reconnecting" — so letting it escape does not reach the backoff tail, it
+    /// leaves the loop for good. Measured: making this group throwing and
+    /// propagating fails `idleEOFReconnectsPromptly` with one attempt and no
+    /// reconnect.
     private func raceHeartbeatAgainstSession(_ racedSession: ConnectionSession) async {
         await withTaskGroup(of: Void.self) { group in
             group.addTask {
@@ -439,6 +443,11 @@ final class DaemonConnection {
             // successful heartbeat waits out the rest of that sleep — the delay
             // this whole feature exists to remove. `idleEOFReconnectsPromptly`
             // fails when it is removed.
+            //
+            // It is also the only thing left that frees the other child: if the
+            // monitor exits first on a session that is still live, nothing else
+            // resumes `waitUntilFinished`. No test is in that shape today, so
+            // that half is reasoning rather than a measurement.
             group.cancelAll()
             await group.waitForAll()
         }

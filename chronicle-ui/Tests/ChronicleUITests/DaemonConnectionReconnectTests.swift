@@ -189,11 +189,13 @@ struct DaemonConnectionReconnectTests {
         await waitUntil { conn.lastStatus != nil }
         #expect(conn.lastStatus != nil, "the heartbeat never completed; the wait below proves nothing")
 
-        // A reconnect costs race-return time plus the 1 second backoff floor,
-        // so this rejects any implementation that cycles a healthy connection
-        // in under 2.5 seconds — a 1 second timer included. It does not reject
-        // an arbitrarily slow one; nothing here can. The 30 second stall this
-        // task removes is caught by the budget after the close, not by this.
+        // Headroom, not a derived bound: one reconnect cycle costs about a
+        // second (the backoff floor), so an implementation that cycles a
+        // healthy connection at all shows up here even under a loaded parallel
+        // suite. A cycler slower than this window still slips through, and
+        // nothing here can catch one. That is a different failure from the 30
+        // second stall this task removes — that one is a slow reconnect AFTER
+        // the peer dies, and the budget below is what catches it.
         try await Task.sleep(for: .milliseconds(2500))
         #expect(log.count == 1, "a healthy connection must not reconnect")
 
@@ -216,7 +218,8 @@ struct DaemonConnectionReconnectTests {
             let serverFD = log.pairs.last!.serverFD
             // Valid JSON of the wrong shape. It carries no `type`, so it
             // reaches the waiter; the decode then fails and monitorConnection
-            // throws, and that throw is what returns from `group.next()`.
+            // throws — the child swallows it and returns, and that return
+            // is what `group.next()` observes.
             // This test does not pin `cancelAll()` — measured, it passes
             // without it, because the server below closes its own descriptor
             // and that EOF finishes the session's child. What it pins is
