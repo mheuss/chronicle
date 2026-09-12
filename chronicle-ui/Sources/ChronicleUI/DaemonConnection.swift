@@ -505,7 +505,7 @@ struct SetMicEnabledResponse: Codable, Sendable {
     let state: MicState
 }
 
-struct StatusResponse: Codable, Sendable {
+struct StatusResponse: Decodable, Sendable {
     let type: String
     let ok: Bool
     let data: StatusData
@@ -533,7 +533,7 @@ struct StatusResponse: Codable, Sendable {
     }
 }
 
-struct StatusData: Codable, Sendable {
+struct StatusData: Decodable, Sendable {
     let uptimeSecs: UInt64
     let version: String
     let capture: CaptureStats?
@@ -565,13 +565,17 @@ struct AudioStats: Codable, Sendable {
     let micState: MicState
 }
 
-struct StorageStats: Codable, Sendable {
+struct StorageStats: Decodable, Sendable {
     let dbSizeBytes: UInt64
     let totalDiskUsageBytes: UInt64
     let screenshotCount: UInt64
     let audioSegmentCount: UInt64
     let oldestEntryMs: Int64?
-    let retentionDays: UInt32
+    /// What the configured retention means. `nil` two ways: the daemon sent
+    /// `null` because it could not read `retention_days`, or a daemon too old
+    /// to send the field omitted it. Either way this one row degrades rather
+    /// than the whole status block.
+    let retention: Retention?
     /// Optional on the decoder, NOT on the wire — Rust sends these
     /// non-optionally. An older daemon omits them, and a non-optional field
     /// here would fail the decode of this entire block, taking disk usage and
@@ -593,6 +597,55 @@ struct StorageStats: Codable, Sendable {
     /// counts serve events, not distinct rows. Copy shown to a user should not
     /// present a non-zero reading as a failure.
     let mediaAbsent: UInt64?
+}
+
+/// What the daemon's `retention_days` setting means, as sent by
+/// `chronicle-ipc`'s `Retention`.
+///
+/// `Decodable` only — nothing in the UI encodes a status response, and Swift's
+/// synthesized encoding would emit `{"days":{"_0":30}}`, nothing like the wire.
+///
+/// The decoder is hand-written: a synthesized one reads every declared field
+/// regardless of `kind`, so a future variant with a wrongly typed payload would
+/// throw and take the whole `StatusData` decode with it.
+///
+/// A `retention` that is not an object, or a `kind` absent or not a string,
+/// still throws, deliberately: either means the peer is not the daemon we
+/// think it is. `MicState`, `TranscriptionState`, `DaemonErrorCode` and
+/// `SearchHitSource` all draw the same line.
+enum Retention: Sendable, Equatable, Decodable {
+    case days(UInt32)
+    case disabled
+    case invalid
+    /// A kind this UI doesn't know yet (newer daemon). Same rule as
+    /// `TranscriptionState`, `MicState` and `SearchHitSource` — see
+    /// docs/use-cases/ipc-compat.md.
+    case unknown
+
+    private enum CodingKeys: String, CodingKey {
+        case kind, value
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(String.self, forKey: .kind) {
+        case "days":
+            // `try?`, not `try`: a malformed value is not a day count, and
+            // throwing would take StatusData into the HEU-725 reconnect loop.
+            // The flattening means this one guard also covers an absent key.
+            guard let value = try? c.decodeIfPresent(UInt32.self, forKey: .value) else {
+                self = .unknown
+                return
+            }
+            self = .days(value)
+        case "disabled":
+            self = .disabled
+        case "invalid":
+            self = .invalid
+        default:
+            self = .unknown
+        }
+    }
 }
 
 enum TranscriptionState: String, Codable, Sendable {

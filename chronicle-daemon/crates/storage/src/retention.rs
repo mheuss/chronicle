@@ -3,6 +3,8 @@ use std::path::Path;
 
 use rusqlite::{Connection, params};
 
+pub use chronicle_ipc::MAX_RETENTION_DAYS;
+
 use crate::StopSignal;
 use crate::error::{Result, StorageError};
 use crate::media::MediaManager;
@@ -35,19 +37,6 @@ const AUDIO_TABLE: MediaTable = MediaTable {
     path_col: "audio_path",
     subdir: "audio",
 };
-
-/// Largest accepted retention window: 100 years (`100 * 365`).
-///
-/// Past this a value is a configuration error rather than a policy — and left
-/// unchecked, a large enough one wraps the cutoff into the *future* and expires
-/// the entire database. Note that `0` already means "keep forever", so the
-/// intuitive way to ask for that is not a large number.
-///
-/// The exact figure is a policy ceiling, not a numeric limit: 36,500 days is
-/// ~3.15e12 ms against an `i64` ceiling of ~9.2e18, so it leaves six orders of
-/// magnitude of headroom. It is set where it is because a century is already
-/// past any real retention policy, not because larger values stop fitting.
-pub const MAX_RETENTION_DAYS: i64 = 36_500;
 
 /// Timestamp before which records are expired, or an error if the window does
 /// not fit in an `i64`.
@@ -82,12 +71,13 @@ fn compute_cutoff(now_millis: i64, retention_days: i64) -> Result<i64> {
 /// would have no production caller.
 ///
 /// `retention_days` of `0` or less is "keep forever" and returns an empty
-/// result; above [`MAX_RETENTION_DAYS`] is an error. Note the asymmetry with
-/// the public boundary, which rejects a *negative* value outright in
-/// `Storage::run_cleanup_interruptible`'s config read: `0` is a legitimate
-/// setting, so it cannot be an error here, while a negative one can only
-/// arrive from a caller that skipped that validation.
-/// Both layers refuse to delete; they differ only in how loudly.
+/// result; above [`MAX_RETENTION_DAYS`] is an error.
+///
+/// Neither branch is reachable from production since HEU-625 — the public
+/// boundary in `Storage::run_cleanup_interruptible` refuses both cases before
+/// calling in, so only the test module reaches them. `0` is "keep forever"
+/// rather than an error because it is a legitimate setting; a negative here can
+/// only be a caller bug.
 pub(crate) fn run_cleanup_interruptible(
     conn: &Connection,
     media_mgr: &MediaManager,
@@ -101,11 +91,14 @@ pub(crate) fn run_cleanup_interruptible(
         });
     }
     if retention_days > MAX_RETENTION_DAYS {
-        // This log line is defence in depth; the `Err` below is the primary
-        // signal. Kept because a caller that swallows the `Err` would otherwise
-        // leave retention silently never running while disk grows. The
-        // scheduled tick logs the error itself too, so the condition is
-        // reported twice per period rather than once.
+        // Defence in depth; the `Err` below is the primary signal. Kept
+        // because a caller that swallows the `Err` would otherwise leave
+        // retention silently never running while disk grows.
+        //
+        // Unreachable from the scheduled path since HEU-625:
+        // `Storage::run_cleanup_interruptible` refuses an above-bound value
+        // before calling in, and logs it there. Only a caller that skips that
+        // boundary reaches this line.
         log::warn!(
             "retention_days {retention_days} exceeds maximum {MAX_RETENTION_DAYS}; \
              skipping cleanup"

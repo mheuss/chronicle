@@ -267,6 +267,16 @@ where
                     CleanupOutcome::Disabled => {
                         log::info!("retention cleanup finished: {stats:?}")
                     }
+                    // `warn`, unlike the `info` beside it: `Disabled` is a
+                    // setting someone chose, a refused value is a fault nobody
+                    // chose. Neither the value nor `{stats:?}` appears here —
+                    // `ConfigInvalid` carries no payload and its counts are
+                    // structural zeros. The storage warning this outcome comes
+                    // from names the value once.
+                    CleanupOutcome::ConfigInvalid => log::warn!(
+                        "retention cleanup skipped, no checkpoint recorded: \
+                         retention_days was refused"
+                    ),
                 }
             }
             Err(e) if is_worker_panic(&e) => {
@@ -648,6 +658,39 @@ mod loop_tests {
             ops.writes.lock().unwrap().is_empty(),
             "an interrupted run may have eligible rows left and must not suppress \
              the next attempt"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_config_records_no_checkpoint() {
+        // A refused `retention_days` deletes nothing, so it must not record a
+        // cleanup that did not happen.
+        //
+        // Nothing about the current process's schedule depends on this: the
+        // reschedule above the match is unconditional, and the checkpoint is
+        // read once at loop start. A checkpoint here would break the NEXT
+        // process, whose `initial_deadline_ms` would treat the refused run as a
+        // completed one and wait a full period before its first attempt, while
+        // the database keeps growing.
+        //
+        // Mutating the arm to write one fails this test and no other in the
+        // file — verified by running it.
+        let mut fake = FakeOps::new();
+        fake.outcome = CleanupOutcome::ConfigInvalid;
+        let ops = Arc::new(fake);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run_cleanup_loop(Arc::clone(&ops), cancel.clone()));
+
+        tokio::time::sleep(Duration::from_secs(3 * 60 + 1)).await;
+        assert_eq!(ops.run_count(), 1, "the run must have happened");
+
+        cancel.cancel();
+        task.await.unwrap().unwrap();
+
+        assert!(
+            ops.writes.lock().unwrap().is_empty(),
+            "a refused run examined nothing, so it must not record a completed \
+             cleanup"
         );
     }
 

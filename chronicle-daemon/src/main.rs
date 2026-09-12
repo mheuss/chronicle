@@ -22,19 +22,43 @@ use chronicle_storage::{Storage, StorageConfig};
 
 use crate::capture_supervisor::{CaptureSupervisor, ReconcileOutcome, StartRetry};
 
-/// Parse a `retention_days` setting from the config table. An unset key uses
-/// the 30-day default; an unparseable value also falls back to 30 with a warn.
+/// Read the configured retention for the status snapshot.
 ///
-/// The `None` case stays silent: the storage refresher calls this every 30 s,
-/// and default configs have no `retention_days` key — logging on each tick
-/// would spam at info level forever.
-fn parse_retention_days(s: Option<String>) -> u32 {
-    match s {
-        Some(v) => v.parse::<u32>().unwrap_or_else(|_| {
-            log::warn!("settings: invalid retention_days={v:?}, defaulting to 30");
-            30
-        }),
-        None => 30,
+/// A failed query is a database fault, not a verdict on the setting. `previous`
+/// is what the caller already published, if anything: the refresher passes its
+/// last snapshot, boot passes `None` because nothing came before it. Boot
+/// therefore reports `None`, which the wire carries as "unknown" and the UI
+/// renders as "Unavailable". Inventing a day count here would be a claim about
+/// the user's configuration made because a query failed — the defect this
+/// ticket removes, on the error path.
+///
+/// The unparseable-value warning that `parse_retention_days` used to log here
+/// every 30 seconds now fires once per cleanup run, in
+/// `Storage::run_cleanup_interruptible`, which still has the raw string. That
+/// first run is `CLEANUP_START_DELAY` after boot, so a daemon that lives under
+/// three minutes never mentions a corrupt setting at all.
+async fn retention_for_snapshot(
+    storage: &Storage,
+    previous: Option<chronicle_ipc::Retention>,
+) -> Option<chronicle_ipc::Retention> {
+    match storage.retention().await {
+        Ok(r) => Some(r),
+        Err(e) => match previous {
+            Some(known) => {
+                log::warn!(
+                    "status: reading retention_days failed, keeping the last \
+                     known value ({known:?}): {e}"
+                );
+                Some(known)
+            }
+            None => {
+                log::warn!(
+                    "status: reading retention_days failed with no previous \
+                     value; reporting it as unknown: {e}"
+                );
+                None
+            }
+        },
     }
 }
 
@@ -301,13 +325,19 @@ async fn main() -> Result<()> {
                 screenshot_count: s.screenshot_count,
                 audio_segment_count: s.audio_segment_count,
                 oldest_entry_ms: s.oldest_entry,
-                retention_days: parse_retention_days(
-                    storage.get_config("retention_days").await.ok().flatten(),
-                ),
+                retention: retention_for_snapshot(&storage, None).await,
             },
             Err(e) => {
+                // `status()` failing says nothing about the retention setting,
+                // so read it anyway rather than publishing a defaulted 30-day
+                // policy the daemon never looked at. The IPC server starts
+                // immediately below, so a Status landing in this window would
+                // otherwise be served that claim for up to one refresh period.
                 log::warn!("initial storage status read failed: {e}");
-                crate::ipc_handler::StorageStatusSnapshot::default()
+                crate::ipc_handler::StorageStatusSnapshot {
+                    retention: retention_for_snapshot(&storage, None).await,
+                    ..Default::default()
+                }
             }
         };
         storage_status_snapshot.store(Arc::new(snapshot));
@@ -610,17 +640,23 @@ async fn main() -> Result<()> {
                 _ = ticker.tick() => {
                     match storage_refresher_storage.status().await {
                         Ok(s) => {
-                            let retention = parse_retention_days(
-                                storage_refresher_storage
-                                    .get_config("retention_days").await.ok().flatten(),
-                            );
+                            // Fall back to what is already published rather
+                            // than to the default: a transient read failure
+                            // must not flip a configured 90 to 30 and back on
+                            // the next tick.
+                            let previous = storage_refresher_snapshot.load().retention;
+                            let retention = retention_for_snapshot(
+                                &storage_refresher_storage,
+                                previous,
+                            )
+                            .await;
                             let snap = crate::ipc_handler::StorageStatusSnapshot {
                                 db_size_bytes: s.db_size_bytes,
                                 total_disk_usage_bytes: s.total_disk_usage_bytes,
                                 screenshot_count: s.screenshot_count,
                                 audio_segment_count: s.audio_segment_count,
                                 oldest_entry_ms: s.oldest_entry,
-                                retention_days: retention,
+                                retention,
                             };
                             storage_refresher_snapshot.store(Arc::new(snap));
                         }
