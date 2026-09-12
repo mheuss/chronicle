@@ -191,8 +191,11 @@ struct DaemonConnectionReconnectTests {
         let conn = DaemonConnection(connectionFactory: {
             let fd = try log.make()
             let serverFD = log.pairs.last!.serverFD
-            // Valid JSON of the wrong shape: monitorConnection throws while
-            // the socket stays open, so only cancellation ends the race.
+            // Valid JSON of the wrong shape. It carries no `type`, so it
+            // reaches the waiter; the decode then fails and monitorConnection
+            // throws, which is what ends the race. The socket stays open, so
+            // the session's own child would never finish on its own — this is
+            // the path where `cancelAll()` is what lets the group return.
             _ = blockingServer {
                 guard readLineSync(from: serverFD) != nil else { return }
                 writeAll(#"{"unexpected":"shape"}"# + "\n", to: serverFD)
