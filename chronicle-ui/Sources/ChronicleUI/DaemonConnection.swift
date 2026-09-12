@@ -39,10 +39,25 @@ final class DaemonConnection {
 
     // MARK: - Private
 
-    private var socketHandle: FileHandle?
+    private var session: ConnectionSession?
     private var reconnectTask: Task<Void, Never>?
     private var requestQueue: Task<Void, Never>?
-    private var connectionGeneration: UInt64 = 0
+
+    /// Establishes a connection and returns a connected descriptor.
+    ///
+    /// Injected because the production path resolves `Self.socketPath`, a
+    /// static pointing at the real socket — without a seam the reconnect and
+    /// teardown requirements cannot be tested at all.
+    ///
+    /// `@MainActor` is load-bearing in both directions: the reconnect tests
+    /// mutate MainActor state from inside the factory, and the session is
+    /// published on the MainActor immediately after it returns.
+    private let connectionFactory: @MainActor @Sendable () async throws -> Int32
+
+    #if DEBUG
+    var sessionForTesting: ConnectionSession? { session }
+    #endif
+
     private let encoder = JSONEncoder()
     private let decoder: JSONDecoder = {
         let d = JSONDecoder()
@@ -52,17 +67,28 @@ final class DaemonConnection {
 
     // MARK: - Init
 
-    init() {}
+    init() {
+        self.connectionFactory = { try await Self.connectToDaemonSocket() }
+    }
+
+    /// Builds a connection whose descriptors come from `connectionFactory`
+    /// instead of the real socket path.
+    internal init(connectionFactory: @escaping @MainActor @Sendable () async throws -> Int32) {
+        self.connectionFactory = connectionFactory
+    }
 
     /// **Test-only.** Not for production use. Wires `DaemonConnection` to a
     /// pre-connected fd (e.g., one side of a `socketpair()`). The fd is taken
-    /// over and closed when the connection deallocates.
+    /// over by the session built around it, which closes it once neither the
+    /// reader nor a write still holds it.
     ///
     /// `setsockopt(SO_NOSIGPIPE)` failure here aborts via `precondition` so a
     /// genuine macOS quirk surfaces as a loud test-time crash rather than a
     /// confusing SIGPIPE later inside `brokenPipeDoesNotCrash`. Production
-    /// callers go through `establishConnection`, which checks the result and
+    /// callers go through `connectToDaemonSocket`, which checks the result and
     /// throws `IPCError.socketCreationFailed` on failure.
+    ///
+    /// This connection never reconnects, so its factory is never called.
     internal init(testingSocketFD fd: Int32) {
         var noSigPipe: Int32 = 1
         let result = setsockopt(
@@ -73,7 +99,10 @@ final class DaemonConnection {
             socklen_t(MemoryLayout<Int32>.size)
         )
         precondition(result == 0, "SO_NOSIGPIPE failed in testing init: errno=\(errno)")
-        self.socketHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        self.connectionFactory = { throw IPCError.notConnected }
+        let session = ConnectionSession(fd: fd, maxResponseSize: Self.maxResponseSize)
+        session.start()
+        self.session = session
         self.state = .connected
     }
 
@@ -87,8 +116,17 @@ final class DaemonConnection {
             while !Task.isCancelled {
                 state = .connecting
                 do {
-                    try await establishConnection()
-                    try Task.checkCancellation()
+                    let fd = try await connectionFactory()
+                    let newSession = ConnectionSession(fd: fd, maxResponseSize: Self.maxResponseSize)
+                    guard !Task.isCancelled else {
+                        // Closes the descriptor. The old code broke here
+                        // without closing what it had just built, leaking one
+                        // descriptor for the life of the process.
+                        newSession.close()
+                        break
+                    }
+                    newSession.start()
+                    session = newSession
                     state = .connected
                     delay = .seconds(1)
                     try await monitorConnection()
@@ -253,10 +291,9 @@ final class DaemonConnection {
     }
 
     /// Generic request helper. ALL request methods must route through this —
-    /// raw socket I/O lives on the nested `IO` struct, which only `sendRequest`
-    /// constructs. There is no other way to call `write`/`readLine`, so a
-    /// future request method cannot accidentally bypass FIFO serialization or
-    /// the connection-generation check.
+    /// it is the only caller of `ConnectionSession.send`, so a future request
+    /// method cannot accidentally bypass FIFO serialization or the session
+    /// check, and the live session keeps at most one waiter (design AD-8).
     ///
     /// The unstructured `Task` here is intentional: caller cancellation must
     /// not abort socket I/O mid-write/read, or we'd leave the newline-delimited
@@ -264,27 +301,27 @@ final class DaemonConnection {
     ///
     /// The Task strongly captures `self` and is then stored in
     /// `self.requestQueue`, creating a temporary retain cycle. This is safe:
-    /// `closeSocket()` closes the underlying fd, which aborts any blocked
-    /// `Darwin.read`/`write`, which lets the task complete and the cycle break.
+    /// `closeSocket()` closes the session, which resumes every waiting caller
+    /// and wakes the reader, which lets the task complete and the cycle break.
     /// Hosts should still call `disconnect()` on teardown rather than relying
     /// on ARC alone — that's the only path that drops the cycle deterministically.
     private func sendRequest<Req: Encodable & Sendable, Res: Decodable & Sendable>(
         _ request: Req,
         expecting: Res.Type
     ) async throws -> Res {
-        let myGeneration = connectionGeneration
         let prev = requestQueue
-        guard let handle = socketHandle else {
+        guard let mySession = session else {
             throw IPCError.notConnected
         }
-        let io = IO(fd: handle.fileDescriptor, maxResponseSize: Self.maxResponseSize)
         // The Task closure inherits @MainActor from this enclosing context, so
-        // accesses to `self.connectionGeneration`/`encoder`/`decoder` below are
-        // actor-isolated and require no `await` — only the socket I/O on `io`
-        // suspends.
+        // accesses to `self.session`/`encoder`/`decoder` below are
+        // actor-isolated and require no `await` — only the socket I/O on the
+        // session suspends.
         let task = Task<Res, Error> {
             _ = await prev?.value  // wait for predecessor
-            guard self.connectionGeneration == myGeneration else {
+            // Session identity replaces the generation counter: a request that
+            // waited through a reconnect is holding the previous session.
+            guard self.session === mySession else {
                 throw IPCError.notConnected
             }
             let data = try self.encoder.encode(request)
@@ -292,8 +329,7 @@ final class DaemonConnection {
                 throw IPCError.encodingFailed
             }
             line.append("\n")
-            try await io.write(line)
-            let responseLine = try await io.readLine()
+            let responseLine = try await mySession.send(line)
             let responseData = Data(responseLine.utf8)
             do {
                 return try self.decoder.decode(Res.self, from: responseData)
@@ -310,83 +346,8 @@ final class DaemonConnection {
 
     // MARK: - Socket Operations
 
-    /// Raw socket I/O. Only `sendRequest` constructs this, so other methods on
-    /// `DaemonConnection` cannot reach `write`/`readLine` directly.
-    private struct IO: Sendable {
-        let fd: Int32
-        let maxResponseSize: Int
-
-        func write(_ string: String) async throws {
-            let fd = self.fd
-            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                DispatchQueue.global().async {
-                    let data = Array(string.utf8)
-                    data.withUnsafeBytes { rawBuffer in
-                        var offset = 0
-                        while offset < rawBuffer.count {
-                            let written = Darwin.write(
-                                fd,
-                                rawBuffer.baseAddress! + offset,
-                                rawBuffer.count - offset
-                            )
-                            if written < 0 {
-                                if errno == EINTR { continue }
-                                cont.resume(throwing: IPCError.writeFailed(errno: errno))
-                                return
-                            }
-                            if written == 0 {
-                                // POSIX write should not return 0 on non-zero count for a
-                                // stream socket; treat it as a broken connection rather than
-                                // an infinite loop.
-                                cont.resume(throwing: IPCError.writeFailed(errno: errno))
-                                return
-                            }
-                            offset += written
-                        }
-                        cont.resume()
-                    }
-                }
-            }
-        }
-
-        func readLine() async throws -> String {
-            let fd = self.fd
-            let maxSize = self.maxResponseSize
-            return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
-                DispatchQueue.global().async {
-                    var buffer = [UInt8]()
-                    var byte: UInt8 = 0
-                    while true {
-                        let bytesRead = Darwin.read(fd, &byte, 1)
-                        if bytesRead < 0 {
-                            if errno == EINTR { continue }
-                            cont.resume(throwing: IPCError.readFailed(errno: errno))
-                            return
-                        }
-                        if bytesRead == 0 {
-                            cont.resume(throwing: IPCError.connectionClosed)
-                            return
-                        }
-                        if byte == UInt8(ascii: "\n") {
-                            break
-                        }
-                        buffer.append(byte)
-                        if buffer.count > maxSize {
-                            cont.resume(throwing: IPCError.responseTooLarge)
-                            return
-                        }
-                    }
-                    guard let line = String(bytes: buffer, encoding: .utf8) else {
-                        cont.resume(throwing: IPCError.invalidUTF8)
-                        return
-                    }
-                    cont.resume(returning: line)
-                }
-            }
-        }
-    }
-
-    private func establishConnection() async throws {
+    /// Connects to the daemon's socket and returns the connected descriptor.
+    private static func connectToDaemonSocket() async throws -> Int32 {
         let path = Self.socketPath
         let fd: Int32 = try await withCheckedThrowingContinuation { cont in
             DispatchQueue.global().async {
@@ -444,29 +405,19 @@ final class DaemonConnection {
             }
         }
 
-        socketHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        return fd
     }
 
     private func monitorConnection() async throws {
-        while !Task.isCancelled && socketHandle != nil {
+        while !Task.isCancelled && session != nil {
             _ = try await requestStatus()
             try await Task.sleep(for: .seconds(30))
         }
     }
 
     private func closeSocket() {
-        if let handle = socketHandle {
-            // closeOnDealloc is true, but we close explicitly for immediate cleanup.
-            // Close errors on a socket are unrecoverable and not actionable for the
-            // caller — the fd is reaped on dealloc regardless. We swallow the error.
-            do {
-                try handle.close()
-            } catch {
-                // intentionally ignored
-            }
-            socketHandle = nil
-        }
-        connectionGeneration &+= 1
+        session?.close()
+        session = nil
         requestQueue = nil
     }
 }

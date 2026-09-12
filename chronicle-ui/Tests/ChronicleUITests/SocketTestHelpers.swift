@@ -62,7 +62,7 @@ func setNonBlocking(_ fd: Int32) -> Bool {
 
 /// Sets `SO_NOSIGPIPE` on `fd`, so a write to a shut-down or closed peer
 /// returns `EPIPE` instead of killing the test process. Production sets this in
-/// `establishConnection`; a session built straight on a `socketpair` needs it
+/// `connectToDaemonSocket`; a session built straight on a `socketpair` needs it
 /// applied by hand.
 @discardableResult
 func setNoSigPipe(_ fd: Int32) -> Bool {

@@ -11,7 +11,7 @@ struct DaemonConnectionGateTests {
     func testingInitProducesConnected() async throws {
         let pair = try SocketPairHelper.make()
         defer {
-            // serverFD owned by the test, clientFD owned by FileHandle inside conn
+            // serverFD owned by the test, clientFD owned by the session inside conn
             Darwin.close(pair.serverFD)
         }
         let conn = DaemonConnection(testingSocketFD: pair.clientFD)
@@ -280,14 +280,14 @@ struct DaemonConnectionGateTests {
         // chain wrapper that secondTask awaits on.
         Darwin.close(serverFD)
 
-        // Now disconnect. closeSocket() bumps connectionGeneration. By the
-        // time secondTask resumes from `await prev?.value`, its captured
-        // myGeneration no longer matches → throws notConnected.
+        // Now disconnect. closeSocket() drops the session. By the time
+        // secondTask resumes from `await prev?.value`, the session it captured
+        // is no longer the connection's → throws notConnected.
         conn.disconnect()
 
         do {
             _ = try await secondTask.value
-            Issue.record("Expected throw — generation should have changed")
+            Issue.record("Expected throw — the session should have been replaced")
         } catch IPCError.notConnected {
             // expected
         } catch {
