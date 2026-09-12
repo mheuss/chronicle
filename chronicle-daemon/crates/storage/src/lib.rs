@@ -543,11 +543,24 @@ impl Storage {
     /// user who set it. Every other key keeps the untyped passthrough
     /// behaviour.
     ///
-    /// This repeats the read-time comparison in
-    /// `retention::run_cleanup_interruptible`, and deliberately does not make
-    /// it redundant: a database written by an earlier build — or by hand — can
-    /// already hold an out-of-range value that no write path ever saw, and only
-    /// the read-time bound catches that.
+    /// The rules are not restated here. `Retention::classify` owns them, and
+    /// this guard calls it. What the guard adds is the message: `classify`
+    /// reports *which* rule was broken, and each reason keeps the substring
+    /// `set_config_rejects_an_out_of_range_retention` pins.
+    ///
+    /// Two readers still parse the stored string by hand rather than calling
+    /// `classify`, and they do not even agree with each other:
+    /// `Storage::run_cleanup_interruptible` uses `i64::from_str` and errors on
+    /// a bad value, while `parse_retention_days` in `chronicle-daemon` uses
+    /// `u32::from_str` and falls back to 30 with a warning. Task 4 of HEU-625
+    /// converts the first, Task 6 removes the second. Neither trims, which is
+    /// why this guard stores the value trimmed.
+    ///
+    /// Read-time checks are deliberately not redundant with this one: a
+    /// database written by an earlier build — or by hand — can already hold a
+    /// value no write path ever saw. The non-negative and unparseable checks
+    /// live in `Storage::run_cleanup_interruptible`; the upper bound lives one
+    /// layer further in, in `retention::run_cleanup_interruptible`.
     ///
     /// Delete this guard and `set_config_rejects_an_out_of_range_retention`
     /// fails at its `unwrap_err` — which is what makes it load-bearing where
@@ -555,25 +568,34 @@ impl Storage {
     /// beside it catches a different mutation: a guard that returns `Err`
     /// *after* writing, which asserting the error alone would wave through.
     pub async fn set_config(&self, key: &str, value: &str) -> Result<()> {
-        if key == "retention_days" {
-            let days = value
-                .parse::<i64>()
-                .map_err(|e| StorageError::Other(format!("invalid retention_days value: {e}")))?;
-            if days < 0 {
-                return Err(StorageError::Other(
-                    "retention_days must be non-negative".into(),
-                ));
-            }
-            if days > retention::MAX_RETENTION_DAYS {
-                return Err(StorageError::Other(format!(
-                    "retention_days {days} exceeds maximum {}",
+        if key == "retention_days"
+            && let Err(reason) = chronicle_ipc::Retention::classify(value)
+        {
+            return Err(StorageError::Other(match reason {
+                chronicle_ipc::Rejected::NotANumber => {
+                    format!("invalid retention_days value: {value:?}")
+                }
+                chronicle_ipc::Rejected::Negative => "retention_days must be non-negative".into(),
+                chronicle_ipc::Rejected::AboveMax => format!(
+                    "retention_days {value:?} exceeds maximum {}",
                     retention::MAX_RETENTION_DAYS
-                )));
-            }
+                ),
+            }));
         }
+        // Store `retention_days` trimmed. `classify` trims to decide, so a
+        // padded value is accepted at write time — and every reader parses the
+        // stored string itself. `Storage::run_cleanup_interruptible` uses
+        // `i64::from_str` and `parse_retention_days` in the daemon uses
+        // `u32::from_str`; neither trims, and a padded row would make them
+        // disagree with the guard and with each other. Normalising here means
+        // no reader ever sees the padding, including ones added later.
         let pool = self.pool.clone();
         let key = key.to_string();
-        let value = value.to_string();
+        let value = if key == "retention_days" {
+            value.trim().to_string()
+        } else {
+            value.to_string()
+        };
         tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             conn.execute(
@@ -767,6 +789,38 @@ mod tests {
 
         let value = storage.get_config("retention_days").await.unwrap();
         assert_eq!(value, Some("30".to_string()));
+    }
+
+    /// The guard must not bless a value its readers refuse.
+    ///
+    /// `Retention::classify` trims, so routing the guard through it made
+    /// `set_config(" 30 ")` succeed — while both readers parse the stored
+    /// string without trimming and would have refused it. The guard now stores
+    /// the trimmed form, so the question never reaches a reader.
+    ///
+    /// Asserting the stored value rather than a cleanup outcome is deliberate:
+    /// Task 4 turns a refused value from `Err` into
+    /// `Ok(CleanupOutcome::ConfigInvalid)`, which would make an `is_ok` check
+    /// here vacuous.
+    #[tokio::test]
+    async fn the_write_guard_accepts_what_the_read_path_accepts() {
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            base_dir: dir.path().to_path_buf(),
+            pool_size: 2,
+        };
+        let storage = Storage::open(config).await.unwrap();
+
+        storage.set_config("retention_days", " 30 ").await.unwrap();
+        assert_eq!(
+            storage.get_config("retention_days").await.unwrap(),
+            Some("30".to_string()),
+            "the guard must store the trimmed form, or every reader must trim"
+        );
+        storage
+            .run_cleanup()
+            .await
+            .expect("the reader must accept what the guard wrote");
     }
 
     /// The seeded row and `DEFAULT_RETENTION_DAYS` are two spellings of one
