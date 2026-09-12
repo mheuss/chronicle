@@ -19,9 +19,9 @@ struct ConnectionSessionLifecycleTests {
             // test with a thread actually parked on it would be closed out from
             // under that thread. Without the line, a test that calls
             // markReaderStarted() leaks clientFD for the run instead.
-            session.markReaderExited()
+            session.markReaderExitedForTesting()
             session.close()
-            session.closeIfDone()
+            session.closeIfDoneForTesting()
             Darwin.close(pair.serverFD)
         }
         try await body(session, pair.serverFD)
@@ -126,14 +126,14 @@ struct ConnectionSessionLifecycleTests {
     @Test("close while the reader is live leaves the descriptor open")
     func closeWithLiveReaderHoldsDescriptor() async throws {
         try await withSession { session, _ in
-            session.markReaderStarted()
+            session.markReaderStartedForTesting()
             session.close()
             #expect(session.state == .closing)
             #expect(session.descriptorCloseCountForTesting == 0,
                     "closing the fd with a thread parked on it is the AD-3 hazard")
 
-            session.markReaderExited()
-            session.closeIfDone()
+            session.markReaderExitedForTesting()
+            session.closeIfDoneForTesting()
             #expect(session.state == .finished)
             #expect(session.descriptorCloseCountForTesting == 1)
         }
@@ -181,6 +181,9 @@ struct ConnectionSessionRoutingTests {
         try await withStartedSession { session, serverFD in
             _ = writeAll(#"{"type":"event","event":"capture_changed"}"# + "\n", to: serverFD)
             try await Task.sleep(for: .milliseconds(20))   // let the reader take it
+            // Without this the test passes even with routing deleted: the event
+            // would hit the empty-waiter drop and the send below still works.
+            #expect(session.eventsYieldedForTesting == 1)
 
             let server = respond(on: serverFD, with: #"{"type":"status","ok":true}"#)
             let received = try await session.send("{\"type\":\"status\"}\n")
@@ -340,6 +343,8 @@ struct ConnectionSessionWriteTests {
         // readerExited false and closeIfDone() returns on THAT guard whatever
         // writesInFlight says — so the write guard would never be the thing
         // under test. closeWithLiveReaderHoldsDescriptor covers the reader half.
+        // 4 MB is far past net.local.stream.sendspace, 8 KB by default on
+        // macOS, so the write cannot complete while the peer is never read.
         let big = String(repeating: "x", count: 4_000_000) + "\n"
         let sendTask = Task { try await session.send(big) }
         try await Task.sleep(for: .milliseconds(100))
@@ -354,12 +359,37 @@ struct ConnectionSessionWriteTests {
         #expect(session.state == .closing, "must not finish while a write holds the fd")
         #expect(session.descriptorCloseCountForTesting == 0)
 
-        // Draining the peer lets the write finish, which releases the close.
+        // Closing the peer lets the aborted write unwind, which releases the
+        // close. It does not complete — shutdown() already broke it.
         Darwin.close(pair.serverFD)
         _ = try? await sendTask.value
         await session.waitUntilFinished()
         #expect(session.state == .finished)
         #expect(session.descriptorCloseCountForTesting == 1)
+    }
+
+    @Test("close fails a waiting caller rather than stranding it")
+    func closeFailsAWaitingCaller() async throws {
+        let pair = try SocketPairHelper.make()
+        setNoSigPipe(pair.clientFD)
+        let session = ConnectionSession(fd: pair.clientFD, maxResponseSize: 64 * 1024)
+        session.start()
+
+        // The peer never answers, so this caller is parked in `send` with its
+        // waiter registered. Only teardown can resume it.
+        let caller = Task { try await session.send("{\"type\":\"status\"}\n") }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(session.waiterCountForTesting == 1)
+
+        session.close()
+        do {
+            _ = try await caller.value
+            Issue.record("expected a throw")
+        } catch {
+            #expect(error as? IPCError == IPCError.notConnected)
+        }
+        #expect(session.waiterCountForTesting == 0)
+        Darwin.close(pair.serverFD)
     }
 
     @Test("two overlapping sends both hold the descriptor")

@@ -27,12 +27,14 @@ final class ConnectionSession {
     /// ships the Rust side and the test that the two agree.
     nonisolated static let eventDiscriminator = "event"
 
+    /// Daemon-initiated lines. Single-consumer: two callers each making an
+    /// iterator would steal elements from one another.
     let eventLines: AsyncStream<String>
     private let eventContinuation: AsyncStream<String>.Continuation
     private var readerTask: Task<Void, Never>?
     private var waiters: [CheckedContinuation<String, Error>] = []
 
-    private lazy var io = IO(fd: fd, maxResponseSize: maxResponseSize)
+    private let io: IO
 
     #if DEBUG
     private(set) var shutdownCountForTesting = 0
@@ -46,6 +48,7 @@ final class ConnectionSession {
     init(fd: Int32, maxResponseSize: Int) {
         self.fd = fd
         self.maxResponseSize = maxResponseSize
+        self.io = IO(fd: fd, maxResponseSize: maxResponseSize)
         // Bounded: nothing on this branch consumes the stream, so an unbounded
         // buffer would grow for the life of the connection.
         let (stream, continuation) = AsyncStream<String>.makeStream(
@@ -60,22 +63,35 @@ final class ConnectionSession {
     /// The reader ignores cancellation: it parks in a blocking `read` that
     /// cancellation cannot interrupt, and exiting early would close a
     /// descriptor a thread is still on. `close()` is the only way to stop it.
+    /// The reader captures `self` strongly, so releasing the last external
+    /// reference cannot strand a thread parked in `read` on a descriptor
+    /// nothing will ever close. That is a retain cycle — session holds task,
+    /// task holds session — and `close()` is what breaks it: `shutdown` wakes
+    /// the reader, the reader exits, the closure's capture is released. Hosts
+    /// must call `close()` rather than rely on ARC. `DaemonConnection` makes
+    /// the same trade for the same reason.
     func start() {
         guard !readerStarted, state == .live else { return }
-        markReaderStarted()
-        readerTask = Task { [weak self] in
+        readerStarted = true
+        readerTask = Task { [self] in
             while true {
-                guard let self else { return }
                 do {
-                    let line = try await self.io.readLine()
-                    guard self.state == .live else { break }
-                    self.deliver(line)
+                    let line = try await io.readLine()
+                    guard state == .live else {
+                        // Every waiter was already resumed when the state left
+                        // `.live`, so this line has no destination. Logged
+                        // without its body: a response can carry an FTS5
+                        // snippet of the user's screen.
+                        NSLog("ChronicleUI: dropping a line read during teardown")
+                        break
+                    }
+                    deliver(line)
                 } catch {
-                    self.readerDidExit(with: error)
+                    readerDidExit(with: error)
                     return
                 }
             }
-            self?.readerDidExit(with: nil)
+            readerDidExit(with: nil)
         }
     }
 
@@ -94,21 +110,29 @@ final class ConnectionSession {
             // would let the first completion clear it while a second write
             // still holds the descriptor.
             writesInFlight += 1
-            Task { [weak self] in
-                guard let self else { return }
-                do {
-                    try await self.io.write(line)
-                } catch {
-                    self.fail(error)
+            Task { [self] in
+                // close() may have landed between the registration above and
+                // this task's turn. It calls shutdown() synchronously, so the
+                // write would fail anyway — but resting on another method's
+                // statement order is not the same as saying so.
+                guard state == .live else {
+                    writesInFlight -= 1
+                    closeIfDone()
+                    return
                 }
-                self.writesInFlight -= 1
-                self.closeIfDone()
+                do {
+                    try await io.write(line)
+                } catch {
+                    fail(error)
+                }
+                writesInFlight -= 1
+                closeIfDone()
             }
         }
     }
 
     private func readerDidExit(with error: Error?) {
-        markReaderExited()
+        readerExited = true
         if state == .live {
             state = .closing
             let cause = terminalError ?? error ?? IPCError.connectionClosed
@@ -121,10 +145,17 @@ final class ConnectionSession {
 
     private func deliver(_ line: String) {
         if Self.isDaemonInitiated(line) {
-            eventContinuation.yield(line)
-            #if DEBUG
-            eventsYieldedForTesting += 1
-            #endif
+            // The buffer is bounded, so a yield can be refused. Counting the
+            // attempt rather than the result would let a test assert on events
+            // that never reached a consumer.
+            switch eventContinuation.yield(line) {
+            case .enqueued:
+                #if DEBUG
+                eventsYieldedForTesting += 1
+                #endif
+            default:
+                NSLog("ChronicleUI: event stream full, dropping an event")
+            }
             return
         }
         guard !waiters.isEmpty else {
@@ -209,7 +240,7 @@ final class ConnectionSession {
     }
 
     /// Transition to `finished` once nothing holds the descriptor.
-    func closeIfDone() {
+    private func closeIfDone() {
         guard state == .closing, readerExited, writesInFlight == 0 else { return }
         state = .finished
         Darwin.close(fd)
@@ -217,9 +248,9 @@ final class ConnectionSession {
         descriptorCloseCountForTesting += 1
         #endif
         finishStream()
-        let waiters = finishedWaiters
+        let pendingFinished = finishedWaiters
         finishedWaiters.removeAll()
-        for (_, cont) in waiters { cont.resume() }
+        for (_, cont) in pendingFinished { cont.resume() }
     }
 
     /// The only `shutdown` call site, so the DEBUG counter cannot drift from it.
@@ -240,8 +271,15 @@ final class ConnectionSession {
         for cont in pending { cont.resume(throwing: error) }
     }
 
-    func markReaderStarted() { readerStarted = true }
-    func markReaderExited() { readerExited = true }
+    #if DEBUG
+    // Test seams. `readerExited` is what closeIfDone() consults before closing
+    // the descriptor, so a caller that sets it while a thread is parked in
+    // read() causes exactly the double-close this class exists to prevent.
+    // Production never touches these: start() and readerDidExit() own the flags.
+    func markReaderStartedForTesting() { readerStarted = true }
+    func markReaderExitedForTesting() { readerExited = true }
+    func closeIfDoneForTesting() { closeIfDone() }
+    #endif
 
     /// Raw socket I/O for this session.
     private struct IO: Sendable {
