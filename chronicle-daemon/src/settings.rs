@@ -3,7 +3,7 @@
 //! A minimal `key=value` text file at `<base_dir>/settings`. Holds the
 //! microphone preference (`mic_enabled`), the capture pause state
 //! (`capture_paused`), and the selected whisper-model variant
-//! (`whisper_model`). Deliberately not JSON — see the HEU-330 design's
+//! (`whisper_model`). Deliberately not JSON — see the CHR-103 design's
 //! Data Architecture and anti-scope.
 
 use chronicle_transcription::{DEFAULT_VARIANT, ModelVariant, parse_variant};

@@ -225,7 +225,7 @@ fn begin_model_switch(
     )
 }
 
-/// Arm or clear the start-retry budget from a reconcile outcome (HEU-575):
+/// Arm or clear the start-retry budget from a reconcile outcome (CHR-136):
 /// `StartFailed` arms the next backoff step (or reports an exhausted
 /// budget); every other outcome ends the incident and restores the budget.
 fn note_reconcile_outcome(
@@ -360,7 +360,7 @@ async fn main() -> Result<()> {
     let (capture_tx, mut capture_rx) = tokio::sync::mpsc::channel::<ipc_handler::CaptureCommand>(8);
     let initial_capture_paused = settings::read_capture_paused(storage.base_dir());
     let capture_paused = Arc::new(AtomicBool::new(initial_capture_paused));
-    // Model-switch control channel (HEU-475). The handler forwards
+    // Model-switch control channel (CHR-71). The handler forwards
     // SetWhisperModel here; the event loop decides accept/reject and spawns
     // the provision.
     let (model_tx, mut model_rx) = tokio::sync::mpsc::channel::<ipc_handler::ModelCommand>(8);
@@ -368,7 +368,7 @@ async fn main() -> Result<()> {
     // loop — persists the variant. See `handle_provision_event`.
     let (provision_evt_tx, mut provision_evt_rx) =
         tokio::sync::mpsc::channel::<provisioning::ProvisionEvent>(8);
-    // Power observer (HEU-284). Sleep/wake transitions arrive on `power_rx`
+    // Power observer (CHR-109). Sleep/wake transitions arrive on `power_rx`
     // and drive the supervisor's sleep flags. The observer thread is not
     // joined (design §4); dropping the handle is fine — process exit reaps
     // the thread. If registration fails, capture continues normally without
@@ -381,14 +381,14 @@ async fn main() -> Result<()> {
              capture continues normally"
         ),
     }
-    // Start-retry channel (HEU-575). When a wake/resume reconcile fails to
+    // Start-retry channel (CHR-136). When a wake/resume reconcile fails to
     // start capture — typically racing display re-registration right after
     // wake — a detached sleeper sends one unit event here to re-run
     // reconcile. Stale nudges after recovery are harmless: reconcile is
     // idempotent.
     let (retry_tx, mut retry_rx) = tokio::sync::mpsc::channel::<()>(4);
     let mut start_retry = StartRetry::new();
-    // Whisper model status cell (HEU-475). Created — and, when the model is
+    // Whisper model status cell (CHR-71). Created — and, when the model is
     // on disk, put into Loading — BEFORE the IPC server below serves its
     // first Status, so the UI never sees Missing for a model that exists
     // (design §2.1: boot, file present → Loading). The engine-load block
@@ -404,7 +404,7 @@ async fn main() -> Result<()> {
         // missing, and promise nothing. Phase 1 has no in-app remediation —
         // the banner is deliberately CTA-less and the download button lands in
         // Phase 2 — so "enable it from the menu bar app" would be false today.
-        // The fetch script stays out of user-facing strings (HEU-485).
+        // The fetch script stays out of user-facing strings (CHR-61).
         log::warn!(
             "whisper model \"{}\" is not downloaded — transcription is off; \
              the rest of Chronicle runs normally",
@@ -442,7 +442,7 @@ async fn main() -> Result<()> {
 
     // --- Screen capture pipeline (with audio on primary display) ---
     //
-    // HEU-242: `CaptureRuntime` wraps the engine + capture_store_loop +
+    // CHR-121: `CaptureRuntime` wraps the engine + capture_store_loop +
     // ocr_loop as one atomic unit so pause/resume cycle them together. If
     // the persisted `capture_paused` is true, we boot with no runtime; the
     // 1Hz refresher publishes a default snapshot until Resume rebuilds one.
@@ -517,7 +517,7 @@ async fn main() -> Result<()> {
     // Drop reporter. Spawned here, BEFORE provisioning::boot() below, not
     // beside the status refreshers further down: the microphone is restored
     // early and a model load can take a long time, so a reporter spawned after
-    // boot() stays silent through exactly the window HEU-548 describes. The
+    // boot() stays silent through exactly the window CHR-53 describes. The
     // counters accumulate either way and ReporterState starts at zero, so a
     // late reporter would still eventually report the burst — what a late
     // spawn costs is promptness, while an operator is watching the terminal.
@@ -667,7 +667,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Retention cleanup. Spawned, never awaited on the startup path: HEU-547
+    // Retention cleanup. Spawned, never awaited on the startup path: CHR-54
     // was a 249-second startup stall and that shape must not come back.
     //
     // The handle is retained and joined as the last teardown step. Two things
@@ -688,7 +688,7 @@ async fn main() -> Result<()> {
     //
     // Stranded rows — files unlinked, rows not yet deleted — repair themselves
     // on the next run; see docs/guides/storage-engine.md, "Stranded rows repair
-    // themselves". HEU-624 added counters that make it visible, not a repair.
+    // themselves". CHR-34 added counters that make it visible, not a repair.
     //
     // An in-flight run ends at its next batch boundary rather than running to
     // completion — see `cancellation_stop_signal` for why `cancel` alone
@@ -1110,7 +1110,7 @@ mod tests {
 
     #[test]
     fn default_log_filter_admits_chronicle_info_but_not_dependency_info() {
-        // The headline change of HEU-653. Built as a real Filter rather than a
+        // The headline change of CHR-22. Built as a real Filter rather than a
         // string comparison, so this tests the behaviour rather than the spelling.
         let filter = env_filter::Builder::new().parse(DEFAULT_LOG_FILTER).build();
 

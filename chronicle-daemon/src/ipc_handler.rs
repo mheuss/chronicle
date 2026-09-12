@@ -16,7 +16,7 @@ use crate::provisioning::TranscriptionStatusCell;
 /// Sample rate for the INFO search-latency log: 1 in N successful searches.
 /// DEBUG carries every search but is off by default; this sampled INFO line
 /// keeps NFR-1 (search p95 < 200ms) observable in production without flooding
-/// the logs. See HEU-484.
+/// the logs. See CHR-62.
 const SEARCH_SAMPLE_RATE: u64 = 20;
 
 /// Monotonic counter of successful searches, used only to sample the INFO log.
@@ -123,7 +123,7 @@ pub struct DaemonHandler {
     /// `main.rs`.
     capture_ready: Arc<AtomicBool>,
     capture_reply_timeout: Duration,
-    /// Transcription status cell (HEU-475): boot/provisioner write it, the
+    /// Transcription status cell (CHR-71): boot/provisioner write it, the
     /// `Status` arm reads it.
     transcription_status: Arc<TranscriptionStatusCell>,
     /// Control channel to the main event loop for model switches.
@@ -375,7 +375,7 @@ impl RequestHandler for DaemonHandler {
                 // NFR-5: capture the start time BEFORE the blocking call so the
                 // elapsed time we log covers everything the caller waits for.
                 //
-                // That window widened in HEU-624: it now spans the query, the
+                // That window widened in CHR-34: it now spans the query, the
                 // row->hit mapping, and one `stat` per returned hit (up to the
                 // 200 clamped above). Measured on a warm local SSD: a full
                 // 200-hit page costs 0.2-0.65 ms of stats, against NFR-1's
@@ -422,7 +422,7 @@ impl RequestHandler for DaemonHandler {
                             "search q_len={} limit={limit} offset={offset} -> {hit_count} hits in {elapsed:?}",
                             query.chars().count()
                         );
-                        // HEU-484: DEBUG is off by default, so NFR-1 (search p95 <
+                        // CHR-62: DEBUG is off by default, so NFR-1 (search p95 <
                         // 200ms) isn't observable in production. Emit a sampled INFO
                         // line (1 in SEARCH_SAMPLE_RATE) — light enough for INFO,
                         // dense enough to compute p95 offline. Same PII-safe fields,
@@ -557,10 +557,10 @@ fn search_hit_from_storage(r: chronicle_storage::SearchResult) -> chronicle_ipc:
     let screenshot = match r.source {
         chronicle_storage::SearchSource::Screen(s) => s,
         chronicle_storage::SearchSource::Audio(_) => {
-            // HEU-242 is screen-only. ScreenOnly filter guarantees this
+            // CHR-121 is screen-only. ScreenOnly filter guarantees this
             // branch is unreachable. Defensive panic in case the
             // contract is violated later.
-            unreachable!("HEU-242 search filter is ScreenOnly; audio hit returned");
+            unreachable!("CHR-121 search filter is ScreenOnly; audio hit returned");
         }
     };
     chronicle_ipc::SearchHit {
@@ -591,7 +591,7 @@ pub(crate) fn map_outcome(
         MicToggleOutcome::Enabled => MicState::On,
         MicToggleOutcome::Disabled => MicState::Off,
         MicToggleOutcome::Failed { reason } => {
-            // HEU-330: log the reason daemon-side; the IPC response carries
+            // CHR-103: log the reason daemon-side; the IPC response carries
             // only MicState, never internal error detail.
             log::warn!("microphone toggle failed: {reason}");
             match mic_permission {

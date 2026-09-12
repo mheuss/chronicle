@@ -10,7 +10,7 @@
 //!
 //! **System sleep only.** `IORegisterForSystemPower` does not fire on display
 //! sleep, and `IODisplayWrangler` is absent on Apple Silicon — display-sleep
-//! awareness is filed as HEU-496.
+//! awareness is filed as CHR-57.
 
 #![allow(non_upper_case_globals, non_camel_case_types)]
 

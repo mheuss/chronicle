@@ -3,7 +3,7 @@ import Testing
 
 @testable import ChronicleUI
 
-/// Decoding `StorageStats.retention`, the tagged value HEU-625 put on the wire
+/// Decoding `StorageStats.retention`, the tagged value CHR-33 put on the wire
 /// in place of `retention_days`.
 ///
 /// The decoder is hand-written rather than synthesized. A synthesized one reads
@@ -142,7 +142,7 @@ struct RetentionDecodingTests {
 ///
 /// The copy lives in a value type because a `private struct: View` is
 /// unreachable from tests, and these branches are the user-visible half of
-/// HEU-625 — zero used to render as "0 days" when it means keep forever.
+/// CHR-33 — zero used to render as "0 days" when it means keep forever.
 @Suite("Retention copy")
 struct RetentionCopyTests {
     @Test("a day count reads as days")

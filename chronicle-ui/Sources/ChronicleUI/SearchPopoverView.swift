@@ -20,7 +20,7 @@ struct SearchPopoverView: View {
 
     /// Which message the search area should render. A pure function of the
     /// inputs so it can be unit-tested without driving the SwiftUI view — the
-    /// HEU-478 error-vs-no-match disambiguation lives here.
+    /// CHR-68 error-vs-no-match disambiguation lives here.
     enum SearchContent: Equatable {
         case disconnected
         case prompt
@@ -258,7 +258,7 @@ struct SearchPopoverView: View {
         let myID = requestID &+ 1
         requestID = myID
         // Clear any prior error the instant the user edits, before the debounce
-        // sleep — otherwise the failure message lingers for ~200ms (HEU-478).
+        // sleep — otherwise the failure message lingers for ~200ms (CHR-68).
         searchError = false
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -268,7 +268,7 @@ struct SearchPopoverView: View {
         }
         // Enter the loading state before the debounce so the pending window
         // doesn't transiently render `.noMatches` while a search is queued
-        // (HEU-478). The requestID guard in the defer ensures only the latest
+        // (CHR-68). The requestID guard in the defer ensures only the latest
         // request clears it.
         isLoading = true
         defer { if requestID == myID { isLoading = false } }
@@ -284,7 +284,7 @@ struct SearchPopoverView: View {
         } catch {
             // A non-cancellation error means the daemon or IPC failed. Surface
             // it instead of rendering an empty result set as a misleading
-            // "No matches". See HEU-478.
+            // "No matches". See CHR-68.
             if requestID == myID {
                 results = []
                 searchError = true

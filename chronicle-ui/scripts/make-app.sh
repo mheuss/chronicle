@@ -9,7 +9,7 @@
 #
 # Produces: .build/Chronicle.app — launch via `open .build/Chronicle.app`.
 #
-# Full code-signed packaging + SMAppService comes in HEU-420; this is the
+# Full code-signed packaging + SMAppService comes in CHR-83; this is the
 # minimum bundle structure needed for the menu bar icon to render under
 # modern macOS Control Center.
 

@@ -1,5 +1,5 @@
 -- Chronicle storage schema v2
--- Covering indexes for the orphan sweep's path lookup (HEU-547).
+-- Covering indexes for the orphan sweep's path lookup (CHR-54).
 --
 -- The sweep reads every tracked path with `SELECT <path_col> FROM <table>`.
 -- With these indexes SQLite satisfies that from the index alone (a covering

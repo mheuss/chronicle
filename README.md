@@ -73,7 +73,7 @@ cd chronicle-ui
 
 The script writes to `.build/Chronicle.app`. Re-run it after any code change.
 (Proper code-signed packaging and an autostart `SMAppService` are tracked
-separately under HEU-420.)
+separately under CHR-83.)
 
 ## Running
 

@@ -60,7 +60,7 @@ pub(crate) fn update_transcript(conn: &Connection, id: i64, transcript: &str) ->
 
 /// `transcript: None` records that transcription ran and found no speech — a
 /// different state from an untranscribed row, which has no `whisper_model`
-/// (HEU-620). Passing `None` also clears any previous transcript from
+/// (CHR-38). Passing `None` also clears any previous transcript from
 /// `audio_fts`, because the `audio_au` trigger reindexes on every update.
 ///
 /// **This function does no normalization.** It will write `Some("")` — the

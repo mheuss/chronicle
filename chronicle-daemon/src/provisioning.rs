@@ -1,4 +1,4 @@
-//! Whisper-model provisioning (HEU-475 Phase 1, HEU-589 Phase 2).
+//! Whisper-model provisioning (CHR-71 Phase 1, CHR-47 Phase 2).
 //!
 //! Holds the status cell the IPC `Status` handler reads, the per-variant
 //! on-disk report, and [`EngineHandle`] — the shared slot the sink gates on,
@@ -766,7 +766,7 @@ impl ProvisionerContext {
         self.cell.set_loading(variant);
         let base_dir = self.base_dir.clone();
         // Off the runtime: loading a ggml model is seconds of blocking work
-        // for a large variant and must not stall tokio workers (HEU-480).
+        // for a large variant and must not stall tokio workers (CHR-66).
         let load = tokio::task::spawn_blocking(move || {
             chronicle_transcription::TranscriptionEngine::load(&base_dir, variant)
         })

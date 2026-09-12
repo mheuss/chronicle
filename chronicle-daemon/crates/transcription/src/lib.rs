@@ -146,7 +146,7 @@ const MIN_DECODABLE_SAMPLES: usize = 41;
 
 /// Rejection message for an *empty* buffer. Matches whisper-rs's own
 /// `WhisperError::NoSamples` wording, so this case reads to a caller exactly as
-/// it did before HEU-664.
+/// it did before CHR-18.
 const EMPTY_MSG: &str = "Input sample buffer was empty.";
 
 /// The short-PCM guard `transcribe` runs before touching the state slot, as a
@@ -196,7 +196,7 @@ pub enum TranscriptionError {
 /// - **Over-matches** a bracketed ASCII token like `[sic]` when whisper puts it
 ///   in its own segment. Pinned as a known loss by
 ///   `concat_segment_text_drops_bracketed_token_split_into_own_segment`
-///   (HEU-622).
+///   (CHR-35).
 ///
 /// Each condition rules out a different false positive. Non-empty: `[]` is
 /// punctuation. ASCII: `set_language(None)` means any language can come back,
@@ -219,7 +219,7 @@ fn is_whisper_marker(s: &str) -> bool {
 /// An empty result means "no usable speech".
 ///
 /// whisper-rs 0.14.4 exposes no per-segment `no_speech_prob`, so this filter
-/// plus `suppress_blank` is the whole guard against music and noise (HEU-472).
+/// plus `suppress_blank` is the whole guard against music and noise (CHR-74).
 pub fn concat_segment_text<'a>(segments: impl IntoIterator<Item = &'a str>) -> String {
     let mut out = String::new();
     for text in segments {
@@ -324,7 +324,7 @@ pub fn decode_opus_16k_mono(path: &Path) -> Result<Vec<f32>, TranscriptionError>
 ///
 /// An empty or whitespace-only result means **no usable speech was found**.
 /// That is an answer, not a failure: `pipeline::transcribe_loop` records it as
-/// an attempt with a NULL transcript (HEU-620). Return `Err` only when
+/// an attempt with a NULL transcript (CHR-38). Return `Err` only when
 /// transcription could not be performed.
 ///
 /// `language` on an empty result need not be `None`. whisper reports a
@@ -400,7 +400,7 @@ impl<T> StateSlot<T> {
             // mutex with the errored state still in it.
             *slot = None;
             // Whisper-specific wording on purpose: this string is the anchor
-            // HEU-664's live verification greps for. The count is the check.
+            // CHR-18's live verification greps for. The count is the check.
             // One build per engine, plus one per discard that a later call
             // rebuilds.
             log::warn!(
@@ -415,7 +415,7 @@ impl<T> StateSlot<T> {
 /// whisper.cpp engine. The `WhisperContext` (the loaded model) is created once
 /// and shared via `Arc`. One `WhisperState` is created on first use and reused
 /// for the life of the engine. Creating one allocates the whole GGML compute
-/// backend, so doing it per call rebuilt Metal on every segment (HEU-664).
+/// backend, so doing it per call rebuilt Metal on every segment (CHR-18).
 ///
 /// The slot holds its mutex across the whole decode, so concurrent
 /// `transcribe` calls serialize. That costs nothing today: `transcribe_loop`
@@ -479,7 +479,7 @@ impl Transcriber for TranscriptionEngine {
                 let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
                 params.set_translate(false);
                 // language = None means "auto-detect AND transcribe". (set_detect_language(true)
-                // is detect-ONLY — it returns 0 segments and no text. HEU-472 T11.)
+                // is detect-ONLY — it returns 0 segments and no text. CHR-74 T11.)
                 params.set_language(None);
                 params.set_suppress_blank(true);
                 params.set_n_threads(4); // Metal does the work; keep CPU threads modest
@@ -493,7 +493,7 @@ impl Transcriber for TranscriptionEngine {
                 // decoder RNG is seeded once and never reset, so temperature
                 // fallback in one segment can shift later ones. Accepted:
                 // whisper.cpp exposes no reseed. Mechanism and line cites are
-                // on HEU-664.
+                // on CHR-18.
                 params.set_no_context(true);
 
                 state
@@ -829,7 +829,7 @@ mod tests {
 
     /// Pins a KNOWN LOSS, not a guarantee. If this ever returns
     /// `"the [sic] answer"`, that is an improvement: update the test and close
-    /// HEU-622. But the expected value has a DOUBLE space, so a change to how
+    /// CHR-35. But the expected value has a DOUBLE space, so a change to how
     /// the join handles whitespace also fails this test. Check which moved.
     #[test]
     fn concat_segment_text_drops_bracketed_token_split_into_own_segment() {
@@ -837,7 +837,7 @@ mod tests {
         assert_eq!(
             concat_segment_text(segs.iter().copied()),
             "the  answer",
-            "a bracketed token in its own segment is dropped — known limitation, HEU-622"
+            "a bracketed token in its own segment is dropped — known limitation, CHR-35"
         );
     }
 
@@ -1050,14 +1050,14 @@ mod tests {
         base
     }
 
-    /// What one state's create+free cycle costs: the work HEU-664 stops doing
+    /// What one state's create+free cycle costs: the work CHR-18 stops doing
     /// per call. The pre-fix path built and freed a state per `transcribe`, so
     /// the cycle is exactly the removed work. Do not quote it as a creation
     /// cost or as a transcription latency delta.
     #[test]
-    #[ignore = "timing measurement for HEU-664; needs a provisioned model; run manually"]
+    #[ignore = "timing measurement for CHR-18; needs a provisioned model; run manually"]
     fn measure_state_create_free_cost() {
-        // The figure is per-variant, and HEU-664's baseline run used `small`
+        // The figure is per-variant, and CHR-18's baseline run used `small`
         // while the code default is `base`.
         let variant = std::env::var("CHRONICLE_TEST_VARIANT")
             .ok()
@@ -1158,7 +1158,7 @@ mod tests {
             "expected auto-detected language `en`"
         );
 
-        // 3) Second call on the SAME engine — this is the HEU-664 guarantee.
+        // 3) Second call on the SAME engine — this is the CHR-18 guarantee.
         // No words in common with phrase 1, so a stale first result cannot pass.
         let second_pcm = synthesize_test_phrase("pack my box with five dozen liquor jugs");
         let second = engine.transcribe(&second_pcm).expect("second transcribe");
@@ -1169,7 +1169,7 @@ mod tests {
             second.text
         );
 
-        // The point of HEU-664: two transcriptions, ONE state.
+        // The point of CHR-18: two transcriptions, ONE state.
         assert_eq!(
             engine.state.creation_count(),
             1,

@@ -1,4 +1,4 @@
--- HEU-620: clear whisper's own markers from persisted transcripts.
+-- CHR-38: clear whisper's own markers from persisted transcripts.
 --
 -- whisper.cpp emits [BLANK_AUDIO] (and [Motor], [_BEG_], ...) as ordinary
 -- segment text. Those passed the empty-text guard, were stored as transcripts,
@@ -33,7 +33,7 @@
 -- `[Music] [Music] [Music]`. The other four (`[ Inaudible ]`,
 -- `[Distant by the wind]`, `[sad music]`, `[報告 ]`) are single markers whose
 -- internal whitespace or non-ASCII content spares them under BOTH rules, at
--- any granularity -- see HEU-622. `audio_fts` keeps matching all six on their
+-- any granularity -- see CHR-35. `audio_fts` keeps matching all six on their
 -- words: `music` (1404, 1453), `silence` (1060), `inaudible` (1147), `distant`
 -- and `wind` (1326), `報告` (1427).
 --
@@ -68,7 +68,7 @@
 --                      is what it is. Without this clause a hand-written
 --                      '[sic]' is destroyed AND its row is left reading
 --                      "never transcribed" (transcript NULL, model NULL),
---                      which is the exact ambiguity HEU-620 exists to remove
+--                      which is the exact ambiguity CHR-38 exists to remove
 --                      -- so the migration would manufacture the state it is
 --                      meant to eliminate. Costs nothing on the database this
 --                      was written against: all 169 rows the predicate clears

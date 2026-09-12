@@ -24,7 +24,7 @@ pub(crate) fn search(
     // input into quoted prefix terms via `sanitize_fts5_query` so arbitrary
     // input is safe. A query with no alphanumeric characters has no search
     // terms, so return empty rather than building a degenerate MATCH
-    // expression. See HEU-478 / HEU-483.
+    // expression. See CHR-68 / CHR-63.
     if !query.chars().any(char::is_alphanumeric) {
         return Ok(Vec::new());
     }
@@ -159,7 +159,7 @@ fn sanitize_fts5_query(query: &str) -> String {
 /// fixed message, because the returned text flows to the UI as `Response::Error`
 /// and `StorageError::Database`'s `Display` would otherwise carry that token.
 /// Genuine infrastructure failures (I/O, corruption, locking — distinct codes)
-/// pass through unchanged. Only the length is logged. See HEU-479. (After
+/// pass through unchanged. Only the length is logged. See CHR-67. (After
 /// `sanitize_fts5_query`, user input is valid FTS5, so this is defense-in-depth.)
 fn map_fts5_error(err: rusqlite::Error, query_len: usize) -> StorageError {
     if matches!(
@@ -308,7 +308,7 @@ mod tests {
     fn search_with_punctuation_does_not_error() {
         // FTS5-significant punctuation (parens, quotes, `*`) must be treated as
         // literal text, not query syntax — otherwise a syntax error surfaces as
-        // a misleading "No matches". Regression: HEU-478.
+        // a misleading "No matches". Regression: CHR-68.
         let conn = setup_db();
         insert_test_screenshot(&conn); // ocr: "deployment pipeline kubernetes cluster"
 
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn map_fts5_error_does_not_leak_query() {
-        // HEU-479: a syntax error must not echo the raw query back to the UI.
+        // CHR-67: a syntax error must not echo the raw query back to the UI.
         let conn = setup_db();
         let secret = "leakyterm)";
         let mut stmt = conn
@@ -384,7 +384,7 @@ mod tests {
     fn map_fts5_error_scrubs_non_syntax_parse_errors() {
         // A column-filter form ("tok:") yields "no such column: <tok>", which is
         // NOT "fts5: syntax error" but still echoes the user's token, so it must
-        // be scrubbed too. Regression for the PR #27 review (HEU-479).
+        // be scrubbed too. Regression for the PR #27 review (CHR-67).
         let conn = setup_db();
         let secret = "topsecret:x";
         let mut stmt = conn

@@ -218,7 +218,7 @@ impl AudioPipeline {
     }
 
     /// Finalize the system accumulator's partial segment now. Sent when capture
-    /// stops (system sleep or IPC pause; display sleep is HEU-496) so a
+    /// stops (system sleep or IPC pause; display sleep is CHR-57) so a
     /// later restart does not
     /// produce one segment spanning the off-period. Symmetric with the `FlushMic`
     /// send inside `set_microphone_enabled`.
@@ -389,7 +389,7 @@ mod tests {
 
         // Same for the microphone tap. Without this, a fresh set handed to
         // MicrophoneCapture compiles and counts where nothing reads — which
-        // would silently lose exactly the mic drop burst HEU-548 reports.
+        // would silently lose exactly the mic drop burst CHR-53 reports.
         //
         // Conditional, because `create` treats a mic setup failure as soft and
         // stores `None`: on a host with no input device, `AVAudioConverter::

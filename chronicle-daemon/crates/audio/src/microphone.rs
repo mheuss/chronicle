@@ -2,7 +2,7 @@
 //!
 //! A dedicated capture path, independent of the screen-capture SCStream.
 //! Toggling the microphone start/stops this engine; screen and system-audio
-//! capture are never touched. See HEU-330.
+//! capture are never touched. See CHR-103.
 //!
 //! The engine's input-node tap delivers the device's *native* format, which is
 //! hardware-dependent (e.g. 44.1 kHz on some mics). The encoder and
@@ -200,7 +200,7 @@ impl MicrophoneCapture {
             // identity passthrough when native already matches the target.
             //
             // With no channelMap set, a 2-to-1 conversion selects channel 0 and
-            // discards channel 1. HEU-651 measured the output as bit-identical
+            // discards channel 1. CHR-24 measured the output as bit-identical
             // to native channel 0 on two devices; on a Blue Yeti that costs
             // 7.7-7.9 dB, because channel 0 is the quieter capsule.
             // SAFETY: both formats are valid PCM formats.
@@ -1059,7 +1059,7 @@ mod tests {
     /// Runs a 48 kHz **stereo** f32 buffer through `convert_to_mono_samples`
     /// and asserts the output is channel 0 verbatim — not an average of the two
     /// channels. This pins the claim the module doc makes about `AVAudioConverter`
-    /// with no `channelMap` set, which HEU-651 measured on real hardware.
+    /// with no `channelMap` set, which CHR-24 measured on real hardware.
     ///
     /// The channels carry distinct constants, so all three plausible behaviours
     /// are distinguishable: channel 0 selection yields `CH0`, channel 1 selection
@@ -1068,7 +1068,7 @@ mod tests {
     ///
     /// This pins the deinterleaved-f32 stereo case, which is what the device in
     /// the guide's sample log delivers. Interleaved and Int16 stereo take a
-    /// different converter configuration; HEU-651 covered those on real hardware.
+    /// different converter configuration; CHR-24 covered those on real hardware.
     ///
     /// Builds only `AVAudioPCMBuffer`/`AVAudioConverter` objects — no
     /// `AVAudioEngine` — so it touches no hardware and triggers no TCC prompt.

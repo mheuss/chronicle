@@ -5,7 +5,7 @@ import Foundation
 ///
 /// A value type rather than a computed property on a `private struct: View`,
 /// because a private view is unreachable from tests and these branches are the
-/// user-visible half of HEU-625.
+/// user-visible half of CHR-33.
 ///
 /// Same shape and reasoning as `TranscriptionBannerCopy`. See
 /// docs/use-cases/ipc-compat.md, "Wire Copy Split From the View That Renders
