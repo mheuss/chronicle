@@ -609,10 +609,10 @@ struct StorageStats: Decodable, Sendable {
 /// regardless of `kind`, so a future variant with a wrongly typed payload would
 /// throw and take the whole `StatusData` decode with it.
 ///
-/// That covers the payload only. A `retention` that is not an object, or a
-/// `kind` absent or not a string, still throws, deliberately: either means the
-/// peer is not the daemon we think it is. `MicState`, `TranscriptionState`,
-/// `DaemonErrorCode` and `SearchHitSource` all draw the same line.
+/// A `retention` that is not an object, or a `kind` absent or not a string,
+/// still throws, deliberately: either means the peer is not the daemon we
+/// think it is. `MicState`, `TranscriptionState`, `DaemonErrorCode` and
+/// `SearchHitSource` all draw the same line.
 enum Retention: Sendable, Equatable, Decodable {
     case days(UInt32)
     case disabled
@@ -630,12 +630,9 @@ enum Retention: Sendable, Equatable, Decodable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(String.self, forKey: .kind) {
         case "days":
-            // `try?`, not `try`: a days object whose value is absent, null, or
-            // the wrong type is malformed, not a day count. Throwing would land
-            // in the reconnect loop (HEU-725) and read as a crashing daemon;
-            // inventing a number would be the display lie this type replaced.
-            // `try?` on an Optional-returning call flattens, so this one guard
-            // covers the throw and the absent key together.
+            // `try?`, not `try`: a malformed value is not a day count, and
+            // throwing would take StatusData into the HEU-725 reconnect loop.
+            // The flattening means this one guard also covers an absent key.
             guard let value = try? c.decodeIfPresent(UInt32.self, forKey: .value) else {
                 self = .unknown
                 return
