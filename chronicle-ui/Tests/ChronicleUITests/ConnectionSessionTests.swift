@@ -219,8 +219,10 @@ struct ConnectionSessionRoutingTests {
             await waitUntil { session.droppedResponsesForTesting == 1 }
             #expect(session.droppedResponsesForTesting == 1)
 
-            // The counter, not an await on the stream: awaiting a stream that
-            // is correctly empty would hang rather than fail.
+            // The counter alone cannot catch this: it is incremented only in
+            // the event branch, so a drop branch that published would not move
+            // it. Draining after close() is what covers that — the stream is
+            // finished by then, so the loop ends rather than hanging.
             #expect(session.eventsYieldedForTesting == 0)
 
             // And it did not become the next caller's response either.
@@ -228,7 +230,28 @@ struct ConnectionSessionRoutingTests {
             let received = try await session.send("{\"type\":\"status\"}\n")
             #expect(received.contains("\"ok\":false"))
             _ = await server.value
+
+            session.close()
+            await session.waitUntilFinished()
+            var published: [String] = []
+            for await line in session.eventLines { published.append(line) }
+            #expect(published.isEmpty, "a dropped response must not reach the event stream")
         }
+    }
+
+    @Test("close really closes the descriptor, not just the counter")
+    func closeReallyClosesTheDescriptor() async throws {
+        let pair = try SocketPairHelper.make()
+        defer { Darwin.close(pair.serverFD) }
+        let session = ConnectionSession(fd: pair.clientFD, maxResponseSize: 64 * 1024)
+        session.close()
+        await session.waitUntilFinished()
+
+        // The counter sits on the line after the syscall, so it reads 1 whether
+        // or not the close happened. NFR-1 needs the descriptor itself.
+        #expect(session.descriptorCloseCountForTesting == 1)
+        #expect(fcntl(pair.clientFD, F_GETFD) == -1)
+        #expect(errno == EBADF)
     }
 
     @Test("a response containing type event in a snippet goes to the caller")

@@ -159,9 +159,17 @@ struct DaemonConnectionReconnectTests {
             // sleep. Closing the peer before this would test a blocked
             // request instead, which is a different path.
             let serverFD = log.pairs.last!.serverFD
+            // Decided here on the MainActor: the closure below is Sendable and
+            // cannot read `log`.
+            let serverOwnsFD = log.count > 1
             _ = blockingServer {
+                // Pair 0's descriptor stays with the test, which closes it
+                // below to force the EOF. Every later pair is the server's, so
+                // the test never frees a number a parked read still holds.
+                defer { if serverOwnsFD { Darwin.close(serverFD) } }
                 guard readLineSync(from: serverFD) != nil else { return }
                 writeAll(#"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"0.0.1"}}"# + "\n", to: serverFD)
+                _ = readLineSync(from: serverFD)
             }
             return fd
         })
@@ -186,7 +194,6 @@ struct DaemonConnectionReconnectTests {
         #expect(log.count >= 2, "idle EOF did not reconnect: \(log.count) attempts")
 
         conn.disconnect()
-        log.closeServers(from: 1)
     }
 
     @Test("a heartbeat failure on a live socket reconnects")
@@ -197,21 +204,69 @@ struct DaemonConnectionReconnectTests {
             #expect(setNoSigPipe(fd))
             let serverFD = log.pairs.last!.serverFD
             // Valid JSON of the wrong shape: no `type`, so it reaches the
-            // waiter, the decode fails and monitorConnection throws. Pins
-            // BR-13 only — measured, this passes without `cancelAll()`,
-            // because the server's own close finishes the session's child.
+            // waiter, the decode fails and monitorConnection throws. The
+            // second read holds the peer OPEN afterwards, which is what makes
+            // this pin BR-13: closing here instead would EOF the reader, and
+            // the reconnect would happen whether or not the decode failure was
+            // handled at all. Holding it open also makes this the one test
+            // where the monitor exits first on a live session, so `cancelAll`
+            // is what frees the other child and the backoff tail is what
+            // closes the session.
             _ = blockingServer {
                 // The server owns serverFD, so the test cannot free the number
                 // back to the next socketpair while this thread is in a read.
                 defer { Darwin.close(serverFD) }
                 guard readLineSync(from: serverFD) != nil else { return }
                 writeAll(#"{"unexpected":"shape"}"# + "\n", to: serverFD)
+                _ = readLineSync(from: serverFD)   // park, keeping the peer open
             }
             return fd
         })
         conn.connect()
         await waitUntil(ticks: 300) { log.count >= 2 }
         #expect(log.count >= 2, "heartbeat failure did not reconnect: \(log.count) attempts")
+
+        // This session never EOFs on its own — its peer stays open — so
+        // connect()'s backoff tail is the only thing that can close it. The
+        // close is not synchronous: the tail shuts the descriptor down and the
+        // woken reader is what closes it, so this has to be a bounded wait.
+        await waitUntil { fcntl(log.pairs[0].clientFD, F_GETFD) == -1 }
+        #expect(fcntl(log.pairs[0].clientFD, F_GETFD) == -1,
+                "the previous session's descriptor leaked")
+
+        conn.disconnect()
+    }
+
+    @Test("a cancelled reconnect does not tear down the next connection")
+    func cancelledReconnectLeavesTheNextSessionAlone() async throws {
+        let log = FactoryLog()
+        let conn = DaemonConnection(connectionFactory: {
+            let fd = try log.make()
+            #expect(setNoSigPipe(fd))
+            let serverFD = log.pairs.last!.serverFD
+            _ = blockingServer {
+                defer { Darwin.close(serverFD) }
+                guard readLineSync(from: serverFD) != nil else { return }
+                writeAll(#"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"0.0.1"}}"# + "\n", to: serverFD)
+                _ = readLineSync(from: serverFD)   // park, keeping the peer open
+            }
+            return fd
+        })
+
+        conn.connect()
+        await waitUntil { conn.lastStatus != nil }
+
+        // The cancelled task's error unwinds while the second connect() is
+        // establishing. Without the guard in connect()'s backoff tail it runs
+        // closeSocket() on the session the SECOND attempt just published,
+        // tearing down a live connection and driving a third attempt.
+        conn.disconnect()
+        conn.connect()
+        await waitUntil { conn.sessionForTesting != nil }
+        try await Task.sleep(for: .milliseconds(500))
+
+        #expect(log.count == 2, "a cancelled task drove an extra attempt: \(log.count)")
+        #expect(conn.state == .connected)
 
         conn.disconnect()
     }

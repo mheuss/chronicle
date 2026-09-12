@@ -324,6 +324,10 @@ final class DaemonConnection {
             _ = await prev?.value  // wait for predecessor
             // Session identity replaces the generation counter: a request that
             // waited through a reconnect is holding the previous session.
+            // Defence in depth, and deliberately unpinned — `closeSocket()`
+            // always closes a session before replacing it, so `send`'s own
+            // `state == .live` guard throws the same error on every path that
+            // reaches here. No test can tell the two apart.
             guard self.session === mySession else {
                 throw IPCError.notConnected
             }
@@ -413,6 +417,9 @@ final class DaemonConnection {
 
     /// Run the heartbeat and the session's completion against each other, and
     /// end the connection when either finishes.
+    ///
+    /// This does not close the session it is handed — `connect()`'s backoff
+    /// tail does, on every path out of the loop body.
     ///
     /// The monitor's error is swallowed here and must stay swallowed:
     /// `cancelAll` makes `CancellationError` the ordinary way it ends, and

@@ -3,9 +3,9 @@ import Darwin
 
 /// One connection's descriptor, reader, and waiting callers.
 ///
-/// Created `live`, leaves `live` exactly once, ends `finished`. `close()` is
-/// the edge into `closing`, and the descriptor is released only once nothing
-/// holds it.
+/// Created `live`, leaves `live` exactly once, ends `finished`. Two edges reach
+/// `closing` — `close()`, and the reader exiting on its own, which is the more
+/// common one — and the descriptor is released only once nothing holds it.
 @MainActor
 final class ConnectionSession {
     enum State { case live, closing, finished }
@@ -275,7 +275,8 @@ final class ConnectionSession {
     #if DEBUG
     // Test seams. `readerExited` is what closeIfDone() consults before closing
     // the descriptor, so a caller that sets it while a thread is parked in
-    // read() causes exactly the double-close this class exists to prevent.
+    // read() closes the fd early and hands its number to the next socketpair —
+    // the AD-3 hazard. The second close is harmless; the early one is not.
     // Production never touches these: start() and readerDidExit() own the flags.
     func markReaderStartedForTesting() { readerStarted = true }
     func markReaderExitedForTesting() { readerExited = true }

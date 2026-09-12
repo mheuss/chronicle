@@ -264,7 +264,8 @@ struct DaemonConnectionGateTests {
         // Fake daemon never replies — first request will hang in readLine.
         // We enqueue a second request behind it, close the server peer to
         // unblock the first task's read with EOF, then disconnect, and
-        // assert the second one throws notConnected (generation mismatch).
+        // assert the second one throws notConnected, because the session it
+        // captured is no longer the connection's.
 
         let firstTask = Task { try await conn.requestStatus() }
         // Give the first request enough time to take the queue head and start
