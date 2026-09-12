@@ -161,6 +161,10 @@ struct DaemonConnectionReconnectTests {
         let log = FactoryLog()
         let conn = DaemonConnection(connectionFactory: {
             let fd = try log.make()
+            // Nothing on this path sets SO_NOSIGPIPE, and a write to a peer the
+            // teardown has closed would kill the test process rather than fail
+            // a test. See disconnectDuringEstablishmentClosesTheDescriptor.
+            _ = setNoSigPipe(fd)
             // Answer the first heartbeat so monitorConnection enters its 30s
             // sleep. Closing the peer before this would test a blocked
             // request instead, which is a different path.
@@ -172,8 +176,17 @@ struct DaemonConnectionReconnectTests {
             return fd
         })
         conn.connect()
-        await waitUntil { log.count >= 1 }
-        #expect(log.count == 1)
+        // `lastStatus` rather than `log.count`: it proves the heartbeat round
+        // trip completed, which both puts monitorConnection into its sleep and
+        // means pair 0's server body has returned, so the close below cannot
+        // free a descriptor number out from under a parked read.
+        await waitUntil { conn.lastStatus != nil }
+
+        // Longer than the 1 second backoff floor. Without this the test is
+        // satisfied by anything that reconnects within the budget below —
+        // including a bare timer that ignores why the connection died.
+        try await Task.sleep(for: .milliseconds(1500))
+        #expect(log.count == 1, "a healthy connection must not reconnect")
 
         // The monitor is now asleep. Close the peer and require a prompt
         // reconnect rather than a 30 second one.
@@ -190,13 +203,20 @@ struct DaemonConnectionReconnectTests {
         let log = FactoryLog()
         let conn = DaemonConnection(connectionFactory: {
             let fd = try log.make()
+            _ = setNoSigPipe(fd)
             let serverFD = log.pairs.last!.serverFD
             // Valid JSON of the wrong shape. It carries no `type`, so it
             // reaches the waiter; the decode then fails and monitorConnection
-            // throws, which is what ends the race. The socket stays open, so
-            // the session's own child would never finish on its own — this is
-            // the path where `cancelAll()` is what lets the group return.
+            // throws, and that throw is what returns from `group.next()`.
+            // Measured: this test still passes with `cancelAll()` deleted,
+            // because `close()` shuts the descriptor down and the woken reader
+            // finishes the session's child too. Only
+            // `idleEOFReconnectsPromptly` pins `cancelAll()`; this one pins
+            // BR-13, that a heartbeat failure on a live socket reconnects.
             _ = blockingServer {
+                // The server owns serverFD, so the test cannot free the number
+                // back to the next socketpair while this thread is in a read.
+                defer { Darwin.close(serverFD) }
                 guard readLineSync(from: serverFD) != nil else { return }
                 writeAll(#"{"unexpected":"shape"}"# + "\n", to: serverFD)
             }
@@ -207,13 +227,16 @@ struct DaemonConnectionReconnectTests {
         #expect(log.count >= 2, "heartbeat failure did not reconnect: \(log.count) attempts")
 
         conn.disconnect()
-        log.closeServers()
     }
 
     @Test("a reconnect leaves the previous session finished")
     func reconnectFinishesPreviousSession() async throws {
         let log = FactoryLog()
-        let conn = DaemonConnection(connectionFactory: { try log.make() })
+        let conn = DaemonConnection(connectionFactory: {
+            let fd = try log.make()
+            _ = setNoSigPipe(fd)
+            return fd
+        })
         conn.connect()
         await waitUntil { conn.sessionForTesting != nil }
         let first = conn.sessionForTesting

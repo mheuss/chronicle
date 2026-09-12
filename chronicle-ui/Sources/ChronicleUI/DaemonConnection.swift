@@ -420,16 +420,18 @@ final class DaemonConnection {
     /// Run the heartbeat and the session's completion against each other, and
     /// end the connection when either finishes.
     ///
-    /// Nothing throws out of the group body: a rethrowing `group.next()` would
-    /// unwind before the wake-ups below, and the group would then wait forever
-    /// on a child nobody resumed.
-    private func raceHeartbeatAgainstSession(_ session: ConnectionSession) async {
+    /// Nothing throws out of the group body. A throwing group does cancel and
+    /// await its children, so most of them would still be freed — but the
+    /// heartbeat can be parked inside `send`, which does not observe
+    /// cancellation, and a rethrowing `group.next()` would unwind past the
+    /// `close()` below that is the only thing able to free it.
+    private func raceHeartbeatAgainstSession(_ racedSession: ConnectionSession) async {
         await withTaskGroup(of: Void.self) { group in
-            group.addTask { [weak self] in
-                _ = try? await self?.monitorConnection()
+            group.addTask {
+                _ = try? await self.monitorConnection()
             }
             group.addTask {
-                await session.waitUntilFinished()
+                await racedSession.waitUntilFinished()
             }
 
             _ = await group.next()
@@ -440,16 +442,19 @@ final class DaemonConnection {
             // this whole feature exists to remove. `idleEOFReconnectsPromptly`
             // fails when it is removed.
             group.cancelAll()
-            // `close` covers what cancellation cannot reach: the request path
-            // does not observe cancellation, so a caller suspended in `send` is
-            // freed by the session's teardown or not at all. That keeps the
-            // group able to finish on its own rather than resting on the
-            // `closeSocket()` the caller runs afterwards. No test fails without
-            // it today — every path that reaches here has already resumed its
-            // waiters — so it is the invariant, not a reproduced bug.
+            // `close` is the race's own teardown of the session it was
+            // handed. No test fails without it, and it never unblocks the
+            // group: on both exits the children are already free — a finished
+            // session resumed its waiters, and a returned monitor leaves only
+            // the other child, which `cancelAll` above releases. It stays
+            // because the backoff tail's cancellation guard can skip
+            // `closeSocket()` entirely, and this is then the only thing that
+            // closes what this iteration built. Redundant in every interleaving
+            // reachable today, since `disconnect()` closes the current session
+            // before a cancelled task resumes.
             // Both calls are synchronous, so their order between themselves is
             // not load-bearing; swapping them changes nothing observable.
-            session.close()
+            racedSession.close()
             await group.waitForAll()
         }
     }
