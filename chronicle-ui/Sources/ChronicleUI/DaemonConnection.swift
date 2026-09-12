@@ -129,20 +129,22 @@ final class DaemonConnection {
                     session = newSession
                     state = .connected
                     delay = .seconds(1)
-                    try await monitorConnection()
+                    await raceHeartbeatAgainstSession(newSession)
                 } catch is CancellationError {
                     break
                 } catch {
-                    // Only this task's own session is ours to close. A
-                    // cancelled task is one `disconnect()` already cleaned up
-                    // after, and by the time its error unwinds a newer
-                    // `connect()` may have published a session of its own.
-                    guard !Task.isCancelled else { break }
-                    closeSocket()
-                    state = .disconnected
-                    try? await Task.sleep(for: delay)
-                    delay = min(delay * 2, .seconds(30))
+                    // Establishment failed. The backoff below is shared with
+                    // the race returning, which does not throw.
                 }
+                // Only this task's own session is ours to close. A cancelled
+                // task is one `disconnect()` already cleaned up after, and by
+                // the time it reaches here a newer `connect()` may have
+                // published a session of its own.
+                guard !Task.isCancelled else { break }
+                closeSocket()
+                state = .disconnected
+                try? await Task.sleep(for: delay)
+                delay = min(delay * 2, .seconds(30))
             }
         }
     }
@@ -413,6 +415,43 @@ final class DaemonConnection {
         }
 
         return fd
+    }
+
+    /// Run the heartbeat and the session's completion against each other, and
+    /// end the connection when either finishes.
+    ///
+    /// Nothing throws out of the group body: a rethrowing `group.next()` would
+    /// unwind before the wake-ups below, and the group would then wait forever
+    /// on a child nobody resumed.
+    private func raceHeartbeatAgainstSession(_ session: ConnectionSession) async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { [weak self] in
+                _ = try? await self?.monitorConnection()
+            }
+            group.addTask {
+                await session.waitUntilFinished()
+            }
+
+            _ = await group.next()
+            // `cancelAll` is what makes an idle end of file prompt:
+            // monitorConnection spends almost all its time in a 30 second
+            // Task.sleep, and without this a session that finishes just after a
+            // successful heartbeat waits out the rest of that sleep — the delay
+            // this whole feature exists to remove. `idleEOFReconnectsPromptly`
+            // fails when it is removed.
+            group.cancelAll()
+            // `close` covers what cancellation cannot reach: the request path
+            // does not observe cancellation, so a caller suspended in `send` is
+            // freed by the session's teardown or not at all. That keeps the
+            // group able to finish on its own rather than resting on the
+            // `closeSocket()` the caller runs afterwards. No test fails without
+            // it today — every path that reaches here has already resumed its
+            // waiters — so it is the invariant, not a reproduced bug.
+            // Both calls are synchronous, so their order between themselves is
+            // not load-bearing; swapping them changes nothing observable.
+            session.close()
+            await group.waitForAll()
+        }
     }
 
     private func monitorConnection() async throws {

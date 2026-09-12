@@ -155,4 +155,73 @@ struct DaemonConnectionReconnectTests {
         // shuts the descriptor down and the woken reader closes it. The two
         // are indistinguishable from the peer.
     }
+
+    @Test("an idle end of file reconnects without waiting for the heartbeat")
+    func idleEOFReconnectsPromptly() async throws {
+        let log = FactoryLog()
+        let conn = DaemonConnection(connectionFactory: {
+            let fd = try log.make()
+            // Answer the first heartbeat so monitorConnection enters its 30s
+            // sleep. Closing the peer before this would test a blocked
+            // request instead, which is a different path.
+            let serverFD = log.pairs.last!.serverFD
+            _ = blockingServer {
+                guard readLineSync(from: serverFD) != nil else { return }
+                writeAll(#"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"0.0.1"}}"# + "\n", to: serverFD)
+            }
+            return fd
+        })
+        conn.connect()
+        await waitUntil { log.count >= 1 }
+        #expect(log.count == 1)
+
+        // The monitor is now asleep. Close the peer and require a prompt
+        // reconnect rather than a 30 second one.
+        Darwin.close(log.pairs[0].serverFD)
+        await waitUntil(ticks: 300) { log.count >= 2 }
+        #expect(log.count >= 2, "idle EOF did not reconnect: \(log.count) attempts")
+
+        conn.disconnect()
+        log.closeServers(from: 1)
+    }
+
+    @Test("a heartbeat failure on a live socket reconnects")
+    func heartbeatFailureReconnects() async throws {
+        let log = FactoryLog()
+        let conn = DaemonConnection(connectionFactory: {
+            let fd = try log.make()
+            let serverFD = log.pairs.last!.serverFD
+            // Valid JSON of the wrong shape: monitorConnection throws while
+            // the socket stays open, so only cancellation ends the race.
+            _ = blockingServer {
+                guard readLineSync(from: serverFD) != nil else { return }
+                writeAll(#"{"unexpected":"shape"}"# + "\n", to: serverFD)
+            }
+            return fd
+        })
+        conn.connect()
+        await waitUntil(ticks: 300) { log.count >= 2 }
+        #expect(log.count >= 2, "heartbeat failure did not reconnect: \(log.count) attempts")
+
+        conn.disconnect()
+        log.closeServers()
+    }
+
+    @Test("a reconnect leaves the previous session finished")
+    func reconnectFinishesPreviousSession() async throws {
+        let log = FactoryLog()
+        let conn = DaemonConnection(connectionFactory: { try log.make() })
+        conn.connect()
+        await waitUntil { conn.sessionForTesting != nil }
+        let first = conn.sessionForTesting
+        #expect(first != nil)
+
+        Darwin.close(log.pairs[0].serverFD)
+        await waitUntil(ticks: 300) { first?.state == .finished && conn.sessionForTesting !== first }
+        #expect(first?.state == .finished)
+        #expect(conn.sessionForTesting !== first)
+
+        conn.disconnect()
+        log.closeServers(from: 1)
+    }
 }
