@@ -49,10 +49,11 @@ impl Retention {
     /// delegate here. `Days`'s field is public, so this is not the only way to
     /// build a `Retention` — a caller or `Deserialize` can still bypass it.
     ///
-    /// The bound check deliberately duplicates the one in `chronicle-storage`'s
-    /// `run_cleanup_interruptible`; see docs/development/storage.md, "Two guards
-    /// on one invariant means the outer one is untestable", for when that is
-    /// legitimate. Delete the arm and
+    /// The bound check duplicates the one in `chronicle-storage`'s
+    /// `run_cleanup_interruptible`. docs/development/storage.md, "Two guards on
+    /// one invariant means the outer one is untestable", argues against exactly
+    /// that — but its test is whether an assertion can tell the two apart. This
+    /// one is distinguishable: delete the arm and
     /// `one_past_the_bound_is_refused_as_above_max` fails.
     pub fn classify(raw: &str) -> Result<Self, Rejected> {
         let n: i64 = raw.trim().parse().map_err(|_| Rejected::NotANumber)?;

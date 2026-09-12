@@ -274,8 +274,10 @@ pub struct StorageStats {
     /// What the configured retention means, parsed by `Retention::classify`.
     ///
     /// Replaced a bare day count, which could not say "off" or "unusable".
-    /// See HEU-625 and ADR-015.
-    pub retention: Retention,
+    /// `None` is a third thing it could not say: the daemon failed to read the
+    /// setting and is not claiming a policy. The UI renders that as
+    /// "Unavailable" rather than a number. See HEU-625 and ADR-015.
+    pub retention: Option<Retention>,
     /// Media rows served over IPC this process lifetime. The denominator for
     /// `media_absent` — a bare absent count cannot be interpreted without it.
     ///
@@ -677,7 +679,7 @@ mod tests {
             screenshot_count: 100,
             audio_segment_count: 10,
             oldest_entry_ms: Some(1_700_000_000_000),
-            retention: Retention::Days { value: 30 },
+            retention: Some(Retention::Days { value: 30 }),
             media_served: 900,
             media_absent: 3,
         };
@@ -702,7 +704,7 @@ mod tests {
         // before this cannot decode StorageStats at all — accepted per AD-2
         // because the .app ships both halves together.
         let disabled = StorageStats {
-            retention: Retention::Disabled,
+            retention: Some(Retention::Disabled),
             ..StorageStats::default()
         };
         let v: serde_json::Value =
@@ -714,7 +716,7 @@ mod tests {
         );
 
         let days = StorageStats {
-            retention: Retention::Days { value: 7 },
+            retention: Some(Retention::Days { value: 7 }),
             ..StorageStats::default()
         };
         let v: serde_json::Value =
@@ -727,13 +729,27 @@ mod tests {
         // to keep "bad data" from the UI would pass every other test in the
         // tree and silently turn the invalid copy into "Unavailable".
         let invalid = StorageStats {
-            retention: Retention::Invalid,
+            retention: Some(Retention::Invalid),
             ..StorageStats::default()
         };
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&invalid).unwrap()).unwrap();
         assert_eq!(v["retention"]["kind"], "invalid");
         assert!(v.get("retention_days").is_none(), "{v}");
+    }
+
+    #[test]
+    fn an_unread_retention_is_null_rather_than_a_day_count() {
+        // The daemon failing to read the setting is not a policy. Collapsing
+        // this to a default would put a number the daemon never read in front
+        // of the user, which is the defect HEU-625 removes.
+        let unread = StorageStats {
+            retention: None,
+            ..StorageStats::default()
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&unread).unwrap()).unwrap();
+        assert!(v["retention"].is_null(), "{v}");
     }
 
     #[test]
@@ -744,7 +760,7 @@ mod tests {
             screenshot_count: 0,
             audio_segment_count: 0,
             oldest_entry_ms: None,
-            retention: Retention::Days { value: 30 },
+            retention: Some(Retention::Days { value: 30 }),
             media_served: 0,
             media_absent: 0,
         };

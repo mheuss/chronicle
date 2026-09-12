@@ -269,13 +269,10 @@ where
                     }
                     // `warn`, unlike the `info` beside it: `Disabled` is a
                     // setting someone chose, a refused value is a fault nobody
-                    // chose. The value itself is not named here — `ConfigInvalid`
-                    // carries no payload, and `Storage::run_cleanup_interruptible`
-                    // logs the offending string where it still has it.
-                    // Deliberately not `{stats:?}`: every count in it is a
-                    // structural zero, since nothing was examined. The
-                    // offending value is named once, by the storage warning
-                    // this outcome comes from.
+                    // chose. Neither the value nor `{stats:?}` appears here —
+                    // `ConfigInvalid` carries no payload and its counts are
+                    // structural zeros. The storage warning this outcome comes
+                    // from names the value once.
                     CleanupOutcome::ConfigInvalid => log::warn!(
                         "retention cleanup skipped, no checkpoint recorded: \
                          retention_days was refused"

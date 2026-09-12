@@ -88,7 +88,7 @@ pub struct StorageStatusSnapshot {
     pub screenshot_count: u64,
     pub audio_segment_count: u64,
     pub oldest_entry_ms: Option<i64>,
-    pub retention: chronicle_ipc::Retention,
+    pub retention: Option<chronicle_ipc::Retention>,
 }
 
 /// Daemon-side request handler.
@@ -633,7 +633,9 @@ mod tests {
         // The literal, not `Retention::default()` — that would assert X == X
         // now that the impl is derived, and nothing else in the tree pins what
         // a defaulted snapshot claims about retention.
-        assert_eq!(snap.retention, chronicle_ipc::Retention::Days { value: 30 });
+        // `None`, not a day count: a snapshot the daemon has not populated is
+        // not a claim that retention is 30 days.
+        assert_eq!(snap.retention, None);
     }
 
     #[test]
@@ -1551,7 +1553,7 @@ mod tests {
             screenshot_count: 50,
             audio_segment_count: 5,
             oldest_entry_ms: Some(1_700_000_000_000),
-            retention: chronicle_ipc::Retention::Days { value: 14 },
+            retention: Some(chronicle_ipc::Retention::Days { value: 14 }),
         }));
         capture_paused.store(true, std::sync::atomic::Ordering::Release);
 
@@ -1572,7 +1574,7 @@ mod tests {
         assert_eq!(data.storage.oldest_entry_ms, Some(1_700_000_000_000));
         assert_eq!(
             data.storage.retention,
-            chronicle_ipc::Retention::Days { value: 14 }
+            Some(chronicle_ipc::Retention::Days { value: 14 })
         );
     }
 }

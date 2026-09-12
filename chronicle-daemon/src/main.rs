@@ -24,27 +24,41 @@ use crate::capture_supervisor::{CaptureSupervisor, ReconcileOutcome, StartRetry}
 
 /// Read the configured retention for the status snapshot.
 ///
-/// A failed query is a database fault, not a verdict on the setting, so
-/// `on_error` — what the caller already believes — is returned rather than a
-/// default. The refresher passes what it last published; boot passes the
-/// default because there is nothing earlier.
+/// A failed query is a database fault, not a verdict on the setting. `previous`
+/// is what the caller already published, if anything: the refresher passes its
+/// last snapshot, boot passes `None` because nothing came before it. Boot
+/// therefore reports `None`, which the wire carries as "unknown" and the UI
+/// renders as "Unavailable". Inventing a day count here would be a claim about
+/// the user's configuration made because a query failed — the defect this
+/// ticket removes, on the error path.
 ///
 /// The unparseable-value warning that `parse_retention_days` used to log here
 /// every 30 seconds now fires once per cleanup run, in
-/// `Storage::run_cleanup_interruptible`, which still has the raw string.
+/// `Storage::run_cleanup_interruptible`, which still has the raw string. That
+/// first run is `CLEANUP_START_DELAY` after boot, so a daemon that lives under
+/// three minutes never mentions a corrupt setting at all.
 async fn retention_for_snapshot(
     storage: &Storage,
-    on_error: chronicle_ipc::Retention,
-) -> chronicle_ipc::Retention {
+    previous: Option<chronicle_ipc::Retention>,
+) -> Option<chronicle_ipc::Retention> {
     match storage.retention().await {
-        Ok(r) => r,
-        Err(e) => {
-            log::warn!(
-                "status: reading retention_days failed, keeping the last known \
-                 value ({on_error:?}): {e}"
-            );
-            on_error
-        }
+        Ok(r) => Some(r),
+        Err(e) => match previous {
+            Some(known) => {
+                log::warn!(
+                    "status: reading retention_days failed, keeping the last \
+                     known value ({known:?}): {e}"
+                );
+                Some(known)
+            }
+            None => {
+                log::warn!(
+                    "status: reading retention_days failed with no previous \
+                     value; reporting it as unknown: {e}"
+                );
+                None
+            }
+        },
     }
 }
 
@@ -311,8 +325,7 @@ async fn main() -> Result<()> {
                 screenshot_count: s.screenshot_count,
                 audio_segment_count: s.audio_segment_count,
                 oldest_entry_ms: s.oldest_entry,
-                retention: retention_for_snapshot(&storage, chronicle_ipc::Retention::default())
-                    .await,
+                retention: retention_for_snapshot(&storage, None).await,
             },
             Err(e) => {
                 // `status()` failing says nothing about the retention setting,
@@ -322,11 +335,7 @@ async fn main() -> Result<()> {
                 // otherwise be served that claim for up to one refresh period.
                 log::warn!("initial storage status read failed: {e}");
                 crate::ipc_handler::StorageStatusSnapshot {
-                    retention: retention_for_snapshot(
-                        &storage,
-                        chronicle_ipc::Retention::default(),
-                    )
-                    .await,
+                    retention: retention_for_snapshot(&storage, None).await,
                     ..Default::default()
                 }
             }

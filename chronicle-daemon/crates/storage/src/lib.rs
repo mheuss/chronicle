@@ -836,10 +836,8 @@ mod tests {
     }
 
     /// The guard must not bless a value its readers refuse.
-    ///
-    /// The guard must not bless a value its readers refuse. `Retention::classify`
-    /// trims and the guard stores the trimmed form, so a padded `" 30 "` cannot
-    /// reach a reader that does not.
+    /// `Retention::classify` trims and the guard stores the trimmed form, so a
+    /// padded `" 30 "` cannot reach a reader that does not.
     ///
     /// Asserted on `outcome`, not `is_ok`: a refused value is now
     /// `Ok(CleanupOutcome::ConfigInvalid)`, so `is_ok` would not catch it.
