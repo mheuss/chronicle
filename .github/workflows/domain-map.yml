@@ -1,0 +1,31 @@
+name: Domain map
+
+# The map in docs/domains/ says which domain owns each source file. It only
+# stays true if something notices when the code moves out from under it.
+# Check 8 is that alarm: it rebuilds the inventory from the repo instead of
+# trusting INVENTORY.txt, so a new source file nobody classified fails here.
+# Checks 3 and 4 guard the map's own grammar.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Placement tests (check 3)
+        run: bash docs/domains/checks/check3_placement_tests.sh docs/domains .
+
+      - name: Citations resolve (check 4)
+        run: bash docs/domains/checks/check4_citations.sh docs/domains .
+
+      - name: Inventory coverage (check 8)
+        run: bash docs/domains/checks/check8_coverage.sh docs/domains .
