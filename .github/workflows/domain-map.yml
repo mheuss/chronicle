@@ -10,12 +10,17 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: domain-map-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
@@ -27,6 +32,11 @@ jobs:
 
       - name: Inventory coverage (check 8)
         run: bash docs/domains/checks/check8_coverage.sh docs/domains .
+
+      # Runs directly so a deleted OFFSHOOTS_RESOLVED.txt fails the job. Its
+      # exit 2 means the local half passed and the file is gone.
+      - name: Offshoots recorded (check 6)
+        run: bash docs/domains/checks/check6_offshoots.sh docs/domains .
 
       - name: Falsification harness
         run: bash docs/domains/checks/falsify.sh

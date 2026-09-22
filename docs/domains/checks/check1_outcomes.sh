@@ -19,7 +19,7 @@ python3 - "$REG" "$MAP_ROOT" <<'PY'
 import re, sys, os
 
 reg_path, map_root = sys.argv[1], sys.argv[2]
-text = open(reg_path).read()
+text = open(reg_path, encoding='utf-8').read()
 
 fail = []
 
@@ -62,6 +62,7 @@ if not rows:
     print("check1: examined zero register rows")
     sys.exit(1)
 
+WALK_ROWS = 14
 OUTCOMES = {'confirmed', 'merged', 'dropped', 'split'}
 by_name, by_num = {}, {}
 
@@ -78,7 +79,10 @@ for cells in rows:
     # a sitting from unless Roots and Symbols came with it.
     if not roots:
         fail.append(f"row {num} ({name}): has no Roots")
-    if int(num) > 14 and not symbols:
+    # The walk opened with fourteen candidates. A row numbered above that was
+    # appended mid-walk, and an appended row has to carry the Symbols a sitting
+    # greps from, because no design manifest supplied them.
+    if int(num) > WALK_ROWS and not symbols:
         fail.append(f"row {num} ({name}): appended row has no Symbols")
 
     if outcome and outcome not in OUTCOMES:

@@ -715,6 +715,8 @@ what was true during the walk, not of the tree today.
   legible, where the same case against 64 files is not. Seventeen cases run
   against it, each on a fresh copy.
 
+  **Superseded 2026-09-22:** twenty-five cases run against the fixture.
+
   Its own clean gate runs first and aborts the section if any of the three is
   not green on it. That mirrors the live gate's reasoning: once the baseline is
   red, "the fixture broke it" and "it was already broken" are the same exit
@@ -1092,6 +1094,10 @@ what was true during the walk, not of the tree today.
   names — is the one CHR-155 needed and never reached. It had no case. Nor did
   the duplicate-ID branch. Both do now, and both bite. The harness is at 40
   cases, 39 bit, one no-op control.
+
+  **Superseded 2026-09-22:** fourteen cases were added for check 1, which until
+  then was the one tracked check with none. The harness is at 54 cases, 53 bit,
+  one no-op control.
 
   Writing them is what proved the guard live rather than arguing it from the
   source. Planting `CHR-999` in a copy of the tree fails check 6 with the exact

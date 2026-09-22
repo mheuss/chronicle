@@ -59,6 +59,23 @@ trap 'rm -f "$FRESH"' EXIT
     /usr/bin/find chronicle-ui/Sources -name 'Info.plist' || exit 1 ) | sort ) > "$FRESH" \
   || { echo "check8: inventory regeneration failed; the globs did not complete"; exit 1; }
 
+# The globs above name three roots. A source file outside all three is invisible
+# to them, so a new top-level crate would be unowned and this check would still
+# pass. This sweep looks everywhere else and fails on anything it finds, which
+# turns a silent under-enumeration into a named source root the map has not seen.
+STRAY=$(cd "$REPO_ABS" && /usr/bin/find . \
+    -path './.git' -prune -o \
+    -path './chronicle-daemon' -prune -o \
+    -path './chronicle-ui' -prune -o \
+    -path '*/target' -prune -o -path '*/.build' -prune -o \
+    \( -name '*.rs' -o -name '*.swift' \) -print) \
+  || { echo "check8: stray-source sweep failed"; exit 1; }
+if [ -n "$STRAY" ]; then
+    echo "check8: source files outside every known root; the map does not cover them:"
+    echo "$STRAY" | sed 's|^\./|  |'
+    exit 1
+fi
+
 python3 - "$MAP_ROOT" "$FRESH" <<'PY'
 import re, sys, os
 
@@ -171,7 +188,10 @@ if reg_block is None:
 
 confirmed = {}
 for cells in register_rows(reg_block, fail):
-    if len(cells) >= 8 and cells[2] == 'confirmed':
+    if len(cells) < 8:
+        fail.append(f"row {cells[0]}: has {len(cells)} cells, expected 8")
+        continue
+    if cells[2] == 'confirmed':
         confirmed[cells[1]] = cells[4]
 
 if not confirmed:

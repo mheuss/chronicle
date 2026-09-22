@@ -54,62 +54,14 @@ trap '[ -n "$FIX" ] && rm -rf "$FIX"' EXIT
 # ---------------------------------------------------------------------------
 echo "== clean case =="
 for f in "$CHECKS"/check[0-9]*.sh; do
-    # Output is captured, not discarded, because the tolerance below has to know
-    # *why* a check failed. Keyed on the exit code alone it accepted check8's
-    # "no inventory" as pre-close, so falsify.sh reported the suite honest with
-    # one of the map's four inputs deleted.
-    out=$(bash "$f" "$MAP_ABS" "$REPO_ABS" 2>&1)
+    bash "$f" "$MAP_ABS" "$REPO_ABS" >/dev/null 2>&1
     rc=$?
     printf '  %-32s exit=%s\n' "$(basename "$f")" "$rc"
-    # check1 documents exit 3 as "grammar passes, register incomplete" -- the
-    # normal mid-walk state. Treating it as red made the harness unrunnable
-    # during exactly the stretch when you most want to be falsifying checks.
+    # The clean case must be all-zero. Every tolerance that used to live here
+    # was for a pre-close state that cannot recur now the map is committed, and
+    # each one turned a deleted input into a green run.
     case "$(basename "$f"):$rc" in
-        check1_outcomes.sh:0|check1_outcomes.sh:3) ;;
         *:0) ;;
-        # Dead branches as of the 2026-09-21 close, kept deliberately.
-        #
-        # Before Tasks 28 and 29 wrote SYNTHESIS.md and OFFSHOOTS_RESOLVED.txt,
-        # these three could not be green on the live tree and their failure was
-        # the documented pre-close state rather than a defect. Both files exist
-        # now, so every guard below fails its `[ -f ... ]` test and aborts --
-        # which is the correct behaviour, and is what makes these branches
-        # self-expiring rather than something anyone had to remember to remove.
-        #
-        # They stay because the tree they guard is untracked and unbacked: a lost
-        # or half-restored docs/domains puts the suite back in the pre-close state,
-        # and a harness that abort-with-reason beats one that reports a bare
-        # failure. The reason-check keeps them honest either way.
-        check5_synthesis.sh:1|check8_coverage.sh:1)
-            if [ -f "$MAP_ABS/SYNTHESIS.md" ]; then
-                echo "falsify: $(basename "$f") fails with SYNTHESIS.md present; that is a real failure"
-                exit 1
-            fi
-            case "$out" in
-                *"no synthesis at"*) ;;
-                *)
-                    echo "falsify: $(basename "$f") failed for a reason other than the missing synthesis:"
-                    echo "$out"
-                    exit 1
-                    ;;
-            esac
-            printf '  %-32s %s\n' "" "pre-close: no SYNTHESIS.md yet, falsified against the synthetic fixture"
-            ;;
-        check6_offshoots.sh:2)
-            if [ -f "$MAP_ABS/OFFSHOOTS_RESOLVED.txt" ]; then
-                echo "falsify: check6_offshoots.sh exits 2 with OFFSHOOTS_RESOLVED.txt present; that is a real failure"
-                exit 1
-            fi
-            case "$out" in
-                *"OFFSHOOTS_RESOLVED.txt is absent"*) ;;
-                *)
-                    echo "falsify: check6_offshoots.sh exited 2 for an unexpected reason:"
-                    echo "$out"
-                    exit 1
-                    ;;
-            esac
-            printf '  %-32s %s\n' "" "pre-close: no OFFSHOOTS_RESOLVED.txt yet, falsified against the synthetic fixture"
-            ;;
         *)
             echo "falsify: $(basename "$f") is not green on the live tree; fix that before falsifying anything"
             exit 1
@@ -178,6 +130,50 @@ run() {
     fi
     rm -rf "$FIX"; FIX=""
 }
+
+echo "== check 1: register grammar, merge chains and split children =="
+run "Decided is not YYYY-MM-DD" check1_outcomes.sh \
+    'perl -0pi -e "s/\| 1 \| capture \| confirmed \| 2026-09-16 \| maps\/capture.md \|/| 1 | capture | confirmed | 16-09-2026 | maps\/capture.md |/" domains/REGISTER.md' \
+    "Decided '16-09-2026' is not YYYY-MM-DD"
+run "confirmed Detail is not maps/<name>.md" check1_outcomes.sh \
+    'perl -0pi -e "s/\| 1 \| capture \| confirmed \| 2026-09-16 \| maps\/capture.md \|/| 1 | capture | confirmed | 2026-09-16 | capture.md |/" domains/REGISTER.md' \
+    "confirmed Detail 'capture.md' is not maps/<name>.md"
+run "a row with no Roots" check1_outcomes.sh \
+    'perl -0pi -e "s/\| crates\/capture\/src\/; src\/capture_runtime.rs; src\/capture_supervisor.rs \|/|  |/" domains/REGISTER.md' \
+    "row 1 (capture): has no Roots"
+run "an outcome outside the vocabulary" check1_outcomes.sh \
+    'perl -0pi -e "s/\| 5 \| audio-encoding \| merged \|/| 5 | audio-encoding | absorbed |/" domains/REGISTER.md' \
+    "outcome 'absorbed' not in"
+run "merged Detail is not 'into <candidate>'" check1_outcomes.sh \
+    'perl -0pi -e "s/\| 5 \| audio-encoding \| merged \| 2026-09-16 \| into audio \|/| 5 | audio-encoding | merged | 2026-09-16 | audio |/" domains/REGISTER.md' \
+    "merged Detail 'audio' is not 'into <candidate>'"
+run "a merge into a candidate with no row" check1_outcomes.sh \
+    'perl -0pi -e "s/\| 5 \| audio-encoding \| merged \| 2026-09-16 \| into audio \|/| 5 | audio-encoding | merged | 2026-09-16 | into ghost |/" domains/REGISTER.md' \
+    "merges into 'ghost', which is not a register row"
+run "a merge chain that cycles" check1_outcomes.sh \
+    'perl -0pi -e "s/\| 5 \| audio-encoding \| merged \| 2026-09-16 \| into audio \|/| 5 | audio-encoding | merged | 2026-09-16 | into audio-encoding |/" domains/REGISTER.md' \
+    "merge chain cycles at 'audio-encoding'"
+run "dropped Detail is not 'cross-cutting: ...'" check1_outcomes.sh \
+    'perl -0pi -e "s/\| 5 \| audio-encoding \| merged \| 2026-09-16 \| into audio \|/| 5 | audio-encoding | dropped | 2026-09-16 | x |/" domains/REGISTER.md' \
+    "dropped Detail 'x' is not 'cross-cutting: <sentence>'"
+run "split Detail names only one child" check1_outcomes.sh \
+    'perl -0pi -e "s/\| 5 \| audio-encoding \| merged \| 2026-09-16 \| into audio \|/| 5 | audio-encoding | split | 2026-09-16 | into audio |/" domains/REGISTER.md' \
+    "split Detail 'into audio' is not 'into <name>, <name>"
+run "a split naming a child with no row" check1_outcomes.sh \
+    'perl -0pi -e "s/\| 5 \| audio-encoding \| merged \| 2026-09-16 \| into audio \|/| 5 | audio-encoding | split | 2026-09-16 | into ghost1, ghost2 |/" domains/REGISTER.md' \
+    "split names child 'ghost1', which is not a register row"
+run "a decided row with empty Offshoots" check1_outcomes.sh \
+    'perl -0pi -e "s/\| into audio \| none found \|/| into audio |  |/" domains/REGISTER.md' \
+    "decided but Offshoots is empty"
+run "Offshoots that are not CHR- IDs" check1_outcomes.sh \
+    'perl -0pi -e "s/\| into audio \| none found \|/| into audio | CHR-x |/" domains/REGISTER.md' \
+    "is not 'none found' or ', '-separated CHR- IDs"
+run "an appended row with no Symbols" check1_outcomes.sh \
+    'perl -0pi -e "s/(\n\| 14 \|[^\n]*\n)/\$1| 15 | ghost | confirmed | 2026-09-20 | maps\/ghost.md | none found | src\/ |  |\n/" domains/REGISTER.md' \
+    "row 15 (ghost): appended row has no Symbols"
+run "a blocked row naming no register row" check1_outcomes.sh \
+    'perl -0pi -e "s/(\| # \| Candidate \| Waiting on \| Since \| Offshoots \|\n\|---\|---\|---\|---\|---\|\n)/\$1| 9 | ghost | audio | 2026-09-20 | none found |\n/" domains/REGISTER.md' \
+    "blocked row 'ghost' is not a register row"
 
 echo "== check 2: domain files and confirmed rows correspond =="
 run "delete a confirmed domain's file" check2_domain_files.sh \

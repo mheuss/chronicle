@@ -20,6 +20,15 @@ file. It is a question you ask of the file to decide where it belongs.
 **Why a boundary sits where it does** is in `DECISIONS.md`. That file also holds
 the corrections made along the way and a list of what the walk left unfinished.
 
+**Where the evidence lives.** The four claim sections in each domain file cite
+repository source, so every one of those citations resolves. The
+`## How The Existing Documents Saw This` tables and the `**Document
+comparison:**` fields cite `docs/use-cases/`, `docs/decisions/`, `docs/audits/`
+and `.claude/audit/` instead. Those directories are gitignored and are not in
+this repository. What each of them said is recorded here rather than left to be
+re-derived, so the comparison stands on its own for a reader who cannot open
+them.
+
 **A seam** is a contract between two domains. Owning one means the owning domain
 decides the contract's shape. The other endpoint follows. Not every dependency
 is a seam. Domains depend on each other in more places than this table has rows.

@@ -20,7 +20,7 @@
 # Exit 1 = anything else.
 #
 # Exit 2 is not a pass. Design section 5 check 6 requires every recorded ID to
-# resolve in Linear, and MVF-2's exit criterion is that all eight checks pass.
+# resolve in Linear, and MVF-2's exit criterion is that all seven checks pass.
 # It is a distinct code because it is the state the suite sees on its first run,
 # before Linear has been touched, and reporting that as a hard failure would
 # hide a real one sitting next to it.
