@@ -59,14 +59,24 @@ trap 'rm -f "$FRESH"' EXIT
     /usr/bin/find chronicle-ui/Sources -name 'Info.plist' || exit 1 ) | sort ) > "$FRESH" \
   || { echo "check8: inventory regeneration failed; the globs did not complete"; exit 1; }
 
-# The globs above name three roots. A source file outside all three is invisible
-# to them, so a new top-level crate would be unowned and this check would still
-# pass. This sweep looks everywhere else and fails on anything it finds, which
-# turns a silent under-enumeration into a named source root the map has not seen.
+# The globs above name three roots, so a source file outside all three is
+# invisible to them and a new top-level crate would be unowned with this check
+# still passing. This sweep covers the rest of the tree and fails on what it
+# finds, which turns a silent under-enumeration into a named source root.
+#
+# chronicle-daemon is pruned because its glob is recursive over the whole root.
+# chronicle-ui is not: its glob reads only Sources, so pruning the root here
+# would leave a .swift in a sibling directory invisible to both. The three
+# entries pruned under it are the ones whose content does not ship -- tests, the
+# build directory, and the package manifest.
 STRAY=$(cd "$REPO_ABS" && /usr/bin/find . \
     -path './.git' -prune -o \
+    -path './.sop-tmp' -prune -o \
     -path './chronicle-daemon' -prune -o \
-    -path './chronicle-ui' -prune -o \
+    -path './chronicle-ui/Sources' -prune -o \
+    -path './chronicle-ui/Tests' -prune -o \
+    -path './chronicle-ui/.build' -prune -o \
+    -path './chronicle-ui/Package.swift' -prune -o \
     -path '*/target' -prune -o -path '*/.build' -prune -o \
     \( -name '*.rs' -o -name '*.swift' \) -print) \
   || { echo "check8: stray-source sweep failed"; exit 1; }

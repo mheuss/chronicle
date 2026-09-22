@@ -54,7 +54,8 @@ trap '[ -n "$FIX" ] && rm -rf "$FIX"' EXIT
 # ---------------------------------------------------------------------------
 echo "== clean case =="
 for f in "$CHECKS"/check[0-9]*.sh; do
-    bash "$f" "$MAP_ABS" "$REPO_ABS" >/dev/null 2>&1
+    # Output is captured so the abort path can print why, not just that.
+    out=$(bash "$f" "$MAP_ABS" "$REPO_ABS" 2>&1)
     rc=$?
     printf '  %-32s exit=%s\n' "$(basename "$f")" "$rc"
     # The clean case must be all-zero. Every tolerance that used to live here
@@ -64,6 +65,7 @@ for f in "$CHECKS"/check[0-9]*.sh; do
         *:0) ;;
         *)
             echo "falsify: $(basename "$f") is not green on the live tree; fix that before falsifying anything"
+            echo "$out"
             exit 1
             ;;
     esac
@@ -537,6 +539,19 @@ run_synth "an empty INVENTORY.txt must not pass vacuously" check8_coverage.sh \
 run_synth "malformed Owned Files bullet is not silently skipped" check8_coverage.sh \
     'perl -0pi -e "s|^- chronicle-daemon/src/alpha.rs$|- chronicle-daemon/src/alpha.rs\n-chronicle-ui/Sources/ChronicleUI/Beta.swift|m" domains/maps/alpha.md' \
     "alpha.md [Owned Files]: bare prose, not a bullet: '-chronicle-ui/Sources/ChronicleUI/Beta.swift'"
+# The four globs name three roots. These two cases are the reason the sweep
+# after them exists: both files ship, and both were invisible before it.
+run_synth "a source file outside every known root" check8_coverage.sh \
+    'mkdir -p repo/extra && echo "fn main(){}" > repo/extra/stray.rs' \
+    'check8: source files outside every known root'
+run_synth "a .swift beside Sources rather than inside it" check8_coverage.sh \
+    'mkdir -p repo/chronicle-ui/Widgets && echo "struct X {}" > repo/chronicle-ui/Widgets/Stray.swift' \
+    'check8: source files outside every known root'
+# Four siblings report a short register row by name. check8 did not, and read the
+# missing cells as a domain that owns nothing.
+run_synth "a truncated register row is named, not inferred" check8_coverage.sh \
+    'perl -0pi -e "s/^(\| 1 \| alpha \| confirmed \|)[^\n]*$/\$1/m" domains/REGISTER.md' \
+    'cells, expected 8'
 
 
 echo

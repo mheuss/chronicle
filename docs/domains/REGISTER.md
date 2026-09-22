@@ -136,7 +136,7 @@ under `## Close-out` → Still open.
   enforced it. That left the map in one place with nothing backing it up. A
   `git clean -xdf` or a lost checkout destroyed it. A green suite said nothing
   about that. The map, the checks and the falsification harness are now
-  committed. `.github/workflows/domain-map.yml` runs checks 3, 4, 8 and
+  committed. `.github/workflows/domain-map.yml` runs checks 3, 4, 6, 8 and
   `falsify.sh` on every pull request. The baseline check and its manifest were
   deleted with the walk they guarded.
 

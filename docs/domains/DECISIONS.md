@@ -25,6 +25,11 @@ because the plan is in `docs/plans/`, which is gitignored. Task 1 Step 5 routes
 session handoff notes there for the same reason. Decisions are the same
 category.
 
+**Where the evidence lives.** Entries below cite `docs/plans/`,
+`docs/use-cases/`, `docs/decisions/`, `docs/audits/` and `.claude/audit/`. Those
+directories are gitignored and are not in this repository. What each source said
+is quoted here rather than left to be looked up.
+
 **Superseded 2026-09-22.** Entries below refer to `check7_baseline.sh` and
 `BASELINE.txt`, a tripwire that failed on any commit under `docs/`. It existed to
 keep the walk from editing documents it was only meant to read. Both were deleted
@@ -715,7 +720,7 @@ what was true during the walk, not of the tree today.
   legible, where the same case against 64 files is not. Seventeen cases run
   against it, each on a fresh copy.
 
-  **Superseded 2026-09-22:** twenty-five cases run against the fixture.
+  **Superseded 2026-09-22:** twenty-eight cases run against the fixture.
 
   Its own clean gate runs first and aborts the section if any of the three is
   not green on it. That mirrors the live gate's reasoning: once the baseline is
@@ -730,7 +735,7 @@ what was true during the walk, not of the tree today.
   The moment Task 28 or Task 29 writes one, the tolerance stops applying and the
   same failure is treated as real.
 
-  **Superseded 2026-09-22:** the tolerance block is deleted, not expired. A code review found it gated backwards, so the only state it accepted was the one where a tracked input had been removed, and all four CI steps went green on a checkout missing `OFFSHOOTS_RESOLVED.txt`. The clean gate now requires every check to exit 0.
+  **Superseded 2026-09-22:** the tolerance block is deleted, not expired. A code review found it gated backwards. The only state it accepted was one where a tracked input had been removed. All four CI steps went green on a checkout missing `OFFSHOOTS_RESOLVED.txt`. The clean gate now requires every check to exit 0.
 
   A blanket exemption would have gone stale silently on the day the artifact
   landed. That is the failure this whole revision pass has been finding in
@@ -897,7 +902,7 @@ what was true during the walk, not of the tree today.
   Step 3. **As of the close all three are dead branches**, kept deliberately —
   `falsify.sh` explains why at its clean gate.
 
-  **Superseded 2026-09-22:** the tolerance block is deleted, not expired. A code review found it gated backwards, so the only state it accepted was the one where a tracked input had been removed, and all four CI steps went green on a checkout missing `OFFSHOOTS_RESOLVED.txt`. The clean gate now requires every check to exit 0.
+  **Superseded 2026-09-22:** the tolerance block is deleted, not expired. A code review found it gated backwards. The only state it accepted was one where a tracked input had been removed. All four CI steps went green on a checkout missing `OFFSHOOTS_RESOLVED.txt`. The clean gate now requires every check to exit 0.
 
 - **[2026-09-21] The synthesis's `search` row conflated the register's Roots
   column with its Symbols column.** It said the Swift files row 10's Roots named
@@ -1093,7 +1098,7 @@ what was true during the walk, not of the tree today.
   the pre-close state. And a harness that aborts with a reason beats one that
   reports a bare failure.
 
-  **Superseded 2026-09-22:** the tolerance block is deleted, not expired. A code review found it gated backwards, so the only state it accepted was the one where a tracked input had been removed, and all four CI steps went green on a checkout missing `OFFSHOOTS_RESOLVED.txt`. The clean gate now requires every check to exit 0.
+  **Superseded 2026-09-22:** the tolerance block is deleted, not expired. A code review found it gated backwards. The only state it accepted was one where a tracked input had been removed. All four CI steps went green on a checkout missing `OFFSHOOTS_RESOLVED.txt`. The clean gate now requires every check to exit 0.
 
 - **[2026-09-21] Two dead branches in check 6 now have falsification cases.**
   The reverse guard — an ID in `OFFSHOOTS_RESOLVED.txt` that no register row
@@ -1102,8 +1107,9 @@ what was true during the walk, not of the tree today.
   cases, 39 bit, one no-op control.
 
   **Superseded 2026-09-22:** fourteen cases were added for check 1, which until
-  then was the one tracked check with none. The harness is at 54 cases, 53 bit,
-  one no-op control.
+  then was the one tracked check with none. Three more cover the stray-source
+  sweep and the short-row guard. The harness is at 57 cases, 56 bit, one no-op
+  control.
 
   Writing them is what proved the guard live rather than arguing it from the
   source. Planting `CHR-999` in a copy of the tree fails check 6 with the exact
