@@ -6,9 +6,8 @@
 
 Given a source file, this says which domain owns it. Eleven domains own all 64
 production source files — every Rust, Swift, SQL and plist file whose content
-ships inside a binary Chronicle installs, enumerated in `INVENTORY.txt` and
-defined in `INVENTORY.md`. Each is owned exactly once, so the Exclusions table
-below is empty.
+ships inside a binary Chronicle installs, enumerated in `INVENTORY.txt`. Each
+is owned exactly once, so the Exclusions table below is empty.
 
 Eleven domains, fourteen candidates: the walk opened with fourteen and three of
 them merged into others, which the Candidate Outcomes table records.

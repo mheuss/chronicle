@@ -62,7 +62,7 @@ bullet.
 
 ## Sections beyond the template
 
-`TEMPLATE.md` gives the seven sections every domain file carries: the four claim
+Every domain file carries seven sections: the four claim
 sections above, plus `## How The Existing Documents Saw This` and
 `## Offshoots Filed`. Those two are mandatory, not optional additions — check 6
 requires an Offshoots record from every domain file, and a check that tolerates a
@@ -120,5 +120,4 @@ closure check 1 reports:
 > **Not authoritative.** The walk is incomplete. This synthesis covers only the register rows that have an outcome, and the closure checks have not passed.
 ```
 
-The synthesis's four tables are fixed by `SYNTHESIS_TEMPLATE.md`, extracted
-verbatim from Design §2.3.
+The synthesis's four tables are fixed by Design §2.3.

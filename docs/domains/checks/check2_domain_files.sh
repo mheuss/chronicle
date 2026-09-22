@@ -119,8 +119,7 @@ for cells in rows:
                 f"row {num} ({name}): outcome '{outcome or 'empty'}' but a domain file exists at maps/{stray}"
             )
 
-# .DS_Store is excluded by name in check7_baseline.sh's manifest; the two
-# checks agree on it, so opening maps/ in Finder does not red the gate.
+# Opening maps/ in Finder drops a .DS_Store, which is not a domain file.
 entries = {f for f in os.listdir(maps_dir) if f != '.DS_Store'}
 
 # "and nothing else lives in maps/" -- FORMAT.md, restating Design 2.1. Filtering

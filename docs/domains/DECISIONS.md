@@ -21,11 +21,15 @@ Three kinds are worth knowing about before you start:
 The map itself is `SYNTHESIS.md`. This file is why it looks the way it does.
 
 This file lives in `docs/domains/` rather than at the bottom of the plan, because
-the plan is in `docs/plans/`, which is inside the set BR-5 protects — 170 of the
-225 baseline lines are under it, and a probe file there flips check 7 to a
-failure. Re-taking the baseline to clear that would defeat the only control BR-5
-has. Task 1 Step 5 routes session handoff notes here for the same reason;
-decisions are the same category.
+the plan is in `docs/plans/`, which is gitignored. Task 1 Step 5 routes session
+handoff notes there for the same reason; decisions are the same category.
+
+**Superseded 2026-09-22.** Entries below refer to `check7_baseline.sh` and
+`BASELINE.txt`, a tripwire that failed on any commit under `docs/`. It existed to
+keep the walk from editing documents it was only meant to read. Both were deleted
+when the map was committed, along with `RECIPE.md`, `TEMPLATE.md`,
+`SYNTHESIS_TEMPLATE.md` and `INVENTORY.md`. Entries naming them are a record of
+what was true during the walk, not of the tree today.
 
 - **[2026-09-16] No compaction-recovery marker.** `/sop:execute-plan` writes
   `.claude/active-plan/<session>.txt` so a compacted session can find its plan.
@@ -1038,6 +1042,9 @@ decisions are the same category.
   enforces that state, so a green suite guarantees the map exists nowhere else. The
   close-out now says so and names the long-term-home decision as due. That was the
   honest answer to "is the walk closed or does it only report as closed".
+
+  **Superseded 2026-09-22:** the map is committed and gated in CI, and the
+  baseline check is deleted. `REGISTER.md`'s close-out records what was settled.
 
 - **[2026-09-21] Two comments in `falsify.sh` were falsified by this very task.**
   Both said checks 5, 6 and 8 need a synthetic fixture because `SYNTHESIS.md` and

@@ -49,8 +49,7 @@ trap 'rm -f "$FRESH"' EXIT
 # Each find guards itself. A ( a; b; c; d ) group exits with d's status, so a
 # guard on the group alone sees only the last glob -- the first three could fail
 # and the short list would surface as inventory drift, sending whoever reads it
-# to the inventory when the problem was find. check7 makes the same regeneration
-# and its comment calls pipefail load-bearing for the same reason.
+# to the inventory when the problem was find.
 ( cd "$REPO_ABS" && \
   ( /usr/bin/find chronicle-daemon \
         -path '*/target' -prune -o -path '*/tests' -prune -o -path '*/examples' -prune -o \
@@ -144,9 +143,9 @@ fresh = lines(fresh_path)
 # "every production source file resolves to exactly one domain" is vacuously
 # true, which is the silent pass this check exists to be. Every sibling carries
 # the equivalent guard -- check1's "examined zero register rows", check2's "zero
-# confirmed rows", check4's "zero bullets examined", check7's "generated an
-# empty manifest". This is the one whose whole job is set arithmetic, so it is
-# the one where an empty set does the most damage.
+# confirmed rows" and check4's "zero bullets examined". This is the one whose
+# whole job is set arithmetic, so it is the one where an empty set does the
+# most damage.
 if not fresh:
     print("check8: the globs found zero source files under the repo root")
     sys.exit(1)

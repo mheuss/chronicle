@@ -39,8 +39,8 @@ cases=0
 noops=0
 noop_labels=""
 
-# check7_baseline.sh sets the house convention. Without it, a Ctrl-C between
-# mktemp and rm -rf leaves a full copy of docs/domains in /tmp.
+# Without this trap, a Ctrl-C between mktemp and rm -rf leaves a full copy of
+# docs/domains in /tmp.
 FIX=""
 trap '[ -n "$FIX" ] && rm -rf "$FIX"' EXIT
 

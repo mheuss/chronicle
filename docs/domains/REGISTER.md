@@ -47,7 +47,7 @@ that prefix, and `grep` fails silently without it. A Symbols cell reads
 `rust: a; b; swift: X; Y` — the `rust:` and `swift:` tags are what split it
 between the two dependency searches. Some Roots cells carry an exclusion clause
 in prose (`except`, `less the files claimed by`); no command consumes those, so
-apply them by hand. See `RECIPE.md`, "Reading a register cell".
+apply them by hand.
 
 A merge may only name a target that is already confirmed. Design §1.3 requires
 the target's Boundary section to absorb the responsibility, and a file that does
@@ -131,14 +131,14 @@ empty and the synthesis's exclusion table is empty too. The gap is recorded unde
   All nine are open work. BR-4 requires offshoots to be filed and not fixed, so the
   walk left every one of them for later.
 
-  **This map exists in one place and nothing backs it up.** `docs/domains/` is 34
-  untracked files in a working checkout. That is deliberate — the design left it
-  uncommitted and `checks/check7_baseline.sh` enforces it, failing on any commit or
-  tracked diff — but it means a `git clean -xdf` or a lost checkout destroys the
-  whole walk, and a green suite says nothing about that. `RECIPE.md` records that
-  AD-9 defers where this should live, and CHR-150's own scope says the long-term
-  home is decided once the map exists. **It exists. That decision is now due, and
-  only the maintainer can make it.**
+  **Where the map lives, settled 2026-09-22.** For the length of the walk
+  `docs/domains/` was untracked, which the design intended and a baseline check
+  enforced. That left the map in one place with nothing backing it up: a
+  `git clean -xdf` or a lost checkout destroyed it, and a green suite said nothing
+  about that. The map, the checks and the falsification harness are now committed,
+  and `.github/workflows/domain-map.yml` runs checks 3, 4, 8 and `falsify.sh` on
+  every pull request. The baseline check and its manifest were deleted with the
+  walk they guarded.
 
   ### Still open
 
