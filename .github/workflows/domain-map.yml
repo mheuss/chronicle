@@ -5,6 +5,10 @@ name: Domain map
 # Check 8 is that alarm: it rebuilds the inventory from the repo instead of
 # trusting INVENTORY.txt, so a new source file nobody classified fails here.
 # Checks 3 and 4 guard the map's own grammar.
+#
+# falsify.sh runs last and guards the checks themselves. A check that passes
+# everything looks identical to a working one until something breaks it on
+# purpose, so the harness breaks each check in turn and requires it to fail.
 
 on:
   push:
@@ -29,3 +33,6 @@ jobs:
 
       - name: Inventory coverage (check 8)
         run: bash docs/domains/checks/check8_coverage.sh docs/domains .
+
+      - name: Falsification harness
+        run: bash docs/domains/checks/falsify.sh
