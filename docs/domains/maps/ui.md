@@ -17,8 +17,8 @@
 - outside: declaring the wire types these views read — `chronicle-ui/Sources/ChronicleUI/DaemonConnection.swift` — `StatusData`
 - outside: producing the data a view renders, and deciding what a status can report — `chronicle-daemon/crates/storage/src/models.rs` — `StorageStatus`
 
-**Placement test:** Does the file decide what the person sees, what it says, or when it appears? Getting the value it displays belongs to whoever produces that value; carrying it across the socket belongs to IPC.
-**Document comparison:** differs — no document in the corpus describes this domain. `docs/guides/` holds four files and `docs/use-cases/` eight, six of them domain entries, none about the UI, and `docs/use-cases/INDEX.md` names no UI row. Thirteen of the twenty corpus files naming `chronicle-ui` or `ChronicleUI` are under `.claude/audit/`.
+**Placement test:** Does the file decide what the person sees, what it says, or when it appears? Getting the value it displays belongs to whoever produces that value. Carrying it across the socket belongs to IPC.
+**Document comparison:** differs — no document in the corpus describes this domain. `docs/guides/` holds four files. `docs/use-cases/` holds eight, six of them domain entries, none about the UI. `docs/use-cases/INDEX.md` names no UI row. Thirteen of the twenty corpus files naming `chronicle-ui` or `ChronicleUI` are under `.claude/audit/`.
 
 ## Owned Files
 
@@ -63,19 +63,19 @@
 
 Two facts about the walk rather than about the code, recorded because nothing
 else holds them. Row 10's Roots named `SearchPopoverView.swift`,
-`ResultRow.swift` and `SnippetAttributedString.swift`; that sitting merged into
-`storage` and claimed none of the three, so all three arrived here. And this
-row's clause subtracts three candidates by name but only two files, because
-`search` and `ipc-compat` both merged without claiming anything in this
+`ResultRow.swift` and `SnippetAttributedString.swift`. That sitting merged into
+`storage` and claimed none of the three. So all three arrived here. And this
+row's clause subtracts three candidates by name but only two files. That is
+because `search` and `ipc-compat` both merged without claiming anything in this
 directory.
 
 `Info.plist` is owned rather than excluded. `chronicle-ui/Package.swift` both
-excludes it from compilation and links it into `__TEXT` with `-sectcreate`, so it
-ships inside the built binary and meets §3.2's inventory rule. Seven of its ten
-keys are `CFBundle*` identity, `LSMinimumSystemVersion` a deployment floor, and
-`NSHighResolutionCapable` a rendering capability. `LSUIElement` is the one that
+excludes it from compilation and links it into `__TEXT` with `-sectcreate`. So it
+ships inside the built binary. It meets §3.2's inventory rule. Seven of its ten
+keys are `CFBundle*` identity. `LSMinimumSystemVersion` is a deployment floor.
+`NSHighResolutionCapable` is a rendering capability. `LSUIElement` is the one that
 decides what kind of app this is — a menu bar agent with no Dock icon. CHR-75
-will consume this file when the bundle pipeline is built, which changes who edits
+will consume this file when the bundle pipeline is built. That changes who edits
 it, not who owns it today.
 
 ## Offshoots Filed

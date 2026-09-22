@@ -13,7 +13,7 @@
 - outside: keeping the timeline correct across a gap the event describes — `chronicle-daemon/crates/audio/src/accumulator.rs` — `SegmentAccumulator`
 
 **Placement test:** Does the file listen to the operating system for a power transition? Deciding what to do about one belongs to whoever is running at the time.
-**Document comparison:** differs — no document describes this module. `docs/use-cases/pipeline.md` treats system sleep as an input to its reconcile pattern, which is the reaction rather than the observation, and no guide or ADR mentions sleep or wake at all.
+**Document comparison:** differs — no document describes this module. `docs/use-cases/pipeline.md` treats system sleep as an input to its reconcile pattern. That is the reaction rather than the observation. No guide or ADR mentions sleep or wake at all.
 
 ## Owned Files
 

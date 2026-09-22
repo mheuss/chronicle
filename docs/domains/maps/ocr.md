@@ -14,7 +14,7 @@
 - outside: counting what the OCR queue did, which is pipeline's bookkeeping published by IPC — `chronicle-daemon/crates/ipc/src/lib.rs` — `OcrStats`
 
 **Placement test:** Does the file turn an image into text? Deciding when to do that, where the image came from, or what happens to the text belongs to whoever calls it.
-**Document comparison:** differs — `docs/use-cases/pipeline.md` treats `ocr_loop` as a pipeline pattern and no document describes the crate's boundary. The distinction between the extraction and its scheduling is drawn here for the first time.
+**Document comparison:** differs — `docs/use-cases/pipeline.md` treats `ocr_loop` as a pipeline pattern. No document describes the crate's boundary. The distinction between the extraction and its scheduling is drawn here for the first time.
 
 ## Owned Files
 

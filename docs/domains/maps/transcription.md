@@ -19,7 +19,7 @@
 - outside: rendering provisioning state to the user — `chronicle-ui/Sources/ChronicleUI/TranscriptionAlertState.swift` — `TranscriptionAlertState`
 
 **Placement test:** Does the file decide which model is loaded, or turn audio into text? Scheduling the work, storing the result, and showing it to the user each belong to whoever does that.
-**Document comparison:** differs — `docs/use-cases/INDEX.md` gives this domain the Code Location `chronicle-daemon/crates/transcription/`, which stops at the crate and leaves `src/provisioning.rs` in no domain at all.
+**Document comparison:** differs — `docs/use-cases/INDEX.md` gives this domain the Code Location `chronicle-daemon/crates/transcription/`. That stops at the crate. It leaves `src/provisioning.rs` in no domain at all.
 
 ## Owned Files
 
@@ -59,8 +59,8 @@
 
 `src/provisioning.rs` carries nine `design §` citations and the crate's `lib.rs`
 carries none, counted 2026-09-17. That is the worst single-file concentration
-behind CHR-36, which is already labelled `needs-domain` and recorded against
-row 6.
+behind CHR-36. That ticket is already labelled `needs-domain` and recorded
+against row 6.
 
 ## Offshoots Filed
 

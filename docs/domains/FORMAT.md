@@ -1,8 +1,8 @@
 # File Formats
 
 Restates Design §2.1, §2.2, and §2.3 in one place, for the check scripts to be
-written against. Where this file and the design disagree, the design wins and
-this file is the defect.
+written against. Where this file and the design disagree, the design wins. This
+file is the defect.
 
 ## Where domain files live
 
@@ -14,17 +14,17 @@ file" means every path named by a confirmed register row's Detail cell.
 `Status`, `Owns`, and `Code` are required and non-empty, per Design §2.1. A
 present-but-blank field passes a check that only looks for the label.
 
-`Status` is `Decided <date>`, optionally followed by one or more clauses, each
-`, edited <date>`, `, revised <date>` or `, reviewed <date>`. The three say how
-much is known about what happened:
+`Status` is `Decided <date>`. It is optionally followed by one or more clauses,
+each `, edited <date>`, `, revised <date>` or `, reviewed <date>`. The three say
+how much is known about what happened:
 
 - `revised` — a pass read the file and changed a claim in it.
 - `reviewed` — a pass read the file and changed nothing.
-- `edited` — the file changed on that date and no one recorded what the change
+- `edited` — the file changed on that date. No one recorded what the change
   meant. Use it when the only evidence is that the file differs, such as a
   timestamp, and not that someone judged its content.
 
-No check parses past the label, so this grammar is for readers, not for
+No check parses past the label. This grammar is for readers, not for
 scripts.
 
 ## Fields inside `## Boundary`
@@ -33,7 +33,7 @@ scripts.
 inside the `## Boundary` section after its bullets. `Document comparison` starts
 with `differs` or with `deliberately matches`.
 
-Design §2.1 puts both inside Boundary, and closure check 3 is worded against the
+Design §2.1 puts both inside Boundary. Closure check 3 is worded against the
 Boundary section. They are labelled only so check 3 can parse them. They stay
 where the design put them.
 
@@ -55,7 +55,7 @@ prose sentence.
 
 This is what lets check 4 fail. A check that validates only the bullets already
 matching the citation form cannot see a claim written without one. Check 4
-requires every bullet to match or be a sentinel, and fails on anything else.
+requires every bullet to match or be a sentinel. It fails on anything else.
 
 All four sections must be present in every domain file, each with at least one
 bullet.
@@ -64,14 +64,14 @@ bullet.
 
 Every domain file carries seven sections: the four claim
 sections above, plus `## How The Existing Documents Saw This` and
-`## Offshoots Filed`. Those two are mandatory, not optional additions — check 6
-requires an Offshoots record from every domain file, and a check that tolerates a
+`## Offshoots Filed`. Those two are mandatory, not optional additions. Check 6
+requires an Offshoots record from every domain file. A check that tolerates a
 missing `## Offshoots Filed` is not the BR-4 accounting it is meant to be.
 
 A file may add a section beyond those seven. One does: `audio.md` carries
-`## Why transcription Is Not A Dependent`, because the rule above forbids a bare
-prose sentence inside a claim section, which leaves an explanation of an *absence*
-nowhere legal to go.
+`## Why transcription Is Not A Dependent`. It is there because the rule above
+forbids a bare prose sentence inside a claim section. That rule leaves an
+explanation of an *absence* nowhere legal to go.
 
 So a check must locate a section by name, never by position and never by
 enumerating the full heading vocabulary. `^## <name>\n(.*?)(?=^## |\Z)` is the
@@ -79,10 +79,10 @@ form the existing checks use and the form new ones should use.
 
 ## `Code` and `Owned Files`
 
-`**Code:**` is the design's §2.1 field and stays as the human-readable summary.
-`## Owned Files` is the machine-readable list check 8 parses: one exact path per
-bullet, copied verbatim from `INVENTORY.txt`. No directories, no globs, no
-comma-separated lists. Check 8 does set comparison, so a directory is a failure
+`**Code:**` is the design's §2.1 field. It stays as the human-readable summary.
+`## Owned Files` is the machine-readable list check 8 parses. It holds one exact
+path per bullet, copied verbatim from `INVENTORY.txt`. No directories, no globs,
+no comma-separated lists. Check 8 does set comparison. A directory is a failure
 rather than a shorthand.
 
 `Code` may say `crates/audio/src/` while `Owned Files` enumerates every file in
@@ -94,16 +94,16 @@ A domain that owns no files carries `- None`.
 ## Seams
 
 A seam ID is `SEAM-<lowercase-kebab>`. It appears in exactly two domain files,
-both naming the same owner, and the owner is one of the two endpoints. The
-synthesis's seam table is keyed on the ID, and check 5 joins on it.
+both naming the same owner. The owner is one of the two endpoints. The
+synthesis's seam table is keyed on the ID. Check 5 joins on it.
 
 "Appears in two files" counts the files whose `## Seams` section names the ID,
 never the number of occurrences. An ID may also be named in prose elsewhere in
-the same file: `audio.md` names `SEAM-opus-segment-file` twice,
+the same file. `audio.md` names `SEAM-opus-segment-file` twice,
 `background-work.md` names `SEAM-cleanup-schedule-key` twice, and
 `transcription.md` names `SEAM-transcription-wire` twice. A whole-file occurrence
-count reports three for each of those and fails them, and the tempting repair is
-to loosen the two-file rule — which is the rule check 5 exists to enforce.
+count reports three for each of those and fails them. The tempting repair is
+to loosen the two-file rule. That is the rule check 5 exists to enforce.
 
 ## Offshoots
 
@@ -112,7 +112,7 @@ Either one or more `- CHR-NNN — <one line>` bullets, or the single literal lin
 
 ## Synthesis status line
 
-The first line of the synthesis is exactly one of these, and it must match what
+The first line of the synthesis is exactly one of these. It must match what
 closure check 1 reports:
 
 ```

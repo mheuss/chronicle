@@ -20,7 +20,7 @@
 - outside: deciding when recurring work is due — `chronicle-daemon/src/retention_task.rs` — `run_cleanup_loop`
 
 **Placement test:** Does the file carry an item between two stages, define the contract a stage runs on, or start and stop the process? Doing a stage's actual work belongs to that stage's domain.
-**Document comparison:** differs — `docs/use-cases/INDEX.md:7` gives this domain the Code Location `chronicle-daemon/src/`, which is the whole daemon source tree and now spans eight domains. Six of the nine solutions in `docs/use-cases/pipeline.md` are located in files owned elsewhere.
+**Document comparison:** differs — `docs/use-cases/INDEX.md:7` gives this domain the Code Location `chronicle-daemon/src/`. That is the whole daemon source tree. It now spans eight domains. Six of the nine solutions in `docs/use-cases/pipeline.md` are located in files owned elsewhere.
 
 ## Owned Files
 
@@ -68,11 +68,11 @@
 | `docs/guides/chronicle-daemon.md:219` | Gives an "Adding a new pipeline stage" procedure | accurate |
 
 `main.rs` holds two helpers that are other domains' logic rather than
-composition: `note_reconcile_outcome` (`:231`), half of a `background-work`
-solution, and `handle_provision_event` (`:155`) with `begin_model_switch`
-(`:188`), the `transcription` model-switch path. Recorded on CHR-58 rather than
-filed separately, since that ticket already names the file as accumulating
-responsibilities. The map records who owns the file today, not who should.
+composition. One is `note_reconcile_outcome` (`:231`), half of a
+`background-work` solution. The other is `handle_provision_event` (`:155`) with
+`begin_model_switch` (`:188`), the `transcription` model-switch path. Recorded
+on CHR-58 rather than filed separately, since that ticket already names the file
+as accumulating responsibilities. The map records who owns the file today, not who should.
 
 ## Offshoots Filed
 

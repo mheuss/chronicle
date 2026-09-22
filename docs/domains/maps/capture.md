@@ -16,7 +16,7 @@
 - outside: the audio pipeline the supervisor reconciles alongside capture — `chronicle-daemon/crates/audio/src/lib.rs` — `AudioPipeline`
 
 **Placement test:** Does the file decide whether a display is being captured, or turn a captured buffer into a frame? If it only reads a frame that already exists, it belongs to whoever consumes it.
-**Document comparison:** differs — no existing document draws this boundary. `docs/use-cases/INDEX.md` assigns all of `chronicle-daemon/src/` to `pipeline`, which would place two of these files elsewhere.
+**Document comparison:** differs — no existing document draws this boundary. `docs/use-cases/INDEX.md` assigns all of `chronicle-daemon/src/` to `pipeline`. That would place two of these files elsewhere.
 
 ## Owned Files
 

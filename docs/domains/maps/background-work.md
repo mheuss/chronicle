@@ -16,7 +16,7 @@
 - outside: wiring the scheduler to its one implementation at startup — `chronicle-daemon/src/main.rs` — `run_cleanup_loop`
 
 **Placement test:** Does the file decide *when* work runs, how often, or whether it is due again after a restart? Doing the work belongs to whoever owns the work.
-**Document comparison:** deliberately matches — `docs/use-cases/background-work.md:107` locates its surviving-restarts pattern at `retention_task.rs:run_cleanup_loop`, which is this boundary exactly. It departs from `docs/use-cases/INDEX.md:8` only in excluding `src/pipeline.rs`, which register row 11 reaches and this row does not.
+**Document comparison:** deliberately matches — `docs/use-cases/background-work.md:107` locates its surviving-restarts pattern at `retention_task.rs:run_cleanup_loop`. That is this boundary exactly. It departs from `docs/use-cases/INDEX.md:8` only in excluding `src/pipeline.rs`. Register row 11 reaches `src/pipeline.rs` and this row does not.
 
 ## Owned Files
 
@@ -49,10 +49,10 @@
 | `docs/guides/storage-engine.md:146` | The schedule resumes from `last_cleanup_ms` in the `config` table | accurate — recorded here as `SEAM-cleanup-schedule-key` |
 
 The design's §3.1 manifest and `docs/use-cases/INDEX.md:8` disagree about
-`src/pipeline.rs`: the index gives it to this domain, the manifest to `pipeline`.
+`src/pipeline.rs`. The index gives it to this domain, the manifest to `pipeline`.
 Surfaced here because this is the first of the two rows to be walked. The
-register already follows the manifest — `src/pipeline.rs` is reachable from
-row 11's Roots and from no other row — and this sitting does not reopen it.
+register already follows the manifest. `src/pipeline.rs` is reachable from
+row 11's Roots and from no other row. This sitting does not reopen it.
 
 ## Offshoots Filed
 

@@ -18,7 +18,7 @@
 - outside: deciding whether audio should be running at all — `chronicle-daemon/src/capture_supervisor.rs` — `CaptureSupervisor`
 
 **Placement test:** Does the file move sound from a device into memory, turn those samples into a segment on disk, or name a state that only an audio source can be in? Scheduling when to capture, and reporting on it afterwards, belong elsewhere.
-**Document comparison:** deliberately matches — `docs/use-cases/INDEX.md` assigns the whole `crates/audio/` directory to a single domain, and after the `audio-encoding` merge on 2026-09-16 that is the shape this domain has. The index has the boundary right and the name wrong.
+**Document comparison:** deliberately matches — `docs/use-cases/INDEX.md` assigns the whole `crates/audio/` directory to a single domain. After the `audio-encoding` merge on 2026-09-16 that is the shape this domain has. The index has the boundary right and the name wrong.
 
 ## Owned Files
 

@@ -5,25 +5,25 @@
 **Written 2026-09-21**, from the fourteen-sitting walk recorded in `REGISTER.md`.
 
 Given a source file, this says which domain owns it. Eleven domains own all 64
-production source files — every Rust, Swift, SQL and plist file whose content
-ships inside a binary Chronicle installs, enumerated in `INVENTORY.txt`. Each
-is owned exactly once, so the Exclusions table below is empty.
+production source files. That is every Rust, Swift, SQL and plist file whose
+content ships inside a binary Chronicle installs, enumerated in `INVENTORY.txt`.
+Each is owned exactly once, so the Exclusions table below is empty.
 
 Eleven domains, fourteen candidates: the walk opened with fourteen and three of
-them merged into others, which the Candidate Outcomes table records.
+them merged into others. The Candidate Outcomes table records that.
 
 **To place a file.** For a file that already exists, read the `## Owned Files`
-section of the domain files — it is an exact list, and between them the eleven
+section of the domain files. It is an exact list. Between them the eleven
 cover all 64. For a *new* file, use the placement test at the top of each domain
-file, which is a question you ask of the file to decide where it belongs.
+file. It is a question you ask of the file to decide where it belongs.
 
-**Why a boundary sits where it does** is in `DECISIONS.md`, alongside the
-corrections made along the way and a list of what the walk left unfinished.
+**Why a boundary sits where it does** is in `DECISIONS.md`. That file also holds
+the corrections made along the way and a list of what the walk left unfinished.
 
-**A seam** is a contract between two domains: owning one means the owning domain
-decides the contract's shape and the other endpoint follows. Not every dependency
-is a seam. Domains depend on each other in more places than this table has rows —
-`pipeline` alone names nine — and a seam is only where a contract had to be
+**A seam** is a contract between two domains. Owning one means the owning domain
+decides the contract's shape. The other endpoint follows. Not every dependency
+is a seam. Domains depend on each other in more places than this table has rows.
+`pipeline` alone names nine. A seam is only where a contract had to be
 agreed. For the full picture, read each domain file's `## Depends On` and
 `## Depended On By`.
 
@@ -61,7 +61,7 @@ agreed. For the full picture, read each domain file's `## Depends On` and
 ## Candidate Outcomes
 
 All fourteen candidates the walk opened with. No candidate was split and none was
-dropped, so no row here records a cross-cutting concern.
+dropped. No row here records a cross-cutting concern.
 
 | Candidate | Outcome | Where it ended up |
 |---|---|---|
@@ -82,12 +82,12 @@ dropped, so no row here records a cross-cutting concern.
 
 ## Exclusions
 
-Empty, and that is the result rather than an omission. All 64 paths in
-`INVENTORY.txt` are owned by exactly one confirmed domain, so no path needs an
+Empty. That is the result rather than an omission. All 64 paths in
+`INVENTORY.txt` are owned by exactly one confirmed domain. No path needs an
 exclusion reason. Closure check 8 enforces that rather than taking it on trust.
 
 The header row below stays with no rows under it. `check8_coverage.sh` parses this
-table by discarding the first pipe-led line as a header, so removing it would make
+table by discarding the first pipe-led line as a header. Removing it would make
 the first exclusion anyone adds later invisible to the check.
 
 | Path | Reason |

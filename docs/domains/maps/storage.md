@@ -21,7 +21,7 @@
 - outside: the status shape that crosses the wire — `chronicle-daemon/crates/ipc/src/lib.rs` — `StorageStats`
 
 **Placement test:** Does the file put a capture on disk, get it back, or define the shape it is stored in? Deciding *when* to do that, and showing the user what came back, belong elsewhere.
-**Document comparison:** deliberately matches — `docs/guides/storage-engine.md:71` already draws this line, stating that the inner modules are `pub(crate)` and "callers only interact through the `Storage` struct". Measured 2026-09-17 and re-measured 2026-09-21: all seven importers reach the crate through `Storage` or a `models` type, and none names a `pub(crate)` module.
+**Document comparison:** deliberately matches — `docs/guides/storage-engine.md:71` already draws this line. It states that the inner modules are `pub(crate)` and "callers only interact through the `Storage` struct". Measured 2026-09-17 and re-measured 2026-09-21: all seven importers reach the crate through `Storage` or a `models` type. None names a `pub(crate)` module.
 
 ## Owned Files
 
@@ -71,7 +71,7 @@
 | `docs/decisions/011-chronicle-ui-sandbox-approach.md:26-27` | The daemon writes the database, screenshots and settings under `~/Library/Application Support/Chronicle/`, and sandboxing moves all of it | accurate — `MediaManager` is what moves |
 | `.claude/audit/security.md:18-19` | Capture history is persisted unencrypted and FTS5 duplicates the sensitive text in searchable form | accurate — still true, and untracked. CHR-90 closed 2026-04-06 as an audit-sweep umbrella without addressing it. Re-filed as CHR-156 |
 
-Counted 2026-09-17 and re-counted 2026-09-21: `crates/storage/src/` carries zero `design §` citations, so CHR-36
+Counted 2026-09-17 and re-counted 2026-09-21: `crates/storage/src/` carries zero `design §` citations. So CHR-36
 does not reach this domain. Control: the same pattern returns nine hits in
 `src/provisioning.rs`.
 

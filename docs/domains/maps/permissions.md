@@ -14,7 +14,7 @@
 - outside: the states the UI is told about, which IPC defines rather than this domain — `chronicle-ui/Sources/ChronicleUI/DaemonConnection.swift` — `MicState`
 
 **Placement test:** Does the file ask the operating system whether we are permitted to do something? Reacting to the answer belongs to whoever asked.
-**Document comparison:** differs — no existing document draws this boundary. The use-case catalogue has no permissions entry and no ADR mentions it, so this is the first time the area has been written down.
+**Document comparison:** differs — no existing document draws this boundary. The use-case catalogue has no permissions entry. No ADR mentions it. So this is the first time the area has been written down.
 
 ## Owned Files
 

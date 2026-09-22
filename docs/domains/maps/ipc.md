@@ -23,7 +23,7 @@
 - outside: what a wire value means to the person reading it on screen — `chronicle-ui/Sources/ChronicleUI/RetentionCopy.swift` — `RetentionCopy`
 
 **Placement test:** Does the file declare the wire vocabulary, move bytes across the socket at either end, or turn a request into a response? Producing the data a response carries belongs to the domain that produces it.
-**Document comparison:** differs — `docs/use-cases/INDEX.md:12` names no `IPC` domain at all and gives `ipc-compat` the whole of `chronicle-daemon/crates/ipc/` and `chronicle-ui/Sources/ChronicleUI/`; row 13 merged here on 2026-09-18, so the first of those two trees is now this domain and the second still spans this domain and row 14.
+**Document comparison:** differs — `docs/use-cases/INDEX.md:12` names no `IPC` domain at all and gives `ipc-compat` the whole of `chronicle-daemon/crates/ipc/` and `chronicle-ui/Sources/ChronicleUI/`. Row 13 merged here on 2026-09-18. So the first of those two trees is now this domain. The second still spans this domain and row 14.
 
 ## Owned Files
 
@@ -82,17 +82,17 @@
 
 `ipc_handler.rs` carries two reasons to change: a 227-line match on the seven
 `Request` variants at `:311-537`, and 222 lines of daemon runtime wiring at
-`:74-134` and `:136-296` — three `mpsc` channels to `main()`'s event loop, two
-readiness atomics, three reply timeouts — that only `main.rs` constructs.
-`DaemonConnection.swift` splits the same way at its own
-`// MARK: - Protocol Types` divider on line 465: the class runs `:10-463`, and
-the 23 wire types run `:467-801`. Both are recorded as offshoots. The map
+`:74-134` and `:136-296` that only `main.rs` constructs. That wiring is three
+`mpsc` channels to `main()`'s event loop, two readiness atomics, three reply
+timeouts. `DaemonConnection.swift` splits the same way at its own
+`// MARK: - Protocol Types` divider on line 465. The class runs `:10-463`. The
+23 wire types run `:467-801`. Both are recorded as offshoots. The map
 records who owns the file today, not who should.
 
-`media_presence.rs` appears in row 4's Roots and `audio` did not claim it. The
-revision pass placed it here on 2026-09-18: its only production caller is
-`ipc_handler.rs:551`, and it exists to fill the `media_absent` counter on the
-status response. It reads the filesystem and changes nothing, so it crosses no
+`media_presence.rs` appears in row 4's Roots. `audio` did not claim it. The
+revision pass placed it here on 2026-09-18. Its only production caller is
+`ipc_handler.rs:551`. It exists to fill the `media_absent` counter on the
+status response. It reads the filesystem and changes nothing. So it crosses no
 boundary that `storage` owns.
 
 ## Offshoots Filed
