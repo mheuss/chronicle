@@ -161,7 +161,7 @@ what was true during the walk, not of the tree today.
 
 - **[2026-09-17] `src/settings.rs` added to row 11's Roots, because no row
   reached it.** Every path in `INVENTORY.txt` was checked against every register
-  row's Roots during sitting 7. Of those, 63 are reachable and
+  row's Roots during sitting 7. Of the 64, 63 are reachable and
   `chronicle-daemon/src/settings.rs` was not. Roots are what a sitting greps
   from. So no sitting would have pulled it up for a decision. It would have
   arrived at close as an inventoried file no domain claims. Task 28 then reports

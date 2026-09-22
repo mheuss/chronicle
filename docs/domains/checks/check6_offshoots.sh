@@ -60,8 +60,8 @@ def register_rows(block, fail):
     """Body rows of a register table, as lists of cells.
 
     A row whose leading cell is neither the header nor a positive integer is
-    reported, never skipped. Five checks parse this table and two of them used
-    to disagree about such a row.
+    reported, never skipped. Five checks parse this table. Three of them once
+    read such a row differently from the other two.
     """
     rows = []
     for line in (block or '').split('\n'):
