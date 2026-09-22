@@ -812,6 +812,9 @@ what was true during the walk, not of the tree today.
   A falsification case covers it. The docstring is raw because the `\|` in its
   own explanation raised a `SyntaxWarning` on every run.
 
+  **Superseded 2026-09-22:** the docstring no longer quotes that pattern, so it
+  is no longer a raw string. The five copies stay byte-identical.
+
 - **[2026-09-21] The `||` guard on check 8's find pipeline did not do what its
   message said.** The re-review demonstrated it: `( a; b; c; d )` exits with
   **d's** status. So a failure in any of the first three globs was invisible to

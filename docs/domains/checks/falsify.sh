@@ -229,25 +229,6 @@ run "Depends On present but empty" check4_citations.sh \
     'perl -0pi -e "s/^(## Depends On\n).*?(?=^## )/\$1\n/sm" domains/maps/ocr.md' \
     'ocr.md [Depends On]: section present but carries no bullet'
 
-
-# ===========================================================================
-# Checks 5, 6 and 8 falsify against a synthetic fixture, not the live tree.
-#
-# A fixture small enough to hold in your head. Two domains, one seam, three
-# register rows, two source files, and its own repo tree so check 8's globs have
-# something to regenerate from.
-#
-# It was built when SYNTHESIS.md and OFFSHOOTS_RESOLVED.txt did not exist and
-# these three checks could not be green on the live tree at all. That is no
-# longer the reason. The reason now is size: a case that breaks a two-file
-# inventory or a one-seam synthesis shows exactly what it broke, where the same
-# case against 64 files and 10 seams buries it.
-#
-# So the fixture is purpose-built and tiny -- two domains, one seam, two source
-# files -- and it carries its own repo so check 8's globs have something to
-# regenerate from. Small enough to read, which is the point: a case that breaks
-# a two-file inventory is obvious, where the same case against 64 files is not.
-# ===========================================================================
 SYNTH_REF=""
 trap '[ -n "$FIX" ] && rm -rf "$FIX"; [ -n "$SYNTH_REF" ] && rm -rf "$SYNTH_REF"' EXIT
 

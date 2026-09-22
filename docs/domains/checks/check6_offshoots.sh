@@ -57,14 +57,11 @@ if reg_block is None:
     sys.exit(1)
 
 def register_rows(block, fail):
-    r"""Body rows of a register table, as lists of cells.
+    """Body rows of a register table, as lists of cells.
 
-    A row whose leading cell is neither the `#` header nor a positive integer is
-    reported, never skipped. The five checks that read the register used to
-    disagree here: three matched `^\|\s*\d+\s*\|` and silently dropped
-    anything else, two took every pipe-led line and discarded the first as a
-    header. The same malformed row was invisible to one set and a live candidate
-    to the other.
+    A row whose leading cell is neither the header nor a positive integer is
+    reported, never skipped. Five checks parse this table and two of them used
+    to disagree about such a row.
     """
     rows = []
     for line in (block or '').split('\n'):

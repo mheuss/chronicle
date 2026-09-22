@@ -1,14 +1,8 @@
 name: Domain map
 
-# The map in docs/domains/ says which domain owns each source file. It only
-# stays true if something notices when the code moves out from under it.
-# Check 8 is that alarm: it rebuilds the inventory from the repo instead of
-# trusting INVENTORY.txt, so a new source file nobody classified fails here.
-# Checks 3 and 4 guard the map's own grammar.
-#
-# falsify.sh runs last and guards the checks themselves. A check that passes
-# everything looks identical to a working one until something breaks it on
-# purpose, so the harness breaks each check in turn and requires it to fail.
+# Check 8 rebuilds the inventory from the repo instead of trusting
+# INVENTORY.txt, so a source file nobody classified fails here. falsify.sh
+# breaks each check in turn and requires it to fail.
 
 on:
   push:
