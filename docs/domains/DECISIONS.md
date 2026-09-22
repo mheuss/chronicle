@@ -730,6 +730,8 @@ what was true during the walk, not of the tree today.
   The moment Task 28 or Task 29 writes one, the tolerance stops applying and the
   same failure is treated as real.
 
+  **Superseded 2026-09-22:** the tolerance block is deleted, not expired. A code review found it gated backwards, so the only state it accepted was the one where a tracked input had been removed, and all four CI steps went green on a checkout missing `OFFSHOOTS_RESOLVED.txt`. The clean gate now requires every check to exit 0.
+
   A blanket exemption would have gone stale silently on the day the artifact
   landed. That is the failure this whole revision pass has been finding in
   prose.
@@ -894,6 +896,8 @@ what was true during the walk, not of the tree today.
   Only check 6's tolerance remained live, and it expired the same way at Task 29
   Step 3. **As of the close all three are dead branches**, kept deliberately —
   `falsify.sh` explains why at its clean gate.
+
+  **Superseded 2026-09-22:** the tolerance block is deleted, not expired. A code review found it gated backwards, so the only state it accepted was the one where a tracked input had been removed, and all four CI steps went green on a checkout missing `OFFSHOOTS_RESOLVED.txt`. The clean gate now requires every check to exit 0.
 
 - **[2026-09-21] The synthesis's `search` row conflated the register's Roots
   column with its Symbols column.** It said the Swift files row 10's Roots named
@@ -1088,6 +1092,8 @@ what was true during the walk, not of the tree today.
   is untracked. A lost or half-restored `docs/domains/` puts the suite back in
   the pre-close state. And a harness that aborts with a reason beats one that
   reports a bare failure.
+
+  **Superseded 2026-09-22:** the tolerance block is deleted, not expired. A code review found it gated backwards, so the only state it accepted was the one where a tracked input had been removed, and all four CI steps went green on a checkout missing `OFFSHOOTS_RESOLVED.txt`. The clean gate now requires every check to exit 0.
 
 - **[2026-09-21] Two dead branches in check 6 now have falsification cases.**
   The reverse guard — an ID in `OFFSHOOTS_RESOLVED.txt` that no register row
