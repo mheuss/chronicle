@@ -1114,7 +1114,21 @@ what was true during the walk, not of the tree today.
   then was the one tracked check with none. Three more cover the stray-source
   sweep and the short-row guard. The harness is at 57 cases, 56 bit, one no-op
   control.
+  **Superseded 2026-09-23:** the PR #54 review added five more. The harness is
+  at 62 cases, 61 bit, one no-op control.
 
   Writing them is what proved the guard live rather than arguing it from the
   source. Planting `CHR-999` in a copy of the tree fails check 6 with the exact
   message. A branch with no case is a branch nobody has watched work.
+
+- **[2026-09-23] CodeRabbit's review of PR #54 found three checks that accepted
+  states they should reject.** Check 1 followed a merge through other merged
+  rows, where the design requires the target itself to be confirmed. Check 5
+  joined Candidate Outcomes on names only, so a wrong outcome or destination
+  passed. Check 6 skipped `- none found` when real bullets sat beside it. Each
+  fix has a falsify case that was seen passing before the fix and failing after.
+  The same review found a table row in `maps/ui.md` split by unescaped pipes,
+  and the checkout step in CI now drops its token after cloning.
+
+  This is the third review round in a row where the findings were in the gate,
+  not the map.
