@@ -173,6 +173,9 @@ run "a decided row with empty Offshoots" check1_outcomes.sh \
 run "Offshoots that are not CHR- IDs" check1_outcomes.sh \
     'perl -0pi -e "s/\| into audio \| none found \|/| into audio | CHR-x |/" domains/REGISTER.md' \
     "is not 'none found' or ', '-separated CHR- IDs"
+run "a second Register heading with a trailing space" check1_outcomes.sh \
+    'printf "\n## Register \n\n| 99 | smuggled | confirmed | 2026-09-23 | maps/x.md | none found | src/ | x |\n" >> domains/REGISTER.md' \
+    "'## Register' appears 2 times in REGISTER.md"
 run "a candidate name on two rows" check1_outcomes.sh \
     'perl -0pi -e "s/(\n\| 14 \|[^\n]*\n)/\$1| 15 | search | confirmed | 2026-09-20 | maps\/storage.md | none found | src\/ | x |\n/" domains/REGISTER.md' \
     "candidate 'search' is named on rows 10 and 15"
@@ -553,6 +556,9 @@ run_synth "a path owned by two domains" check8_coverage.sh \
     'chronicle-daemon/src/alpha.rs is owned by 2 domains: alpha, beta'
 run_synth "a second Owned Files heading" check8_coverage.sh \
     'printf "\n## Owned Files\n\n- chronicle-daemon/src/alpha.rs\n" >> domains/maps/beta.md' \
+    "'## Owned Files' appears 2 times in beta.md"
+run_synth "a second Owned Files heading with closing hashes" check8_coverage.sh \
+    'printf "\n##  Owned Files ##\n\n- chronicle-daemon/src/alpha.rs\n" >> domains/maps/beta.md' \
     "'## Owned Files' appears 2 times in beta.md"
 run_synth "a path both owned and excluded" check8_coverage.sh \
     'printf "| chronicle-daemon/src/alpha.rs | not really |\n" >> domains/SYNTHESIS.md' \

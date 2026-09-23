@@ -30,7 +30,7 @@ fail = []
 
 def section(text, name, where):
     pat = r'^## ' + re.escape(name) + r'\n(.*?)(?=^## |\Z)'
-    n = len(re.findall(pat, text, re.S | re.M))
+    n = len(re.findall(r'^##[ \t]+' + re.escape(name) + r'[ \t]*#*[ \t]*$', text, re.M))
     msg = f"'## {name}' appears {n} times in {where}; only the first would be read"
     if n > 1 and msg not in fail:
         fail.append(msg)
