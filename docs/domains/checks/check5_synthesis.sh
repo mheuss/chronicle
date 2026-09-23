@@ -256,11 +256,14 @@ for name in sorted(set(syn_candidates) - set(candidates)):
 # The destination cell may explain itself after the register's detail, set
 # off by an em dash. A bare space would let a second destination through.
 for name in candidates:
-    if name not in syn_candidates or not reg_outcomes[name][0]:
+    if name not in syn_candidates:
         continue
     r_out, r_detail = reg_outcomes[name]
     s_out, s_dest = syn_candidates[name]
-    if s_out != r_out:
+    if not r_out:
+        if s_out:
+            fail.append(f"synthesis Candidate Outcomes row '{name}' says '{s_out}', register has no outcome")
+    elif s_out != r_out:
         fail.append(f"synthesis Candidate Outcomes row '{name}' says '{s_out}', register says '{r_out}'")
     elif r_out == 'confirmed':
         if file_cell(s_dest) != r_detail:

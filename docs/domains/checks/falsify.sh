@@ -480,6 +480,10 @@ run_synth "dropped destination disagrees with the register" check5_synthesis.sh 
     'perl -0pi -e "s/\| 3 \| gamma \| merged \| 2026-09-21 \| into alpha \|/| 3 | gamma | dropped | 2026-09-21 | cross-cutting: alpha handles it |/" domains/REGISTER.md;
      perl -0pi -e "s/\| gamma \| merged \| into alpha \|/| gamma | dropped | into beta |/" domains/SYNTHESIS.md' \
     "synthesis Candidate Outcomes row 'gamma' says 'into beta', register says 'cross-cutting: alpha handles it'"
+run_synth "undecided row given an outcome in the synthesis" check5_synthesis.sh \
+    'perl -0pi -e "s/\| 3 \| gamma \| merged \|/| 3 | gamma |  |/" domains/REGISTER.md;
+     perl -0pi -e "s/^> \*\*Authoritative\.\*\* The walk is complete and the closure checks pass\.$/> **Not authoritative.** The walk is incomplete. This synthesis covers only the register rows that have an outcome, and the closure checks have not passed./m" domains/SYNTHESIS.md' \
+    "synthesis Candidate Outcomes row 'gamma' says 'merged', register has no outcome"
 run_synth "merge destination with a second target appended" check5_synthesis.sh \
     'perl -0pi -e "s/\| gamma \| merged \| into alpha \|/| gamma | merged | into alpha and beta |/" domains/SYNTHESIS.md' \
     "synthesis Candidate Outcomes row 'gamma' says 'into alpha and beta', register says 'into alpha'"
