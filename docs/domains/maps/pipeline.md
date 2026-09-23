@@ -20,7 +20,7 @@
 - outside: deciding when recurring work is due — `chronicle-daemon/src/retention_task.rs` — `run_cleanup_loop`
 
 **Placement test:** Does the file carry an item between two stages, define the contract a stage runs on, or start and stop the process? Doing a stage's actual work belongs to that stage's domain.
-**Document comparison:** differs — `docs/use-cases/INDEX.md:7` gives this domain the Code Location `chronicle-daemon/src/`. That is the whole daemon source tree. It now spans eight domains. Six of the nine solutions in `docs/use-cases/pipeline.md` are located in files owned elsewhere.
+**Document comparison:** differs — `docs/use-cases/INDEX.md:7` gives this domain the Code Location `chronicle-daemon/src/`. That is the whole daemon source tree. It now spans seven domains. Six of the nine solutions in `docs/use-cases/pipeline.md` are located in files owned elsewhere.
 
 ## Owned Files
 
@@ -60,7 +60,7 @@
 
 | Document | Said | Verdict |
 |---|---|---|
-| `docs/use-cases/INDEX.md:7` | Code Location `chronicle-daemon/src/` | wrong — that path is the whole daemon source tree, which spans eight domains. Filed as CHR-151 |
+| `docs/use-cases/INDEX.md:7` | Code Location `chronicle-daemon/src/` | wrong — that path is the whole daemon source tree, which spans seven domains. Filed as CHR-151 |
 | `docs/use-cases/pipeline.md:18, 89, 134` | Locates shutdown at `main.rs:main`, per-item log throttling at `pipeline.rs`, and channel bridging at `pipeline.rs:bridge_audio_segments` | accurate — these three are this domain |
 | `docs/use-cases/pipeline.md:155, 187, 218, 241, 274, 298` | Locates six more solutions at `capture_runtime.rs`, `crates/capture/src/handler.rs` twice, `capture_supervisor.rs`, `power.rs`, and `provisioning.rs` | stale as a grouping — all six are owned by `capture`, `power` and `transcription`. The patterns are real; the catalogue grouped them by shape rather than by owner |
 | `docs/use-cases/background-work.md:20` | Locates "Budgeted Start-Retry via Detached Nudges" at `main.rs:note_reconcile_outcome` plus `capture_supervisor.rs:StartRetry` | accurate, and evidence for CHR-58 — one behaviour split across this domain's file and `capture`'s |
