@@ -76,6 +76,10 @@ for cells in rows:
         fail.append(f"row {cells[0]}: has {len(cells)} cells, expected 8")
         continue
     num, name, outcome, decided, detail, offshoots, roots, symbols = cells[:8]
+    if name in by_name:
+        fail.append(f"candidate '{name}' is named on rows {by_name[name][2]} and {num}")
+    if num in by_num:
+        fail.append(f"row number {num} is used twice")
     by_name[name] = (outcome, detail, num)
     by_num[num] = name
 

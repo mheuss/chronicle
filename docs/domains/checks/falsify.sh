@@ -173,6 +173,12 @@ run "a decided row with empty Offshoots" check1_outcomes.sh \
 run "Offshoots that are not CHR- IDs" check1_outcomes.sh \
     'perl -0pi -e "s/\| into audio \| none found \|/| into audio | CHR-x |/" domains/REGISTER.md' \
     "is not 'none found' or ', '-separated CHR- IDs"
+run "a candidate name on two rows" check1_outcomes.sh \
+    'perl -0pi -e "s/(\n\| 14 \|[^\n]*\n)/\$1| 15 | search | confirmed | 2026-09-20 | maps\/storage.md | none found | src\/ | x |\n/" domains/REGISTER.md' \
+    "candidate 'search' is named on rows 10 and 15"
+run "a row number used twice" check1_outcomes.sh \
+    'perl -0pi -e "s/\n\| 14 \|/\n| 13 |/" domains/REGISTER.md' \
+    "row number 13 is used twice"
 run "a second Register heading" check1_outcomes.sh \
     'printf "\n## Register\n\n| 99 | smuggled | confirmed | 2026-09-23 | maps/x.md | none found | src/ | x |\n" >> domains/REGISTER.md' \
     "'## Register' appears 2 times in REGISTER.md"
