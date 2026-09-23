@@ -1144,5 +1144,10 @@ what was true during the walk, not of the tree today.
   Offshoots Filed and Owned Files. Check 1 now also rejects a candidate name or
   a row number used twice in the register.
 
+  Check 1 still does not compare a merge's Decided date with its target's.
+  "Already confirmed" governs when a sitting may merge, and the dates are whole
+  days. Every merge shares its date with its target, so the check could not
+  tell a merge before confirmation from one after it.
+
   This is the third review round in a row where most findings were in the gate
   rather than the map.
