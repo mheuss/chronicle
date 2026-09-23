@@ -1115,8 +1115,8 @@ what was true during the walk, not of the tree today.
   then was the one tracked check with none. Three more cover the stray-source
   sweep and the short-row guard. The harness is at 57 cases, 56 bit, one no-op
   control.
-  **Superseded 2026-09-23:** the PR #54 review added nine more. The harness is
-  at 66 cases, 65 bit, one no-op control.
+  **Superseded 2026-09-23:** the PR #54 review added thirteen more. The harness is
+  at 70 cases, 69 bit, one no-op control.
 
   Writing them is what proved the guard live rather than arguing it from the
   source. Planting `CHR-999` in a copy of the tree fails check 6 with the exact
@@ -1136,6 +1136,12 @@ what was true during the walk, not of the tree today.
   destination was never compared, and a bare space let a second merge target
   follow the right one. An undecided row could also claim any outcome. Each of
   those has a case too.
+
+  The same review found that a repeated heading hid its second copy. Every
+  check's `section()` read only the first `## <name>` it found, so a second
+  `## Offshoots Filed` or `## Owned Files` in a map was never read. All five
+  copies now fail when a heading repeats, with a case for Register, Seams,
+  Offshoots Filed and Owned Files.
 
   This is the third review round in a row where most findings were in the gate
   rather than the map.

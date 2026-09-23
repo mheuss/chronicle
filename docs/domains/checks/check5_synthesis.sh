@@ -52,8 +52,13 @@ syn_path = os.path.join(map_root, 'SYNTHESIS.md')
 
 fail = []
 
-def section(text, name):
-    m = re.search(r'^## ' + re.escape(name) + r'\n(.*?)(?=^## |\Z)', text, re.S | re.M)
+def section(text, name, where):
+    pat = r'^## ' + re.escape(name) + r'\n(.*?)(?=^## |\Z)'
+    n = len(re.findall(pat, text, re.S | re.M))
+    msg = f"'## {name}' appears {n} times in {where}; only the first would be read"
+    if n > 1 and msg not in fail:
+        fail.append(msg)
+    m = re.search(pat, text, re.S | re.M)
     return m.group(1) if m else None
 
 def register_rows(block, fail):
@@ -96,7 +101,7 @@ def table_rows(block):
 # Register: the authority on which candidates exist and which are confirmed.
 # ---------------------------------------------------------------------------
 reg_text = open(reg_path, encoding='utf-8').read()
-reg_block = section(reg_text, 'Register')
+reg_block = section(reg_text, 'Register', 'REGISTER.md')
 if reg_block is None:
     print("check5: no ## Register section in REGISTER.md")
     sys.exit(1)
@@ -139,7 +144,7 @@ for name, detail in sorted(confirmed.items()):
     if not os.path.isfile(path):
         fail.append(f"{name}: no domain file at {detail} (check2 owns this; check5 cannot join without it)")
         continue
-    body = section(open(path, encoding='utf-8').read(), 'Seams')
+    body = section(open(path, encoding='utf-8').read(), 'Seams', os.path.basename(detail))
     if body is None:
         fail.append(f"{os.path.basename(detail)}: no ## Seams section")
         continue
@@ -184,7 +189,7 @@ elif want not in syn_lines:
         fail.append(f"no status line; check1 reports {state}, so it must be exactly: {want}")
 
 for table in ('Domains', 'Seams', 'Candidate Outcomes', 'Exclusions'):
-    if section(syn_text, table) is None:
+    if section(syn_text, table, 'SYNTHESIS.md') is None:
         fail.append(f"synthesis has no ## {table} section")
 
 def file_cell(raw):
@@ -201,7 +206,7 @@ def file_cell(raw):
     return s.strip().strip('`').strip()
 
 syn_domains = {}     # domain -> file cell, normalized
-for cells in table_rows(section(syn_text, 'Domains')):
+for cells in table_rows(section(syn_text, 'Domains', 'SYNTHESIS.md')):
     if len(cells) < 3:
         fail.append(f"synthesis Domains row has {len(cells)} cells, expected 3: {cells}")
         continue
@@ -213,7 +218,7 @@ for cells in table_rows(section(syn_text, 'Domains')):
         fail.append(f"synthesis Domains row '{domain}' has an empty Owns cell")
 
 syn_seams = {}       # id -> (a, b, owner)
-for cells in table_rows(section(syn_text, 'Seams')):
+for cells in table_rows(section(syn_text, 'Seams', 'SYNTHESIS.md')):
     if len(cells) < 6:
         fail.append(f"synthesis Seams row has {len(cells)} cells, expected 6: {cells}")
         continue
@@ -227,7 +232,7 @@ for cells in table_rows(section(syn_text, 'Seams')):
     syn_seams[sid] = (a, b, owner)
 
 syn_candidates = {}      # name -> (outcome cell, destination cell)
-for cells in table_rows(section(syn_text, 'Candidate Outcomes')):
+for cells in table_rows(section(syn_text, 'Candidate Outcomes', 'SYNTHESIS.md')):
     if len(cells) < 3:
         fail.append(f"synthesis Candidate Outcomes row has {len(cells)} cells, expected 3: {cells}")
         continue

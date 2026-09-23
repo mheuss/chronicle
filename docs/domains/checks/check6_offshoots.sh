@@ -47,11 +47,16 @@ resolved_path = os.path.join(map_root, 'OFFSHOOTS_RESOLVED.txt')
 text = open(reg_path, encoding='utf-8').read()
 fail = []
 
-def section(text, name):
-    m = re.search(r'^## ' + re.escape(name) + r'\n(.*?)(?=^## |\Z)', text, re.S | re.M)
+def section(text, name, where):
+    pat = r'^## ' + re.escape(name) + r'\n(.*?)(?=^## |\Z)'
+    n = len(re.findall(pat, text, re.S | re.M))
+    msg = f"'## {name}' appears {n} times in {where}; only the first would be read"
+    if n > 1 and msg not in fail:
+        fail.append(msg)
+    m = re.search(pat, text, re.S | re.M)
     return m.group(1) if m else None
 
-reg_block = section(text, 'Register')
+reg_block = section(text, 'Register', 'REGISTER.md')
 if reg_block is None:
     print("check6: no ## Register section in REGISTER.md")
     sys.exit(1)
@@ -172,7 +177,7 @@ for name, (num, ids, raw, detail) in sorted(confirmed.items()):
         if not pat.search(dtext):
             fail.append(f"{base}: **{field}:** is missing or empty")
 
-    body = section(dtext, 'Offshoots Filed')
+    body = section(dtext, 'Offshoots Filed', base)
     if body is None:
         fail.append(f"{base}: no ## Offshoots Filed section")
         continue

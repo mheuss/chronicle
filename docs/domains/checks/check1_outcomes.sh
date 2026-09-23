@@ -23,8 +23,13 @@ text = open(reg_path, encoding='utf-8').read()
 
 fail = []
 
-def section(text, name):
-    m = re.search(r'^## ' + re.escape(name) + r'\n(.*?)(?=^## |\Z)', text, re.S | re.M)
+def section(text, name, where):
+    pat = r'^## ' + re.escape(name) + r'\n(.*?)(?=^## |\Z)'
+    n = len(re.findall(pat, text, re.S | re.M))
+    msg = f"'## {name}' appears {n} times in {where}; only the first would be read"
+    if n > 1 and msg not in fail:
+        fail.append(msg)
+    m = re.search(pat, text, re.S | re.M)
     return m.group(1) if m else None
 
 def register_rows(block, fail):
@@ -50,13 +55,13 @@ def register_rows(block, fail):
         rows.append(cells)
     return rows
 
-reg_block = section(text, 'Register')
+reg_block = section(text, 'Register', 'REGISTER.md')
 if reg_block is None:
     print("check1: no ## Register section in REGISTER.md")
     sys.exit(1)
 
 rows = register_rows(reg_block, fail)
-blocked = register_rows(section(text, 'Blocked rows'), fail)
+blocked = register_rows(section(text, 'Blocked rows', 'REGISTER.md'), fail)
 
 if not rows:
     print("check1: examined zero register rows")

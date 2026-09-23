@@ -173,6 +173,9 @@ run "a decided row with empty Offshoots" check1_outcomes.sh \
 run "Offshoots that are not CHR- IDs" check1_outcomes.sh \
     'perl -0pi -e "s/\| into audio \| none found \|/| into audio | CHR-x |/" domains/REGISTER.md' \
     "is not 'none found' or ', '-separated CHR- IDs"
+run "a second Register heading" check1_outcomes.sh \
+    'printf "\n## Register\n\n| 99 | smuggled | confirmed | 2026-09-23 | maps/x.md | none found | src/ | x |\n" >> domains/REGISTER.md' \
+    "'## Register' appears 2 times in REGISTER.md"
 run "an appended row with no Symbols" check1_outcomes.sh \
     'perl -0pi -e "s/(\n\| 14 \|[^\n]*\n)/\$1| 15 | ghost | confirmed | 2026-09-20 | maps\/ghost.md | none found | src\/ |  |\n/" domains/REGISTER.md' \
     "row 15 (ghost): appended row has no Symbols"
@@ -480,6 +483,9 @@ run_synth "dropped destination disagrees with the register" check5_synthesis.sh 
     'perl -0pi -e "s/\| 3 \| gamma \| merged \| 2026-09-21 \| into alpha \|/| 3 | gamma | dropped | 2026-09-21 | cross-cutting: alpha handles it |/" domains/REGISTER.md;
      perl -0pi -e "s/\| gamma \| merged \| into alpha \|/| gamma | dropped | into beta |/" domains/SYNTHESIS.md' \
     "synthesis Candidate Outcomes row 'gamma' says 'into beta', register says 'cross-cutting: alpha handles it'"
+run_synth "a second Seams heading in a domain file" check5_synthesis.sh \
+    'printf "\n## Seams\n\n- SEAM-zz — alpha — smuggled — owner: alpha — \`x\` — \`X\`\n" >> domains/maps/beta.md' \
+    "'## Seams' appears 2 times in beta.md"
 run_synth "undecided row given an outcome in the synthesis" check5_synthesis.sh \
     'perl -0pi -e "s/\| 3 \| gamma \| merged \|/| 3 | gamma |  |/" domains/REGISTER.md;
      perl -0pi -e "s/^> \*\*Authoritative\.\*\* The walk is complete and the closure checks pass\.$/> **Not authoritative.** The walk is incomplete. This synthesis covers only the register rows that have an outcome, and the closure checks have not passed./m" domains/SYNTHESIS.md' \
@@ -517,6 +523,9 @@ run_synth "malformed Offshoots bullet is not silently skipped" check6_offshoots.
 run_synth "sentinel alongside a real offshoot bullet" check6_offshoots.sh \
     'perl -0pi -e "s/^- CHR-901 — the alpha offshoot$/- CHR-901 — the alpha offshoot\n- none found/m" domains/maps/alpha.md' \
     "alpha.md [Offshoots Filed]: '- none found' must be the only bullet"
+run_synth "a second Offshoots Filed heading" check6_offshoots.sh \
+    'printf "\n## Offshoots Filed\n\n- CHR-999 — smuggled in a second section\n" >> domains/maps/beta.md' \
+    "'## Offshoots Filed' appears 2 times in beta.md"
 # The bare-prose guard catches a line that is not a bullet. This is the other
 # half: a well-formed bullet whose ID is the wrong shape.
 # The branch CHR-155 needed and never reached, because the close procedure built
@@ -536,6 +545,9 @@ echo "== check 8: every source file owned once, or excluded with a reason =="
 run_synth "a path owned by two domains" check8_coverage.sh \
     'perl -0pi -e "s|^- chronicle-ui/Sources/ChronicleUI/Beta.swift$|- chronicle-ui/Sources/ChronicleUI/Beta.swift\n- chronicle-daemon/src/alpha.rs|m" domains/maps/beta.md' \
     'chronicle-daemon/src/alpha.rs is owned by 2 domains: alpha, beta'
+run_synth "a second Owned Files heading" check8_coverage.sh \
+    'printf "\n## Owned Files\n\n- chronicle-daemon/src/alpha.rs\n" >> domains/maps/beta.md' \
+    "'## Owned Files' appears 2 times in beta.md"
 run_synth "a path both owned and excluded" check8_coverage.sh \
     'printf "| chronicle-daemon/src/alpha.rs | not really |\n" >> domains/SYNTHESIS.md' \
     'chronicle-daemon/src/alpha.rs is both owned and excluded'

@@ -96,8 +96,13 @@ syn_path = os.path.join(map_root, 'SYNTHESIS.md')
 
 fail = []
 
-def section(text, name):
-    m = re.search(r'^## ' + re.escape(name) + r'\n(.*?)(?=^## |\Z)', text, re.S | re.M)
+def section(text, name, where):
+    pat = r'^## ' + re.escape(name) + r'\n(.*?)(?=^## |\Z)'
+    n = len(re.findall(pat, text, re.S | re.M))
+    msg = f"'## {name}' appears {n} times in {where}; only the first would be read"
+    if n > 1 and msg not in fail:
+        fail.append(msg)
+    m = re.search(pat, text, re.S | re.M)
     return m.group(1) if m else None
 
 def register_rows(block, fail):
@@ -191,7 +196,7 @@ for p in sorted(rec_set - fresh_set):
 # Owned: every confirmed domain's ## Owned Files.
 # ---------------------------------------------------------------------------
 reg_text = open(reg_path, encoding='utf-8').read()
-reg_block = section(reg_text, 'Register')
+reg_block = section(reg_text, 'Register', 'REGISTER.md')
 if reg_block is None:
     print("check8: no ## Register section in REGISTER.md")
     sys.exit(1)
@@ -215,7 +220,7 @@ for name, detail in sorted(confirmed.items()):
         fail.append(f"{name}: no domain file at {detail} (check2 owns this; check8 cannot count without it)")
         continue
     base = os.path.basename(detail)
-    body = section(open(path, encoding='utf-8').read(), 'Owned Files')
+    body = section(open(path, encoding='utf-8').read(), 'Owned Files', os.path.basename(path))
     if body is None:
         fail.append(f"{base}: no ## Owned Files section")
         continue
@@ -248,7 +253,7 @@ for p in sorted(owned):
 # Excluded: the synthesis's Exclusions table.
 # ---------------------------------------------------------------------------
 syn_text = open(syn_path, encoding='utf-8').read()
-excl_block = section(syn_text, 'Exclusions')
+excl_block = section(syn_text, 'Exclusions', 'SYNTHESIS.md')
 if excl_block is None:
     fail.append("synthesis has no ## Exclusions section")
     excl_block = ''
