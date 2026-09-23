@@ -103,12 +103,14 @@ if reg_block is None:
 
 candidates = []          # every candidate name, in register order
 confirmed = {}           # name -> detail path
+reg_outcomes = {}        # name -> (outcome, detail)
 for cells in register_rows(reg_block, fail):
     if len(cells) < 8:
         fail.append(f"row {cells[0]}: has {len(cells)} cells, expected 8")
         continue
     num, name, outcome, _decided, detail = cells[:5]
     candidates.append(name)
+    reg_outcomes[name] = (outcome, detail)
     if outcome == 'confirmed':
         confirmed[name] = detail
 
@@ -224,12 +226,12 @@ for cells in table_rows(section(syn_text, 'Seams')):
         fail.append(f"synthesis Seams row '{sid}' has an empty Evidence cell")
     syn_seams[sid] = (a, b, owner)
 
-syn_candidates = set()
+syn_candidates = {}      # name -> (outcome cell, destination cell)
 for cells in table_rows(section(syn_text, 'Candidate Outcomes')):
     if len(cells) < 3:
         fail.append(f"synthesis Candidate Outcomes row has {len(cells)} cells, expected 3: {cells}")
         continue
-    syn_candidates.add(cells[0])
+    syn_candidates[cells[0]] = (cells[1], cells[2])
 
 # ---------------------------------------------------------------------------
 # Joins, both directions.
@@ -246,8 +248,24 @@ for name in sorted(syn_domains):
 for name in candidates:
     if name not in syn_candidates:
         fail.append(f"candidate '{name}' is missing from the synthesis Candidate Outcomes table")
-for name in sorted(syn_candidates - set(candidates)):
+for name in sorted(set(syn_candidates) - set(candidates)):
     fail.append(f"synthesis Candidate Outcomes names '{name}', which is not a register row")
+
+# The destination cell may explain itself after the register's detail, so
+# merged and split rows match on a prefix that ends at a word boundary.
+for name in candidates:
+    if name not in syn_candidates or not reg_outcomes[name][0]:
+        continue
+    r_out, r_detail = reg_outcomes[name]
+    s_out, s_dest = syn_candidates[name]
+    if s_out != r_out:
+        fail.append(f"synthesis Candidate Outcomes row '{name}' says '{s_out}', register says '{r_out}'")
+    elif r_out == 'confirmed':
+        if file_cell(s_dest) != r_detail:
+            fail.append(f"synthesis Candidate Outcomes row '{name}' names file '{file_cell(s_dest)}', register says '{r_detail}'")
+    elif r_out in ('merged', 'split'):
+        if not (s_dest == r_detail or s_dest.startswith(r_detail + ' ')):
+            fail.append(f"synthesis Candidate Outcomes row '{name}' says '{s_dest[:len(r_detail) + 20]}', register says '{r_detail}'")
 
 for sid in sorted(file_seams):
     holders = file_seams[sid]

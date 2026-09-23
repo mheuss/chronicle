@@ -918,6 +918,10 @@ what was true during the walk, not of the tree today.
   The row now states them separately. No check could have caught this. Check 5
   joins on candidate *names* and never reads the "where it ended up" prose,
   which is the half a reader actually reads.
+  **Superseded 2026-09-23:** check 5 now compares each row's Outcome with the
+  register, and the start of "where it ended up" with the register's detail.
+  The explanation after that is still unchecked, so this defect still would
+  not be caught.
 
 - **[2026-09-21] The status line's second clause has no legal fix inside this
   plan.** The merged review called it Important and was right about the shape.

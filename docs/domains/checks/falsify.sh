@@ -464,6 +464,15 @@ run_synth "owner that is not one of the endpoints" check5_synthesis.sh \
 run_synth "authoritative while check1 reports incomplete" check5_synthesis.sh \
     'perl -0pi -e "s/\| 2 \| beta \| confirmed \|/| 2 | beta |  |/" domains/REGISTER.md' \
     'status line says the walk is complete, but check1 reports incomplete'
+run_synth "candidate outcome disagrees with the register" check5_synthesis.sh \
+    'perl -0pi -e "s/\| gamma \| merged \| into alpha \|/| gamma | confirmed | into alpha |/" domains/SYNTHESIS.md' \
+    "synthesis Candidate Outcomes row 'gamma' says 'confirmed', register says 'merged'"
+run_synth "merge destination disagrees with the register" check5_synthesis.sh \
+    'perl -0pi -e "s/\| gamma \| merged \| into alpha \|/| gamma | merged | into beta |/" domains/SYNTHESIS.md' \
+    "synthesis Candidate Outcomes row 'gamma' says 'into beta', register says 'into alpha'"
+run_synth "confirmed destination names the wrong file" check5_synthesis.sh \
+    'perl -0pi -e "s/\| alpha \| confirmed \| maps\/alpha.md \|/| alpha | confirmed | maps\/beta.md |/" domains/SYNTHESIS.md' \
+    "synthesis Candidate Outcomes row 'alpha' names file 'maps/beta.md', register says 'maps/alpha.md'"
 
 echo
 echo "== check 6: offshoots accounted for locally and in Linear =="
