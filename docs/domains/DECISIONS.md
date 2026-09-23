@@ -918,10 +918,11 @@ what was true during the walk, not of the tree today.
   The row now states them separately. No check could have caught this. Check 5
   joins on candidate *names* and never reads the "where it ended up" prose,
   which is the half a reader actually reads.
-  **Superseded 2026-09-23:** check 5 now compares each row's Outcome with the
-  register, and the start of "where it ended up" with the register's detail.
-  The explanation after that is still unchecked, so this defect still would
-  not be caught.
+  **Superseded 2026-09-23:** check 5 now compares each decided row's Outcome
+  with the register. It also compares where the row ended up: the file for a
+  confirmed row, and the register's detail up to an em dash for the others. The
+  explanation after the dash is still unchecked, so this defect still would not
+  be caught.
 
 - **[2026-09-21] The status line's second clause has no legal fix inside this
   plan.** The merged review called it Important and was right about the shape.
@@ -1114,8 +1115,8 @@ what was true during the walk, not of the tree today.
   then was the one tracked check with none. Three more cover the stray-source
   sweep and the short-row guard. The harness is at 57 cases, 56 bit, one no-op
   control.
-  **Superseded 2026-09-23:** the PR #54 review added five more. The harness is
-  at 62 cases, 61 bit, one no-op control.
+  **Superseded 2026-09-23:** the PR #54 review added eight more. The harness is
+  at 65 cases, 64 bit, one no-op control.
 
   Writing them is what proved the guard live rather than arguing it from the
   source. Planting `CHR-999` in a copy of the tree fails check 6 with the exact
@@ -1130,5 +1131,10 @@ what was true during the walk, not of the tree today.
   The same review found a table row in `maps/ui.md` split by unescaped pipes,
   and the checkout step in CI now drops its token after cloning.
 
-  This is the third review round in a row where the findings were in the gate,
-  not the map.
+  A local review of those fixes, before pushing, found the check 5 fix
+  incomplete. A duplicate row could hide a wrong one, a dropped row's
+  destination was never compared, and a bare space let a second merge target
+  follow the right one. Each of those has a case too.
+
+  This is the third review round in a row where most findings were in the gate
+  rather than the map.

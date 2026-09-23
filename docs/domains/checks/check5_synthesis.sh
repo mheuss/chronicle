@@ -231,6 +231,8 @@ for cells in table_rows(section(syn_text, 'Candidate Outcomes')):
     if len(cells) < 3:
         fail.append(f"synthesis Candidate Outcomes row has {len(cells)} cells, expected 3: {cells}")
         continue
+    if cells[0] in syn_candidates:
+        fail.append(f"synthesis Candidate Outcomes names '{cells[0]}' twice")
     syn_candidates[cells[0]] = (cells[1], cells[2])
 
 # ---------------------------------------------------------------------------
@@ -251,8 +253,8 @@ for name in candidates:
 for name in sorted(set(syn_candidates) - set(candidates)):
     fail.append(f"synthesis Candidate Outcomes names '{name}', which is not a register row")
 
-# The destination cell may explain itself after the register's detail, so
-# merged and split rows match on a prefix that ends at a word boundary.
+# The destination cell may explain itself after the register's detail, set
+# off by an em dash. A bare space would let a second destination through.
 for name in candidates:
     if name not in syn_candidates or not reg_outcomes[name][0]:
         continue
@@ -263,8 +265,8 @@ for name in candidates:
     elif r_out == 'confirmed':
         if file_cell(s_dest) != r_detail:
             fail.append(f"synthesis Candidate Outcomes row '{name}' names file '{file_cell(s_dest)}', register says '{r_detail}'")
-    elif r_out in ('merged', 'split'):
-        if not (s_dest == r_detail or s_dest.startswith(r_detail + ' ')):
+    elif r_out in ('merged', 'split', 'dropped'):
+        if not (s_dest == r_detail or s_dest.startswith(r_detail + ' — ')):
             fail.append(f"synthesis Candidate Outcomes row '{name}' says '{s_dest[:len(r_detail) + 20]}', register says '{r_detail}'")
 
 for sid in sorted(file_seams):

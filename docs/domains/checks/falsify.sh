@@ -473,6 +473,16 @@ run_synth "merge destination disagrees with the register" check5_synthesis.sh \
 run_synth "confirmed destination names the wrong file" check5_synthesis.sh \
     'perl -0pi -e "s/\| alpha \| confirmed \| maps\/alpha.md \|/| alpha | confirmed | maps\/beta.md |/" domains/SYNTHESIS.md' \
     "synthesis Candidate Outcomes row 'alpha' names file 'maps/beta.md', register says 'maps/alpha.md'"
+run_synth "duplicate candidate row hides a wrong one" check5_synthesis.sh \
+    'perl -0pi -e "s/^\| gamma \| merged \| into alpha \|$/| gamma | confirmed | maps\/alpha.md |\n| gamma | merged | into alpha |/m" domains/SYNTHESIS.md' \
+    "synthesis Candidate Outcomes names 'gamma' twice"
+run_synth "dropped destination disagrees with the register" check5_synthesis.sh \
+    'perl -0pi -e "s/\| 3 \| gamma \| merged \| 2026-09-21 \| into alpha \|/| 3 | gamma | dropped | 2026-09-21 | cross-cutting: alpha handles it |/" domains/REGISTER.md;
+     perl -0pi -e "s/\| gamma \| merged \| into alpha \|/| gamma | dropped | into beta |/" domains/SYNTHESIS.md' \
+    "synthesis Candidate Outcomes row 'gamma' says 'into beta', register says 'cross-cutting: alpha handles it'"
+run_synth "merge destination with a second target appended" check5_synthesis.sh \
+    'perl -0pi -e "s/\| gamma \| merged \| into alpha \|/| gamma | merged | into alpha and beta |/" domains/SYNTHESIS.md' \
+    "synthesis Candidate Outcomes row 'gamma' says 'into alpha and beta', register says 'into alpha'"
 
 echo
 echo "== check 6: offshoots accounted for locally and in Linear =="
