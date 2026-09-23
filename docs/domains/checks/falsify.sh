@@ -133,7 +133,7 @@ run() {
     rm -rf "$FIX"; FIX=""
 }
 
-echo "== check 1: register grammar, merge chains and split children =="
+echo "== check 1: register grammar, merge targets and split children =="
 run "Decided is not YYYY-MM-DD" check1_outcomes.sh \
     'perl -0pi -e "s/\| 1 \| capture \| confirmed \| 2026-09-16 \| maps\/capture.md \|/| 1 | capture | confirmed | 16-09-2026 | maps\/capture.md |/" domains/REGISTER.md' \
     "Decided '16-09-2026' is not YYYY-MM-DD"
@@ -152,9 +152,12 @@ run "merged Detail is not 'into <candidate>'" check1_outcomes.sh \
 run "a merge into a candidate with no row" check1_outcomes.sh \
     'perl -0pi -e "s/\| 5 \| audio-encoding \| merged \| 2026-09-16 \| into audio \|/| 5 | audio-encoding | merged | 2026-09-16 | into ghost |/" domains/REGISTER.md' \
     "merges into 'ghost', which is not a register row"
-run "a merge chain that cycles" check1_outcomes.sh \
+run "a merge into itself" check1_outcomes.sh \
     'perl -0pi -e "s/\| 5 \| audio-encoding \| merged \| 2026-09-16 \| into audio \|/| 5 | audio-encoding | merged | 2026-09-16 | into audio-encoding |/" domains/REGISTER.md' \
-    "merge chain cycles at 'audio-encoding'"
+    "merges into 'audio-encoding', whose outcome is 'merged', not confirmed"
+run "a merge into a merged candidate" check1_outcomes.sh \
+    'perl -0pi -e "s/\| 5 \| audio-encoding \| merged \| 2026-09-16 \| into audio \|/| 5 | audio-encoding | merged | 2026-09-16 | into search |/" domains/REGISTER.md' \
+    "merges into 'search', whose outcome is 'merged', not confirmed"
 run "dropped Detail is not 'cross-cutting: ...'" check1_outcomes.sh \
     'perl -0pi -e "s/\| 5 \| audio-encoding \| merged \| 2026-09-16 \| into audio \|/| 5 | audio-encoding | dropped | 2026-09-16 | x |/" domains/REGISTER.md' \
     "dropped Detail 'x' is not 'cross-cutting: <sentence>'"

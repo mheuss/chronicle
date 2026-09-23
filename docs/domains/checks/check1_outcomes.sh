@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Closure check 1: every register entry has a permitted outcome and a date,
-# and the outcome grammar, merge targets, merge chains and split children hold.
+# and the outcome grammar, merge targets and split children hold.
 # Per Design section 5 check 1, and the grammar in Design 1.2 / 1.4.
 #
 # Exit 0 = grammar passes and the register is complete.
@@ -112,27 +112,15 @@ for cells in rows:
     elif offshoots != 'none found' and not re.fullmatch(r'CHR-\d+(, CHR-\d+)*', offshoots):
         fail.append(f"row {num} ({name}): Offshoots '{offshoots}' is not 'none found' or ', '-separated CHR- IDs")
 
-# Merge targets must be confirmed, and merge chains must terminate.
+# A merge target must already be confirmed, so no chain is longer than one.
 for name, (outcome, detail, num) in by_name.items():
     if outcome != 'merged':
         continue
-    seen, cur = {name}, detail.split(' ', 1)[1] if ' ' in detail else ''
-    while True:
-        if cur not in by_name:
-            fail.append(f"row {num} ({name}): merges into '{cur}', which is not a register row")
-            break
-        if cur in seen:
-            fail.append(f"row {num} ({name}): merge chain cycles at '{cur}'")
-            break
-        seen.add(cur)
-        t_out, t_detail, _ = by_name[cur]
-        if t_out == 'confirmed':
-            break
-        if t_out == 'merged':
-            cur = t_detail.split(' ', 1)[1] if ' ' in t_detail else ''
-            continue
-        fail.append(f"row {num} ({name}): merges into '{cur}', whose outcome is '{t_out or 'undecided'}', not confirmed")
-        break
+    target = detail.split(' ', 1)[1] if ' ' in detail else ''
+    if target not in by_name:
+        fail.append(f"row {num} ({name}): merges into '{target}', which is not a register row")
+    elif by_name[target][0] != 'confirmed':
+        fail.append(f"row {num} ({name}): merges into '{target}', whose outcome is '{by_name[target][0] or 'undecided'}', not confirmed")
 
 # Split children must exist as rows.
 for name, (outcome, detail, num) in by_name.items():
