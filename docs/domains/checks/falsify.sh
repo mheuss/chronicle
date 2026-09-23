@@ -500,6 +500,9 @@ run_synth "resolved file removed entirely must exit 2" check6_offshoots.sh \
 run_synth "malformed Offshoots bullet is not silently skipped" check6_offshoots.sh \
     'perl -0pi -e "s/^- CHR-901 — the alpha offshoot$/- CHR-901 — the alpha offshoot\n-CHR-999 — smuggled in with no space/m" domains/maps/alpha.md' \
     "alpha.md [Offshoots Filed]: bare prose, not a bullet: '-CHR-999 — smuggled in with no space'"
+run_synth "sentinel alongside a real offshoot bullet" check6_offshoots.sh \
+    'perl -0pi -e "s/^- CHR-901 — the alpha offshoot$/- CHR-901 — the alpha offshoot\n- none found/m" domains/maps/alpha.md' \
+    "alpha.md [Offshoots Filed]: '- none found' must be the only bullet"
 # The bare-prose guard catches a line that is not a bullet. This is the other
 # half: a well-formed bullet whose ID is the wrong shape.
 # The branch CHR-155 needed and never reached, because the close procedure built

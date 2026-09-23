@@ -183,6 +183,9 @@ for name, (num, ids, raw, detail) in sorted(confirmed.items()):
         continue
 
     sentinel = bullets == ['- none found']
+    if not sentinel and '- none found' in bullets:
+        fail.append(f"{base} [Offshoots Filed]: '- none found' must be the only bullet")
+        continue
     file_ids = set()
     for b in bullets:
         if b == '- none found':
