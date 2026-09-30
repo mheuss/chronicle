@@ -95,8 +95,8 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureRuntime<'a, M> {
     }
 
     /// Status probe — survives engine drop because it holds `Arc`s into
-    /// the engine's atomic counters. The 1Hz refresher in main() captures
-    /// this and continues to read it across pause/resume.
+    /// the engine's atomic counters. The supervisor stores it in the probe
+    /// holder, and the IPC `Status` handler reads it from there.
     pub fn status_probe(&self) -> chronicle_capture::EngineStatusProbe {
         // Always Some until stop() consumes self.
         self.engine

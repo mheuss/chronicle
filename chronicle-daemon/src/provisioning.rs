@@ -33,7 +33,7 @@ struct Snapshot {
 }
 
 /// Shared transcription status, written by boot/provisioner, read by the
-/// IPC handler. Same ArcSwap pattern as `CaptureStatusSnapshot`.
+/// IPC handler. Same ArcSwap pattern as `StorageStatusSnapshot`.
 pub struct TranscriptionStatusCell {
     snapshot: ArcSwap<Snapshot>,
     download_bytes: AtomicU64,

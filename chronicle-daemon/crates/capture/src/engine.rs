@@ -390,9 +390,9 @@ impl<'a> CaptureEngine<'a> {
 
 /// Lightweight read-only view of the capture engine's live health state.
 ///
-/// Allows a background refresher to observe capture health without
+/// Allows the daemon's IPC `Status` handler to observe capture health without
 /// borrowing `CaptureEngine` itself (which lives on the main task and
-/// isn't `Send` across the refresher boundary).
+/// isn't `Send` across that boundary).
 #[derive(Clone)]
 pub struct EngineStatusProbe {
     pub frames_captured: Arc<AtomicU64>,

@@ -97,9 +97,9 @@ ordered teardown that cascades through the system:
    loop, joined last so it keeps winding down while steps 1-4 drain
 
 Of the five steps above, only retention cleanup does not drain on a closing
-channel. It watches the cancellation token instead. The capture and storage
-status refreshers watch the same token, but they are spawned detached and no
-step joins them. `cancel.cancel()` sets that
+channel. It watches the cancellation token instead. The storage status
+refresher watches the same token, but it is spawned detached and no step
+joins it. `cancel.cancel()` sets that
 token. It fires after the provisioning wait and the channel closes, and before
 every unbounded step. The batch loop checks the token before each batch and
 again after each commit. An in-flight run therefore ends at the next batch

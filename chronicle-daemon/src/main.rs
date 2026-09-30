@@ -299,9 +299,6 @@ async fn main() -> Result<()> {
     // so `DaemonHandler::new` can borrow them). The metadata provider is
     // kept here as well so the `capture_store_loop` spawn can pass it in.
     let counters = crate::pipeline::counters::PipelineCounters::new();
-    let capture_snapshot = Arc::new(ArcSwap::from_pointee(
-        crate::ipc_handler::CaptureStatusSnapshot::default(),
-    ));
     let storage_status_snapshot = Arc::new(ArcSwap::from_pointee(
         crate::ipc_handler::StorageStatusSnapshot::default(),
     ));
@@ -411,10 +408,12 @@ async fn main() -> Result<()> {
             whisper_variant.as_str()
         );
     }
+    let capture_probe_holder: Arc<std::sync::Mutex<Option<chronicle_capture::EngineStatusProbe>>> =
+        Arc::new(std::sync::Mutex::new(None));
     let capture_ready = Arc::new(AtomicBool::new(false));
     let handler = ipc_handler::DaemonHandler::new(
         Arc::clone(&counters),
-        Arc::clone(&capture_snapshot),
+        Arc::clone(&capture_probe_holder),
         Arc::clone(&storage_status_snapshot),
         Arc::clone(&storage),
         mic_tx,
@@ -444,8 +443,8 @@ async fn main() -> Result<()> {
     //
     // CHR-121: `CaptureRuntime` wraps the engine + capture_store_loop +
     // ocr_loop as one atomic unit so pause/resume cycle them together. If
-    // the persisted `capture_paused` is true, we boot with no runtime; the
-    // 1Hz refresher publishes a default snapshot until Resume rebuilds one.
+    // the persisted `capture_paused` is true, we boot with no runtime, and
+    // `Status` reports "paused" until Resume rebuilds one.
     //
     // The runtime borrows the audio token, which borrows `audio_pipeline`.
     // `set_microphone_enabled(&self)` only takes a shared borrow, so the
@@ -457,9 +456,6 @@ async fn main() -> Result<()> {
     // cycle. The drop reporter spawned below reads it, and needs it to outlive
     // the supervisor.
     let capture_drops = Arc::new(chronicle_capture::CaptureDropCounters::default());
-
-    let capture_probe_holder: Arc<std::sync::Mutex<Option<chronicle_capture::EngineStatusProbe>>> =
-        Arc::new(std::sync::Mutex::new(None));
 
     let mut supervisor: CaptureSupervisor<
         '_,
@@ -515,12 +511,13 @@ async fn main() -> Result<()> {
     // stop after the segment it is already working on.
     let stop_transcription = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Drop reporter. Spawned here, BEFORE provisioning::boot() below, not
-    // beside the status refreshers further down: the microphone is restored
-    // early and a model load can take a long time, so a reporter spawned after
-    // boot() stays silent through exactly the window CHR-53 describes. The
-    // counters accumulate either way and ReporterState starts at zero, so a
-    // late reporter would still eventually report the burst — what a late
-    // spawn costs is promptness, while an operator is watching the terminal.
+    // beside the storage status refresher further down: the microphone is
+    // restored early and a model load can take a long time, so a reporter
+    // spawned after boot() stays silent through exactly the window CHR-53
+    // describes. The counters accumulate either way and ReporterState starts at
+    // zero, so a late reporter would still eventually report the burst — what a
+    // late spawn costs is promptness, while an operator is watching the
+    // terminal.
     //
     // It takes its own shutdown channel rather than the shared `cancel` token:
     // `cancel.cancel()` fires at the top of the shutdown block, while both
@@ -592,39 +589,6 @@ async fn main() -> Result<()> {
         Arc::clone(&transcription_sink),
         audio_counters,
     ));
-
-    // Capture status refresher (1 Hz). Reads engine atomics via the probe
-    // holder so the loop works across pause/resume cycles — when the
-    // runtime is absent (paused, or paused-on-boot), publish the default
-    // snapshot and the `Status` handler reports state="paused".
-    let refresher_cancel = cancel.clone();
-    let refresher_snapshot = Arc::clone(&capture_snapshot);
-    let refresher_probe = Arc::clone(&capture_probe_holder);
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_secs(1));
-        loop {
-            tokio::select! {
-                _ = refresher_cancel.cancelled() => break,
-                _ = ticker.tick() => {
-                    let snapshot = if let Some(probe) =
-                        refresher_probe.lock().unwrap().as_ref()
-                    {
-                        let snap = probe.snapshot();
-                        crate::ipc_handler::CaptureStatusSnapshot {
-                            state: Some(snap.state),
-                            active_displays: snap.active_displays,
-                            frames_captured: snap.frames_captured,
-                            frames_dropped: snap.frames_dropped,
-                        }
-                    } else {
-                        // No active runtime → paused or paused-on-boot.
-                        crate::ipc_handler::CaptureStatusSnapshot::default()
-                    };
-                    refresher_snapshot.store(Arc::new(snapshot));
-                }
-            }
-        }
-    });
 
     let storage_refresher_storage = Arc::clone(&storage);
     let storage_refresher_snapshot = Arc::clone(&storage_status_snapshot);
@@ -1076,8 +1040,8 @@ async fn main() -> Result<()> {
     // down through all of them and this wait is normally already satisfied.
     // Not through the provision wait, which runs *before* the cancel and is
     // tied with DRAIN_GRACE for the longest at 5s — moving the cancel above it
-    // would buy that time too, at the cost of stopping IPC and the refreshers
-    // earlier.
+    // would buy that time too, at the cost of stopping IPC and the storage
+    // refresher earlier.
     //
     // Four times a measured batch (NFR-3), rounded up to a whole hundred: eight
     // runs per table of 500 rows (`CLEANUP_BATCH_SIZE`) spanned 29-49 ms idle
