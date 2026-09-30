@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// What the menu bar item shows. Every state has its own symbol shape, so it
-/// reads without relying on tint.
+/// What the menu bar item shows. Each state has its own symbol shape, so it
+/// reads without relying on tint. The one exception is connecting and waiting
+/// for status, which share `ellipsis.circle` because both mean no status yet.
 struct MenuBarDisplay: Equatable {
     enum Tint: Equatable {
         case red, yellow, orange, green
