@@ -444,7 +444,7 @@ async fn main() -> Result<()> {
     // CHR-121: `CaptureRuntime` wraps the engine + capture_store_loop +
     // ocr_loop as one atomic unit so pause/resume cycle them together. If
     // the persisted `capture_paused` is true, we boot with no runtime, and
-    // `Status` reports "paused" until Resume rebuilds one.
+    // `Status` reports "paused" until Resume clears the flag.
     //
     // The runtime borrows the audio token, which borrows `audio_pipeline`.
     // `set_microphone_enabled(&self)` only takes a shared borrow, so the

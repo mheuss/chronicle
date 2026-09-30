@@ -401,7 +401,7 @@ pub struct EngineStatusProbe {
     pub active_displays: Arc<AtomicUsize>,
 }
 
-/// One tick's worth of engine status.
+/// One point-in-time read of engine status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EngineStatusSnapshot {
     pub frames_captured: u64,
@@ -414,7 +414,7 @@ impl EngineStatusProbe {
     /// Load all four values. `Relaxed` for counters (monotonically
     /// increasing), `Acquire` for state/active_displays (they change in
     /// lockstep with engine transitions and readers want to see a coherent
-    /// snapshot — a cache-line refresh per tick is fine).
+    /// snapshot — a cache-line refresh per `Status` request is fine).
     pub fn snapshot(&self) -> EngineStatusSnapshot {
         EngineStatusSnapshot {
             frames_captured: self.frames_captured.load(Ordering::Relaxed),
