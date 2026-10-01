@@ -606,6 +606,7 @@ mod tests {
     use crate::permissions::MicrophoneStatus;
     use chronicle_audio::MicToggleOutcome;
     use chronicle_ipc::{MicState, Request, RequestHandler, Response};
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn search_sampling_fires_every_nth_from_first() {
@@ -961,7 +962,7 @@ mod tests {
             frames_captured: Arc::new(AtomicU64::new(40)),
             frames_dropped: Arc::new(AtomicU64::new(3)),
             state: Arc::new(AtomicU8::new(state as u8)),
-            active_displays: Arc::new(std::sync::atomic::AtomicUsize::new(2)),
+            active_displays: Arc::new(AtomicUsize::new(2)),
         }
     }
 
