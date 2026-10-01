@@ -33,19 +33,19 @@ struct CaptureBadgeTests {
             == .notRunning)
     }
 
-    @Test func eachBadgeHasItsOwnLook() {
-        let looks: [(CaptureBadge, String, MenuBarDisplay.Tint, String)] = [
-            (.disconnected, "xmark.circle.fill", .red, "Disconnected"),
-            (.connecting, "ellipsis.circle.fill", .yellow, "Connecting"),
-            (.waiting, "ellipsis.circle.fill", .yellow, "Waiting for status"),
-            (.paused, "pause.circle.fill", .orange, "Paused"),
-            (.active, "record.circle.fill", .green, "Active"),
-            (.notRunning, "exclamationmark.circle.fill", .red, "Not running"),
-        ]
-        for (badge, symbol, tint, label) in looks {
-            #expect(badge.symbol == symbol)
-            #expect(badge.tint == tint)
-            #expect(badge.label == label)
-        }
+    @Test(arguments: [
+        (CaptureBadge.disconnected, "xmark.circle.fill", MenuBarDisplay.Tint.red, "Disconnected"),
+        (.connecting, "ellipsis.circle.fill", .yellow, "Connecting"),
+        (.waiting, "ellipsis.circle.fill", .yellow, "Waiting for status"),
+        (.paused, "pause.circle.fill", .orange, "Paused"),
+        (.active, "record.circle.fill", .green, "Active"),
+        (.notRunning, "exclamationmark.circle.fill", .red, "Not running"),
+    ])
+    func eachBadgeHasItsOwnLook(
+        badge: CaptureBadge, symbol: String, tint: MenuBarDisplay.Tint, label: String
+    ) {
+        #expect(badge.symbol == symbol)
+        #expect(badge.tint == tint)
+        #expect(badge.label == label)
     }
 }
