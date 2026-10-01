@@ -2,7 +2,7 @@ import SwiftUI
 
 /// What the Settings capture badge shows. It has one case per menu bar icon
 /// state, and both classify capture with `CaptureHealth`.
-enum CaptureBadge: Equatable {
+enum CaptureBadge: String, CaseIterable {
     case disconnected, connecting, waiting, paused, active, notRunning
 
     static func from(

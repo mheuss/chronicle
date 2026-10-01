@@ -33,19 +33,20 @@ struct CaptureBadgeTests {
             == .notRunning)
     }
 
-    @Test(arguments: [
-        (CaptureBadge.disconnected, "xmark.circle.fill", MenuBarDisplay.Tint.red, "Disconnected"),
-        (.connecting, "ellipsis.circle.fill", .yellow, "Connecting"),
-        (.waiting, "ellipsis.circle.fill", .yellow, "Waiting for status"),
-        (.paused, "pause.circle.fill", .orange, "Paused"),
-        (.active, "record.circle.fill", .green, "Active"),
-        (.notRunning, "exclamationmark.circle.fill", .red, "Not running"),
-    ])
-    func eachBadgeHasItsOwnLook(
-        badge: CaptureBadge, symbol: String, tint: MenuBarDisplay.Tint, label: String
-    ) {
-        #expect(badge.symbol == symbol)
-        #expect(badge.tint == tint)
-        #expect(badge.label == label)
+    private static let looks: [CaptureBadge: (symbol: String, tint: MenuBarDisplay.Tint, label: String)] = [
+        .disconnected: ("xmark.circle.fill", .red, "Disconnected"),
+        .connecting: ("ellipsis.circle.fill", .yellow, "Connecting"),
+        .waiting: ("ellipsis.circle.fill", .yellow, "Waiting for status"),
+        .paused: ("pause.circle.fill", .orange, "Paused"),
+        .active: ("record.circle.fill", .green, "Active"),
+        .notRunning: ("exclamationmark.circle.fill", .red, "Not running"),
+    ]
+
+    @Test(arguments: CaptureBadge.allCases)
+    func eachBadgeHasItsOwnLook(badge: CaptureBadge) throws {
+        let look = try #require(Self.looks[badge])
+        #expect(badge.symbol == look.symbol)
+        #expect(badge.tint == look.tint)
+        #expect(badge.label == look.label)
     }
 }
