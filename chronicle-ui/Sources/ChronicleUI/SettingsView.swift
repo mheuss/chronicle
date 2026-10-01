@@ -21,6 +21,36 @@ enum CaptureBadge: Equatable {
             }
         }
     }
+
+    var symbol: String {
+        switch self {
+        case .disconnected: return "xmark.circle.fill"
+        case .connecting, .waiting: return "ellipsis.circle.fill"
+        case .paused: return "pause.circle.fill"
+        case .active: return "record.circle.fill"
+        case .notRunning: return "exclamationmark.circle.fill"
+        }
+    }
+
+    var tint: MenuBarDisplay.Tint {
+        switch self {
+        case .disconnected, .notRunning: return .red
+        case .connecting, .waiting: return .yellow
+        case .paused: return .orange
+        case .active: return .green
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .disconnected: return "Disconnected"
+        case .connecting: return "Connecting"
+        case .waiting: return "Waiting for status"
+        case .paused: return "Paused"
+        case .active: return "Active"
+        case .notRunning: return "Not running"
+        }
+    }
 }
 
 struct SettingsView: View {
@@ -124,26 +154,8 @@ struct SettingsView: View {
 
     private var statusBadge: some View {
         HStack(spacing: 6) {
-            switch captureStatus {
-            case .disconnected:
-                Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                Text("Disconnected")
-            case .connecting:
-                Image(systemName: "ellipsis.circle.fill").foregroundStyle(.yellow)
-                Text("Connecting")
-            case .waiting:
-                Image(systemName: "ellipsis.circle.fill").foregroundStyle(.yellow)
-                Text("Waiting for status")
-            case .paused:
-                Image(systemName: "pause.circle.fill").foregroundStyle(.orange)
-                Text("Paused")
-            case .active:
-                Image(systemName: "record.circle.fill").foregroundStyle(.green)
-                Text("Active")
-            case .notRunning:
-                Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.red)
-                Text("Not running")
-            }
+            Image(systemName: captureStatus.symbol).foregroundStyle(captureStatus.tint.color)
+            Text(captureStatus.label)
         }
     }
 
