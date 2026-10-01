@@ -98,12 +98,11 @@ ordered teardown that cascades through the system:
 
 Of the five steps above, only retention cleanup does not drain on a closing
 channel. It watches the cancellation token instead. The storage status
-refresher watches the same token, but it is spawned detached and no step
-joins it. `cancel.cancel()` sets that
-token. It fires after the provisioning wait and the channel closes, and before
-every unbounded step. The batch loop checks the token before each batch and
-again after each commit. An in-flight run therefore ends at the next batch
-boundary instead of running to completion.
+refresher watches the same token. It is spawned detached. No step joins it.
+`cancel.cancel()` sets that token. It fires after the provisioning wait and the
+channel closes, and before every unbounded step. The batch loop checks the
+token before each batch and again after each commit. An in-flight run therefore
+ends at the next batch boundary instead of running to completion.
 
 `CLEANUP_GRACE` is not a deadline. When it expires the join logs that cleanup
 is running long, then keeps waiting. Two other waits do force work to stop.

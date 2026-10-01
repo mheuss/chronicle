@@ -50,7 +50,6 @@ final class DaemonConnection {
     /// and teardown requirements cannot be tested.
     private let connectionFactory: @MainActor @Sendable () async throws -> Int32
 
-    /// How long the heartbeat waits between status requests.
     let heartbeatInterval: Duration
 
     #if DEBUG

@@ -67,11 +67,7 @@ struct MenuBarDisplay: Equatable {
     }
 }
 
-/// Menu bar status icon, drawn from `MenuBarDisplay`. Six states:
-/// disconnected = `xmark.circle` red; connecting = `ellipsis.circle` yellow;
-/// connected with no status yet = `ellipsis.circle` yellow; paused =
-/// `pause.circle.fill` orange; running = `record.circle.fill` green; any other
-/// state = `exclamationmark.circle` red.
+/// Menu bar status icon, drawn from `MenuBarDisplay`.
 struct MenuBarIcon: View {
     var connection: DaemonConnection
 
