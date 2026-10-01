@@ -276,7 +276,7 @@ struct DaemonConnectionReconnectTests {
                 _ = readLineSync(from: serverFD)   // park, keeping the peer open
             }
             return fd
-        })
+        }, heartbeatInterval: .seconds(30))
 
         conn.connect()
         await waitUntil { conn.lastStatus != nil }
