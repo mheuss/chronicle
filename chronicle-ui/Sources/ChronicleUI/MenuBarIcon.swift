@@ -1,8 +1,7 @@
 import SwiftUI
 
 /// How capture is doing, from the latest status. The menu bar icon and the
-/// Settings badge both classify with this, so they agree on what capture is
-/// doing.
+/// Settings badge both classify with this.
 enum CaptureHealth: Equatable {
     case noStatus, paused, running, notRunning
 
