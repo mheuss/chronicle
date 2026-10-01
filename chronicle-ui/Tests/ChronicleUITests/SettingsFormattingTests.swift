@@ -159,7 +159,7 @@ struct SettingsFormattingTests {
 /// The fallback that keeps a provision visible when `setWhisperModel`'s
 /// follow-up status refresh fails. Both views start their 1 Hz poll by
 /// reading `lastStatus`, so a stale block there means no progress and a
-/// swallowed fast failure until the 30-second monitor tick.
+/// swallowed fast failure until the next 5-second monitor tick.
 @Suite("Status transcription splice")
 struct StatusTranscriptionSpliceTests {
     private func status(_ state: TranscriptionState) -> StatusResponse {

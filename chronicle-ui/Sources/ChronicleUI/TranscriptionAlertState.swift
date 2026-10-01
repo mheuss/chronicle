@@ -109,7 +109,7 @@ final class TranscriptionAlertState {
 
         // Latches on the way in, clears on the way out. `.error` raises it too
         // and keeps it set: a failure is where Retry lives, and a fast one can
-        // land between two 30 s status ticks without any in-flight snapshot
+        // land between two 5 s status ticks without any in-flight snapshot
         // ever being observed — so keying only on `isProvisioning` would leave
         // the user with a broken switch and no way to retry it.
         if Self.raisesBanner(state) {

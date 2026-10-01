@@ -50,6 +50,9 @@ final class DaemonConnection {
     /// and teardown requirements cannot be tested.
     private let connectionFactory: @MainActor @Sendable () async throws -> Int32
 
+    /// How long the heartbeat waits between status requests.
+    let heartbeatInterval: Duration
+
     #if DEBUG
     var sessionForTesting: ConnectionSession? { session }
     #endif
@@ -65,12 +68,17 @@ final class DaemonConnection {
 
     init() {
         self.connectionFactory = { try await Self.connectToDaemonSocket() }
+        self.heartbeatInterval = .seconds(5)
     }
 
     /// Builds a connection whose descriptors come from `connectionFactory`
     /// instead of the real socket path.
-    internal init(connectionFactory: @escaping @MainActor @Sendable () async throws -> Int32) {
+    internal init(
+        connectionFactory: @escaping @MainActor @Sendable () async throws -> Int32,
+        heartbeatInterval: Duration = .seconds(5)
+    ) {
         self.connectionFactory = connectionFactory
+        self.heartbeatInterval = heartbeatInterval
     }
 
     /// **Test-only.** Not for production use. Wires `DaemonConnection` to a
@@ -96,6 +104,7 @@ final class DaemonConnection {
         )
         precondition(result == 0, "SO_NOSIGPIPE failed in testing init: errno=\(errno)")
         self.connectionFactory = { preconditionFailure("testing connections do not reconnect") }
+        self.heartbeatInterval = .seconds(5)
         let session = ConnectionSession(fd: fd, maxResponseSize: Self.maxResponseSize)
         session.start()
         self.session = session
@@ -202,7 +211,7 @@ final class DaemonConnection {
             // provisioning poll by reading `lastStatus`, so leaving it on the
             // pre-request state means neither loop starts: no progress bar,
             // and a fast failure invisible until the connection monitor's
-            // 30-second tick. "One second of staleness" was only ever true
+            // next 5-second tick. "One second of staleness" was only ever true
             // when the poll was already running.
             //
             // The reply we are holding carries the state the daemon just
@@ -438,7 +447,7 @@ final class DaemonConnection {
 
             _ = await group.next()
             // Without this, a session that finishes just after a heartbeat
-            // waits out the rest of monitorConnection's 30 second sleep — the
+            // waits out the rest of monitorConnection's 5 second sleep — the
             // delay this feature removes. `idleEOFReconnectsPromptly` fails
             // when it is removed. It is also the only thing that frees the
             // other child when the monitor exits first, though no test is in
@@ -451,7 +460,7 @@ final class DaemonConnection {
     private func monitorConnection() async throws {
         while !Task.isCancelled && session != nil {
             _ = try await requestStatus()
-            try await Task.sleep(for: .seconds(30))
+            try await Task.sleep(for: heartbeatInterval)
         }
     }
 
