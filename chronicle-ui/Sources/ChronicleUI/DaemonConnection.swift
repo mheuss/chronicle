@@ -51,6 +51,7 @@ final class DaemonConnection {
     private let connectionFactory: @MainActor @Sendable () async throws -> Int32
 
     let heartbeatInterval: Duration
+    static let defaultHeartbeatInterval: Duration = .seconds(5)
 
     #if DEBUG
     var sessionForTesting: ConnectionSession? { session }
@@ -67,14 +68,14 @@ final class DaemonConnection {
 
     init() {
         self.connectionFactory = { try await Self.connectToDaemonSocket() }
-        self.heartbeatInterval = .seconds(5)
+        self.heartbeatInterval = Self.defaultHeartbeatInterval
     }
 
     /// Builds a connection whose descriptors come from `connectionFactory`
     /// instead of the real socket path.
     internal init(
         connectionFactory: @escaping @MainActor @Sendable () async throws -> Int32,
-        heartbeatInterval: Duration = .seconds(5)
+        heartbeatInterval: Duration = DaemonConnection.defaultHeartbeatInterval
     ) {
         self.connectionFactory = connectionFactory
         self.heartbeatInterval = heartbeatInterval
@@ -103,7 +104,7 @@ final class DaemonConnection {
         )
         precondition(result == 0, "SO_NOSIGPIPE failed in testing init: errno=\(errno)")
         self.connectionFactory = { preconditionFailure("testing connections do not reconnect") }
-        self.heartbeatInterval = .seconds(5)
+        self.heartbeatInterval = Self.defaultHeartbeatInterval
         let session = ConnectionSession(fd: fd, maxResponseSize: Self.maxResponseSize)
         session.start()
         self.session = session

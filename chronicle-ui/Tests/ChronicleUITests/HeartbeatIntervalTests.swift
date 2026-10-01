@@ -33,10 +33,13 @@ struct HeartbeatIntervalTests {
             }
             return fd
         }, heartbeatInterval: .milliseconds(100))
+        let start = ContinuousClock.now
         conn.connect()
         await waitUntil { (conn.lastStatus?.data.uptimeSecs ?? 0) >= 3 }
         #expect((conn.lastStatus?.data.uptimeSecs ?? 0) >= 3,
-                "expected 3 heartbeats within 2 s at a 100 ms interval")
+                "expected 3 heartbeats within the wait budget at a 100 ms interval")
+        // The third heartbeat follows two full sleeps.
+        #expect(ContinuousClock.now - start >= .milliseconds(200))
         #expect(log.count == 1, "the heartbeats should share one connection")
         conn.disconnect()
     }
