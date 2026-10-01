@@ -92,12 +92,11 @@ open chronicle-ui/.build/Chronicle.app
 ```
 
 An icon should appear in the menu bar. A red `xmark.circle` means the UI cannot
-reach the daemon. Once it connects, the icon shows a yellow `ellipsis.circle`
-until the first status arrives. After the daemon reports capture running, it
-shows a green `record.circle.fill`. Orange `pause.circle.fill` means capture is
-paused. Red `exclamationmark.circle` means the daemon is up but capture is not
-running. Left-click the icon to open the search popover, or use `Cmd+,` for
-Settings.
+reach the daemon. A yellow `ellipsis.circle` means it is connecting or waiting
+for the first status. A green `record.circle.fill` means the daemon reports
+capture running. Orange `pause.circle.fill` means capture is paused. Red
+`exclamationmark.circle` means the daemon is up but capture is not running.
+Left-click the icon to open the search popover, or use `Cmd+,` for Settings.
 
 ### First run
 
