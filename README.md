@@ -91,7 +91,8 @@ the repo root launch the UI:
 open chronicle-ui/.build/Chronicle.app
 ```
 
-An icon should appear in the menu bar. It shows a yellow `ellipsis.circle`
+An icon should appear in the menu bar. A red `xmark.circle` means the UI cannot
+reach the daemon. Once it connects, the icon shows a yellow `ellipsis.circle`
 until the first status arrives. After the daemon reports capture running, it
 shows a green `record.circle.fill`. Orange `pause.circle.fill` means capture is
 paused. Red `exclamationmark.circle` means the daemon is up but capture is not

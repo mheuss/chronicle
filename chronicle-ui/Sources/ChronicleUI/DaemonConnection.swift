@@ -36,6 +36,7 @@ final class DaemonConnection {
     // MARK: - Constants
 
     private static let maxResponseSize = 64 * 1024
+    static let defaultHeartbeatInterval: Duration = .seconds(5)
 
     // MARK: - Private
 
@@ -51,7 +52,6 @@ final class DaemonConnection {
     private let connectionFactory: @MainActor @Sendable () async throws -> Int32
 
     let heartbeatInterval: Duration
-    static let defaultHeartbeatInterval: Duration = .seconds(5)
 
     #if DEBUG
     var sessionForTesting: ConnectionSession? { session }
