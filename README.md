@@ -91,8 +91,10 @@ the repo root launch the UI:
 open chronicle-ui/.build/Chronicle.app
 ```
 
-A green `record.circle` icon should appear in the menu bar. Left-click it to
-open the search popover, or use `Cmd+,` for Settings.
+An icon should appear in the menu bar. It shows a yellow `ellipsis.circle`
+until the first status arrives, then a green `record.circle.fill` once the
+daemon reports capture running. Left-click it to open the search popover, or
+use `Cmd+,` for Settings.
 
 ### First run
 
