@@ -95,22 +95,25 @@ struct SettingsView: View {
         }
     }
 
-    /// Three-way capture status. We don't show "Active" until we have both a
-    /// live connection AND a status snapshot that says we're not paused; a
-    /// missing snapshot or a disconnected daemon now shows a distinct badge
-    /// instead of falsely flashing green.
+    /// Capture status for the badge. "Active" needs a live connection and a
+    /// status that says capture is running; a missing snapshot or a
+    /// disconnected daemon shows "Disconnected" instead of falsely flashing
+    /// green.
     private enum CaptureStatus {
         case disconnected
         case paused
         case active
+        case notRunning
     }
 
     private var captureStatus: CaptureStatus {
-        guard connection.state == .connected,
-              let paused = connection.lastStatus?.data.capture?.paused else {
-            return .disconnected
+        guard connection.state == .connected else { return .disconnected }
+        switch CaptureHealth.classify(connection.lastStatus) {
+        case .noStatus: return .disconnected
+        case .paused: return .paused
+        case .running: return .active
+        case .notRunning: return .notRunning
         }
-        return paused ? .paused : .active
     }
 
     private var statusBadge: some View {
@@ -125,6 +128,9 @@ struct SettingsView: View {
             case .active:
                 Image(systemName: "record.circle.fill").foregroundStyle(.green)
                 Text("Active")
+            case .notRunning:
+                Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.red)
+                Text("Not running")
             }
         }
     }
