@@ -1,5 +1,28 @@
 import SwiftUI
 
+/// What the Settings capture badge shows. It has one case per menu bar icon
+/// state, and both classify capture with `CaptureHealth`.
+enum CaptureBadge: Equatable {
+    case disconnected, connecting, waiting, paused, active, notRunning
+
+    static func from(
+        connectionState: DaemonConnection.ConnectionState,
+        status: StatusResponse?
+    ) -> CaptureBadge {
+        switch connectionState {
+        case .disconnected: return .disconnected
+        case .connecting: return .connecting
+        case .connected:
+            switch CaptureHealth.classify(status) {
+            case .noStatus: return .waiting
+            case .paused: return .paused
+            case .running: return .active
+            case .notRunning: return .notRunning
+            }
+        }
+    }
+}
+
 struct SettingsView: View {
     @Environment(DaemonConnection.self) private var connection
     @Environment(TranscriptionAlertState.self) private var transcriptionAlert
@@ -95,25 +118,8 @@ struct SettingsView: View {
         }
     }
 
-    /// Capture status for the badge. "Active" needs a live connection and a
-    /// status that says capture is running; a missing snapshot or a
-    /// disconnected daemon shows "Disconnected" instead of falsely flashing
-    /// green.
-    private enum CaptureStatus {
-        case disconnected
-        case paused
-        case active
-        case notRunning
-    }
-
-    private var captureStatus: CaptureStatus {
-        guard connection.state == .connected else { return .disconnected }
-        switch CaptureHealth.classify(connection.lastStatus) {
-        case .noStatus: return .disconnected
-        case .paused: return .paused
-        case .running: return .active
-        case .notRunning: return .notRunning
-        }
+    private var captureStatus: CaptureBadge {
+        CaptureBadge.from(connectionState: connection.state, status: connection.lastStatus)
     }
 
     private var statusBadge: some View {
@@ -122,6 +128,12 @@ struct SettingsView: View {
             case .disconnected:
                 Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                 Text("Disconnected")
+            case .connecting:
+                Image(systemName: "ellipsis.circle.fill").foregroundStyle(.yellow)
+                Text("Connecting")
+            case .waiting:
+                Image(systemName: "ellipsis.circle.fill").foregroundStyle(.yellow)
+                Text("Waiting for status")
             case .paused:
                 Image(systemName: "pause.circle.fill").foregroundStyle(.orange)
                 Text("Paused")
