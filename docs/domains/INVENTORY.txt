@@ -48,6 +48,7 @@ chronicle-daemon/src/power.rs
 chronicle-daemon/src/provisioning.rs
 chronicle-daemon/src/retention_task.rs
 chronicle-daemon/src/settings.rs
+chronicle-ui/Sources/ChronicleUI/CaptureHealth.swift
 chronicle-ui/Sources/ChronicleUI/ChronicleApp.swift
 chronicle-ui/Sources/ChronicleUI/ConnectionSession.swift
 chronicle-ui/Sources/ChronicleUI/DaemonConnection.swift

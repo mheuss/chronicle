@@ -1,9 +1,9 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
-use chronicle_capture::EngineState;
+use chronicle_capture::{EngineState, EngineStatusProbe};
 use chronicle_ipc::{
     AudioStats, CaptureStats, MicState, OcrStats, Request, RequestHandler, Response, StatusData,
     StorageStats,
@@ -67,17 +67,6 @@ pub(crate) struct ModelCommand {
     pub still_waiting: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// Engine status as observed by the background refresher. Owned by the
-/// daemon; published via `ArcSwap` so the sync `RequestHandler::handle`
-/// can read without blocking.
-#[derive(Debug, Clone, Default)]
-pub struct CaptureStatusSnapshot {
-    pub state: Option<EngineState>,
-    pub active_displays: usize,
-    pub frames_captured: u64,
-    pub frames_dropped: u64,
-}
-
 /// Cached storage status snapshot. Written every 30s by the storage
 /// refresher task in `main()`. Read by `RequestHandler::handle` on every
 /// `Status` request — no per-request directory walk.
@@ -95,7 +84,9 @@ pub struct StorageStatusSnapshot {
 pub struct DaemonHandler {
     started_at: Instant,
     counters: Arc<PipelineCounters>,
-    engine_status: Arc<ArcSwap<CaptureStatusSnapshot>>,
+    /// The capture engine's status probe, or `None` while no capture runtime
+    /// exists. `CaptureSupervisor` installs and clears it.
+    capture_probe: Arc<Mutex<Option<EngineStatusProbe>>>,
     /// Cached storage status, refreshed every 30s. Read on every `Status`
     /// request — no per-IPC directory walk.
     storage_status: Arc<ArcSwap<StorageStatusSnapshot>>,
@@ -262,7 +253,7 @@ impl DaemonHandler {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         counters: Arc<PipelineCounters>,
-        engine_status: Arc<ArcSwap<CaptureStatusSnapshot>>,
+        capture_probe: Arc<Mutex<Option<EngineStatusProbe>>>,
         storage_status: Arc<ArcSwap<StorageStatusSnapshot>>,
         storage: Arc<chronicle_storage::Storage>,
         mic_tx: mpsc::Sender<MicCommand>,
@@ -277,7 +268,7 @@ impl DaemonHandler {
         Self {
             started_at: Instant::now(),
             counters,
-            engine_status,
+            capture_probe,
             storage_status,
             storage,
             mic_tx,
@@ -313,7 +304,12 @@ impl RequestHandler for DaemonHandler {
         match req {
             Request::Status => {
                 let c = self.counters.snapshot();
-                let cap = self.engine_status.load();
+                let engine = self
+                    .capture_probe
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|probe| probe.snapshot());
                 let storage = self.storage_status.load();
                 let paused = self.capture_paused.load(Ordering::Acquire);
                 Response::Status {
@@ -322,10 +318,10 @@ impl RequestHandler for DaemonHandler {
                         uptime_secs: self.started_at.elapsed().as_secs(),
                         version: env!("CARGO_PKG_VERSION").to_string(),
                         capture: CaptureStats {
-                            state: engine_state_str(cap.state, paused).to_string(),
-                            active_displays: cap.active_displays,
-                            frames_captured: cap.frames_captured,
-                            frames_dropped: cap.frames_dropped,
+                            state: engine_state_str(engine.map(|e| e.state), paused).to_string(),
+                            active_displays: engine.map_or(0, |e| e.active_displays),
+                            frames_captured: engine.map_or(0, |e| e.frames_captured),
+                            frames_dropped: engine.map_or(0, |e| e.frames_dropped),
                             frames_processed: c.frames_processed,
                             frames_failed: c.frames_failed,
                             paused,
@@ -610,6 +606,7 @@ mod tests {
     use crate::permissions::MicrophoneStatus;
     use chronicle_audio::MicToggleOutcome;
     use chronicle_ipc::{MicState, Request, RequestHandler, Response};
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn search_sampling_fires_every_nth_from_first() {
@@ -956,6 +953,105 @@ mod tests {
             Response::Status { data, .. } => assert_eq!(data.audio.mic_state, MicState::On),
             other => panic!("expected Status response, got: {other:?}"),
         }
+    }
+
+    /// A probe like the one `CaptureRuntime::status_probe` hands out, built
+    /// from its public fields so no capture runtime is needed.
+    fn probe_in(state: EngineState) -> EngineStatusProbe {
+        EngineStatusProbe {
+            frames_captured: Arc::new(AtomicU64::new(40)),
+            frames_dropped: Arc::new(AtomicU64::new(3)),
+            state: Arc::new(AtomicU8::new(state as u8)),
+            active_displays: Arc::new(AtomicUsize::new(2)),
+        }
+    }
+
+    fn capture_stats(handler: &DaemonHandler) -> CaptureStats {
+        match handler.handle(Request::Status) {
+            Response::Status { data, .. } => data.capture,
+            other => panic!("expected Status response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_probe_installed_reads_immediately() {
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
+            handler_with_full_channels(8, true).await;
+        handler
+            .counters
+            .frames_processed
+            .store(7, Ordering::Relaxed);
+        handler.counters.frames_failed.store(1, Ordering::Relaxed);
+        *handler.capture_probe.lock().unwrap() = Some(probe_in(EngineState::Running));
+
+        let cap = capture_stats(&handler);
+        assert_eq!(cap.state, "running");
+        assert_eq!(cap.active_displays, 2);
+        assert_eq!(cap.frames_captured, 40);
+        assert_eq!(cap.frames_dropped, 3);
+        assert_eq!(cap.frames_processed, 7);
+        assert_eq!(cap.frames_failed, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_probe_absent_zeroes_engine_fields_only() {
+        let (handler, _mic_rx, _mic_atom, _cap_rx, cap_paused, _ss, _tcell, _dir) =
+            handler_with_full_channels(8, true).await;
+        handler
+            .counters
+            .frames_processed
+            .store(7, Ordering::Relaxed);
+        handler.counters.frames_failed.store(1, Ordering::Relaxed);
+
+        for (paused, expected) in [(false, "unknown"), (true, "paused")] {
+            cap_paused.store(paused, Ordering::Release);
+            let cap = capture_stats(&handler);
+            assert_eq!(cap.state, expected);
+            assert_eq!(cap.active_displays, 0);
+            assert_eq!(cap.frames_captured, 0);
+            assert_eq!(cap.frames_dropped, 0);
+            assert_eq!(cap.frames_processed, 7);
+            assert_eq!(cap.frames_failed, 1);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_probe_change_shows_on_next_request() {
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
+            handler_with_full_channels(8, true).await;
+        let probe = probe_in(EngineState::Running);
+        *handler.capture_probe.lock().unwrap() = Some(probe.clone());
+        assert_eq!(capture_stats(&handler).state, "running");
+
+        probe
+            .state
+            .store(EngineState::Stopping as u8, Ordering::Release);
+        assert_eq!(capture_stats(&handler).state, "stopping");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_probe_removal_shows_on_next_request() {
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
+            handler_with_full_channels(8, true).await;
+        *handler.capture_probe.lock().unwrap() = Some(probe_in(EngineState::Running));
+        assert_eq!(capture_stats(&handler).state, "running");
+
+        *handler.capture_probe.lock().unwrap() = None;
+        let cap = capture_stats(&handler);
+        assert_eq!(cap.state, "unknown");
+        assert_eq!(cap.active_displays, 0);
+        assert_eq!(cap.frames_captured, 0);
+        assert_eq!(cap.frames_dropped, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_probe_user_pause_outranks_running() {
+        let (handler, _mic_rx, _mic_atom, _cap_rx, cap_paused, _ss, _tcell, _dir) =
+            handler_with_full_channels(8, true).await;
+        *handler.capture_probe.lock().unwrap() = Some(probe_in(EngineState::Running));
+        cap_paused.store(true, Ordering::Release);
+
+        assert_eq!(capture_stats(&handler).state, "paused");
     }
 
     /// Build a `DaemonHandler` with the full constructor signature. Returns the
@@ -1404,7 +1500,7 @@ mod tests {
         tempfile::TempDir,
     ) {
         let counters = crate::pipeline::counters::PipelineCounters::new();
-        let cap_snapshot = Arc::new(ArcSwap::from_pointee(CaptureStatusSnapshot::default()));
+        let capture_probe = Arc::new(Mutex::new(None));
         let storage_status = Arc::new(ArcSwap::from_pointee(StorageStatusSnapshot::default()));
         let dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(
@@ -1426,7 +1522,7 @@ mod tests {
         let (model_tx, model_rx) = tokio::sync::mpsc::channel(capacity);
         let handler = DaemonHandler::new(
             counters,
-            cap_snapshot,
+            capture_probe,
             Arc::clone(&storage_status),
             storage,
             mic_tx,

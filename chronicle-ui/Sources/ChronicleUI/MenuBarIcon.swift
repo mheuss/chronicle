@@ -1,48 +1,66 @@
 import SwiftUI
 
-/// Menu bar status icon. Active = `record.circle` filled green;
-/// paused = `pause.circle` orange; connecting = `ellipsis.circle` yellow;
-/// disconnected = `xmark.circle` red. Every state has a distinct symbol
-/// shape so colorblind users can read it without relying on tint.
+/// What the menu bar item shows. Each state has its own symbol shape, so it
+/// reads without relying on tint. The one exception is connecting and waiting
+/// for status, which share `ellipsis.circle` because both mean no status yet.
+struct MenuBarDisplay: Equatable {
+    enum Tint: Equatable {
+        case red, yellow, orange, green
+
+        var color: Color {
+            switch self {
+            case .red: return .red
+            case .yellow: return .yellow
+            case .orange: return .orange
+            case .green: return .green
+            }
+        }
+    }
+
+    let symbol: String
+    let tint: Tint
+    let label: String
+
+    /// The icon for a connection state and the latest status.
+    static func from(
+        connectionState: DaemonConnection.ConnectionState,
+        status: StatusResponse?
+    ) -> MenuBarDisplay {
+        switch connectionState {
+        case .disconnected:
+            return MenuBarDisplay(symbol: "xmark.circle", tint: .red,
+                                  label: "Chronicle daemon disconnected")
+        case .connecting:
+            return MenuBarDisplay(symbol: "ellipsis.circle", tint: .yellow,
+                                  label: "Chronicle daemon connecting")
+        case .connected:
+            switch CaptureHealth.classify(status) {
+            case .noStatus:
+                return MenuBarDisplay(symbol: "ellipsis.circle", tint: .yellow,
+                                      label: "Chronicle waiting for status")
+            case .paused:
+                return MenuBarDisplay(symbol: "pause.circle.fill", tint: .orange,
+                                      label: "Chronicle capture paused")
+            case .running:
+                return MenuBarDisplay(symbol: "record.circle.fill", tint: .green,
+                                      label: "Chronicle capture active")
+            case .notRunning:
+                return MenuBarDisplay(symbol: "exclamationmark.circle", tint: .red,
+                                      label: "Chronicle capture not running")
+            }
+        }
+    }
+}
+
+/// Menu bar status icon, drawn from `MenuBarDisplay`.
 struct MenuBarIcon: View {
     var connection: DaemonConnection
 
     var body: some View {
-        Image(systemName: symbolName)
-            .foregroundStyle(tint)
-            .accessibilityLabel(label)
-    }
-
-    private var symbolName: String {
-        switch connection.state {
-        case .disconnected:
-            return "xmark.circle"
-        case .connecting:
-            return "ellipsis.circle"
-        case .connected:
-            if connection.lastStatus?.data.capture?.paused == true {
-                return "pause.circle.fill"
-            }
-            return "record.circle.fill"
-        }
-    }
-
-    private var tint: Color {
-        switch connection.state {
-        case .disconnected: return .red
-        case .connecting: return .yellow
-        case .connected:
-            return connection.lastStatus?.data.capture?.paused == true ? .orange : .green
-        }
-    }
-
-    private var label: String {
-        switch connection.state {
-        case .disconnected: return "Chronicle daemon disconnected"
-        case .connecting: return "Chronicle daemon connecting"
-        case .connected:
-            return connection.lastStatus?.data.capture?.paused == true
-                ? "Chronicle capture paused" : "Chronicle capture active"
-        }
+        let display = MenuBarDisplay.from(
+            connectionState: connection.state, status: connection.lastStatus)
+        Image(systemName: display.symbol)
+            .foregroundStyle(display.tint.color)
+            .accessibilityLabel(display.label)
     }
 }

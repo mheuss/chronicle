@@ -181,7 +181,7 @@ struct DaemonConnectionReconnectTests {
                 _ = readLineSync(from: serverFD)
             }
             return fd
-        })
+        }, heartbeatInterval: .seconds(30))
         conn.connect()
         // `lastStatus`, not `log.count`: it proves the round trip completed, so
         // monitorConnection is in its 30s sleep and pair 0's server is past its
@@ -276,7 +276,7 @@ struct DaemonConnectionReconnectTests {
                 _ = readLineSync(from: serverFD)   // park, keeping the peer open
             }
             return fd
-        })
+        }, heartbeatInterval: .seconds(30))
 
         conn.connect()
         await waitUntil { conn.lastStatus != nil }

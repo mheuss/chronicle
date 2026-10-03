@@ -22,6 +22,7 @@
 
 ## Owned Files
 
+- chronicle-ui/Sources/ChronicleUI/CaptureHealth.swift
 - chronicle-ui/Sources/ChronicleUI/ChronicleApp.swift
 - chronicle-ui/Sources/ChronicleUI/Info.plist
 - chronicle-ui/Sources/ChronicleUI/MenuBarIcon.swift

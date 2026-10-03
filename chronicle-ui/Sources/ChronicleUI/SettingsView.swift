@@ -1,5 +1,58 @@
 import SwiftUI
 
+/// What the Settings capture badge shows. It has one case per menu bar icon
+/// state, and both classify capture with `CaptureHealth`.
+enum CaptureBadge: String, CaseIterable {
+    case disconnected, connecting, waiting, paused, active, notRunning
+
+    static func from(
+        connectionState: DaemonConnection.ConnectionState,
+        status: StatusResponse?
+    ) -> CaptureBadge {
+        switch connectionState {
+        case .disconnected: return .disconnected
+        case .connecting: return .connecting
+        case .connected:
+            switch CaptureHealth.classify(status) {
+            case .noStatus: return .waiting
+            case .paused: return .paused
+            case .running: return .active
+            case .notRunning: return .notRunning
+            }
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .disconnected: return "xmark.circle.fill"
+        case .connecting, .waiting: return "ellipsis.circle.fill"
+        case .paused: return "pause.circle.fill"
+        case .active: return "record.circle.fill"
+        case .notRunning: return "exclamationmark.circle.fill"
+        }
+    }
+
+    var tint: MenuBarDisplay.Tint {
+        switch self {
+        case .disconnected, .notRunning: return .red
+        case .connecting, .waiting: return .yellow
+        case .paused: return .orange
+        case .active: return .green
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .disconnected: return "Disconnected"
+        case .connecting: return "Connecting"
+        case .waiting: return "Waiting for status"
+        case .paused: return "Paused"
+        case .active: return "Active"
+        case .notRunning: return "Not running"
+        }
+    }
+}
+
 struct SettingsView: View {
     @Environment(DaemonConnection.self) private var connection
     @Environment(TranscriptionAlertState.self) private var transcriptionAlert
@@ -95,37 +148,14 @@ struct SettingsView: View {
         }
     }
 
-    /// Three-way capture status. We don't show "Active" until we have both a
-    /// live connection AND a status snapshot that says we're not paused; a
-    /// missing snapshot or a disconnected daemon now shows a distinct badge
-    /// instead of falsely flashing green.
-    private enum CaptureStatus {
-        case disconnected
-        case paused
-        case active
-    }
-
-    private var captureStatus: CaptureStatus {
-        guard connection.state == .connected,
-              let paused = connection.lastStatus?.data.capture?.paused else {
-            return .disconnected
-        }
-        return paused ? .paused : .active
+    private var captureStatus: CaptureBadge {
+        CaptureBadge.from(connectionState: connection.state, status: connection.lastStatus)
     }
 
     private var statusBadge: some View {
         HStack(spacing: 6) {
-            switch captureStatus {
-            case .disconnected:
-                Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                Text("Disconnected")
-            case .paused:
-                Image(systemName: "pause.circle.fill").foregroundStyle(.orange)
-                Text("Paused")
-            case .active:
-                Image(systemName: "record.circle.fill").foregroundStyle(.green)
-                Text("Active")
-            }
+            Image(systemName: captureStatus.symbol).foregroundStyle(captureStatus.tint.color)
+            Text(captureStatus.label)
         }
     }
 

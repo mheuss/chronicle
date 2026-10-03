@@ -135,7 +135,7 @@ struct TranscriptionAlertStateTests {
         #expect(alert.shouldShow)
     }
 
-    // A fast failure can land between two 30s status ticks with no in-flight
+    // A fast failure can land between two 5s status ticks with no in-flight
     // snapshot ever observed. Keying only on "is provisioning" would leave a
     // broken switch with no Retry anywhere.
     @Test func anErrorRaisesTheBannerOnItsOwn() {

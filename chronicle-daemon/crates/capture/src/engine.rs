@@ -390,9 +390,8 @@ impl<'a> CaptureEngine<'a> {
 
 /// Lightweight read-only view of the capture engine's live health state.
 ///
-/// Allows a background refresher to observe capture health without
-/// borrowing `CaptureEngine` itself (which lives on the main task and
-/// isn't `Send` across the refresher boundary).
+/// Lets another task observe capture health without borrowing `CaptureEngine`
+/// itself (which lives on the main task and isn't `Send` across that boundary).
 #[derive(Clone)]
 pub struct EngineStatusProbe {
     pub frames_captured: Arc<AtomicU64>,
@@ -401,7 +400,7 @@ pub struct EngineStatusProbe {
     pub active_displays: Arc<AtomicUsize>,
 }
 
-/// One tick's worth of engine status.
+/// One point-in-time read of engine status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EngineStatusSnapshot {
     pub frames_captured: u64,
@@ -414,7 +413,7 @@ impl EngineStatusProbe {
     /// Load all four values. `Relaxed` for counters (monotonically
     /// increasing), `Acquire` for state/active_displays (they change in
     /// lockstep with engine transitions and readers want to see a coherent
-    /// snapshot — a cache-line refresh per tick is fine).
+    /// snapshot — a cache-line refresh per `Status` request is fine).
     pub fn snapshot(&self) -> EngineStatusSnapshot {
         EngineStatusSnapshot {
             frames_captured: self.frames_captured.load(Ordering::Relaxed),
