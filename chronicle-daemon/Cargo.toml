@@ -11,7 +11,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-rust-version = "1.88"
+rust-version = "1.89"
 
 [package]
 name = "chronicle-daemon"
