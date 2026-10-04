@@ -1,6 +1,7 @@
 mod capture_runtime;
 mod capture_supervisor;
 mod drop_reporter;
+mod instance_lock;
 mod ipc_handler;
 mod media_presence;
 mod permissions;
@@ -264,8 +265,7 @@ fn note_reconcile_outcome(
 /// be exercised twice in a process, but the string it is handed can.
 const DEFAULT_LOG_FILTER: &str = "warn,chronicle=info";
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     // `chronicle` is a prefix match, not a crate name: env_filter compares
     // with `target.starts_with(directive)`, so one directive covers
     // chronicle_daemon, chronicle_audio, chronicle_capture and every future
@@ -278,11 +278,20 @@ async fn main() -> Result<()> {
         .init();
     log::info!("chronicle-daemon starting");
 
+    let storage_config = StorageConfig::default();
+    let lock = instance_lock::acquire(&storage_config.base_dir)?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    instance_lock::run_holding(lock, runtime, run(storage_config))
+}
+
+async fn run(storage_config: StorageConfig) -> Result<()> {
     // --- Permission preflight ---
     let _mic_status = permissions::preflight()?;
 
     // --- Storage ---
-    let storage = Arc::new(Storage::open(StorageConfig::default()).await?);
+    let storage = Arc::new(Storage::open(storage_config).await?);
 
     // --- Startup orphan sweep ---
     match storage.sweep_orphans().await {
