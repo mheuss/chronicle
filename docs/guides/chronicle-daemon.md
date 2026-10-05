@@ -121,7 +121,7 @@ only then releases `chronicle.lock`. Dropping the runtime waits for every
 running `spawn_blocking` task. Storage work still in flight finishes while the
 lock is held. A new daemon cannot start until that work is done. The two
 `exit(3)` paths in `run` skip this. The process ends with its blocking work
-still running. The kernel releases the lock when it does.
+still running. The kernel releases the lock when the process exits.
 
 ## Key Concepts
 

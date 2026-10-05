@@ -320,8 +320,8 @@ fn sweep_media_orphans(
     // swept path, not the moment it landed there. And `SystemTime::now()` is
     // wall-clock: a backward step only spares files, but a forward step (an NTP
     // correction at boot, which is exactly when this runs) can make an
-    // in-flight file look older than it is. Both only bite if the cross-process
-    // guard above is bypassed.
+    // in-flight file look older than it is. Both only bite if either
+    // assumption above stops holding.
     //
     // Reclaiming a true orphan created in that same instant is deferred to the
     // next sweep — which, with no periodic sweep, means the next daemon start.
