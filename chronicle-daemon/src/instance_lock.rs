@@ -24,8 +24,8 @@ pub struct InstanceLock {
 pub fn acquire(base_dir: &Path) -> Result<InstanceLock, InstanceLockError> {
     let path = base_dir.join(LOCK_FILE);
     let io_at = |at: &Path| {
-        let path = at.to_path_buf();
-        move |source| InstanceLockError::Io { path, source }
+        let at = at.to_path_buf();
+        move |source| InstanceLockError::Io { path: at, source }
     };
     DirBuilder::new()
         .recursive(true)

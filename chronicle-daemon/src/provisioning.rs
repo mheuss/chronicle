@@ -590,7 +590,7 @@ impl EngineHandle {
     }
 }
 
-/// Sent to the main event loop when a provision completes successfully —
+/// Sent to the `run()` event loop when a provision completes successfully —
 /// the loop persists the variant (sole settings writer, AD-10).
 #[derive(Debug)]
 pub enum ProvisionEvent {

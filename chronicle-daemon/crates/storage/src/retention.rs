@@ -314,13 +314,14 @@ fn sweep_media_orphans(
     // 5000 ms, so a contended insert can block for seconds.
     //
     // Two caveats on what the mtime actually measures. Audio is encoded in a
-    // staging directory and `rename`d into place (the `audio-staging` dir in main.rs, media.rs:107),
-    // and rename preserves mtime — so for audio this is the staging-encode time,
-    // milliseconds before the file appeared at the swept path, not the moment it
-    // landed there. And `SystemTime::now()` is wall-clock: a backward step only
-    // spares files, but a forward step (an NTP correction at boot, which is
-    // exactly when this runs) can make an in-flight file look older than it is.
-    // Both only bite under the cross-process case above.
+    // staging directory and `rename`d into place (the `audio-staging` dir in
+    // main.rs, media.rs:107), and rename preserves mtime — so for audio this is
+    // the staging-encode time, milliseconds before the file appeared at the
+    // swept path, not the moment it landed there. And `SystemTime::now()` is
+    // wall-clock: a backward step only spares files, but a forward step (an NTP
+    // correction at boot, which is exactly when this runs) can make an
+    // in-flight file look older than it is. Both only bite if the cross-process
+    // guard above is bypassed.
     //
     // Reclaiming a true orphan created in that same instant is deferred to the
     // next sweep — which, with no periodic sweep, means the next daemon start.
