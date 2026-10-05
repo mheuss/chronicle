@@ -9,7 +9,7 @@ pub const LOCK_FILE: &str = "chronicle.lock";
 pub enum InstanceLockError {
     #[error("another chronicle-daemon is already running on {0}")]
     AlreadyRunning(PathBuf),
-    #[error("could not lock {path}: {source}")]
+    #[error("could not take the instance lock at {path}")]
     Io {
         path: PathBuf,
         source: std::io::Error,
@@ -23,15 +23,15 @@ pub struct InstanceLock {
 
 pub fn acquire(base_dir: &Path) -> Result<InstanceLock, InstanceLockError> {
     let path = base_dir.join(LOCK_FILE);
-    let io = |source| InstanceLockError::Io {
-        path: path.clone(),
-        source,
+    let io_at = |at: &Path| {
+        let path = at.to_path_buf();
+        move |source| InstanceLockError::Io { path, source }
     };
     DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(base_dir)
-        .map_err(io)?;
+        .map_err(io_at(base_dir))?;
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -39,18 +39,19 @@ pub fn acquire(base_dir: &Path) -> Result<InstanceLock, InstanceLockError> {
         .truncate(false)
         .mode(0o600)
         .open(&path)
-        .map_err(io)?;
+        .map_err(io_at(&path))?;
     match file.try_lock() {
         Ok(()) => Ok(InstanceLock { _file: file }),
         Err(TryLockError::WouldBlock) => {
             Err(InstanceLockError::AlreadyRunning(base_dir.to_path_buf()))
         }
-        Err(TryLockError::Error(e)) => Err(io(e)),
+        Err(TryLockError::Error(e)) => Err(io_at(&path)(e)),
     }
 }
 
 /// Drops the runtime before the lock. Runtime teardown waits for running
-/// `spawn_blocking` tasks, and those can still be writing to storage.
+/// `spawn_blocking` tasks, and those can still be writing to storage. On a
+/// panic, parameters drop in reverse, so `runtime` must stay after `lock`.
 pub fn run_holding<T>(
     lock: InstanceLock,
     runtime: tokio::runtime::Runtime,
@@ -111,6 +112,8 @@ mod tests {
         let base = dir.path().join("a/b/Chronicle");
         let _lock = acquire(&base).unwrap();
         assert!(base.join(LOCK_FILE).is_file());
+        let mode = std::fs::metadata(&base).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
     }
 
     #[test]

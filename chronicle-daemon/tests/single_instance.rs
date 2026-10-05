@@ -33,7 +33,9 @@ fn second_daemon_exits_before_touching_the_database() {
         if Instant::now() > deadline {
             child.kill().unwrap();
             child.wait().unwrap();
-            panic!("daemon did not exit within 10 s while the lock was held");
+            let mut stderr = String::new();
+            let _ = child.stderr.take().unwrap().read_to_string(&mut stderr);
+            panic!("daemon did not exit within 10 s while the lock was held; stderr: {stderr}");
         }
         std::thread::sleep(Duration::from_millis(50));
     };
@@ -48,6 +50,10 @@ fn second_daemon_exits_before_touching_the_database() {
     assert!(!status.success(), "daemon exited 0; stderr: {stderr}");
     assert!(stderr.contains("already running"), "stderr: {stderr}");
     assert!(
+        stderr.contains("chronicle-daemon starting"),
+        "logging never reached stderr, so the preflight check below proves nothing: {stderr}"
+    );
+    assert!(
         stderr.contains(&base.display().to_string()),
         "stderr does not name the data directory: {stderr}"
     );
@@ -55,8 +61,14 @@ fn second_daemon_exits_before_touching_the_database() {
         !stderr.contains("Microphone permission"),
         "preflight ran before the lock: {stderr}"
     );
-    assert!(
-        !base.join("chronicle.db").exists(),
-        "daemon created chronicle.db"
+    let mut entries: Vec<_> = std::fs::read_dir(&base)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    entries.sort();
+    assert_eq!(
+        entries,
+        ["chronicle.lock"],
+        "daemon touched the data directory"
     );
 }
