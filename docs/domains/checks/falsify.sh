@@ -13,7 +13,7 @@
 # 5, 6 and 8 build a small synthetic map with its own repo -- two domains, one
 # seam, two source files -- small enough to read in one screen, which is the
 # point: a case that breaks a two-file inventory is legible where the same case
-# against 64 files is not.
+# against 66 files is not.
 #
 # The synthetic fixture was originally built because SYNTHESIS.md and
 # OFFSHOOTS_RESOLVED.txt did not exist yet. Both exist now, so those three could

@@ -116,7 +116,7 @@ under `## Close-out` → Still open.
   endpoints, and every candidate with where it ended up. Each confirmed domain's
   own file is at the `maps/` path in its Detail cell.
 
-  All 64 paths in `INVENTORY.txt` are owned by exactly one confirmed domain, so
+  All 66 paths in `INVENTORY.txt` are owned by exactly one confirmed domain, so
   the synthesis's Exclusions table is empty. That is machine-checked, not
   asserted. `checks/check8_coverage.sh` regenerates the inventory from the repo
   and fails if any path is owned twice, owned by nobody, or both owned and

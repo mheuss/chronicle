@@ -4,7 +4,7 @@
 
 **Written 2026-09-21**, from the fourteen-sitting walk recorded in `REGISTER.md`.
 
-Given a source file, this says which domain owns it. Eleven domains own all 64
+Given a source file, this says which domain owns it. Eleven domains own all 66
 production source files. That is every Rust, Swift, SQL and plist file whose
 content ships inside a binary Chronicle installs, enumerated in `INVENTORY.txt`.
 Each is owned exactly once, so the Exclusions table below is empty.
@@ -14,7 +14,7 @@ them merged into others. The Candidate Outcomes table records that.
 
 **To place a file.** For a file that already exists, read the `## Owned Files`
 section of the domain files. It is an exact list. Between them the eleven
-cover all 64. For a *new* file, use the placement test at the top of each domain
+cover all 66. For a *new* file, use the placement test at the top of each domain
 file. It is a question you ask of the file to decide where it belongs.
 
 **Why a boundary sits where it does** is in `DECISIONS.md`. That file also holds
@@ -91,7 +91,7 @@ dropped. No row here records a cross-cutting concern.
 
 ## Exclusions
 
-Empty. That is the result rather than an omission. All 64 paths in
+Empty. That is the result rather than an omission. All 66 paths in
 `INVENTORY.txt` are owned by exactly one confirmed domain. No path needs an
 exclusion reason. Closure check 8 enforces that rather than taking it on trust.
 

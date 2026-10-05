@@ -102,7 +102,7 @@ pub struct DaemonHandler {
     mic_ready: Arc<AtomicBool>,
     /// Backstop for a wedged daemon — a real toggle replies well under 1 s.
     mic_reply_timeout: Duration,
-    /// Control channel to the main event loop for capture pause/resume.
+    /// Control channel to the `run()` event loop for capture pause/resume.
     capture_tx: mpsc::Sender<CaptureCommand>,
     /// Latest capture-paused state, read by `Status`.
     capture_paused: Arc<AtomicBool>,
@@ -117,7 +117,7 @@ pub struct DaemonHandler {
     /// Transcription status cell (CHR-71): boot/provisioner write it, the
     /// `Status` arm reads it.
     transcription_status: Arc<TranscriptionStatusCell>,
-    /// Control channel to the main event loop for model switches.
+    /// Control channel to the `run()` event loop for model switches.
     model_tx: mpsc::Sender<ModelCommand>,
     /// Backstop for a wedged daemon — `try_begin` is a CAS plus one ArcSwap
     /// store, so a real accept/reject replies in microseconds.

@@ -19,7 +19,8 @@ pipelines, and handles shutdown.
 ```mermaid
 flowchart TD
     subgraph Startup
-        P[Permission Preflight] --> S[Storage]
+        L[Instance Lock] --> P[Permission Preflight]
+        P --> S[Storage]
         S --> IPC[IpcServer]
         IPC --> AP[AudioPipeline]
         AP --> CE[CaptureEngine]
@@ -42,6 +43,7 @@ flowchart TD
 | File | Role |
 |------|------|
 | `src/main.rs` | Entry point, startup sequence, shutdown |
+| `src/instance_lock.rs` | Single-instance lock on `chronicle.lock`, held until the runtime is dropped |
 | `src/permissions.rs` | macOS TCC permission checks (Screen Recording, Microphone) |
 | `src/pipeline.rs` | Async tasks: capture-to-store, OCR, audio-to-store, bridge thread |
 
@@ -114,10 +116,12 @@ step 4 raises `stop_transcription`, and the transcribe loop then abandons what
 is still queued. `CLEANUP_GRACE` is the only one whose expiry raises nothing,
 because `cancel.cancel()` already raised its signal.
 
-After teardown, `main` drops the Tokio runtime and only then releases
-`chronicle.lock`. Dropping the runtime waits for every running
-`spawn_blocking` task. Storage work still in flight finishes while the lock is
-held. A new daemon cannot start until that work is done.
+On a normal return, `instance_lock::run_holding` drops the Tokio runtime and
+only then releases `chronicle.lock`. Dropping the runtime waits for every
+running `spawn_blocking` task. Storage work still in flight finishes while the
+lock is held. A new daemon cannot start until that work is done. The two
+`exit(3)` paths in `run` skip this. The process ends with its blocking work
+still running, and the kernel releases the lock when it does.
 
 ## Key Concepts
 
@@ -205,7 +209,7 @@ everything else, as in `RUST_LOG=warn,chronicle_audio=debug`.
 Three things to know before you trust what you read:
 
 - **A second daemon on the same data directory will not start.** The daemon
-  locks `chronicle.lock` in its data directory before anything else. A
+  locks `chronicle.lock` in its data directory as soon as logging starts. A
   newcomer that finds the lock held exits with "another chronicle-daemon is
   already running". It exits *before* it opens the database or reaches the tap
   install. You get no line at all, not an error about the microphone. Stop the

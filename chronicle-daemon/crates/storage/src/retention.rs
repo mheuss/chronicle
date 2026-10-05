@@ -314,7 +314,7 @@ fn sweep_media_orphans(
     // 5000 ms, so a contended insert can block for seconds.
     //
     // Two caveats on what the mtime actually measures. Audio is encoded in a
-    // staging directory and `rename`d into place (main.rs:219, media.rs:107),
+    // staging directory and `rename`d into place (the `audio-staging` dir in main.rs, media.rs:107),
     // and rename preserves mtime — so for audio this is the staging-encode time,
     // milliseconds before the file appeared at the swept path, not the moment it
     // landed there. And `SystemTime::now()` is wall-clock: a backward step only

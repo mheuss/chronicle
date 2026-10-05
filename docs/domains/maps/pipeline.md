@@ -1,6 +1,6 @@
 # Domain: pipeline
 
-**Status:** Decided 2026-09-17, revised 2026-09-18, revised 2026-09-21
+**Status:** Decided 2026-09-17, revised 2026-09-18, revised 2026-09-21, revised 2026-10-05
 **Owns:** The daemon binary itself — the stage loops that move a captured item to storage, the contracts they run on, the counters they report through, and the process that wires them together.
 **Code:** `chronicle-daemon/src/pipeline.rs`, `chronicle-daemon/src/pipeline/`, `chronicle-daemon/src/main.rs`, `chronicle-daemon/src/instance_lock.rs`, `chronicle-daemon/src/settings.rs`, `chronicle-daemon/src/drop_reporter.rs`
 
@@ -56,7 +56,7 @@
 
 - SEAM-stage-enqueue — capture — a producer holds an `Arc<dyn OcrSink>` and enqueues through a bounded channel whose full case is a typed result rather than a block or a panic; this domain decides the trait and the outcome vocabulary, the producer decides what it sends — owner: pipeline — `chronicle-daemon/src/pipeline/sinks.rs` — `OcrSink`
 - SEAM-ocr-extraction — OCR — a blocking synchronous call taking a path and returning text, invoked from this domain's async loop through `spawn_blocking`; OCR decides the signature and the error vocabulary, this domain decides the scheduling — owner: OCR — `chronicle-daemon/src/pipeline.rs` — `ocr_loop`
-- SEAM-power-event — power — power names the transition and this domain decides what it means: a two-variant `PowerEvent` delivered fire-and-forget, since `try_send` at `power.rs:141` logs at warn and discards its error, so an event is dropped rather than queued when the bounded channel at `main.rs:376` is full — owner: power — `chronicle-daemon/src/main.rs` — `power_rx`
+- SEAM-power-event — power — power names the transition and this domain decides what it means: a two-variant `PowerEvent` delivered fire-and-forget, since `try_send` at `power.rs:141` logs at warn and discards its error, so an event is dropped rather than queued when the bounded channel at `main.rs:382` is full — owner: power — `chronicle-daemon/src/main.rs` — `power_rx`
 
 ## How The Existing Documents Saw This
 
@@ -66,13 +66,13 @@
 | `docs/use-cases/pipeline.md:18, 89, 134` | Locates shutdown at `main.rs:run`, per-item log throttling at `pipeline.rs`, and channel bridging at `pipeline.rs:bridge_audio_segments` | accurate — these three are this domain |
 | `docs/use-cases/pipeline.md:155, 187, 218, 241, 274, 298` | Locates six more solutions at `capture_runtime.rs`, `crates/capture/src/handler.rs` twice, `capture_supervisor.rs`, `power.rs`, and `provisioning.rs` | stale as a grouping — all six are owned by `capture`, `power` and `transcription`. The patterns are real; the catalogue grouped them by shape rather than by owner |
 | `docs/use-cases/background-work.md:20` | Locates "Budgeted Start-Retry via Detached Nudges" at `main.rs:note_reconcile_outcome` plus `capture_supervisor.rs:StartRetry` | accurate, and evidence for CHR-58 — one behaviour split across this domain's file and `capture`'s |
-| `docs/guides/chronicle-daemon.md:48-122` | Documents the Startup Sequence, Channel Topology and Shutdown as properties of the binary | accurate — and the closest existing description of why `main.rs` is one file |
-| `docs/guides/chronicle-daemon.md:227` | Gives an "Adding a new pipeline stage" procedure | accurate |
+| `docs/guides/chronicle-daemon.md:50-126` | Documents the Startup Sequence, Channel Topology and Shutdown as properties of the binary | accurate — and the closest existing description of why `main.rs` is one file |
+| `docs/guides/chronicle-daemon.md:231` | Gives an "Adding a new pipeline stage" procedure | accurate |
 
 `main.rs` holds two helpers that are other domains' logic rather than
-composition. One is `note_reconcile_outcome` (`:231`), half of a
-`background-work` solution. The other is `handle_provision_event` (`:155`) with
-`begin_model_switch` (`:188`), the `transcription` model-switch path. Recorded
+composition. One is `note_reconcile_outcome` (`:232`), half of a
+`background-work` solution. The other is `handle_provision_event` (`:156`) with
+`begin_model_switch` (`:189`), the `transcription` model-switch path. Recorded
 on CHR-58 rather than filed separately, since that ticket already names the file
 as accumulating responsibilities. The map records who owns the file today, not who should.
 
