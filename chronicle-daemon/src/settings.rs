@@ -133,7 +133,7 @@ pub fn read_whisper_model(base_dir: &Path) -> ModelVariant {
     parse_variant(&raw).unwrap_or(DEFAULT_VARIANT)
 }
 
-/// Persist the whisper-model variant. Called by the main event loop ONLY on
+/// Persist the whisper-model variant. Called by the `run()` event loop ONLY on
 /// a successful provision (design AD-10) — the persisted value is always the
 /// last variant that actually reached Ready. Takes `ModelVariant` so an
 /// un-validated string cannot reach the settings file.

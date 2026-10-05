@@ -48,7 +48,7 @@ chronicle-ui/              Swift package
 - Apple Silicon (for efficient local transcription)
 - Screen Recording permission
 - Microphone permission
-- Rust 1.88+ toolchain (to build the daemon)
+- Rust 1.89+ toolchain (to build the daemon)
 
 ## Building
 

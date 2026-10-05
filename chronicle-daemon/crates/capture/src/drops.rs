@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// which stays per-engine because `CaptureStats` reports it over IPC and that
 /// behaviour is unchanged. The handler bumps both.
 ///
-/// Owned by the daemon's `main` and passed in through `CaptureConfig`, because
+/// Owned by the daemon's `run` and passed in through `CaptureConfig`, because
 /// `CaptureEngine` is rebuilt on every resume. An engine-owned counter would
 /// reset each cycle, which is exactly the loss this design removes.
 #[derive(Default)]

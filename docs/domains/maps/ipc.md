@@ -1,6 +1,6 @@
 # Domain: IPC
 
-**Status:** Decided 2026-09-18, revised 2026-09-21
+**Status:** Decided 2026-09-18, revised 2026-09-21, revised 2026-10-05
 **Owns:** The daemon–UI wire — the request and response vocabulary, the value types carried on it, the socket transport at both ends, the dispatch that turns a request into a response and gathers what it reports, and the rules that keep the two sides talking across a version gap.
 **Code:** `chronicle-daemon/crates/ipc/src/lib.rs`, `chronicle-daemon/crates/ipc/src/retention.rs`, `chronicle-daemon/crates/ipc/src/server.rs`, `chronicle-daemon/src/ipc_handler.rs`, `chronicle-daemon/src/media_presence.rs`, `chronicle-ui/Sources/ChronicleUI/DaemonConnection.swift`, `chronicle-ui/Sources/ChronicleUI/ConnectionSession.swift`
 
@@ -18,7 +18,7 @@
 - inside: absorbed from the `ipc-compat` candidate on 2026-09-18 — keeping the two sides able to talk across a version gap: additive fields optional on the decoder, unknown enum values degraded rather than thrown, and a tagged payload read only under the tag that carries it — `chronicle-ui/Sources/ChronicleUI/DaemonConnection.swift` — `Retention`
 - inside: absorbed from the `ipc-compat` candidate on 2026-09-18 — what a configured retention value means, what an invalid one means, and the single bound every entry point validates against — `chronicle-daemon/crates/ipc/src/retention.rs` — `classify`
 - outside: the work a response reports on, and the types each domain declares for its own use — `chronicle-daemon/crates/storage/src/models.rs` — `StorageStatus`
-- outside: constructing the handler, opening the channels it sends on, and starting and stopping the server — `chronicle-daemon/src/main.rs` — `main`
+- outside: constructing the handler, opening the channels it sends on, and starting and stopping the server — `chronicle-daemon/src/main.rs` — `run`
 - outside: the view layer that calls the client and renders what it returns — `chronicle-ui/Sources/ChronicleUI/MenuBarIcon.swift` — `MenuBarIcon`
 - outside: what a wire value means to the person reading it on screen — `chronicle-ui/Sources/ChronicleUI/RetentionCopy.swift` — `RetentionCopy`
 
@@ -65,10 +65,10 @@
 | Document | Said | Verdict |
 |---|---|---|
 | `docs/project-description.md:34` | "JSON-over-Unix-domain-socket. Newline-delimited JSON request/response." | accurate — still the protocol |
-| `docs/project-description.md:152` | The socket is at `~/Library/Application Support/Rewind/rewind.sock` | wrong — both sides compose `Chronicle/chronicle.sock`, the daemon at `src/main.rs:348` and the UI at `DaemonConnection.swift:25-34`. Pre-existing Rewind-era drift already recorded in `.claude/audit/documentation-drift.md:52` |
-| `docs/guides/chronicle-daemon.md:11, 249` | "The current IPC surface is status-only" | wrong — `Request` declares seven variants and `Response` eight. Already recorded in `docs/audits/2026-04-06-system-health-audit.md:90-95` |
-| `docs/guides/chronicle-daemon.md:261-262` | The UI "does not depend on the daemon as a library — only on the IPC protocol" | accurate — and it is why this domain owns both ends |
-| `docs/guides/chronicle-daemon.md:200-205` | `IpcServer` is the single-instance guard, socket-based rather than a global lock | accurate |
+| `docs/project-description.md:152` | The socket is at `~/Library/Application Support/Rewind/rewind.sock` | wrong — both sides compose `Chronicle/chronicle.sock`, the daemon at `src/main.rs:354` and the UI at `DaemonConnection.swift:25-34`. Pre-existing Rewind-era drift already recorded in `.claude/audit/documentation-drift.md:52` |
+| `docs/guides/chronicle-daemon.md:11, 261` | "The current IPC surface is status-only" | wrong — `Request` declares seven variants and `Response` eight. Already recorded in `docs/audits/2026-04-06-system-health-audit.md:90-95` |
+| `docs/guides/chronicle-daemon.md:274` | The UI "does not depend on the daemon as a library — only on the IPC protocol" | accurate — and it is why this domain owns both ends |
+| `docs/guides/chronicle-daemon.md:211-217` | A second daemon exits on `chronicle.lock`, before it opens the database | accurate — since CHR-45 the guard is `instance_lock`, outside this domain. The socket probe in `IpcServer::start` still refuses a second listener. It runs after `Storage::open` |
 | `docs/use-cases/INDEX.md:12` | Gives `ipc-compat` the code locations `chronicle-daemon/crates/ipc/` and `chronicle-ui/Sources/ChronicleUI/` | wrong as a grouping — those two trees span this domain, row 13 and row 14. Already covered by CHR-151, which re-scoped that column as a whole |
 | `docs/use-cases/pipeline.md:21-22` | Shutdown stops the IPC server first, awaiting socket-file cleanup | accurate — the ordering is `pipeline`'s, the `shutdown` it calls is this domain's |
 | `docs/decisions/015-shared-value-types-live-in-the-ipc-crate.md:19, 73-74` | `chronicle-ipc` is a leaf crate and keeping it a leaf is load-bearing | accurate — its `Cargo.toml` names no workspace crate, and the crate's source names none. The arrow it describes is recorded here as storage depending on this domain |
@@ -83,7 +83,7 @@
 `ipc_handler.rs` carries two reasons to change: a 227-line match on the seven
 `Request` variants at `:311-537`, and 222 lines of daemon runtime wiring at
 `:74-134` and `:136-296` that only `main.rs` constructs. That wiring is three
-`mpsc` channels to `main()`'s event loop, two readiness atomics, three reply
+`mpsc` channels to `run()`'s event loop, two readiness atomics, three reply
 timeouts. `DaemonConnection.swift` splits the same way at its own
 `// MARK: - Protocol Types` divider on line 465. The class runs `:10-463`. The
 23 wire types run `:467-801`. Both are recorded as offshoots. The map

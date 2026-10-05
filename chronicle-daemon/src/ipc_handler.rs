@@ -68,7 +68,7 @@ pub(crate) struct ModelCommand {
 }
 
 /// Cached storage status snapshot. Written every 30s by the storage
-/// refresher task in `main()`. Read by `RequestHandler::handle` on every
+/// refresher task in `run()`. Read by `RequestHandler::handle` on every
 /// `Status` request — no per-request directory walk.
 #[derive(Debug, Clone, Default)]
 pub struct StorageStatusSnapshot {
@@ -92,7 +92,7 @@ pub struct DaemonHandler {
     storage_status: Arc<ArcSwap<StorageStatusSnapshot>>,
     /// Concrete storage handle for direct search / get_screenshot calls.
     storage: Arc<chronicle_storage::Storage>,
-    /// Control channel to the `main()` event loop for mic toggles.
+    /// Control channel to the `run()` event loop for mic toggles.
     mic_tx: mpsc::Sender<MicCommand>,
     /// Latest microphone state, published by the event loop, read by `Status`.
     mic_state: Arc<AtomicU8>,
@@ -102,7 +102,7 @@ pub struct DaemonHandler {
     mic_ready: Arc<AtomicBool>,
     /// Backstop for a wedged daemon — a real toggle replies well under 1 s.
     mic_reply_timeout: Duration,
-    /// Control channel to the main event loop for capture pause/resume.
+    /// Control channel to the `run()` event loop for capture pause/resume.
     capture_tx: mpsc::Sender<CaptureCommand>,
     /// Latest capture-paused state, read by `Status`.
     capture_paused: Arc<AtomicBool>,
@@ -117,7 +117,7 @@ pub struct DaemonHandler {
     /// Transcription status cell (CHR-71): boot/provisioner write it, the
     /// `Status` arm reads it.
     transcription_status: Arc<TranscriptionStatusCell>,
-    /// Control channel to the main event loop for model switches.
+    /// Control channel to the `run()` event loop for model switches.
     model_tx: mpsc::Sender<ModelCommand>,
     /// Backstop for a wedged daemon — `try_begin` is a CAS plus one ArcSwap
     /// store, so a real accept/reject replies in microseconds.

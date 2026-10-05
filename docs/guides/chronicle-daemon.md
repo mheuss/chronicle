@@ -19,7 +19,8 @@ pipelines, and handles shutdown.
 ```mermaid
 flowchart TD
     subgraph Startup
-        P[Permission Preflight] --> S[Storage]
+        L[Instance Lock] --> P[Permission Preflight]
+        P --> S[Storage]
         S --> IPC[IpcServer]
         IPC --> AP[AudioPipeline]
         AP --> CE[CaptureEngine]
@@ -42,6 +43,7 @@ flowchart TD
 | File | Role |
 |------|------|
 | `src/main.rs` | Entry point, startup sequence, shutdown |
+| `src/instance_lock.rs` | Single-instance lock on `chronicle.lock`, held until the runtime is dropped |
 | `src/permissions.rs` | macOS TCC permission checks (Screen Recording, Microphone) |
 | `src/pipeline.rs` | Async tasks: capture-to-store, OCR, audio-to-store, bridge thread |
 
@@ -49,20 +51,23 @@ flowchart TD
 
 1. `env_logger::Builder::from_env(...)` — logging, defaulting to
    `warn,chronicle=info` when `RUST_LOG` is unset
-2. `permissions::preflight()` — checks Screen Recording (hard gate) and
+2. `instance_lock::acquire()` — takes an exclusive lock on `chronicle.lock` in
+   the data directory, before the Tokio runtime exists. Exits with "another
+   chronicle-daemon is already running" if another daemon holds it.
+3. `permissions::preflight()` — checks Screen Recording (hard gate) and
    Microphone (informational). Exits with an actionable error if Screen
    Recording is denied.
-3. `Storage::open()` — opens/migrates SQLite database
-4. `IpcServer::start()` — starts the Unix-socket status server
-5. `AudioPipeline::create()` — prepares the audio handler, dispatch queue, and
+4. `Storage::open()` — opens/migrates SQLite database
+5. `IpcServer::start()` — starts the Unix-socket status server
+6. `AudioPipeline::create()` — prepares the audio handler, dispatch queue, and
    encoding thread used by ScreenCaptureKit audio callbacks, and builds the
    microphone tap (installed eagerly; capture starts only on mic-on)
-6. `CaptureEngine::start()` — enumerates displays, starts one SCStream per
+7. `CaptureEngine::start()` — enumerates displays, starts one SCStream per
    display, registers the audio handler on the primary display, and returns a
    frame receiver channel
-7. Spawn `capture_store_loop` (Task A) and `ocr_loop` (Task B)
-8. Spawn bridge thread and `audio_store_loop` (Task C)
-9. Block on the shutdown signal (`SIGINT` from Ctrl-C or `SIGTERM`)
+8. Spawn `capture_store_loop` (Task A) and `ocr_loop` (Task B)
+9. Spawn bridge thread and `audio_store_loop` (Task C)
+10. Block on the shutdown signal (`SIGINT` from Ctrl-C or `SIGTERM`)
 
 ### Channel Topology
 
@@ -110,6 +115,13 @@ The provisioning wait, earlier in teardown, aborts its task. `DRAIN_GRACE` in
 step 4 raises `stop_transcription`, and the transcribe loop then abandons what
 is still queued. `CLEANUP_GRACE` is the only one whose expiry raises nothing,
 because `cancel.cancel()` already raised its signal.
+
+On a normal return, `instance_lock::run_holding` drops the Tokio runtime and
+only then releases `chronicle.lock`. Dropping the runtime waits for every
+running `spawn_blocking` task. Storage work still in flight finishes while the
+lock is held. A new daemon cannot start until that work is done. The two
+`exit(3)` paths in `run` skip this. The process ends with its blocking work
+still running. The kernel releases the lock when the process exits.
 
 ## Key Concepts
 
@@ -196,12 +208,13 @@ everything else, as in `RUST_LOG=warn,chronicle_audio=debug`.
 
 Three things to know before you trust what you read:
 
-- **A second daemon on the same data directory will not start.** `IpcServer`
-  finds the existing socket and connects to it, and the newcomer exits with
-  "another daemon is already listening" *before* it reaches the tap install — so
-  you get no line at all, not an error about the microphone. Stop the running
-  daemon first. (The check is socket-based, not a global lock: a different data
-  directory has its own socket and its own daemon.)
+- **A second daemon on the same data directory will not start.** The daemon
+  locks `chronicle.lock` in its data directory as soon as logging starts. A
+  newcomer that finds the lock held exits with "another chronicle-daemon is
+  already running". It exits *before* it opens the database or reaches the tap
+  install. You get no line at all, not an error about the microphone. Stop the
+  running daemon first. (The lock is per data directory: a different data
+  directory has its own lock and its own daemon.)
 - **Restart between devices.** `MicrophoneCapture` and its converter are built
   once when the pipeline is created, so changing the default input while the
   daemon runs leaves the converter built for the previous device.

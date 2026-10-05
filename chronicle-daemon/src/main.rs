@@ -1,6 +1,7 @@
 mod capture_runtime;
 mod capture_supervisor;
 mod drop_reporter;
+mod instance_lock;
 mod ipc_handler;
 mod media_presence;
 mod permissions;
@@ -144,7 +145,7 @@ async fn join_cleanup_task(
 /// the mic arm below — so strict serialization is the only thing making that
 /// safe. Two truly concurrent callers would surface a lost race as
 /// `AlreadyExists`, and worse, the loser's cleanup can delete the winner's
-/// temp file and break its rename. The drain is safe because `main` is
+/// temp file and break its rename. The drain is safe because `run` is
 /// single-threaded past the loop and no other writer can still be running.
 /// Extracted as a free function purely so it stays unit-testable.
 ///
@@ -264,8 +265,7 @@ fn note_reconcile_outcome(
 /// be exercised twice in a process, but the string it is handed can.
 const DEFAULT_LOG_FILTER: &str = "warn,chronicle=info";
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     // `chronicle` is a prefix match, not a crate name: env_filter compares
     // with `target.starts_with(directive)`, so one directive covers
     // chronicle_daemon, chronicle_audio, chronicle_capture and every future
@@ -278,11 +278,20 @@ async fn main() -> Result<()> {
         .init();
     log::info!("chronicle-daemon starting");
 
+    let storage_config = StorageConfig::default();
+    let lock = instance_lock::acquire(&storage_config.base_dir)?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    instance_lock::run_holding(lock, runtime, run(storage_config))
+}
+
+async fn run(storage_config: StorageConfig) -> Result<()> {
     // --- Permission preflight ---
     let _mic_status = permissions::preflight()?;
 
     // --- Storage ---
-    let storage = Arc::new(Storage::open(StorageConfig::default()).await?);
+    let storage = Arc::new(Storage::open(storage_config).await?);
 
     // --- Startup orphan sweep ---
     match storage.sweep_orphans().await {
@@ -946,10 +955,10 @@ async fn main() -> Result<()> {
 
     // Drop reporter last: both producers have now stopped, so its final read
     // sees every drop including any from teardown. The counters are held in
-    // main, so they outlive the pipeline and the supervisor.
+    // `run`, so they outlive the pipeline and the supervisor.
     //
     // This runs on the poisoned path too. `supervisor.shutdown()` set
-    // `poisoned` above, but exit(3) does not happen until the end of main,
+    // `poisoned` above, but exit(3) does not happen until the end of `run`,
     // after the drain — so suppressing the report here would only hide drops
     // in the very run where something went wrong enough to poison the engine.
     //

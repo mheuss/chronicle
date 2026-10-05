@@ -211,11 +211,11 @@ fn warn_abandoned_queue(abandoned: usize) {
 /// `stop_after_current` is checked *after* the current segment is persisted,
 /// never before it — and again on the empty-handle skip path, which has
 /// nothing to persist and `continue`s past the bottom check. It exists so
-/// `main` never has to drop our `JoinHandle` to stop waiting.
+/// `run` never has to drop our `JoinHandle` to stop waiting.
 /// Dropping it would detach this task, and runtime drop destroys a detached
 /// future without polling it — discarding a transcript whose whisper call the
 /// blocking pool is still, separately, being waited on. Do not swap this flag
-/// for the global token, and do not let `main`'s timeout consume the handle.
+/// for the global token, and do not let `run`'s timeout consume the handle.
 ///
 /// The engine is resolved from the handle **once per job** and held for that
 /// whole job, so a model swap takes effect on the next segment and the
@@ -337,9 +337,9 @@ pub async fn transcribe_loop(
             Err(e) => log::error!("transcription task failed for segment {}: {e}", job.row_id),
         }
 
-        // Checked *after* the write, never before it: `main` sets this when the
+        // Checked *after* the write, never before it: `run` sets this when the
         // shutdown grace expires, and the whole point is that the segment already
-        // in flight still gets persisted. Breaking here (rather than `main`
+        // in flight still gets persisted. Breaking here (rather than `run`
         // dropping our JoinHandle) is what keeps that write from being discarded.
         if stop_after_current.load(Ordering::Relaxed) {
             warn_abandoned_queue(rx.len());
@@ -420,7 +420,7 @@ pub async fn audio_store_loop(
                         counters
                             .transcription_dropped
                             .fetch_add(1, Ordering::Relaxed);
-                        // `main` holds the only other sink handle and drops it last
+                        // `run` holds the only other sink handle and drops it last
                         // during shutdown, so a closed channel here means
                         // `transcribe_loop` itself died. Nothing gets transcribed for
                         // the rest of the process lifetime — not a benign race. That
@@ -1549,7 +1549,7 @@ mod tests {
     /// are enqueued *after* shutdown has begun. Jobs handed to an already-running
     /// loop must therefore all be transcribed, with only the channel close ending it.
     ///
-    /// Scope, stated honestly: this pins the loop-side contract only. The `main`-side
+    /// Scope, stated honestly: this pins the loop-side contract only. The `run`-side
     /// ordering it exists to protect — sink Arc dropped after `audio_store_handle`
     /// resolves — is not exercised here and is carried by `transcribe_loop`'s doc
     /// comment plus `docs/use-cases/pipeline.md`. Reintroducing an early-break would
@@ -1591,7 +1591,7 @@ mod tests {
             // that is already mid-drain.
             tokio::task::yield_now().await;
         }
-        // Closing the channel is what ends the loop — mirrors `main` dropping its
+        // Closing the channel is what ends the loop — mirrors `run` dropping its
         // sink Arc once `audio_store_handle` has finished.
         drop(tx);
         loop_handle.await.unwrap();
@@ -1606,7 +1606,7 @@ mod tests {
         }
     }
 
-    /// When the shutdown grace expires, `main` sets `stop_after_current` instead of
+    /// When the shutdown grace expires, `run` sets `stop_after_current` instead of
     /// dropping our `JoinHandle`. The segment already in flight must still be
     /// **persisted** — discarding a transcript the process already waited for is the
     /// bug this flag exists to prevent — and the loop must then exit rather than
