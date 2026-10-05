@@ -1973,7 +1973,7 @@ mod tests {
         assert_eq!(
             stats.state,
             TranscriptionState::Missing,
-            "boot must publish what it actually found, not inherit main's stale check"
+            "boot must publish what it actually found, not inherit run's stale check"
         );
         assert!(!handle.is_loaded(), "no engine from an absent file");
     }

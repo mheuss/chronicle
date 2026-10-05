@@ -257,8 +257,9 @@ The walk runs before the query, not after — the pipeline writes a file before
 inserting its row, so reading the set first would delete a capture whose file
 landed before the walk reached its directory but whose row had not committed
 yet. Covering indexes on the two path columns (migration 002) keep the query off
-the table itself. This narrows the race but does not close it, and it is not safe
-across processes (CHR-45). See `docs/use-cases/storage.md` for the full
+the table itself. This narrows the race but does not close it. A second daemon cannot
+sweep at the same time, because each daemon locks `chronicle.lock` before it
+opens storage. See `docs/use-cases/storage.md` for the full
 rationale.
 
 ## How to run tests

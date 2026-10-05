@@ -285,23 +285,23 @@ fn sweep_media_orphans(
     // per-file COUNT(*) this replaced, where each row had until its own file's
     // turn in the loop — minutes, which was the CHR-54 bug.
     //
-    // Tolerability rests on two assumptions, and only the first holds today:
-    //   1. HOLDS, in-process: the sole production caller is main.rs:89, awaited
-    //      before the capture runtime spawns, so this process writes no media
-    //      while the sweep runs. A periodic or IPC-triggered sweep breaks this.
-    //   2. DOES NOT HOLD, cross-process: the only single-instance guard is the
-    //      socket probe in IpcServer::start (main.rs:215), which runs long after
-    //      the sweep, so a second daemon sweeps the shared media directory while
-    //      the first is capturing. Tracked as CHR-45. The symptom is worse than
-    //      a lost file — neither insert checks that the file still exists, so the
-    //      row still commits and leaves a row pointing at nothing, plus an OCR or
-    //      transcription job that can never succeed.
+    // Tolerability rests on two assumptions, and both hold today:
+    //   1. HOLDS, in-process: the sole production caller is the daemon's `run`,
+    //      awaited before the capture runtime spawns, so this process writes no
+    //      media while the sweep runs. A periodic or IPC-triggered sweep breaks
+    //      this.
+    //   2. HOLDS, cross-process: the daemon's `main` takes `chronicle.lock`
+    //      through `instance_lock::acquire` before `Storage::open`, so a second
+    //      daemon exits before it can sweep. If that guard is ever bypassed, the
+    //      symptom is worse than a lost file — neither insert checks that the
+    //      file still exists, so the row still commits and leaves a row pointing
+    //      at nothing, plus an OCR or transcription job that can never succeed.
     //
     // `sweep_walks_before_reading_tracked_set` pins the ordering.
     //
-    // The age guard below NARROWS that window. It does not close it, and
-    // CHR-45 stays open. A genuine orphan is left behind by a crash, so it
-    // predates the sweep that finds it; a capture still being written does not.
+    // The age guard below NARROWS that window. It does not close it. A genuine
+    // orphan is left behind by a crash, so it predates the sweep that finds it;
+    // a capture still being written does not.
     //
     // With the guard, deletion requires BOTH: the file's last write predates
     // `sweep_start`, AND its row has not committed by the SELECT. Since
@@ -1002,7 +1002,7 @@ mod tests {
     /// An untracked file that is newer than the sweep is a capture in flight, not
     /// an orphan — the pipeline writes the file before committing its row, so
     /// deleting it destroys a real capture. This guard is what keeps the sweep's
-    /// residual race (CHR-45) from costing data.
+    /// residual race from costing data.
     ///
     /// The fixture stamps the file's mtime forward rather than racing the sweep.
     /// That is deliberate: the file has to be present when the walk enumerates it

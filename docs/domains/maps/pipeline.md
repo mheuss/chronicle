@@ -63,11 +63,11 @@
 | Document | Said | Verdict |
 |---|---|---|
 | `docs/use-cases/INDEX.md:7` | Code Location `chronicle-daemon/src/` | wrong — that path is the whole daemon source tree, which spans seven domains. Filed as CHR-151 |
-| `docs/use-cases/pipeline.md:18, 89, 134` | Locates shutdown at `main.rs:main`, per-item log throttling at `pipeline.rs`, and channel bridging at `pipeline.rs:bridge_audio_segments` | accurate — these three are this domain |
+| `docs/use-cases/pipeline.md:18, 89, 134` | Locates shutdown at `main.rs:run`, per-item log throttling at `pipeline.rs`, and channel bridging at `pipeline.rs:bridge_audio_segments` | accurate — these three are this domain |
 | `docs/use-cases/pipeline.md:155, 187, 218, 241, 274, 298` | Locates six more solutions at `capture_runtime.rs`, `crates/capture/src/handler.rs` twice, `capture_supervisor.rs`, `power.rs`, and `provisioning.rs` | stale as a grouping — all six are owned by `capture`, `power` and `transcription`. The patterns are real; the catalogue grouped them by shape rather than by owner |
 | `docs/use-cases/background-work.md:20` | Locates "Budgeted Start-Retry via Detached Nudges" at `main.rs:note_reconcile_outcome` plus `capture_supervisor.rs:StartRetry` | accurate, and evidence for CHR-58 — one behaviour split across this domain's file and `capture`'s |
-| `docs/guides/chronicle-daemon.md:48-114` | Documents the Startup Sequence, Channel Topology and Shutdown as properties of the binary | accurate — and the closest existing description of why `main.rs` is one file |
-| `docs/guides/chronicle-daemon.md:219` | Gives an "Adding a new pipeline stage" procedure | accurate |
+| `docs/guides/chronicle-daemon.md:48-122` | Documents the Startup Sequence, Channel Topology and Shutdown as properties of the binary | accurate — and the closest existing description of why `main.rs` is one file |
+| `docs/guides/chronicle-daemon.md:227` | Gives an "Adding a new pipeline stage" procedure | accurate |
 
 `main.rs` holds two helpers that are other domains' logic rather than
 composition. One is `note_reconcile_outcome` (`:231`), half of a
