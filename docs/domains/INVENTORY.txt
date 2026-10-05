@@ -36,6 +36,7 @@ chronicle-daemon/crates/transcription/src/lib.rs
 chronicle-daemon/src/capture_runtime.rs
 chronicle-daemon/src/capture_supervisor.rs
 chronicle-daemon/src/drop_reporter.rs
+chronicle-daemon/src/instance_lock.rs
 chronicle-daemon/src/ipc_handler.rs
 chronicle-daemon/src/main.rs
 chronicle-daemon/src/media_presence.rs

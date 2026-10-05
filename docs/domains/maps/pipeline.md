@@ -2,7 +2,7 @@
 
 **Status:** Decided 2026-09-17, revised 2026-09-18, revised 2026-09-21
 **Owns:** The daemon binary itself — the stage loops that move a captured item to storage, the contracts they run on, the counters they report through, and the process that wires them together.
-**Code:** `chronicle-daemon/src/pipeline.rs`, `chronicle-daemon/src/pipeline/`, `chronicle-daemon/src/main.rs`, `chronicle-daemon/src/settings.rs`, `chronicle-daemon/src/drop_reporter.rs`
+**Code:** `chronicle-daemon/src/pipeline.rs`, `chronicle-daemon/src/pipeline/`, `chronicle-daemon/src/main.rs`, `chronicle-daemon/src/instance_lock.rs`, `chronicle-daemon/src/settings.rs`, `chronicle-daemon/src/drop_reporter.rs`
 
 ## Boundary
 
@@ -12,7 +12,8 @@
 - inside: counting what each stage dropped — `chronicle-daemon/src/pipeline/counters.rs` — `PipelineCounters`
 - inside: turning the real-time callbacks' drop counters into at most one log line per period, off the threads that count — `chronicle-daemon/src/drop_reporter.rs` — `run_reporter`
 - inside: caching foreground-app lookups behind a clock so every frame does not pay for one — `chronicle-daemon/src/pipeline/metadata.rs` — `CachingAppMetadataProvider`
-- inside: constructing every domain and ordering startup and shutdown between them — `chronicle-daemon/src/main.rs` — `main`
+- inside: constructing every domain and ordering startup and shutdown between them — `chronicle-daemon/src/main.rs` — `run`
+- inside: refusing to start while another daemon holds the data directory, and holding that claim until the runtime is gone — `chronicle-daemon/src/instance_lock.rs` — `run_holding`
 - inside: persisting the daemon's process-level settings, whichever domain each key belongs to — `chronicle-daemon/src/settings.rs` — `read_capture_paused`
 - outside: producing the frames and segments these loops consume — `chronicle-daemon/src/capture_runtime.rs` — `CaptureRuntime`
 - outside: the work a stage performs once scheduled — `chronicle-daemon/crates/ocr/src/lib.rs` — `extract_text`
@@ -25,6 +26,7 @@
 ## Owned Files
 
 - chronicle-daemon/src/drop_reporter.rs
+- chronicle-daemon/src/instance_lock.rs
 - chronicle-daemon/src/main.rs
 - chronicle-daemon/src/pipeline.rs
 - chronicle-daemon/src/pipeline/counters.rs
