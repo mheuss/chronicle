@@ -116,8 +116,8 @@ because `cancel.cancel()` already raised its signal.
 
 After teardown, `main` drops the Tokio runtime and only then releases
 `chronicle.lock`. Dropping the runtime waits for every running
-`spawn_blocking` task, so storage work still in flight finishes while the lock
-is held. A new daemon cannot start until that work is done.
+`spawn_blocking` task. Storage work still in flight finishes while the lock is
+held. A new daemon cannot start until that work is done.
 
 ## Key Concepts
 
@@ -205,10 +205,10 @@ everything else, as in `RUST_LOG=warn,chronicle_audio=debug`.
 Three things to know before you trust what you read:
 
 - **A second daemon on the same data directory will not start.** The daemon
-  locks `chronicle.lock` in its data directory before anything else, and a
+  locks `chronicle.lock` in its data directory before anything else. A
   newcomer that finds the lock held exits with "another chronicle-daemon is
-  already running" *before* it opens the database or reaches the tap install —
-  so you get no line at all, not an error about the microphone. Stop the
+  already running". It exits *before* it opens the database or reaches the tap
+  install. You get no line at all, not an error about the microphone. Stop the
   running daemon first. (The lock is per data directory: a different data
   directory has its own lock and its own daemon.)
 - **Restart between devices.** `MicrophoneCapture` and its converter are built
