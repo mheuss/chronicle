@@ -68,7 +68,7 @@ pub(crate) struct ModelCommand {
 }
 
 /// Cached storage status snapshot. Written every 30s by the storage
-/// refresher task in `main()`. Read by `RequestHandler::handle` on every
+/// refresher task in `run()`. Read by `RequestHandler::handle` on every
 /// `Status` request — no per-request directory walk.
 #[derive(Debug, Clone, Default)]
 pub struct StorageStatusSnapshot {
@@ -92,7 +92,7 @@ pub struct DaemonHandler {
     storage_status: Arc<ArcSwap<StorageStatusSnapshot>>,
     /// Concrete storage handle for direct search / get_screenshot calls.
     storage: Arc<chronicle_storage::Storage>,
-    /// Control channel to the `main()` event loop for mic toggles.
+    /// Control channel to the `run()` event loop for mic toggles.
     mic_tx: mpsc::Sender<MicCommand>,
     /// Latest microphone state, published by the event loop, read by `Status`.
     mic_state: Arc<AtomicU8>,

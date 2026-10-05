@@ -93,7 +93,7 @@ impl TranscriptionStatusCell {
     }
 
     /// The one transition back to `Missing`: `boot()` reconciling the
-    /// creation-time entry `main` made from an older presence check against
+    /// creation-time entry `run` made from an older presence check against
     /// what boot actually found on disk. Without it, a model deleted during
     /// startup strands the daemon in `Loading` with no engine and no error.
     pub fn set_missing(&self) {
@@ -827,11 +827,11 @@ impl ProvisionerContext {
 /// its file is already on disk. Never downloads — first-run provisioning is
 /// user-initiated via `SetWhisperModel` (design §2.1).
 ///
-/// **Awaited in `main` before `audio_store_loop` spawns**, which preserves
+/// **Awaited in `run` before `audio_store_loop` spawns**, which preserves
 /// today's no-loss ordering (codex I2).
 ///
 /// This function owns the cell's startup state outright, rather than trusting
-/// the creation-time entry `main` made. `main` decides `Loading` vs `Missing`
+/// the creation-time entry `run` made. `run` decides `Loading` vs `Missing`
 /// from a presence check taken before `IpcServer::start` and before
 /// `supervisor.reconcile().await` — hundreds of milliseconds earlier. If the
 /// file disappears in that window, deferring to that stale decision would
@@ -860,12 +860,12 @@ pub async fn boot(
 
     if !chronicle_transcription::model_present(base_dir, variant) {
         // Reconciles the cell with what boot ACTUALLY found. Normally a
-        // no-op — `main` already published Missing and logged the
+        // no-op — `run` already published Missing and logged the
         // "model missing → idle" warning — but it is the one transition back
         // to Missing in the whole state machine, and it is what keeps a file
         // deleted during startup from stranding the daemon in Loading.
         //
-        // In that case `main` took the PRESENT branch and logged nothing, so
+        // In that case `run` took the PRESENT branch and logged nothing, so
         // without the warning below the operator would get a Missing banner
         // with no explanation anywhere in the log. Only fires on the real
         // transition; the ordinary no-op stays quiet.
@@ -879,9 +879,9 @@ pub async fn boot(
         return None;
     }
 
-    // Re-assert Loading for the same reason: `main` set it from an older
+    // Re-assert Loading for the same reason: `run` set it from an older
     // presence check, and on the "absent then created" ordering it would not
-    // have set it at all. That ordering also leaves `main`'s "not downloaded"
+    // have set it at all. That ordering also leaves `run`'s "not downloaded"
     // warning in the log contradicting a successful load — the
     // "transcription engine loaded" line below is what settles it.
     cell.set_loading(variant);
@@ -968,7 +968,7 @@ impl ProvisionerContext {
         self.in_flight.store(true, Ordering::Release);
     }
 
-    /// Production never reaches through the context for these — `main`
+    /// Production never reaches through the context for these — `run`
     /// already holds both Arcs and passes them in — so they are test-only
     /// rather than carrying a dead-code marker.
     pub(crate) fn cell(&self) -> &Arc<TranscriptionStatusCell> {

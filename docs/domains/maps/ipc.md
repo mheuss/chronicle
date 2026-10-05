@@ -18,7 +18,7 @@
 - inside: absorbed from the `ipc-compat` candidate on 2026-09-18 — keeping the two sides able to talk across a version gap: additive fields optional on the decoder, unknown enum values degraded rather than thrown, and a tagged payload read only under the tag that carries it — `chronicle-ui/Sources/ChronicleUI/DaemonConnection.swift` — `Retention`
 - inside: absorbed from the `ipc-compat` candidate on 2026-09-18 — what a configured retention value means, what an invalid one means, and the single bound every entry point validates against — `chronicle-daemon/crates/ipc/src/retention.rs` — `classify`
 - outside: the work a response reports on, and the types each domain declares for its own use — `chronicle-daemon/crates/storage/src/models.rs` — `StorageStatus`
-- outside: constructing the handler, opening the channels it sends on, and starting and stopping the server — `chronicle-daemon/src/main.rs` — `main`
+- outside: constructing the handler, opening the channels it sends on, and starting and stopping the server — `chronicle-daemon/src/main.rs` — `run`
 - outside: the view layer that calls the client and renders what it returns — `chronicle-ui/Sources/ChronicleUI/MenuBarIcon.swift` — `MenuBarIcon`
 - outside: what a wire value means to the person reading it on screen — `chronicle-ui/Sources/ChronicleUI/RetentionCopy.swift` — `RetentionCopy`
 
@@ -83,7 +83,7 @@
 `ipc_handler.rs` carries two reasons to change: a 227-line match on the seven
 `Request` variants at `:311-537`, and 222 lines of daemon runtime wiring at
 `:74-134` and `:136-296` that only `main.rs` constructs. That wiring is three
-`mpsc` channels to `main()`'s event loop, two readiness atomics, three reply
+`mpsc` channels to `run()`'s event loop, two readiness atomics, three reply
 timeouts. `DaemonConnection.swift` splits the same way at its own
 `// MARK: - Protocol Types` divider on line 465. The class runs `:10-463`. The
 23 wire types run `:467-801`. Both are recorded as offshoots. The map

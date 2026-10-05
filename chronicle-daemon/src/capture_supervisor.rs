@@ -126,7 +126,7 @@ pub struct CaptureSupervisor<'a, M: AppMetadataProvider + 'static + ?Sized> {
     base_dir: PathBuf,
     /// Drop counters handed to every engine this supervisor builds.
     ///
-    /// Owned by `main` and cloned in here, because `start()` constructs a
+    /// Owned by `run` and cloned in here, because `start()` constructs a
     /// fresh `CaptureEngine` on every resume. An engine-owned counter would
     /// reset each cycle, making the reporter's deltas lossy and its totals
     /// non-monotonic.

@@ -769,7 +769,7 @@ mod loop_tests {
         assert_eq!(ops.run_count(), 1);
 
         // The task ends on its own, without anyone cancelling it, AND it ends
-        // in a failed state — that Err is what the join in `main` turns into a
+        // in a failed state — that Err is what the join in `run` turns into a
         // nonzero exit code. A loop that stopped but returned Ok would look
         // like an orderly shutdown.
         let outcome = tokio::time::timeout(Duration::from_secs(1), task)
@@ -925,7 +925,7 @@ mod loop_tests {
         // The other half of `is_worker_panic`. A `JoinError` from an aborted
         // task is not a panic and must not be fatal: at shutdown the runtime
         // can abort a queued blocking task, and classifying that as a panic
-        // would turn an orderly exit into a nonzero exit code, because `main`
+        // would turn an orderly exit into a nonzero exit code, because `run`
         // joins this loop.
         let handle = tokio::spawn(async { std::future::pending::<()>().await });
         handle.abort();

@@ -104,7 +104,7 @@ impl ReporterState {
 /// Flatten the two crates' snapshots into one reading.
 ///
 /// The only place two field vocabularies meet: audio's `mic_*`/`system_*` and
-/// capture's bare `full`/`closed`. Lives here rather than inline in `main` so
+/// capture's bare `full`/`closed`. Lives here rather than inline in `run` so
 /// it can be tested — a swapped pair here mislabels counters in every log line
 /// for the life of the process, and nothing downstream would notice.
 pub(crate) fn totals_from(
@@ -158,7 +158,7 @@ pub(crate) async fn run_reporter_with_sink<F, S>(
     // "at most one line per period" contract would break exactly when the log
     // is busiest. `Delay` restarts the period from the tick that actually ran.
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // Unlike the storage refresher in main(), the immediate first tick is NOT
+    // Unlike the storage refresher in `run()`, the immediate first tick is NOT
     // skipped. That one skips it to avoid double-priming a snapshot; this
     // reporter is silent when nothing was dropped, so an immediate first read
     // costs nothing and catches a burst that predates the task.
@@ -176,7 +176,7 @@ pub(crate) async fn run_reporter_with_sink<F, S>(
         }
     }
     // Final read AFTER the producers have stopped — see the shutdown ordering
-    // in main(). Without this a drop storm during teardown would never be
+    // in `run()`. Without this a drop storm during teardown would never be
     // reported, which is the failure mode this module exists to fix.
     if let Some(line) = state.observe(read_totals()) {
         emit(line);
@@ -197,13 +197,13 @@ pub(crate) const REPORT_LEVEL: log::Level = log::Level::Warn;
 /// to either argument leaves half the report reading zero forever, and nothing
 /// downstream notices.
 ///
-/// Note what this does NOT cover. `main` choosing which `Arc` to pass is still
+/// Note what this does NOT cover. `run` choosing which `Arc` to pass is still
 /// unpinned — swap `audio_pipeline.drop_counters()` at the call site for a
 /// fresh `AudioDropCounters::default()` and every test in the tree still
 /// passes. The capture side has no such gap, because the supervisor owns its
 /// `Arc` and `supervisor_config_carries_its_own_counters` asserts `ptr_eq`
 /// against it. Closing the audio equivalent means lifting that choice out of
-/// `async fn main()`, which no test calls.
+/// `async fn run()`, which no test calls.
 pub(crate) fn counter_reader(
     audio: std::sync::Arc<chronicle_audio::AudioDropCounters>,
     capture: std::sync::Arc<chronicle_capture::CaptureDropCounters>,

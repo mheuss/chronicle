@@ -145,7 +145,7 @@ async fn join_cleanup_task(
 /// the mic arm below — so strict serialization is the only thing making that
 /// safe. Two truly concurrent callers would surface a lost race as
 /// `AlreadyExists`, and worse, the loser's cleanup can delete the winner's
-/// temp file and break its rename. The drain is safe because `main` is
+/// temp file and break its rename. The drain is safe because `run` is
 /// single-threaded past the loop and no other writer can still be running.
 /// Extracted as a free function purely so it stays unit-testable.
 ///
@@ -955,10 +955,10 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
 
     // Drop reporter last: both producers have now stopped, so its final read
     // sees every drop including any from teardown. The counters are held in
-    // main, so they outlive the pipeline and the supervisor.
+    // `run`, so they outlive the pipeline and the supervisor.
     //
     // This runs on the poisoned path too. `supervisor.shutdown()` set
-    // `poisoned` above, but exit(3) does not happen until the end of main,
+    // `poisoned` above, but exit(3) does not happen until the end of `run`,
     // after the drain — so suppressing the report here would only hide drops
     // in the very run where something went wrong enough to poison the engine.
     //
