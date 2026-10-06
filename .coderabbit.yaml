@@ -7,3 +7,7 @@ reviews:
   tools:
     clippy:
       enabled: false
+  # Comments default to none in this repo, so docstring coverage is not a goal.
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
