@@ -98,5 +98,5 @@ boundary that `storage` owns.
 ## Offshoots Filed
 
 - CHR-56 — `ipc_handler.rs` mixes protocol dispatch with daemon runtime wiring; labelled `needs-domain` with the measurement added as a comment rather than a duplicate ticket
-- CHR-154 — `DaemonConnection.swift` holds the transport class and the 23 wire types in one file
+- CHR-154 — `DaemonConnection.swift` holds the transport class and the 25 wire types in one file
 - CHR-155 — this crate's bare re-export of `tokio_util`'s `CancellationToken` at `crates/ipc/src/lib.rs:377` is the daemon's only path to the type, so the map shows a background-work dependency on IPC that is a build artifact rather than a protocol edge
