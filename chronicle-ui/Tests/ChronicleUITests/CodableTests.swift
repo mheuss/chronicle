@@ -276,6 +276,48 @@ struct CodableTests {
         #expect(hit.timestampMs == 1_700_000_000_000)
         #expect(hit.appName == "Terminal")
         #expect(hit.snippet == "hello <b>world</b>")
+        #expect(hit.imagePath == "/x.heif")
+        #expect(hit.endTimestampMs == nil, "a payload without the new keys still decodes")
+        #expect(hit.audioSource == nil)
+    }
+
+    @Test("Audio search hit decodes with no image path")
+    func audioSearchHitDecodes() throws {
+        let json = """
+        {"type":"search","ok":true,"hits":[
+          {"id":5,"source":"audio","timestamp_ms":1700000000000,
+           "app_name":null,"app_bundle_id":null,"window_title":null,
+           "image_path":null,"end_timestamp_ms":1700000030000,
+           "audio_source":"mic","snippet":"the <b>budget</b> call","rank":-2.0}
+        ]}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(SearchResponse.self, from: Data(json.utf8))
+        let hit = try #require(resp.hits.first)
+        #expect(hit.source == .audio)
+        #expect(hit.imagePath == nil)
+        #expect(hit.endTimestampMs == 1_700_000_030_000)
+        #expect(hit.audioSource == "mic")
+    }
+
+    @Test("A screen hit and an audio hit with the same id get different row keys")
+    func rowKeyDistinguishesSources() throws {
+        let json = """
+        {"type":"search","ok":true,"hits":[
+          {"id":1,"source":"screen","timestamp_ms":0,"app_name":null,
+           "app_bundle_id":null,"window_title":null,"image_path":"/x.heif",
+           "snippet":"","rank":0},
+          {"id":1,"source":"audio","timestamp_ms":0,"app_name":null,
+           "app_bundle_id":null,"window_title":null,"image_path":null,
+           "end_timestamp_ms":1,"audio_source":"mic","snippet":"","rank":0}
+        ]}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let resp = try decoder.decode(SearchResponse.self, from: Data(json.utf8))
+        #expect(resp.hits[0].id == resp.hits[1].id, "fixture premise: ids collide")
+        #expect(resp.hits[0].rowKey != resp.hits[1].rowKey)
     }
 
     @Test("GetScreenshotResponse with null hit decodes")
@@ -506,16 +548,16 @@ struct CodableTests {
 
     @Test("Unknown search hit source degrades, not throws")
     func unknownSearchHitSourceDegrades() throws {
-        // Rust reserves SearchHitSource::Audio for CHR-76. `source` is
-        // non-optional, so a closed enum here takes the entire SearchResponse
-        // down and search goes dark — every hit lost, not just the audio one.
+        // `source` is non-optional, so a closed enum here takes the entire
+        // SearchResponse down and search goes dark — every hit lost, not
+        // just the unrecognized one.
         let json = """
         {"type":"search","ok":true,"hits":[
           {"id":1,"source":"screen","timestamp_ms":1700000000000,
            "app_name":"Terminal","app_bundle_id":"com.apple.Terminal",
            "window_title":"zsh","image_path":"/x.heif",
            "snippet":"hello <b>world</b>","rank":-1.5},
-          {"id":2,"source":"audio","timestamp_ms":1700000000001,
+          {"id":2,"source":"video","timestamp_ms":1700000000001,
            "app_name":null,"app_bundle_id":null,
            "window_title":null,"image_path":"","snippet":"spoken <b>words</b>",
            "rank":-1.2}

@@ -237,7 +237,7 @@ struct SearchPopoverView: View {
         case .results:
             // [A11y] Wrap each row in a Button so the result is keyboard-
             // accessible (Tab/Shift-Tab to focus, Return/Space to open).
-            List(results) { hit in
+            List(results, id: \.rowKey) { hit in
                 Button {
                     NSApp.activate(ignoringOtherApps: true)
                     openWindow(id: "screenshot", value: hit.id)
@@ -275,7 +275,7 @@ struct SearchPopoverView: View {
         try? await Task.sleep(for: .milliseconds(200))
         if Task.isCancelled || requestID != myID { return }
         do {
-            let hits = try await connection.search(trimmed, limit: 50, offset: 0)
+            let hits = try await connection.search(trimmed, limit: 50, offset: 0, filter: .screen)
             if requestID == myID {
                 results = hits
             }
