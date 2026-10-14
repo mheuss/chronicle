@@ -99,8 +99,9 @@ trigger does a delete-then-insert to replace the old entry.
    and collect results with `rank`.
 2. If the filter includes audio, do the same against `audio_fts` /
    `audio_segments`.
-3. Merge both result sets, sort by `rank` (lower is better in FTS5), then apply
-   `limit` and `offset`.
+3. Interleave the two result sets, screen first, each in its own `rank` order,
+   then apply `limit` and `offset`. The two tables' `rank` values are not
+   comparable, so they are never sorted against each other.
 
 **Filters:** `SearchFilter::All` queries both tables. `ScreenOnly` and
 `AudioOnly` query one.
