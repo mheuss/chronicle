@@ -334,6 +334,20 @@ pub enum SearchHitSource {
     Screen,
 }
 
+/// Which sources a search covers. Shared with `chronicle-storage` (ADR-015).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SearchFilter {
+    /// Search both screenshots and audio segments.
+    #[serde(rename = "all")]
+    All,
+    /// Search screenshots only.
+    #[serde(rename = "screen")]
+    ScreenOnly,
+    /// Search audio segments only.
+    #[serde(rename = "audio")]
+    AudioOnly,
+}
+
 // ---------------------------------------------------------------------------
 // Handler trait
 // ---------------------------------------------------------------------------
@@ -541,6 +555,30 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let decoded: Request = serde_json::from_str(&json).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn search_filter_serializes_as_wire_names() {
+        assert_eq!(
+            serde_json::to_string(&SearchFilter::All).unwrap(),
+            r#""all""#
+        );
+        assert_eq!(
+            serde_json::to_string(&SearchFilter::ScreenOnly).unwrap(),
+            r#""screen""#
+        );
+        assert_eq!(
+            serde_json::to_string(&SearchFilter::AudioOnly).unwrap(),
+            r#""audio""#
+        );
+        for f in [
+            SearchFilter::All,
+            SearchFilter::ScreenOnly,
+            SearchFilter::AudioOnly,
+        ] {
+            let json = serde_json::to_string(&f).unwrap();
+            assert_eq!(serde_json::from_str::<SearchFilter>(&json).unwrap(), f);
+        }
     }
 
     #[test]
