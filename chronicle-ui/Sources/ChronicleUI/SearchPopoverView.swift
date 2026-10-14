@@ -117,7 +117,7 @@ struct SearchPopoverView: View {
         .task {
             connection.connect()
         }
-        .task(id: searchKey) {
+        .task(id: searchKey) { [searchKey] in
             await runSearch(searchKey)
         }
         .task(id: connection.lastStatus?.data.capture?.paused) {
