@@ -21,12 +21,14 @@ pub enum Request {
     SetMicEnabled {
         enabled: bool,
     },
-    /// Search the OCR index for screen-only results.
-    /// Audio results are added in CHR-76.
+    /// Search screenshots, audio transcripts, or both. A request without
+    /// `filter` searches screenshots only.
     Search {
         query: String,
         limit: u32,
         offset: u32,
+        #[serde(default)]
+        filter: Option<SearchFilter>,
     },
     /// Fetch a single screenshot's metadata by row id.
     /// Used by the UI's detail window for both live click flow and
@@ -278,7 +280,8 @@ pub struct StorageStats {
     /// setting and is not claiming a policy. The UI renders that as
     /// "Unavailable" rather than a number. See CHR-33 and ADR-015.
     pub retention: Option<Retention>,
-    /// Media rows served over IPC this process lifetime. The denominator for
+    /// Screenshot rows served over IPC this process lifetime. Audio hits carry
+    /// no file path and are not counted. The denominator for
     /// `media_absent` — a bare absent count cannot be interpreted without it.
     ///
     /// The pair is sampled, not read atomically: `snapshot()` loads the two
@@ -306,8 +309,8 @@ pub struct StorageStats {
 }
 
 /// One search result row. Mirrors the storage-layer `SearchResult` shape,
-/// flattened for wire transport. Audio fields are deliberately omitted in
-/// CHR-121; they'll be added alongside `SearchHitSource::Audio` in CHR-76.
+/// flattened for wire transport. `id` is a row id in `screenshots` or in
+/// `audio_segments`, depending on `source`, so two hits can share one.
 ///
 /// `Eq` is intentionally not derived: `rank: f64` can be NaN and `Eq`'s
 /// reflexivity would be violated. Tests use `assert_eq!` which only needs
@@ -316,22 +319,30 @@ pub struct StorageStats {
 pub struct SearchHit {
     pub id: i64,
     pub source: SearchHitSource,
+    /// Capture time for a screen hit; segment start for an audio hit.
     pub timestamp_ms: i64,
     pub app_name: Option<String>,
     pub app_bundle_id: Option<String>,
     pub window_title: Option<String>,
-    pub image_path: String,
+    /// `None` for an audio hit.
+    pub image_path: Option<String>,
+    /// Segment end. `None` for a screen hit.
+    pub end_timestamp_ms: Option<i64>,
+    /// `"mic"` or `"system"`, as stored. `None` for a screen hit.
+    pub audio_source: Option<String>,
     /// FTS5 snippet with `<b>...</b>` markup around matched substrings.
     pub snippet: String,
-    /// FTS5 relevance rank (lower is better).
+    /// FTS5 rank within this hit's own source (lower is better). Not
+    /// comparable across sources.
     pub rank: f64,
 }
 
-/// Backing source of a search hit. `Audio` is reserved for CHR-76.
+/// Backing source of a search hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchHitSource {
     Screen,
+    Audio,
 }
 
 /// Which sources a search covers. Shared with `chronicle-storage` (ADR-015).
@@ -536,6 +547,7 @@ mod tests {
             query: "kubectl".into(),
             limit: 50,
             offset: 0,
+            filter: Some(SearchFilter::AudioOnly),
         };
         let json = serde_json::to_string(&req).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -543,6 +555,7 @@ mod tests {
         assert_eq!(v["query"], "kubectl");
         assert_eq!(v["limit"], 50);
         assert_eq!(v["offset"], 0);
+        assert_eq!(v["filter"], "audio");
     }
 
     #[test]
@@ -551,6 +564,7 @@ mod tests {
             query: "deploy".into(),
             limit: 25,
             offset: 10,
+            filter: Some(SearchFilter::All),
         };
         let json = serde_json::to_string(&original).unwrap();
         let decoded: Request = serde_json::from_str(&json).unwrap();
@@ -582,6 +596,43 @@ mod tests {
     }
 
     #[test]
+    fn request_search_without_filter_deserializes_to_none() {
+        let req: Request =
+            serde_json::from_str(r#"{"type":"search","query":"q","limit":5,"offset":0}"#).unwrap();
+        assert_eq!(
+            req,
+            Request::Search {
+                query: "q".into(),
+                limit: 5,
+                offset: 0,
+                filter: None,
+            }
+        );
+    }
+
+    #[test]
+    fn search_hit_serializes_with_audio_source() {
+        let hit = SearchHit {
+            id: 9,
+            source: SearchHitSource::Audio,
+            timestamp_ms: 1_700_000_000_000,
+            app_name: None,
+            app_bundle_id: None,
+            window_title: None,
+            image_path: None,
+            end_timestamp_ms: Some(1_700_000_030_000),
+            audio_source: Some("mic".into()),
+            snippet: "the <b>budget</b> call".into(),
+            rank: -2.0,
+        };
+        let v = serde_json::to_value(&hit).unwrap();
+        assert_eq!(v["source"], "audio");
+        assert!(v["image_path"].is_null());
+        assert_eq!(v["end_timestamp_ms"], 1_700_000_030_000_i64);
+        assert_eq!(v["audio_source"], "mic");
+    }
+
+    #[test]
     fn search_hit_serializes_with_screen_source() {
         let hit = SearchHit {
             id: 42,
@@ -590,7 +641,9 @@ mod tests {
             app_name: Some("Terminal".into()),
             app_bundle_id: Some("com.apple.Terminal".into()),
             window_title: Some("zsh".into()),
-            image_path: "/data/screenshots/shot.heif".into(),
+            image_path: Some("/data/screenshots/shot.heif".into()),
+            end_timestamp_ms: None,
+            audio_source: None,
             snippet: "find this <b>text</b> here".into(),
             rank: -1.5,
         };
@@ -816,7 +869,9 @@ mod tests {
             app_name: None,
             app_bundle_id: None,
             window_title: None,
-            image_path: "/x".into(),
+            image_path: Some("/x".into()),
+            end_timestamp_ms: None,
+            audio_source: None,
             snippet: String::new(),
             rank: 0.0,
         };
