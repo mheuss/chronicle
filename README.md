@@ -17,10 +17,10 @@ Chronicle uses a two-process design:
   land alongside `.app` bundle packaging.
 
 - **chronicle-ui** (Swift/SwiftUI): Menu bar app that connects to the daemon
-  over IPC. Left-click for a search popover (OCR-indexed screen history),
-  right-click or `Cmd+,` for a Settings window (disk usage, retention, pause /
-  resume capture). Click a search result to open the screenshot in its own
-  window.
+  over IPC. Left-click for a search popover over screen history and audio
+  transcripts, with an All / Screen / Audio filter. Right-click or `Cmd+,` for
+  a Settings window (disk usage, retention, pause / resume capture). Click a
+  screen result to open the screenshot in its own window.
 
 The two-process split gives us crash isolation (a UI crash doesn't stop
 capture), clean separation of concerns and independent testability.

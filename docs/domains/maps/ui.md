@@ -29,6 +29,7 @@
 - chronicle-ui/Sources/ChronicleUI/ResultRow.swift
 - chronicle-ui/Sources/ChronicleUI/RetentionCopy.swift
 - chronicle-ui/Sources/ChronicleUI/ScreenshotDetailView.swift
+- chronicle-ui/Sources/ChronicleUI/SearchFilterState.swift
 - chronicle-ui/Sources/ChronicleUI/SearchPopoverView.swift
 - chronicle-ui/Sources/ChronicleUI/SettingsView.swift
 - chronicle-ui/Sources/ChronicleUI/SnippetAttributedString.swift
@@ -52,7 +53,7 @@
 
 | Document | Said | Verdict |
 |---|---|---|
-| `docs/project-description.md:25-26, 166-178, 207` | A "thin menu bar app" whose icon click opens a search popover, built in SwiftUI | accurate in shape — `MenuBarExtra` with `SearchPopoverView` as content is `ChronicleApp.swift:9-17`. "Thin" understates it: this domain is 12 files and 1,631 lines |
+| `docs/project-description.md:25-26, 166-178, 207` | A "thin menu bar app" whose icon click opens a search popover, built in SwiftUI | accurate in shape — `MenuBarExtra` with `SearchPopoverView` as content is `ChronicleApp.swift:10-19`. "Thin" understates it: this domain is 12 files and 1,631 lines |
 | `docs/guides/chronicle-daemon.md:274` | The UI "does not depend on the daemon as a library — only on the IPC protocol" | accurate — this domain's only cross-domain dependency is `DaemonConnection`, and none of its eleven Swift files matches `chronicle_\|chronicle-daemon\|MicrophoneStatus\|StorageStatus\|CompletedSegment`, a pattern that fires twice in `DaemonConnection.swift` |
 | `.claude/audit/architecture-design.md:60` | "the Swift app only connects, polls status, and renders a connection indicator" | stale — true when written 2026-04-06, falsified by CHR-121 (Done 2026-05-21). `SearchPopoverView.swift` is 429 lines and `SettingsView.swift` 458 |
 | `.claude/audit/documentation-drift.md:57-59` | "the UI only connects to the daemon, polls `status`, and offers a Quit action" | stale — same date and same cause as the row above |
