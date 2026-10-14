@@ -653,6 +653,9 @@ mod tests {
         assert_eq!(v["source"], "screen");
         assert_eq!(v["timestamp_ms"], 1_700_000_000_000_i64);
         assert_eq!(v["snippet"], "find this <b>text</b> here");
+        assert_eq!(v["image_path"], "/data/screenshots/shot.heif");
+        assert!(v["end_timestamp_ms"].is_null());
+        assert!(v["audio_source"].is_null());
     }
 
     #[test]

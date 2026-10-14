@@ -1361,13 +1361,17 @@ mod tests {
             .unwrap()
     }
 
-    async fn insert_audio_with_transcript(handler: &DaemonHandler, transcript: &str) -> i64 {
+    async fn insert_audio_with_transcript(
+        handler: &DaemonHandler,
+        source: &str,
+        transcript: &str,
+    ) -> i64 {
         handler
             .storage_for_test()
             .insert_audio_segment(chronicle_storage::AudioSegmentMetadata {
                 start_timestamp: 1_700_000_000_000,
                 end_timestamp: 1_700_000_030_000,
-                source: "mic".into(),
+                source: source.into(),
                 audio_path: "/tmp/segment.opus".into(),
                 transcript: Some(transcript.into()),
                 whisper_model: Some("base".into()),
@@ -1476,7 +1480,7 @@ mod tests {
     async fn search_maps_an_audio_hit_without_panicking() {
         let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
             handler_with_full_channels(8, true).await;
-        let id = insert_audio_with_transcript(&handler, "the findable budget call").await;
+        let id = insert_audio_with_transcript(&handler, "system", "the findable budget call").await;
         let resp = handler.handle(Request::Search {
             query: "budget".into(),
             limit: 10,
@@ -1493,7 +1497,7 @@ mod tests {
         assert_eq!(h.source, chronicle_ipc::SearchHitSource::Audio);
         assert_eq!(h.timestamp_ms, 1_700_000_000_000);
         assert_eq!(h.end_timestamp_ms, Some(1_700_000_030_000));
-        assert_eq!(h.audio_source.as_deref(), Some("mic"));
+        assert_eq!(h.audio_source.as_deref(), Some("system"));
         assert_eq!(h.image_path, None);
         assert!(
             h.snippet.contains("<b>budget</b>"),
@@ -1507,7 +1511,7 @@ mod tests {
         let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
             handler_with_full_channels(8, true).await;
         insert_screenshot_at(&handler, "/tmp/findable.heif").await;
-        insert_audio_with_transcript(&handler, "a findable spoken line").await;
+        insert_audio_with_transcript(&handler, "mic", "a findable spoken line").await;
 
         let search = |filter| match handler.handle(Request::Search {
             query: "findable".into(),
@@ -1539,7 +1543,7 @@ mod tests {
     async fn audio_hits_do_not_touch_media_counters() {
         let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
             handler_with_full_channels(8, true).await;
-        insert_audio_with_transcript(&handler, "findable spoken words").await;
+        insert_audio_with_transcript(&handler, "mic", "findable spoken words").await;
         let resp = handler.handle(Request::Search {
             query: "findable".into(),
             limit: 10,
