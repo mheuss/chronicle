@@ -298,6 +298,16 @@ mod tests {
             .collect()
     }
 
+    fn audio_ids(results: &[SearchResult]) -> Vec<i64> {
+        results
+            .iter()
+            .filter_map(|r| match &r.source {
+                SearchSource::Audio(a) => Some(a.id),
+                SearchSource::Screen(_) => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn all_mode_alternates_screen_and_audio() {
         let conn = setup_db();
@@ -344,14 +354,6 @@ mod tests {
         let audio_only = search(&conn, "kubernetes", &SearchFilter::AudioOnly, 10, 0).unwrap();
         let all = search(&conn, "kubernetes", &SearchFilter::All, 10, 0).unwrap();
         assert_eq!(kinds(&all), ["screen", "audio", "audio", "audio"]);
-        let audio_ids = |rs: &[SearchResult]| -> Vec<i64> {
-            rs.iter()
-                .filter_map(|r| match &r.source {
-                    SearchSource::Audio(a) => Some(a.id),
-                    SearchSource::Screen(_) => None,
-                })
-                .collect()
-        };
         assert_eq!(audio_ids(&all), audio_ids(&audio_only));
     }
 
@@ -366,6 +368,19 @@ mod tests {
         assert_eq!(hit_keys(&even), hit_keys(&full[2..4]));
         let odd = search(&conn, "kubernetes", &SearchFilter::All, 2, 1).unwrap();
         assert_eq!(hit_keys(&odd), hit_keys(&full[1..3]));
+    }
+
+    #[test]
+    fn all_mode_page_in_the_remainder_fetches_past_limit_per_source() {
+        let conn = setup_db();
+        mixed_fixture(&conn, 5, 1);
+        let full = search(&conn, "kubernetes", &SearchFilter::All, 10, 0).unwrap();
+        assert_eq!(
+            kinds(&full),
+            ["screen", "audio", "screen", "screen", "screen", "screen"]
+        );
+        let page = search(&conn, "kubernetes", &SearchFilter::All, 2, 3).unwrap();
+        assert_eq!(hit_keys(&page), hit_keys(&full[3..5]));
     }
 
     #[test]
