@@ -35,6 +35,10 @@ struct SearchPopoverView: View {
         let filter: SearchFilter
     }
 
+    private var searchKey: SearchKey {
+        SearchKey(query: query, filter: searchFilter.filter)
+    }
+
     // `nonisolated` for the same reason SettingsView's formatters are: `View`
     // conformance makes the type `@MainActor`, and this is a pure function of
     // its arguments called from a nonisolated test. It doesn't trap today
@@ -113,8 +117,8 @@ struct SearchPopoverView: View {
         .task {
             connection.connect()
         }
-        .task(id: SearchKey(query: query, filter: searchFilter.filter)) {
-            await runSearch()
+        .task(id: searchKey) {
+            await runSearch(searchKey)
         }
         .task(id: connection.lastStatus?.data.capture?.paused) {
             if let status = connection.lastStatus {
@@ -278,13 +282,13 @@ struct SearchPopoverView: View {
         startupAlert.pausedOnBoot && !startupAlert.dismissed
     }
 
-    private func runSearch() async {
+    private func runSearch(_ key: SearchKey) async {
         let myID = requestID &+ 1
         requestID = myID
         // Clear any prior error the instant the user edits, before the debounce
         // sleep — otherwise the failure message lingers for ~200ms (CHR-68).
         searchError = false
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = key.query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             results = []
             isLoading = false
@@ -299,7 +303,7 @@ struct SearchPopoverView: View {
         try? await Task.sleep(for: .milliseconds(200))
         if Task.isCancelled || requestID != myID { return }
         do {
-            let hits = try await connection.search(trimmed, limit: 50, offset: 0, filter: searchFilter.filter)
+            let hits = try await connection.search(trimmed, limit: 50, offset: 0, filter: key.filter)
             if requestID == myID {
                 results = hits
             }
