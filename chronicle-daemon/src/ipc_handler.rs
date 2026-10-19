@@ -411,7 +411,7 @@ impl RequestHandler for DaemonHandler {
                         // O(n) char count is skipped on the common path — DEBUG off and
                         // no sample this round.
                         log::debug!(
-                            "search q_len={} limit={limit} offset={offset} -> {hit_count} hits in {elapsed:?}",
+                            "search q_len={} filter={filter:?} limit={limit} offset={offset} -> {hit_count} hits in {elapsed:?}",
                             query.chars().count()
                         );
                         // CHR-62: DEBUG is off by default, so NFR-1 (search p95 <
@@ -430,7 +430,7 @@ impl RequestHandler for DaemonHandler {
                         if should_sample_search(n) {
                             let latency_us = elapsed.as_micros();
                             log::info!(
-                                "search latency sample: q_len={} hits={hit_count} latency_us={latency_us}",
+                                "search latency sample: q_len={} filter={filter:?} hits={hit_count} latency_us={latency_us}",
                                 query.chars().count()
                             );
                         }
