@@ -28,7 +28,8 @@ const BATCH: u32 = 32;
 
 /// How a pass ended.
 enum PassEnd {
-    /// Out of rows, stopped at an engine failure, or the model unloaded.
+    /// Out of rows, stopped at an engine failure, the model unloaded, or the
+    /// query failed.
     Done,
     /// Cancelled, or the worker is gone.
     Stopped,

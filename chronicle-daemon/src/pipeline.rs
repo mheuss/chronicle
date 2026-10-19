@@ -1409,7 +1409,8 @@ mod tests {
         outcome
     }
 
-    /// A running `transcribe_loop` and `backfill_loop`, wired as `run` wires them.
+    /// A running `transcribe_loop` and `backfill_loop`, wired as `run` wires them
+    /// apart from a smaller live channel.
     struct Worker {
         live_tx: mpsc::Sender<crate::pipeline::sinks::TranscriptionJob>,
         cancel: chronicle_ipc::CancellationToken,
