@@ -5,6 +5,7 @@ struct ChronicleApp: App {
     @State private var connection = DaemonConnection()
     @State private var startupAlert = StartupAlertState()
     @State private var transcriptionAlert = TranscriptionAlertState()
+    @State private var searchFilter = SearchFilterState()
 
     var body: some Scene {
         MenuBarExtra {
@@ -12,6 +13,7 @@ struct ChronicleApp: App {
                 .environment(connection)
                 .environment(startupAlert)
                 .environment(transcriptionAlert)
+                .environment(searchFilter)
         } label: {
             MenuBarIcon(connection: connection)
         }

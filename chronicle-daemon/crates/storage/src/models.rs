@@ -123,16 +123,7 @@ pub struct AudioSegment {
 
 // --- Search types ---
 
-/// Controls which content types a search query should include.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SearchFilter {
-    /// Search both screenshots and audio segments.
-    All,
-    /// Search screenshots only.
-    ScreenOnly,
-    /// Search audio segments only.
-    AudioOnly,
-}
+pub use chronicle_ipc::SearchFilter;
 
 /// The backing record for a search hit.
 #[derive(Debug)]

@@ -58,6 +58,7 @@ chronicle-ui/Sources/ChronicleUI/MenuBarIcon.swift
 chronicle-ui/Sources/ChronicleUI/ResultRow.swift
 chronicle-ui/Sources/ChronicleUI/RetentionCopy.swift
 chronicle-ui/Sources/ChronicleUI/ScreenshotDetailView.swift
+chronicle-ui/Sources/ChronicleUI/SearchFilterState.swift
 chronicle-ui/Sources/ChronicleUI/SearchPopoverView.swift
 chronicle-ui/Sources/ChronicleUI/SettingsView.swift
 chronicle-ui/Sources/ChronicleUI/SnippetAttributedString.swift

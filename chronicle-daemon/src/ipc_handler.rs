@@ -354,6 +354,7 @@ impl RequestHandler for DaemonHandler {
                 query,
                 limit,
                 offset,
+                filter,
             } => {
                 let trimmed = query.trim();
                 if trimmed.is_empty() {
@@ -367,12 +368,14 @@ impl RequestHandler for DaemonHandler {
                 let limit = (limit.min(200)) as usize;
                 let offset = offset as usize;
                 let query = trimmed.to_string();
+                // A UI that predates `filter` cannot open an audio hit.
+                let filter = filter.unwrap_or(chronicle_ipc::SearchFilter::ScreenOnly);
                 let storage = Arc::clone(&self.storage);
                 // NFR-5: capture the start time BEFORE the blocking call so the
                 // elapsed time we log covers everything the caller waits for.
                 //
                 // That window widened in CHR-34: it now spans the query, the
-                // row->hit mapping, and one `stat` per returned hit (up to the
+                // row->hit mapping, and one `stat` per returned screen hit (up to the
                 // 200 clamped above). Measured on a warm local SSD: a full
                 // 200-hit page costs 0.2-0.65 ms of stats, against NFR-1's
                 // 200 ms p95 budget — well under 1%. A cold cache is slower;
@@ -385,21 +388,14 @@ impl RequestHandler for DaemonHandler {
                 let counters = Arc::clone(&self.counters);
                 let result = tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current()
-                        .block_on(async {
-                            storage
-                                .search(
-                                    &query,
-                                    chronicle_storage::SearchFilter::ScreenOnly,
-                                    limit,
-                                    offset,
-                                )
-                                .await
-                        })
+                        .block_on(async { storage.search(&query, filter, limit, offset).await })
                         .map(|rows| {
                             let hits: Vec<chronicle_ipc::SearchHit> =
                                 rows.into_iter().map(search_hit_from_storage).collect();
                             for h in &hits {
-                                count_media_presence(&counters, &h.image_path);
+                                if let Some(path) = &h.image_path {
+                                    count_media_presence(&counters, path);
+                                }
                             }
                             hits
                         })
@@ -415,7 +411,7 @@ impl RequestHandler for DaemonHandler {
                         // O(n) char count is skipped on the common path — DEBUG off and
                         // no sample this round.
                         log::debug!(
-                            "search q_len={} limit={limit} offset={offset} -> {hit_count} hits in {elapsed:?}",
+                            "search q_len={} filter={filter:?} limit={limit} offset={offset} -> {hit_count} hits in {elapsed:?}",
                             query.chars().count()
                         );
                         // CHR-62: DEBUG is off by default, so NFR-1 (search p95 <
@@ -434,7 +430,7 @@ impl RequestHandler for DaemonHandler {
                         if should_sample_search(n) {
                             let latency_us = elapsed.as_micros();
                             log::info!(
-                                "search latency sample: q_len={} hits={hit_count} latency_us={latency_us}",
+                                "search latency sample: q_len={} filter={filter:?} hits={hit_count} latency_us={latency_us}",
                                 query.chars().count()
                             );
                         }
@@ -470,7 +466,9 @@ impl RequestHandler for DaemonHandler {
                             app_name: s.app_name,
                             app_bundle_id: s.app_bundle_id,
                             window_title: s.window_title,
-                            image_path: s.image_path,
+                            image_path: Some(s.image_path),
+                            end_timestamp_ms: None,
+                            audio_source: None,
                             snippet: String::new(),
                             rank: 0.0,
                         }),
@@ -550,25 +548,33 @@ fn count_media_presence(counters: &PipelineCounters, path: &str) {
 }
 
 fn search_hit_from_storage(r: chronicle_storage::SearchResult) -> chronicle_ipc::SearchHit {
-    let screenshot = match r.source {
-        chronicle_storage::SearchSource::Screen(s) => s,
-        chronicle_storage::SearchSource::Audio(_) => {
-            // CHR-121 is screen-only. ScreenOnly filter guarantees this
-            // branch is unreachable. Defensive panic in case the
-            // contract is violated later.
-            unreachable!("CHR-121 search filter is ScreenOnly; audio hit returned");
-        }
-    };
-    chronicle_ipc::SearchHit {
-        id: screenshot.id,
-        source: chronicle_ipc::SearchHitSource::Screen,
-        timestamp_ms: screenshot.timestamp,
-        app_name: screenshot.app_name,
-        app_bundle_id: screenshot.app_bundle_id,
-        window_title: screenshot.window_title,
-        image_path: screenshot.image_path,
-        snippet: r.snippet,
-        rank: r.rank,
+    match r.source {
+        chronicle_storage::SearchSource::Screen(s) => chronicle_ipc::SearchHit {
+            id: s.id,
+            source: chronicle_ipc::SearchHitSource::Screen,
+            timestamp_ms: s.timestamp,
+            app_name: s.app_name,
+            app_bundle_id: s.app_bundle_id,
+            window_title: s.window_title,
+            image_path: Some(s.image_path),
+            end_timestamp_ms: None,
+            audio_source: None,
+            snippet: r.snippet,
+            rank: r.rank,
+        },
+        chronicle_storage::SearchSource::Audio(a) => chronicle_ipc::SearchHit {
+            id: a.id,
+            source: chronicle_ipc::SearchHitSource::Audio,
+            timestamp_ms: a.start_timestamp,
+            app_name: None,
+            app_bundle_id: None,
+            window_title: None,
+            image_path: None,
+            end_timestamp_ms: Some(a.end_timestamp),
+            audio_source: Some(a.source),
+            snippet: r.snippet,
+            rank: r.rank,
+        },
     }
 }
 
@@ -1279,6 +1285,7 @@ mod tests {
             query: "   ".into(),
             limit: 10,
             offset: 0,
+            filter: None,
         });
         match resp {
             Response::Search { ok, hits } => {
@@ -1297,6 +1304,7 @@ mod tests {
             query: "nothing".into(),
             limit: 10,
             offset: 0,
+            filter: None,
         });
         match resp {
             Response::Search { ok, hits } => {
@@ -1315,6 +1323,7 @@ mod tests {
             query: "any".into(),
             limit: 1_000_000,
             offset: 0,
+            filter: None,
         });
         assert!(matches!(resp, Response::Search { ok: true, .. }));
     }
@@ -1347,6 +1356,26 @@ mod tests {
                 ocr_text: Some("findable marker text".into()),
                 phash: None,
                 resolution: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn insert_audio_with_transcript(
+        handler: &DaemonHandler,
+        source: &str,
+        transcript: &str,
+    ) -> i64 {
+        handler
+            .storage_for_test()
+            .insert_audio_segment(chronicle_storage::AudioSegmentMetadata {
+                start_timestamp: 1_700_000_000_000,
+                end_timestamp: 1_700_000_030_000,
+                source: source.into(),
+                audio_path: "/tmp/segment.opus".into(),
+                transcript: Some(transcript.into()),
+                whisper_model: Some("base".into()),
+                language: Some("en".into()),
             })
             .await
             .unwrap()
@@ -1417,6 +1446,7 @@ mod tests {
             query: "findable".into(),
             limit: 50,
             offset: 0,
+            filter: None,
         });
         let hits = match resp {
             Response::Search { hits, .. } => hits.len(),
@@ -1447,6 +1477,93 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn search_maps_an_audio_hit_without_panicking() {
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
+            handler_with_full_channels(8, true).await;
+        let id = insert_audio_with_transcript(&handler, "system", "the findable budget call").await;
+        let resp = handler.handle(Request::Search {
+            query: "budget".into(),
+            limit: 10,
+            offset: 0,
+            filter: Some(chronicle_ipc::SearchFilter::AudioOnly),
+        });
+        let hits = match resp {
+            Response::Search { ok: true, hits } => hits,
+            other => panic!("expected Search response, got {other:?}"),
+        };
+        assert_eq!(hits.len(), 1);
+        let h = &hits[0];
+        assert_eq!(h.id, id);
+        assert_eq!(h.source, chronicle_ipc::SearchHitSource::Audio);
+        assert_eq!(h.timestamp_ms, 1_700_000_000_000);
+        assert_eq!(h.end_timestamp_ms, Some(1_700_000_030_000));
+        assert_eq!(h.audio_source.as_deref(), Some("system"));
+        assert_eq!(h.image_path, None);
+        assert!(
+            h.snippet.contains("<b>budget</b>"),
+            "snippet: {}",
+            h.snippet
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_without_filter_returns_screen_hits_only() {
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
+            handler_with_full_channels(8, true).await;
+        insert_screenshot_at(&handler, "/tmp/findable.heif").await;
+        insert_audio_with_transcript(&handler, "mic", "a findable spoken line").await;
+
+        let search = |filter| match handler.handle(Request::Search {
+            query: "findable".into(),
+            limit: 10,
+            offset: 0,
+            filter,
+        }) {
+            Response::Search { ok: true, hits } => hits,
+            other => panic!("expected Search response, got {other:?}"),
+        };
+
+        let all = search(Some(chronicle_ipc::SearchFilter::All));
+        assert_eq!(all.len(), 2, "fixture premise: both rows match");
+
+        let hits = search(None);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source, chronicle_ipc::SearchHitSource::Screen);
+
+        let screen = search(Some(chronicle_ipc::SearchFilter::ScreenOnly));
+        assert_eq!(screen.len(), 1);
+        assert_eq!(screen[0].source, chronicle_ipc::SearchHitSource::Screen);
+
+        let audio = search(Some(chronicle_ipc::SearchFilter::AudioOnly));
+        assert_eq!(audio.len(), 1);
+        assert_eq!(audio[0].source, chronicle_ipc::SearchHitSource::Audio);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn audio_hits_do_not_touch_media_counters() {
+        let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
+            handler_with_full_channels(8, true).await;
+        insert_audio_with_transcript(&handler, "mic", "findable spoken words").await;
+        let resp = handler.handle(Request::Search {
+            query: "findable".into(),
+            limit: 10,
+            offset: 0,
+            filter: Some(chronicle_ipc::SearchFilter::AudioOnly),
+        });
+        let hits = match resp {
+            Response::Search { hits, .. } => hits.len(),
+            other => panic!("expected Search response, got {other:?}"),
+        };
+        assert_eq!(
+            hits, 1,
+            "fixture must match, or the counts below prove nothing"
+        );
+        let c = handler.counters.snapshot();
+        assert_eq!(c.media_served, 0);
+        assert_eq!(c.media_absent, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn get_screenshot_existing_id_returns_full_hit() {
         let (handler, _mic_rx, _mic_atom, _cap_rx, _cap_paused, _ss, _tcell, _dir) =
             handler_with_full_channels(8, true).await;
@@ -1471,7 +1588,7 @@ mod tests {
                 assert!(ok);
                 assert_eq!(h.id, id);
                 assert_eq!(h.app_name, Some("Terminal".into()));
-                assert_eq!(h.image_path, "/tmp/x.heif");
+                assert_eq!(h.image_path.as_deref(), Some("/tmp/x.heif"));
             }
             other => panic!("expected GetScreenshot with Some(hit), got {other:?}"),
         }

@@ -21,11 +21,12 @@ struct DaemonConnectionMethodsTests {
             let req = reqBytes.flatMap { String(bytes: $0, encoding: .utf8) } ?? ""
             #expect(req.contains("\"type\":\"search\""))
             #expect(req.contains("\"query\":\"hello\""))
+            #expect(req.contains("\"filter\":\"audio\""))
             writeAll(reply + "\n", to: serverFD)
             Darwin.close(serverFD)
         }
 
-        let hits = try await conn.search("hello", limit: 50, offset: 0)
+        let hits = try await conn.search("hello", limit: 50, offset: 0, filter: .audio)
         _ = await daemonTask.value
 
         #expect(hits.count == 1)

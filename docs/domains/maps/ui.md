@@ -29,6 +29,7 @@
 - chronicle-ui/Sources/ChronicleUI/ResultRow.swift
 - chronicle-ui/Sources/ChronicleUI/RetentionCopy.swift
 - chronicle-ui/Sources/ChronicleUI/ScreenshotDetailView.swift
+- chronicle-ui/Sources/ChronicleUI/SearchFilterState.swift
 - chronicle-ui/Sources/ChronicleUI/SearchPopoverView.swift
 - chronicle-ui/Sources/ChronicleUI/SettingsView.swift
 - chronicle-ui/Sources/ChronicleUI/SnippetAttributedString.swift
@@ -52,9 +53,9 @@
 
 | Document | Said | Verdict |
 |---|---|---|
-| `docs/project-description.md:25-26, 166-178, 207` | A "thin menu bar app" whose icon click opens a search popover, built in SwiftUI | accurate in shape — `MenuBarExtra` with `SearchPopoverView` as content is `ChronicleApp.swift:9-17`. "Thin" understates it: this domain is 12 files and 1,631 lines |
-| `docs/guides/chronicle-daemon.md:274` | The UI "does not depend on the daemon as a library — only on the IPC protocol" | accurate — this domain's only cross-domain dependency is `DaemonConnection`, and none of its eleven Swift files matches `chronicle_\|chronicle-daemon\|MicrophoneStatus\|StorageStatus\|CompletedSegment`, a pattern that fires twice in `DaemonConnection.swift` |
-| `.claude/audit/architecture-design.md:60` | "the Swift app only connects, polls status, and renders a connection indicator" | stale — true when written 2026-04-06, falsified by CHR-121 (Done 2026-05-21). `SearchPopoverView.swift` is 429 lines and `SettingsView.swift` 458 |
+| `docs/project-description.md:25-26, 166-178, 207` | A "thin menu bar app" whose icon click opens a search popover, built in SwiftUI | accurate in shape — `MenuBarExtra` with `SearchPopoverView` as content is `ChronicleApp.swift:11-19`. "Thin" understates it: this domain is 13 Swift files and 1,737 lines |
+| `docs/guides/chronicle-daemon.md:274` | The UI "does not depend on the daemon as a library — only on the IPC protocol" | accurate — this domain's only cross-domain dependency is `DaemonConnection`, and none of its thirteen Swift files matches `chronicle_\|chronicle-daemon\|MicrophoneStatus\|StorageStatus\|CompletedSegment`, a pattern that fires twice in `DaemonConnection.swift` |
+| `.claude/audit/architecture-design.md:60` | "the Swift app only connects, polls status, and renders a connection indicator" | stale — true when written 2026-04-06, falsified by CHR-121 (Done 2026-05-21). `SearchPopoverView.swift` is 457 lines and `SettingsView.swift` 488 |
 | `.claude/audit/documentation-drift.md:57-59` | "the UI only connects to the daemon, polls `status`, and offers a Quit action" | stale — same date and same cause as the row above |
 | `.claude/audit/frontend-ui.md:13` | "The menu bar scene only renders a title, a health badge, and Quit", against `docs/project-description.md:167-178` | stale as a measurement, and the disagreement it names has since inverted — the code grew a search popover and the description is the older artifact. Recorded on CHR-79, which already proposes refreshing that file |
 | `.claude/audit/frontend-ui.md:17, 27, 33` | Three findings, all located at `DaemonConnection.swift` | accurate as findings, and all three are IPC's file rather than this domain's. Open as CHR-87 |

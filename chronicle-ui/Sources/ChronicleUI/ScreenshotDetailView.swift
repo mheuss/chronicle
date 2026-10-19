@@ -92,7 +92,7 @@ struct ScreenshotDetailView: View {
                 state = .notFound
                 return
             }
-            if let img = NSImage(contentsOfFile: hit.imagePath) {
+            if let path = hit.imagePath, let img = NSImage(contentsOfFile: path) {
                 state = .loaded(hit, img)
             } else {
                 state = .fileMissing(hit)

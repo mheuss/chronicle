@@ -49,7 +49,7 @@
 - pipeline — `chronicle-daemon/src/main.rs` — `IpcServer`
 - capture — `chronicle-daemon/src/capture_supervisor.rs` — `map_outcome`
 - storage — `chronicle-daemon/crates/storage/src/lib.rs` — `Retention`
-- background-work — through this crate's re-export of `tokio_util`'s type at `crates/ipc/src/lib.rs:352`, not the wire — `chronicle-daemon/src/retention_task.rs` — `CancellationToken`
+- background-work — through this crate's re-export of `tokio_util`'s type at `crates/ipc/src/lib.rs:377`, not the wire — `chronicle-daemon/src/retention_task.rs` — `CancellationToken`
 - transcription — `chronicle-daemon/src/provisioning.rs` — `TranscriptionStats`
 - UI — `chronicle-ui/Sources/ChronicleUI/ChronicleApp.swift` — `DaemonConnection`
 
@@ -80,23 +80,23 @@
 | `.claude/audit/dry-violations.md:76` | `DaemonConnection.swift` mirrors the Rust wire types, and that duplication "is currently the wire contract itself" rather than a defect | accurate — this domain owns both sides of the mirror, which is what makes the duplication a contract rather than a copy |
 | `.claude/audit/architecture-design.md:86` | `ipc` is a leaf crate with `chronicle-daemon` as the orchestration root | accurate of the crate, incomplete as a description of this domain — `ipc_handler.rs` sits in the root package and names five workspace crates |
 
-`ipc_handler.rs` carries two reasons to change: a 227-line match on the seven
-`Request` variants at `:311-537`, and 222 lines of daemon runtime wiring at
-`:74-134` and `:136-296` that only `main.rs` constructs. That wiring is three
+`ipc_handler.rs` carries two reasons to change: a 226-line match on the seven
+`Request` variants at `:304-529`, and 203 lines of daemon runtime wiring at
+`:84-125` and `:127-287` that only `main.rs` constructs. That wiring is three
 `mpsc` channels to `run()`'s event loop, two readiness atomics, three reply
 timeouts. `DaemonConnection.swift` splits the same way at its own
-`// MARK: - Protocol Types` divider on line 465. The class runs `:10-463`. The
-23 wire types run `:467-801`. Both are recorded as offshoots. The map
+`// MARK: - Protocol Types` divider on line 478. The class runs `:10-476`. The
+25 wire types run `:480-830`. Both are recorded as offshoots. The map
 records who owns the file today, not who should.
 
 `media_presence.rs` appears in row 4's Roots. `audio` did not claim it. The
 revision pass placed it here on 2026-09-18. Its only production caller is
-`ipc_handler.rs:551`. It exists to fill the `media_absent` counter on the
+`ipc_handler.rs:545`. It exists to fill the `media_absent` counter on the
 status response. It reads the filesystem and changes nothing. So it crosses no
 boundary that `storage` owns.
 
 ## Offshoots Filed
 
 - CHR-56 — `ipc_handler.rs` mixes protocol dispatch with daemon runtime wiring; labelled `needs-domain` with the measurement added as a comment rather than a duplicate ticket
-- CHR-154 — `DaemonConnection.swift` holds the transport class and the 23 wire types in one file
-- CHR-155 — this crate's bare re-export of `tokio_util`'s `CancellationToken` at `crates/ipc/src/lib.rs:352` is the daemon's only path to the type, so the map shows a background-work dependency on IPC that is a build artifact rather than a protocol edge
+- CHR-154 — `DaemonConnection.swift` holds the transport class and the 25 wire types in one file
+- CHR-155 — this crate's bare re-export of `tokio_util`'s `CancellationToken` at `crates/ipc/src/lib.rs:377` is the daemon's only path to the type, so the map shows a background-work dependency on IPC that is a build artifact rather than a protocol edge

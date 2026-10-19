@@ -5,6 +5,7 @@ struct SearchPopoverView: View {
     @Environment(DaemonConnection.self) private var connection
     @Environment(StartupAlertState.self) private var startupAlert
     @Environment(TranscriptionAlertState.self) private var transcriptionAlert
+    @Environment(SearchFilterState.self) private var searchFilter
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
 
@@ -27,6 +28,15 @@ struct SearchPopoverView: View {
         case searchFailed
         case noMatches
         case results
+    }
+
+    private struct SearchKey: Equatable {
+        let query: String
+        let filter: SearchFilter
+    }
+
+    private var searchKey: SearchKey {
+        SearchKey(query: query, filter: searchFilter.filter)
     }
 
     // `nonisolated` for the same reason SettingsView's formatters are: `View`
@@ -107,8 +117,8 @@ struct SearchPopoverView: View {
         .task {
             connection.connect()
         }
-        .task(id: query) {
-            await runSearch()
+        .task(id: searchKey) { [searchKey] in
+            await runSearch(searchKey)
         }
         .task(id: connection.lastStatus?.data.capture?.paused) {
             if let status = connection.lastStatus {
@@ -191,13 +201,25 @@ struct SearchPopoverView: View {
     private var connectionRowOrSearchField: some View {
         switch connection.state {
         case .connected:
-            HStack {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Search what you've seen", text: $query)
-                    .textFieldStyle(.plain)
-                if isLoading {
-                    ProgressView().controlSize(.small)
+            VStack(spacing: 6) {
+                HStack {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField("Search what you've seen", text: $query)
+                        .textFieldStyle(.plain)
+                    if isLoading {
+                        ProgressView().controlSize(.small)
+                    }
                 }
+                Picker("Source", selection: Binding(
+                    get: { searchFilter.filter },
+                    set: { searchFilter.filter = $0 }
+                )) {
+                    Text("All").tag(SearchFilter.all)
+                    Text("Screen").tag(SearchFilter.screen)
+                    Text("Audio").tag(SearchFilter.audio)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
         case .connecting:
@@ -235,16 +257,22 @@ struct SearchPopoverView: View {
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .results:
-            // [A11y] Wrap each row in a Button so the result is keyboard-
-            // accessible (Tab/Shift-Tab to focus, Return/Space to open).
-            List(results) { hit in
-                Button {
-                    NSApp.activate(ignoringOtherApps: true)
-                    openWindow(id: "screenshot", value: hit.id)
-                } label: {
+            List(results, id: \.rowKey) { hit in
+                switch hit.source {
+                case .screen:
+                    // [A11y] Wrap each row in a Button so the result is keyboard-
+                    // accessible (Tab/Shift-Tab to focus, Return/Space to open).
+                    Button {
+                        NSApp.activate(ignoringOtherApps: true)
+                        openWindow(id: "screenshot", value: hit.id)
+                    } label: {
+                        ResultRow(hit: hit)
+                    }
+                    .buttonStyle(.plain)
+                case .audio, .unknown:
                     ResultRow(hit: hit)
+                        .accessibilityElement(children: .combine)
                 }
-                .buttonStyle(.plain)
             }
             .listStyle(.plain)
         }
@@ -254,13 +282,13 @@ struct SearchPopoverView: View {
         startupAlert.pausedOnBoot && !startupAlert.dismissed
     }
 
-    private func runSearch() async {
+    private func runSearch(_ key: SearchKey) async {
         let myID = requestID &+ 1
         requestID = myID
         // Clear any prior error the instant the user edits, before the debounce
         // sleep — otherwise the failure message lingers for ~200ms (CHR-68).
         searchError = false
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = key.query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             results = []
             isLoading = false
@@ -275,7 +303,7 @@ struct SearchPopoverView: View {
         try? await Task.sleep(for: .milliseconds(200))
         if Task.isCancelled || requestID != myID { return }
         do {
-            let hits = try await connection.search(trimmed, limit: 50, offset: 0)
+            let hits = try await connection.search(trimmed, limit: 50, offset: 0, filter: key.filter)
             if requestID == myID {
                 results = hits
             }

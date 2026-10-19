@@ -235,26 +235,30 @@ final class DaemonConnection {
         return response
     }
 
-    /// Search the daemon's OCR index. Returns up to `limit` screen-only hits
-    /// ranked by relevance. Audio results are added in CHR-76.
+    /// Search screenshots, audio transcripts, or both, as `filter` says.
+    /// Returns up to `limit` hits. In `.all`, screen and audio hits alternate.
     ///
     /// `limit`/`offset` are clamped into `UInt32` — the wire protocol uses
     /// `u32`, and the unchecked `UInt32(_:)` initializer would trap on a
     /// negative or oversized `Int`. Negative inputs clamp to 0, which the
     /// daemon then bounds-checks against its own ceiling.
-    func search(_ query: String, limit: Int = 50, offset: Int = 0) async throws -> [SearchHit] {
+    func search(
+        _ query: String, limit: Int = 50, offset: Int = 0, filter: SearchFilter
+    ) async throws -> [SearchHit] {
         struct Req: Codable, Sendable {
             let type: String
             let query: String
             let limit: UInt32
             let offset: UInt32
+            let filter: SearchFilter
         }
         let response = try await sendRequest(
             Req(
                 type: "search",
                 query: query,
                 limit: UInt32(clamping: limit),
-                offset: UInt32(clamping: offset)
+                offset: UInt32(clamping: offset),
+                filter: filter
             ),
             expecting: SearchResponse.self
         )
@@ -725,32 +729,48 @@ struct ErrorResponse: Codable, Sendable {
 
 // MARK: - Search
 
-struct SearchHit: Codable, Sendable, Identifiable, Hashable {
+struct SearchHit: Codable, Sendable, Hashable {
     let id: Int64
     let source: SearchHitSource
     let timestampMs: Int64
     let appName: String?
     let appBundleId: String?
     let windowTitle: String?
-    let imagePath: String
+    let imagePath: String?
+    let endTimestampMs: Int64?
+    let audioSource: String?
     let snippet: String
     let rank: Double
+
+    /// List identity. `id` is unique only within one source.
+    var rowKey: RowKey { RowKey(source: source, id: id) }
+}
+
+struct RowKey: Hashable, Sendable {
+    let source: SearchHitSource
+    let id: Int64
 }
 
 enum SearchHitSource: String, Codable, Sendable {
     case screen
-    /// A hit source this UI doesn't know yet. Rust reserves
-    /// `SearchHitSource::Audio` for CHR-76, and `SearchHit.source` is not
-    /// optional — a closed enum here would throw and take the entire
-    /// SearchResponse down, so one audio hit would blank out every screen hit
-    /// beside it and search would go dark. Degrade instead. Formal policy is
-    /// CHR-77; this only guards decoding.
+    case audio
+    /// A hit source this UI doesn't know yet. `SearchHit.source` is not
+    /// optional, so a closed enum here would throw and take the entire
+    /// SearchResponse down: one unrecognized hit would blank out every hit
+    /// beside it. Degrade instead. Formal policy is CHR-77.
     case unknown
 
     init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
         self = SearchHitSource(rawValue: raw) ?? .unknown
     }
+}
+
+/// Which sources a search covers. Raw values are the daemon's wire names.
+enum SearchFilter: String, Codable, Sendable {
+    case all
+    case screen
+    case audio
 }
 
 struct SearchResponse: Codable, Sendable {
