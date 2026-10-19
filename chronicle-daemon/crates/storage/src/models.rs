@@ -121,6 +121,15 @@ pub struct AudioSegment {
     pub created_at: i64,
 }
 
+/// An audio row the pipeline still owes a transcription attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingTranscription {
+    /// Database row ID.
+    pub id: i64,
+    /// Path to the Opus audio file on disk.
+    pub audio_path: PathBuf,
+}
+
 // --- Search types ---
 
 pub use chronicle_ipc::SearchFilter;

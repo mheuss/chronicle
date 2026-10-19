@@ -25,8 +25,9 @@ pub(crate) mod search;
 
 pub use error::{Result, StorageError};
 pub use models::{
-    AudioSegment, AudioSegmentMetadata, CleanupOutcome, CleanupStats, Screenshot,
-    ScreenshotMetadata, SearchFilter, SearchResult, SearchSource, StorageConfig, StorageStatus,
+    AudioSegment, AudioSegmentMetadata, CleanupOutcome, CleanupStats, PendingTranscription,
+    Screenshot, ScreenshotMetadata, SearchFilter, SearchResult, SearchSource, StorageConfig,
+    StorageStatus,
 };
 /// Largest accepted `retention_days`. Exposed so a caller can validate or
 /// render the limit without hardcoding the number or scraping an error string —
@@ -226,22 +227,20 @@ impl Storage {
     ///
     /// Prefer [`Storage::update_transcript_full`] — that is what the transcription
     /// pipeline uses, and it also records the model variant and detected language.
-    /// This narrower setter is retained for the transcript-only case (e.g. a
-    /// future backfill that has no model metadata to record) and currently has no
-    /// production caller.
+    /// This narrower setter is retained for the transcript-only case and
+    /// currently has no production caller.
     ///
-    /// It can write two rows CHR-38's three-state contract has no room for, and
-    /// the second is the worse one:
+    /// It can write two rows the row-state contract has no room for:
     ///
     /// 1. **It cannot express "transcribed, no speech found."** Taking `String`,
-    ///    the closest it can do is `""` — a fourth state that is neither NULL nor
+    ///    the closest it can do is `""` — a blank shape that is neither NULL nor
     ///    speech, and that nothing queries for.
     /// 2. **It writes text without a model.** This setter never touches
     ///    `whisper_model`, so any non-empty text it writes lands in a row that is
     ///    simultaneously "has speech" (non-NULL `transcript`) and "needs
-    ///    transcription" (`whisper_model IS NULL`). A backfill using the
-    ///    sanctioned predicate would re-queue that row and overwrite real
-    ///    text — a worse outcome than the looping CHR-38 set out to fix.
+    ///    transcription" (`whisper_model IS NULL`). [`Storage::pending_transcriptions`]
+    ///    excludes rows with text, so such a row is never re-queued, but it also
+    ///    never gets a model stamp.
     ///    [`Storage::insert_audio_segment`] can produce the same shape, since
     ///    `AudioSegmentMetadata` takes the two fields independently.
     ///
@@ -269,8 +268,8 @@ impl Storage {
     /// transcript from `audio_fts` via the same trigger.
     ///
     /// Transcript text is trimmed, and an all-whitespace `Some` normalizes to
-    /// `None`, so the three-state encoding cannot be broken from here:
-    /// `Some("")` would otherwise persist a fourth state that is neither NULL
+    /// `None`, so the row-state contract cannot be broken from here:
+    /// `Some("")` would otherwise persist a blank shape that is neither NULL
     /// nor speech and that nothing queries for. Callers need not trim first —
     /// padding is stripped rather than stored, so a sloppy `Some("  hi  ")`
     /// cannot land a padded row in `audio_fts` either (BR-4).
@@ -292,9 +291,10 @@ impl Storage {
     ///
     /// # Backfill guidance
     ///
-    /// `whisper_model IS NULL` is the right predicate for routine work and
-    /// `transcript IS NULL` is not — the latter re-queues every silent segment
-    /// forever. But note what that costs: before CHR-38 a segment that produced
+    /// Routine work selects with [`Storage::pending_transcriptions`]:
+    /// `whisper_model IS NULL AND transcript IS NULL`, under an attempt cap.
+    /// `transcript IS NULL` alone is the wrong predicate — it re-queues every
+    /// silent segment forever. But note what that costs: before CHR-38 a segment that produced
     /// no text stayed NULL and was retried on the next pass, so an engine-side
     /// regression healed itself. Now such a row is stamped with `whisper_model`
     /// and routine backfill will never revisit it. That is not hypothetical —
@@ -314,14 +314,19 @@ impl Storage {
     /// first (`whisper_model != 'large-v3'`). That is a property of the column,
     /// not of the `whisper_model IS NULL` predicate, which by construction skips
     /// every already-stamped row.
+    ///
+    /// Rows that hit the attempt cap during an engine outage are recovered by
+    /// resetting the counter:
+    /// `UPDATE audio_segments SET transcribe_attempts = 0 WHERE whisper_model IS NULL`.
     pub async fn update_transcript_full(
         &self,
         id: i64,
+        audio_path: &Path,
         transcript: Option<String>,
         whisper_model: String,
         language: Option<String>,
     ) -> Result<()> {
-        // Collapse the fourth state at the boundary — see the note above. Trim
+        // Collapse the blank shape at the boundary — see the note above. Trim
         // rather than merely test, and clear `language` alongside, so no caller
         // can write a row shape the migration would have to clean up later.
         let (transcript, language) = match transcript
@@ -331,16 +336,66 @@ impl Storage {
             text @ Some(_) => (text, language),
             None => (None, None),
         };
+        let audio_path = audio_path.to_path_buf();
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             audio::update_transcript_full(
                 &conn,
                 id,
+                &audio_path,
                 transcript.as_deref(),
                 &whisper_model,
                 language.as_deref(),
             )
+        })
+        .await?
+    }
+
+    /// Count one failed transcription attempt against the row at `id`
+    /// holding `audio_path`. A row that no longer exists, or now holds a
+    /// different recording, is not an error and is left alone.
+    pub async fn record_transcription_failure(&self, id: i64, audio_path: &Path) -> Result<()> {
+        let pool = self.pool.clone();
+        let audio_path = audio_path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            audio::record_transcription_failure(&conn, id, &audio_path)
+        })
+        .await?
+    }
+
+    /// Up to `limit` rows still owed a transcription attempt, in id order,
+    /// after `after_id`. A row is pending while `whisper_model` and
+    /// `transcript` are NULL and it has fewer than `max_attempts` failures.
+    pub async fn pending_transcriptions(
+        &self,
+        after_id: i64,
+        max_attempts: u32,
+        limit: u32,
+    ) -> Result<Vec<PendingTranscription>> {
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            audio::pending_transcriptions(&conn, after_id, max_attempts, limit)
+        })
+        .await?
+    }
+
+    /// Whether the row at `id` still holds `audio_path` and is pending by the
+    /// same rule as [`Storage::pending_transcriptions`]. A row that no longer
+    /// exists, or now holds a different recording, is not.
+    pub async fn needs_transcription(
+        &self,
+        id: i64,
+        audio_path: &Path,
+        max_attempts: u32,
+    ) -> Result<bool> {
+        let pool = self.pool.clone();
+        let audio_path = audio_path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            audio::needs_transcription(&conn, id, &audio_path, max_attempts)
         })
         .await?
     }
@@ -634,9 +689,9 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    /// The three-state encoding must not be breakable through
+    /// The row-state contract must not be breakable through
     /// `update_transcript_full`. `Some("")` and `Some("   ")` would each persist
-    /// a fourth state — neither NULL nor speech, and queried by nothing — so
+    /// a blank shape — neither NULL nor speech, and queried by nothing — so
     /// they collapse to NULL here, taking `language` with them.
     ///
     /// Scoped deliberately: [`Storage::update_transcript`] is also public, takes
@@ -671,14 +726,20 @@ mod tests {
                 .unwrap();
 
             storage
-                .update_transcript_full(id, Some(blank.into()), "base".into(), Some("en".into()))
+                .update_transcript_full(
+                    id,
+                    Path::new("/data/audio/seg.opus"),
+                    Some(blank.into()),
+                    "base".into(),
+                    Some("en".into()),
+                )
                 .await
                 .unwrap();
 
             let seg = storage.get_audio_segment(id).await.unwrap();
             assert!(
                 seg.transcript.is_none(),
-                "a blank transcript ({blank:?}) must collapse to NULL, not persist a fourth state"
+                "a blank transcript ({blank:?}) must collapse to NULL, not persist a blank shape"
             );
             assert!(
                 seg.language.is_none(),
@@ -721,7 +782,13 @@ mod tests {
             .unwrap();
 
         storage
-            .update_transcript_full(id, Some("  hi  ".into()), "base".into(), Some("en".into()))
+            .update_transcript_full(
+                id,
+                Path::new("/data/audio/seg.opus"),
+                Some("  hi  ".into()),
+                "base".into(),
+                Some("en".into()),
+            )
             .await
             .unwrap();
 

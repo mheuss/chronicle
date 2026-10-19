@@ -319,6 +319,7 @@ pub async fn transcribe_loop(
                 if let Err(e) = storage
                     .update_transcript_full(
                         job.row_id,
+                        &job.audio_path,
                         stored,
                         engine.variant().to_string(),
                         language,
