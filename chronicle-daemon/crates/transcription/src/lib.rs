@@ -144,20 +144,14 @@ pub fn verify_sha1(path: &Path, expected: &str) -> std::io::Result<bool> {
 /// succeeds.
 const MIN_DECODABLE_SAMPLES: usize = 41;
 
-/// Rejection message for an *empty* buffer. Matches whisper-rs's own
-/// `WhisperError::NoSamples` wording, so this case reads to a caller exactly as
-/// it did before CHR-18.
-const EMPTY_MSG: &str = "Input sample buffer was empty.";
-
-/// The short-PCM guard `transcribe` runs before touching the state slot, as a
-/// function of length alone so it can be unit-tested without a model.
-fn short_buffer_error(len: usize) -> Option<TranscriptionError> {
-    if len == 0 {
-        Some(TranscriptionError::Whisper(EMPTY_MSG.into()))
-    } else if len < MIN_DECODABLE_SAMPLES {
-        Some(TranscriptionError::Whisper(format!(
-            "input sample buffer too short: got {len}, need at least {MIN_DECODABLE_SAMPLES} samples"
-        )))
+/// The answer for PCM too short to hold speech, or `None` when whisper should
+/// run. A function of length alone so it can be unit-tested without a model.
+fn short_pcm_transcript(len: usize) -> Option<Transcript> {
+    if len < MIN_DECODABLE_SAMPLES {
+        Some(Transcript {
+            text: String::new(),
+            language: None,
+        })
     } else {
         None
     }
@@ -327,6 +321,8 @@ pub fn decode_opus_16k_mono(path: &Path) -> Result<Vec<f32>, TranscriptionError>
 /// an attempt with a NULL transcript (CHR-38). Return `Err` only when
 /// transcription could not be performed.
 ///
+/// Input too short to hold speech is an empty answer too, not an `Err`.
+///
 /// `language` on an empty result need not be `None`. whisper reports a
 /// detection even for silence, and `Storage::update_transcript_full` clears
 /// `language` whenever the transcript collapses to nothing.
@@ -458,15 +454,15 @@ impl TranscriptionEngine {
 impl Transcriber for TranscriptionEngine {
     fn transcribe(&self, pcm_16k_mono: &[f32]) -> Result<Transcript, TranscriptionError> {
         // Guard before the slot, not inside it. Whisper rejects a too-short
-        // buffer before it does any GPU work, so letting that `Err` reach
+        // buffer before it does any GPU work, so letting that call reach
         // `StateSlot::with` would discard a state that never ran, and the next
         // segment would pay a full backend rebuild for nothing.
         //
         // Nothing the daemon writes lands in that band today: the Opus encoder
         // pads to whole frames, so the shortest decodable segment is 216
         // samples. That floor belongs to another crate and nothing pins it.
-        if let Some(e) = short_buffer_error(pcm_16k_mono.len()) {
-            return Err(e);
+        if let Some(empty) = short_pcm_transcript(pcm_16k_mono.len()) {
+            return Ok(empty);
         }
 
         self.state.with(
@@ -543,30 +539,19 @@ mod tests {
         parse_variant(name).expect("test variant must be allow-listed")
     }
 
-    /// The guard short-circuits before whisper-rs, so nothing else can catch
-    /// its message drifting from `WhisperError::NoSamples` on a patch bump.
     #[test]
-    fn empty_msg_matches_whisper_rs() {
-        assert_eq!(EMPTY_MSG, whisper_rs::WhisperError::NoSamples.to_string());
-    }
-
-    #[test]
-    fn short_buffer_guard_splits_empty_from_too_short() {
-        let msg = |len| match short_buffer_error(len) {
-            Some(TranscriptionError::Whisper(m)) => Some(m),
-            Some(other) => panic!("unexpected variant: {other:?}"),
-            None => None,
-        };
-        assert_eq!(msg(0).as_deref(), Some("Input sample buffer was empty."));
-        assert_eq!(
-            msg(1).as_deref(),
-            Some("input sample buffer too short: got 1, need at least 41 samples")
-        );
-        assert_eq!(
-            msg(40).as_deref(),
-            Some("input sample buffer too short: got 40, need at least 41 samples")
-        );
-        assert_eq!(msg(41), None);
+    fn short_pcm_is_an_empty_answer() {
+        for len in [0, 1, 40] {
+            assert_eq!(
+                short_pcm_transcript(len),
+                Some(Transcript {
+                    text: String::new(),
+                    language: None,
+                }),
+                "{len} samples is too short to hold speech"
+            );
+        }
+        assert_eq!(short_pcm_transcript(41), None);
     }
 
     #[test]
@@ -1123,20 +1108,17 @@ mod tests {
         let pcm = synthesize_test_phrase("the quick brown fox jumps over the lazy dog");
         let engine = TranscriptionEngine::load(&base, DEFAULT_VARIANT).unwrap();
 
-        // 1) Cold: the short-PCM guard must reject before the slot is ever
+        // 1) Cold: the short-PCM guard must answer before the slot is ever
         // populated, or a too-short first segment pays a full backend build.
-        assert!(
-            matches!(
-                engine.transcribe(&[0.0; 1]),
-                Err(TranscriptionError::Whisper(ref m))
-                    if m == "input sample buffer too short: got 1, need at least 41 samples"
-            ),
-            "a non-empty too-short buffer must be rejected on its own terms"
+        assert_eq!(
+            engine.transcribe(&[0.0; 1]).unwrap().text,
+            "",
+            "a too-short buffer is an empty answer"
         );
         assert_eq!(
             engine.state.creation_count(),
             0,
-            "a rejected too-short buffer must not have built a state"
+            "a too-short buffer must not have built a state"
         );
 
         // 2) Transcribe with the real engine and assert it produced text.
@@ -1178,12 +1160,10 @@ mod tests {
 
         // 4) Warm: the same guard with the slot populated. Without it the `Err`
         // from `full()` reaches `StateSlot::with` and discards a healthy state.
-        assert!(
-            matches!(
-                engine.transcribe(&[]),
-                Err(TranscriptionError::Whisper(ref m)) if m == "Input sample buffer was empty."
-            ),
-            "empty PCM must be rejected with whisper-rs's own wording"
+        assert_eq!(
+            engine.transcribe(&[]).unwrap().text,
+            "",
+            "empty PCM is an empty answer"
         );
 
         // The rebuild moves the counter, not the discard, so the warm empty
@@ -1194,13 +1174,13 @@ mod tests {
         let lower = third.text.to_lowercase();
         assert!(
             lower.contains("box") || lower.contains("dozen") || lower.contains("jugs"),
-            "third transcription after a rejected empty buffer returned: {:?}",
+            "third transcription after an empty buffer returned: {:?}",
             third.text
         );
         assert_eq!(
             engine.state.creation_count(),
             1,
-            "a rejected empty buffer must not have discarded the state"
+            "an empty buffer must not have discarded the state"
         );
     }
 

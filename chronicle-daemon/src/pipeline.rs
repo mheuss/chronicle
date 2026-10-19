@@ -289,9 +289,10 @@ pub async fn transcribe_loop(
                 // and is NOT re-derived here: the marker rule is whisper-specific,
                 // so applying it to every impl would corrupt the others' output.
                 let text = transcript.text.trim();
-                // Empty means whisper ran and found no speech. Record the attempt
-                // with a NULL transcript rather than skipping the write: skipping
-                // also discards the fact that we tried, leaving the row
+                // Empty means no speech was found: whisper ran, or the PCM was
+                // too short to run it. Record the attempt with a NULL transcript
+                // rather than skipping the write: skipping also discards the
+                // fact that we tried, leaving the row
                 // indistinguishable from one that was never transcribed, which
                 // makes a backfill scheduler re-queue it forever (CHR-38).
                 let (stored, language) = if text.is_empty() {
