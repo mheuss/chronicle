@@ -88,7 +88,7 @@ pub enum BackfillOutcome {
     DecodeFailed,
     /// Whisper failed, the task panicked, or the result could not be written.
     EngineFailed,
-    /// Not run: no engine, or the row is no longer pending.
+    /// Nothing was recorded: the row is no longer pending.
     Skipped,
 }
 

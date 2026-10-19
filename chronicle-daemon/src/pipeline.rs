@@ -385,14 +385,10 @@ pub async fn transcribe_loop(
                 // that a queue was abandoned.
                 //
                 // `+ 1`, unlike the bottom break. There the current segment
-                // has been ATTEMPTED — transcribed, or found empty, or
-                // failed — so whatever its row now holds, nobody needs to
-                // reprocess it and `rx.len()` is the exact abandoned count.
-                // (Deliberately "attempted", not "persisted": three of that
-                // arm's four outcomes also leave the transcript NULL.) Here
-                // the job never reached an engine at all, so it is abandoned
-                // alongside the queue and the operator's backfill list is one
-                // longer.
+                // has been handled (attempted, or skipped because its row no
+                // longer needed one), so `rx.len()` is the exact abandoned
+                // count. Here the job never reached an engine at all, so it is
+                // abandoned alongside the queue and its row stays pending.
                 warn_abandoned_queue(rx.len() + 1);
                 break;
             }
