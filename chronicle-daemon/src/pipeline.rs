@@ -232,9 +232,9 @@ async fn process_job(
             // Empty means no speech was found: whisper ran, or the PCM was
             // too short to run it. Record the attempt with a NULL transcript
             // rather than skipping the write: skipping also discards the
-            // fact that we tried, leaving the row
-            // indistinguishable from one that was never transcribed, which
-            // makes a backfill scheduler re-queue it forever (CHR-38).
+            // fact that we tried, leaving the row indistinguishable from one
+            // that was never transcribed, which makes backfill re-queue it
+            // forever (CHR-38).
             let (stored, language) = if text.is_empty() {
                 log::debug!(
                     "no usable speech in segment {} — recording the attempt",
@@ -377,11 +377,11 @@ async fn run_backfill(
 /// only when no live job is waiting (`biased` select), so a live segment waits
 /// behind at most one backfill job. A closed backfill channel disables only its
 /// branch: the loop still ends only on a closed live channel or
-/// `stop_after_current`, so backfill holds shutdown open no longer than the
-/// one backfill job already running, if any. A backfill job
-/// whose requester has gone (`reply` closed) is discarded unrun. The abandoned
-/// count stays live-only, because a backfill row left behind is still pending
-/// in the database.
+/// `stop_after_current`, so backfill holds shutdown open no longer than the one
+/// backfill job already running, if any. A backfill job whose requester has
+/// gone (`reply` closed) or whose token has fired is discarded unrun. The
+/// abandoned count stays live-only, because a backfill row left behind is still
+/// pending in the database.
 ///
 /// `stop_after_current` is checked *after* the current segment is persisted,
 /// never before it — and again on the empty-handle skip path, which has
@@ -444,7 +444,8 @@ pub async fn transcribe_loop(
                         // has been handled (attempted, or skipped because its row no
                         // longer needed one), so `rx.len()` is the exact abandoned
                         // count. Here the job never reached an engine at all, so it is
-                        // abandoned alongside the queue and its row stays pending.
+                        // abandoned alongside the queue and its row stays pending
+                        // for backfill.
                         warn_abandoned_queue(rx.len() + 1);
                         break;
                     }
@@ -1408,6 +1409,67 @@ mod tests {
         outcome
     }
 
+    /// A running `transcribe_loop` and `backfill_loop`, wired as `run` wires them.
+    struct Worker {
+        live_tx: mpsc::Sender<crate::pipeline::sinks::TranscriptionJob>,
+        cancel: chronicle_ipc::CancellationToken,
+        loop_handle: tokio::task::JoinHandle<()>,
+        backfill_handle: tokio::task::JoinHandle<()>,
+    }
+
+    fn start_worker(
+        handle: Arc<crate::provisioning::EngineHandle>,
+        storage: Arc<Storage>,
+    ) -> Worker {
+        let (live_tx, live_rx) = mpsc::channel(4);
+        let (backfill_tx, backfill_rx) = mpsc::channel(1);
+        let cancel = chronicle_ipc::CancellationToken::new();
+        let loop_handle = tokio::spawn(transcribe_loop(
+            Arc::clone(&handle),
+            Arc::clone(&storage),
+            live_rx,
+            backfill_rx,
+            never_stop(),
+        ));
+        let backfill_handle = tokio::spawn(backfill::backfill_loop(
+            handle,
+            storage,
+            backfill_tx,
+            cancel.clone(),
+        ));
+        Worker {
+            live_tx,
+            cancel,
+            loop_handle,
+            backfill_handle,
+        }
+    }
+
+    impl Worker {
+        async fn stop(self) {
+            self.cancel.cancel();
+            self.backfill_handle.await.unwrap();
+            drop(self.live_tx);
+            self.loop_handle.await.unwrap();
+        }
+    }
+
+    /// Poll `check` every 100 ms until it holds, failing after 120 s. The
+    /// budget exceeds `IDLE_POLL`, so a model load is always noticed in time.
+    async fn wait_until<F, Fut>(mut check: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        for _ in 0..1_200 {
+            if check().await {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("condition not reached");
+    }
+
     /// Lets a test park a job *inside* `transcribe` — signalling when it has
     /// entered, then blocking until released. `transcribe` runs on a
     /// `spawn_blocking` thread, so the release side is a std channel (blocking
@@ -1485,6 +1547,8 @@ mod tests {
     /// What a `ScriptedTranscriber` does on every call.
     enum Script {
         Text(&'static str),
+        /// "speech" when the PCM carries signal, "" when it is silence.
+        BySignal,
         WhisperErr,
         Panic,
     }
@@ -1532,6 +1596,8 @@ mod tests {
             }
             let text = match self.script {
                 Script::Text(text) => text,
+                Script::BySignal if has_signal(pcm) => "speech",
+                Script::BySignal => "",
                 Script::WhisperErr => {
                     return Err(chronicle_transcription::TranscriptionError::Whisper(
                         "scripted failure".into(),
@@ -1823,7 +1889,7 @@ mod tests {
         assert_eq!(
             seg.whisper_model.as_deref(),
             Some("base"),
-            "but the attempt IS recorded; without this a backfill scheduler \
+            "but the attempt IS recorded; without this backfill \
              re-queues silent segments forever (CHR-38)"
         );
         assert!(
@@ -2298,11 +2364,15 @@ mod tests {
         release_tx.send(()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(10), loop_handle)
             .await
-            .expect("a backfill job must not bypass stop_after_current")
+            .expect("the loop hung after the backfill job")
             .unwrap();
 
         assert_eq!(reply_rx.await.unwrap(), BackfillOutcome::Transcribed);
-        assert_eq!(engine.calls(), 1, "the waiting live job never ran");
+        assert_eq!(
+            engine.calls(),
+            1,
+            "a backfill job must not bypass stop_after_current: the waiting live job ran"
+        );
         assert_eq!(attempts(&storage, live_row).await, 0);
         drop(live_tx);
     }
@@ -2594,6 +2664,370 @@ mod tests {
         );
         assert!(row.whisper_model.is_none());
         assert_eq!(attempts(&storage, reused).await, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backfill_transcribes_audio_captured_before_a_model_loads() {
+        use chronicle_audio::{AudioSource, CompletedSegment};
+        let (storage, dir) = temp_storage().await;
+        let staging = dir.path().join("audio-staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        let staged = staging.join("seg.opus");
+        write_opus(&staged, 0.2);
+        let handle = Arc::new(crate::provisioning::EngineHandle::new());
+        let worker = start_worker(Arc::clone(&handle), Arc::clone(&storage));
+
+        // The real sink over the empty handle: the segment is stored and
+        // reported `Disabled`, never enqueued.
+        let sink: Arc<dyn sinks::TranscriptionSink> = Arc::new(sinks::TokioTranscriptionSink {
+            tx: worker.live_tx.clone(),
+            engine: Arc::clone(&handle),
+        });
+        let (seg_tx, seg_rx) = mpsc::channel(1);
+        seg_tx
+            .send(CompletedSegment {
+                source: AudioSource::Microphone,
+                path: staged,
+                start_timestamp: 1_700_000_000_000,
+                end_timestamp: 1_700_000_030_000,
+            })
+            .await
+            .unwrap();
+        drop(seg_tx);
+        audio_store_loop(
+            Arc::clone(&storage),
+            seg_rx,
+            sink,
+            crate::pipeline::counters::PipelineCounters::new(),
+        )
+        .await;
+        let row_id = 1;
+
+        // Offset by one second so neither check shares an instant with a
+        // poll, which would make the order of the two timers a tie.
+        tokio::time::sleep(backfill::IDLE_POLL + std::time::Duration::from_secs(1)).await;
+        assert!(
+            storage
+                .get_audio_segment(row_id)
+                .await
+                .unwrap()
+                .whisper_model
+                .is_none(),
+            "nothing runs while no model is loaded"
+        );
+
+        handle.set(Arc::new(base_engine("after load")));
+        tokio::time::sleep(backfill::IDLE_POLL).await;
+        assert_eq!(
+            storage
+                .get_audio_segment(row_id)
+                .await
+                .unwrap()
+                .transcript
+                .as_deref(),
+            Some("after load"),
+            "transcribed within one more IDLE_POLL, without a restart"
+        );
+        worker.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backfill_recovers_rows_abandoned_at_shutdown() {
+        let (storage, row_id, opus_path, dir) = persist_segment_with_opus().await;
+        let abandoned = insert_pending_row(&storage, &opus_path).await;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let handle = handle_with(FakeTranscriber {
+            text: "before".into(),
+            variant: "base".into(),
+            gate: Some(TranscribeGate {
+                entered: std::sync::Mutex::new(Some(entered_tx)),
+                release: std::sync::Mutex::new(Some(release_rx)),
+            }),
+        });
+        let (tx, rx) = mpsc::channel(4);
+        for id in [row_id, abandoned] {
+            tx.send(crate::pipeline::sinks::TranscriptionJob {
+                row_id: id,
+                audio_path: opus_path.clone(),
+            })
+            .await
+            .unwrap();
+        }
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let loop_handle = tokio::spawn(transcribe_loop(
+            handle,
+            Arc::clone(&storage),
+            rx,
+            no_backfill(),
+            Arc::clone(&stop),
+        ));
+        // The grace expires while the first job is inside whisper, as in `run`.
+        entered_rx
+            .await
+            .expect("first job never entered transcribe");
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        release_tx.send(()).unwrap();
+        loop_handle.await.unwrap();
+        drop(tx);
+        drop(storage);
+
+        // Next start: reopen the same database.
+        let storage = Arc::new(
+            Storage::open(StorageConfig {
+                base_dir: dir.path().to_path_buf(),
+                pool_size: 2,
+            })
+            .await
+            .unwrap(),
+        );
+        assert_eq!(
+            attempts(&storage, abandoned).await,
+            0,
+            "abandoned, not failed"
+        );
+        let worker = start_worker(handle_with(base_engine("after")), Arc::clone(&storage));
+        wait_until(|| {
+            let storage = Arc::clone(&storage);
+            async move {
+                storage
+                    .get_audio_segment(abandoned)
+                    .await
+                    .unwrap()
+                    .transcript
+                    .as_deref()
+                    == Some("after")
+            }
+        })
+        .await;
+        worker.stop().await;
+        assert_eq!(
+            storage
+                .get_audio_segment(row_id)
+                .await
+                .unwrap()
+                .transcript
+                .as_deref(),
+            Some("before"),
+            "the row written before shutdown is not redone"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backfill_pass_ends_at_first_engine_failure() {
+        let (storage, first, opus_path, _dir) = persist_segment_with_opus().await;
+        let second = insert_pending_row(&storage, &opus_path).await;
+        let engine = ScriptedTranscriber::new(Script::WhisperErr);
+        let worker = start_worker(handle_with_scripted(&engine), Arc::clone(&storage));
+
+        wait_until(|| {
+            let engine = Arc::clone(&engine);
+            async move { engine.calls() == 1 }
+        })
+        .await;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        assert_eq!(
+            engine.calls(),
+            1,
+            "the pass stopped after one engine failure"
+        );
+        assert_eq!(attempts(&storage, first).await, 1);
+        assert_eq!(
+            attempts(&storage, second).await,
+            0,
+            "an outage costs one attempt per pass"
+        );
+        worker.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backfill_pass_continues_past_decode_failures() {
+        let (storage, fixture_row, opus_path, dir) = persist_segment_with_opus().await;
+        // Stamp the fixture's row so it is not pending. Id order is pass
+        // order, and the failing rows must come before the good one.
+        storage
+            .update_transcript_full(fixture_row, &opus_path, None, "base".into(), None)
+            .await
+            .unwrap();
+        let corrupt_path = dir.path().join("corrupt.opus");
+        std::fs::write(&corrupt_path, b"not an ogg stream").unwrap();
+        let corrupt = insert_pending_row(&storage, &corrupt_path).await;
+        let missing = insert_pending_row(&storage, &dir.path().join("missing.opus")).await;
+        let good = insert_pending_row(&storage, &opus_path).await;
+        let engine = ScriptedTranscriber::new(Script::Text("speech"));
+        let start = tokio::time::Instant::now();
+        let worker = start_worker(handle_with_scripted(&engine), Arc::clone(&storage));
+
+        wait_until(|| {
+            let storage = Arc::clone(&storage);
+            async move {
+                storage
+                    .get_audio_segment(good)
+                    .await
+                    .unwrap()
+                    .transcript
+                    .is_some()
+            }
+        })
+        .await;
+        assert!(
+            start.elapsed() < backfill::PASS_INTERVAL,
+            "all three rows ran in the first pass"
+        );
+        assert_eq!(attempts(&storage, corrupt).await, 1);
+        assert_eq!(attempts(&storage, missing).await, 1);
+        assert_eq!(engine.calls(), 1, "only the good row reached the engine");
+        worker.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backfill_pages_past_one_batch() {
+        // One more row than `BATCH`, so the pass must query a second page.
+        let (storage, first, opus_path, _dir) = persist_segment_with_opus().await;
+        let mut last = first;
+        for _ in 0..32 {
+            last = insert_pending_row(&storage, &opus_path).await;
+        }
+        let engine = ScriptedTranscriber::new(Script::Text("paged"));
+        let start = tokio::time::Instant::now();
+        let worker = start_worker(handle_with_scripted(&engine), Arc::clone(&storage));
+
+        wait_until(|| {
+            let storage = Arc::clone(&storage);
+            async move {
+                storage
+                    .get_audio_segment(last)
+                    .await
+                    .unwrap()
+                    .transcript
+                    .is_some()
+            }
+        })
+        .await;
+        assert!(
+            start.elapsed() < backfill::PASS_INTERVAL,
+            "all 33 rows ran in the first pass"
+        );
+        worker.stop().await;
+        assert_eq!(engine.calls(), 33, "each row ran exactly once");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backfill_gives_up_at_the_attempt_cap() {
+        use crate::pipeline::backfill::{MAX_TRANSCRIBE_ATTEMPTS, PASS_INTERVAL};
+        let (storage, row_id, _opus_path, _dir) = persist_segment_with_opus().await;
+        let engine = ScriptedTranscriber::new(Script::WhisperErr);
+        let worker = start_worker(handle_with_scripted(&engine), Arc::clone(&storage));
+
+        tokio::time::sleep(PASS_INTERVAL * (MAX_TRANSCRIBE_ATTEMPTS + 2)).await;
+        assert_eq!(engine.calls(), MAX_TRANSCRIBE_ATTEMPTS as usize);
+        assert_eq!(attempts(&storage, row_id).await, MAX_TRANSCRIBE_ATTEMPTS);
+        worker.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backfill_brings_every_pending_row_to_a_final_state() {
+        use crate::pipeline::backfill::{MAX_TRANSCRIBE_ATTEMPTS, PASS_INTERVAL};
+        let (storage, speech, _opus_path, dir) = persist_segment_with_opus().await;
+        let silent_path = dir.path().join("silent.opus");
+        write_opus(&silent_path, 0.0);
+        let silent = insert_pending_row(&storage, &silent_path).await;
+        let corrupt_path = dir.path().join("corrupt.opus");
+        std::fs::write(&corrupt_path, b"not an ogg stream").unwrap();
+        let corrupt = insert_pending_row(&storage, &corrupt_path).await;
+        let missing = insert_pending_row(&storage, &dir.path().join("missing.opus")).await;
+        let engine = ScriptedTranscriber::new(Script::BySignal);
+        let worker = start_worker(handle_with_scripted(&engine), Arc::clone(&storage));
+
+        tokio::time::sleep(PASS_INTERVAL * (MAX_TRANSCRIBE_ATTEMPTS + 1)).await;
+        worker.stop().await;
+
+        let speech = storage.get_audio_segment(speech).await.unwrap();
+        assert_eq!(speech.transcript.as_deref(), Some("speech"));
+        let silent = storage.get_audio_segment(silent).await.unwrap();
+        assert_eq!(silent.whisper_model.as_deref(), Some("base"));
+        assert!(
+            silent.transcript.is_none(),
+            "silence is recorded as no speech"
+        );
+        assert_eq!(attempts(&storage, corrupt).await, MAX_TRANSCRIBE_ATTEMPTS);
+        assert_eq!(attempts(&storage, missing).await, MAX_TRANSCRIBE_ATTEMPTS);
+        assert!(
+            storage
+                .pending_transcriptions(0, MAX_TRANSCRIBE_ATTEMPTS, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "nothing is left pending"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backfill_loop_returns_promptly_on_cancel() {
+        use crate::pipeline::sinks::BackfillJob;
+        let in_time = std::time::Duration::from_secs(1);
+        let (storage, row_id, opus_path, _dir) = persist_segment_with_opus().await;
+
+        // Idle: no model loaded.
+        let (tx, _rx) = mpsc::channel(1);
+        let cancel = chronicle_ipc::CancellationToken::new();
+        let task = tokio::spawn(backfill::backfill_loop(
+            Arc::new(crate::provisioning::EngineHandle::new()),
+            Arc::clone(&storage),
+            tx,
+            cancel.clone(),
+        ));
+        tokio::time::sleep(in_time).await;
+        cancel.cancel();
+        tokio::time::timeout(in_time, task)
+            .await
+            .expect("idle")
+            .unwrap();
+
+        // Sending: the channel is already full.
+        let (tx, _rx) = mpsc::channel(1);
+        let (filler_reply, _filler_rx) = tokio::sync::oneshot::channel();
+        tx.send(BackfillJob {
+            row_id,
+            audio_path: opus_path.clone(),
+            reply: filler_reply,
+            cancel: chronicle_ipc::CancellationToken::new(),
+        })
+        .await
+        .unwrap();
+        let cancel = chronicle_ipc::CancellationToken::new();
+        let task = tokio::spawn(backfill::backfill_loop(
+            handle_with(base_engine("x")),
+            Arc::clone(&storage),
+            tx,
+            cancel.clone(),
+        ));
+        tokio::time::sleep(in_time).await;
+        cancel.cancel();
+        tokio::time::timeout(in_time, task)
+            .await
+            .expect("sending")
+            .unwrap();
+
+        // Awaiting a reply that never comes.
+        let (tx, mut rx) = mpsc::channel(1);
+        let cancel = chronicle_ipc::CancellationToken::new();
+        let task = tokio::spawn(backfill::backfill_loop(
+            handle_with(base_engine("x")),
+            Arc::clone(&storage),
+            tx,
+            cancel.clone(),
+        ));
+        let job = rx.recv().await.expect("a pending row is sent");
+        cancel.cancel();
+        tokio::time::timeout(in_time, task)
+            .await
+            .expect("awaiting reply")
+            .unwrap();
+        assert!(
+            job.reply.is_closed(),
+            "the worker will discard this job unrun"
+        );
     }
 
     /// `audio_pipeline.stop()` flushes the session's final partial segments, so they

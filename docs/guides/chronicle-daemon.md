@@ -97,13 +97,15 @@ ordered teardown that cascades through the system:
 1. `supervisor.shutdown()` — stops SCStream and joins the store/ocr tasks
 2. `audio_pipeline.stop()` — drops the audio handler and flushes the encoding thread
 3. `bridge_handle.join()` — bridge thread drains and exits, closing `audio_tx`
-4. `await` all async tasks — they exit when their input channels close
+4. `await` all async tasks — they exit when their input channels close, except
+   the backfill task, which stops on the cancellation token
 5. `join_cleanup_task(cleanup_handle, CLEANUP_GRACE)` — the retention cleanup
    loop, joined last so it keeps winding down while steps 1-4 drain
 
-Of the five steps above, only retention cleanup does not drain on a closing
-channel. It watches the cancellation token instead. The storage status
-refresher watches the same token. It is spawned detached. No step joins it.
+Of the five steps above, only retention cleanup and the backfill task in step 4
+do not drain on a closing channel. They watch the cancellation token instead.
+The storage status refresher watches the same token. It is spawned detached. No
+step joins it.
 `cancel.cancel()` sets that token. It fires after the provisioning wait and the
 channel closes, and before every unbounded step. The batch loop checks the
 token before each batch and again after each commit. An in-flight run therefore
