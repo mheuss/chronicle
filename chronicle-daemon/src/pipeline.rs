@@ -1,3 +1,4 @@
+pub mod backfill;
 pub mod counters;
 pub mod metadata;
 pub mod sinks;
@@ -186,6 +187,129 @@ fn warn_abandoned_queue(abandoned: usize) {
     );
 }
 
+/// Count a failed attempt against `row_id`, logging rather than propagating a
+/// write error so the loop keeps going.
+async fn record_failure(storage: &Storage, row_id: i64, audio_path: &std::path::Path) {
+    if let Err(e) = storage
+        .record_transcription_failure(row_id, audio_path)
+        .await
+    {
+        log::error!("failed to record transcription failure for segment {row_id}: {e}");
+    }
+}
+
+/// Decode, transcribe and write one segment with `engine`.
+async fn process_job(
+    engine: Arc<dyn chronicle_transcription::Transcriber>,
+    storage: &Storage,
+    row_id: i64,
+    audio_path: PathBuf,
+) -> crate::pipeline::sinks::BackfillOutcome {
+    use crate::pipeline::backfill::MAX_TRANSCRIBE_ATTEMPTS;
+    use crate::pipeline::sinks::BackfillOutcome;
+
+    // Clone a separate Arc for the blocking closure; `engine` stays owned so
+    // `engine.variant()` is usable after the await.
+    let engine_for_blocking = Arc::clone(&engine);
+    let path = audio_path.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let pcm = chronicle_transcription::decode_opus_16k_mono(&path)?;
+        engine_for_blocking.transcribe(&pcm)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(transcript)) => {
+            // Whitespace normalization only, and deliberately only that: trim
+            // once and use it for both the check and the write, so a sloppy
+            // impl returning "  hi  " can land neither a padded nor a
+            // whitespace-only row in `audio_fts` (BR-4). Content-level
+            // filtering — dropping engine markers like `[BLANK_AUDIO]` — is
+            // the implementation's contract, documented on `Transcriber`,
+            // and is NOT re-derived here: the marker rule is whisper-specific,
+            // so applying it to every impl would corrupt the others' output.
+            let text = transcript.text.trim();
+            // Empty means no speech was found: whisper ran, or the PCM was
+            // too short to run it. Record the attempt with a NULL transcript
+            // rather than skipping the write: skipping also discards the
+            // fact that we tried, leaving the row
+            // indistinguishable from one that was never transcribed, which
+            // makes a backfill scheduler re-queue it forever (CHR-38).
+            let (stored, language) = if text.is_empty() {
+                log::debug!(
+                    "no usable speech in segment {} — recording the attempt",
+                    row_id
+                );
+                // Language goes NULL too. whisper reports a detection even
+                // for silence, derived from noise: of the live database's
+                // 169 no-speech rows, 166 carry `en` and 3 carry `nn`, and
+                // neither means anything — `en` is the more misleading of
+                // the two precisely because it looks plausible. `search.rs`
+                // reads this column back out to callers, so keeping it would
+                // leave one fabricated value in a row whose whole purpose is
+                // to say truthfully what happened.
+                (None, None)
+            } else {
+                (Some(text.to_string()), transcript.language)
+            };
+            let outcome = if stored.is_some() {
+                BackfillOutcome::Transcribed
+            } else {
+                BackfillOutcome::NoSpeech
+            };
+            // Never log `text` itself: transcripts are recordings of speech
+            // near the user and are treated as PII.
+            match storage
+                .update_transcript_full(
+                    row_id,
+                    &audio_path,
+                    stored,
+                    engine.variant().to_string(),
+                    language,
+                )
+                .await
+            {
+                Ok(()) => outcome,
+                Err(e) => match storage
+                    .needs_transcription(row_id, &audio_path, MAX_TRANSCRIBE_ATTEMPTS)
+                    .await
+                {
+                    // Retention can delete the row while whisper runs, or a new
+                    // recording can reuse its id, and the guarded write then
+                    // fails "not found". That is not an engine fault.
+                    Ok(false) => {
+                        log::debug!("segment {row_id} was deleted while it was transcribed");
+                        BackfillOutcome::Skipped
+                    }
+                    _ => {
+                        log::error!(
+                            "failed to record transcription result for segment {row_id}: {e}"
+                        );
+                        BackfillOutcome::EngineFailed
+                    }
+                },
+            }
+        }
+        Ok(Err(e)) => {
+            log::warn!("transcription failed for segment {row_id}: {e}");
+            record_failure(storage, row_id, &audio_path).await;
+            if matches!(e, chronicle_transcription::TranscriptionError::Decode(_)) {
+                BackfillOutcome::DecodeFailed
+            } else {
+                BackfillOutcome::EngineFailed
+            }
+        }
+        // Neutral "failed": `JoinError`'s Display names the cause ("panicked
+        // with message …" / "was cancelled"), and the shutdown contract on
+        // `transcribe_loop` means a cancellation is never observed here.
+        Err(e) => {
+            log::error!("transcription task failed for segment {row_id}: {e}");
+            record_failure(storage, row_id, &audio_path).await;
+            BackfillOutcome::EngineFailed
+        }
+    }
+}
+
 /// Transcribe persisted audio segments off the tokio runtime and store the text.
 ///
 /// Heavy work (Opus decode + whisper) runs inside `spawn_blocking` so it never
@@ -195,7 +319,13 @@ fn warn_abandoned_queue(abandoned: usize) {
 /// set, `transcript` and `language` NULL — so blank text still never reaches
 /// `audio_fts` while the row stays distinguishable from one that was never
 /// transcribed (CHR-38). It is deliberately not skipped; see the comment on the
-/// empty branch below.
+/// empty branch in `process_job`.
+///
+/// A failed attempt (decode error, engine error, or panic) increments the
+/// row's `transcribe_attempts` and leaves `whisper_model` NULL, so the row
+/// stays pending until it reaches `MAX_TRANSCRIBE_ATTEMPTS` (CHR-15). Each job
+/// is first checked with `Storage::needs_transcription`, so a row already
+/// stamped or at the cap is skipped without an attempt.
 ///
 /// **Shutdown contract — this loop must outlive `audio_store_loop`.** It exits
 /// when the channel closes (every `TranscriptionSink` clone dropped) or when
@@ -228,6 +358,7 @@ pub async fn transcribe_loop(
     mut rx: mpsc::Receiver<crate::pipeline::sinks::TranscriptionJob>,
     stop_after_current: Arc<std::sync::atomic::AtomicBool>,
 ) {
+    use crate::pipeline::backfill::MAX_TRANSCRIBE_ATTEMPTS;
     use std::sync::atomic::Ordering;
 
     while let Some(job) = rx.recv().await {
@@ -267,76 +398,20 @@ pub async fn transcribe_loop(
             }
             continue;
         };
-        // Clone a separate Arc for the blocking closure; the resolved `engine`
-        // stays owned so `engine.variant()` is usable after the await — it is
-        // the per-job engine, not the handle, which this binding shadows.
-        let engine_for_blocking = Arc::clone(&engine);
-        let path = job.audio_path.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            let pcm = chronicle_transcription::decode_opus_16k_mono(&path)?;
-            engine_for_blocking.transcribe(&pcm)
-        })
-        .await;
-
-        match result {
-            Ok(Ok(transcript)) => {
-                // Whitespace normalization only, and deliberately only that: trim
-                // once and use it for both the check and the write, so a sloppy
-                // impl returning "  hi  " can land neither a padded nor a
-                // whitespace-only row in `audio_fts` (BR-4). Content-level
-                // filtering — dropping engine markers like `[BLANK_AUDIO]` — is
-                // the implementation's contract, documented on `Transcriber`,
-                // and is NOT re-derived here: the marker rule is whisper-specific,
-                // so applying it to every impl would corrupt the others' output.
-                let text = transcript.text.trim();
-                // Empty means no speech was found: whisper ran, or the PCM was
-                // too short to run it. Record the attempt with a NULL transcript
-                // rather than skipping the write: skipping also discards the
-                // fact that we tried, leaving the row
-                // indistinguishable from one that was never transcribed, which
-                // makes a backfill scheduler re-queue it forever (CHR-38).
-                let (stored, language) = if text.is_empty() {
-                    log::debug!(
-                        "no usable speech in segment {} — recording the attempt",
-                        job.row_id
-                    );
-                    // Language goes NULL too. whisper reports a detection even
-                    // for silence, derived from noise: of the live database's
-                    // 169 no-speech rows, 166 carry `en` and 3 carry `nn`, and
-                    // neither means anything — `en` is the more misleading of
-                    // the two precisely because it looks plausible. `search.rs`
-                    // reads this column back out to callers, so keeping it would
-                    // leave one fabricated value in a row whose whole purpose is
-                    // to say truthfully what happened.
-                    (None, None)
-                } else {
-                    (Some(text.to_string()), transcript.language)
-                };
-                // One write on both paths, so the stop check at the bottom of the
-                // loop still runs on every iteration — there is no `continue` here.
-                // Never log `text` itself: transcripts are recordings of speech
-                // near the user and are treated as PII.
-                if let Err(e) = storage
-                    .update_transcript_full(
-                        job.row_id,
-                        &job.audio_path,
-                        stored,
-                        engine.variant().to_string(),
-                        language,
-                    )
-                    .await
-                {
-                    log::error!(
-                        "failed to record transcription result for segment {}: {e}",
-                        job.row_id
-                    );
-                }
-            }
-            Ok(Err(e)) => log::warn!("transcription failed for segment {}: {e}", job.row_id),
-            // Neutral "failed": `JoinError`'s Display names the cause ("panicked
-            // with message …" / "was cancelled"), and the shutdown contract above
-            // means a cancellation is never observed here — no branch to log it.
-            Err(e) => log::error!("transcription task failed for segment {}: {e}", job.row_id),
+        let pending = storage
+            .needs_transcription(job.row_id, &job.audio_path, MAX_TRANSCRIBE_ATTEMPTS)
+            .await;
+        if let Err(e) = &pending {
+            // A failed read must not cost live work, so transcribe anyway.
+            log::warn!(
+                "could not check segment {} before transcribing: {e}",
+                job.row_id
+            );
+        }
+        if matches!(pending, Ok(false)) {
+            log::debug!("segment {} is no longer pending; skipping", job.row_id);
+        } else {
+            process_job(engine, &storage, job.row_id, job.audio_path).await;
         }
 
         // Checked *after* the write, never before it: `run` sets this when the
@@ -1237,6 +1312,20 @@ mod tests {
         release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     }
 
+    impl TranscribeGate {
+        /// Signal entry, then block until released.
+        fn pass(&self) {
+            if let Some(tx) = self.entered.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            // take() first so the guard is released before we block.
+            let rx = self.release.lock().unwrap().take();
+            if let Some(rx) = rx {
+                let _ = rx.recv();
+            }
+        }
+    }
+
     struct FakeTranscriber {
         text: String,
         variant: String,
@@ -1249,14 +1338,7 @@ mod tests {
         ) -> Result<chronicle_transcription::Transcript, chronicle_transcription::TranscriptionError>
         {
             if let Some(gate) = &self.gate {
-                if let Some(tx) = gate.entered.lock().unwrap().take() {
-                    let _ = tx.send(());
-                }
-                // take() first so the guard is released before we block.
-                let rx = gate.release.lock().unwrap().take();
-                if let Some(rx) = rx {
-                    let _ = rx.recv();
-                }
+                gate.pass();
             }
             Ok(chronicle_transcription::Transcript {
                 text: self.text.clone(),
@@ -1294,19 +1376,132 @@ mod tests {
         }
     }
 
+    /// What a `ScriptedTranscriber` does on every call.
+    enum Script {
+        Text(&'static str),
+        WhisperErr,
+        Panic,
+    }
+
+    /// Whether decoded PCM carries signal rather than silence.
+    fn has_signal(pcm: &[f32]) -> bool {
+        pcm.iter().any(|s| s.abs() > 0.01)
+    }
+
+    /// A fake that follows a script, counts its calls, and records whether
+    /// each call's PCM carried signal, in call order.
+    struct ScriptedTranscriber {
+        script: Script,
+        calls: std::sync::atomic::AtomicUsize,
+        signals: std::sync::Mutex<Vec<bool>>,
+        gate: Option<TranscribeGate>,
+    }
+    impl ScriptedTranscriber {
+        fn new(script: Script) -> Arc<Self> {
+            Arc::new(Self {
+                script,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                signals: std::sync::Mutex::new(Vec::new()),
+                gate: None,
+            })
+        }
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::Relaxed)
+        }
+        fn signals(&self) -> Vec<bool> {
+            self.signals.lock().unwrap().clone()
+        }
+    }
+    impl chronicle_transcription::Transcriber for ScriptedTranscriber {
+        fn transcribe(
+            &self,
+            pcm: &[f32],
+        ) -> Result<chronicle_transcription::Transcript, chronicle_transcription::TranscriptionError>
+        {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.signals.lock().unwrap().push(has_signal(pcm));
+            if let Some(gate) = &self.gate {
+                gate.pass();
+            }
+            let text = match self.script {
+                Script::Text(text) => text,
+                Script::WhisperErr => {
+                    return Err(chronicle_transcription::TranscriptionError::Whisper(
+                        "scripted failure".into(),
+                    ));
+                }
+                Script::Panic => panic!("scripted panic"),
+            };
+            Ok(chronicle_transcription::Transcript {
+                text: text.into(),
+                language: Some("en".into()),
+            })
+        }
+        fn variant(&self) -> &str {
+            "base"
+        }
+    }
+
+    /// An `EngineHandle` holding `engine`, which the caller keeps to read `calls`.
+    fn handle_with_scripted(
+        engine: &Arc<ScriptedTranscriber>,
+    ) -> Arc<crate::provisioning::EngineHandle> {
+        let handle = Arc::new(crate::provisioning::EngineHandle::new());
+        handle.set(Arc::clone(engine) as Arc<dyn chronicle_transcription::Transcriber>);
+        handle
+    }
+
+    /// One second of a 220 Hz tone at `amplitude`; 0.0 writes silence.
+    fn write_opus(path: &std::path::Path, amplitude: f32) {
+        use chronicle_audio::OggOpusEncoder;
+        let samples: Vec<f32> = (0..48_000)
+            .map(|i| (i as f32 * 220.0 * std::f32::consts::TAU / 48_000.0).sin() * amplitude)
+            .collect();
+        OggOpusEncoder::new(1, 24_000, opus::Application::Voip)
+            .encode_to_file(&samples, path)
+            .unwrap();
+    }
+
+    /// Insert an untranscribed row pointing at `audio_path`.
+    async fn insert_pending_row(storage: &Storage, audio_path: &std::path::Path) -> i64 {
+        storage
+            .insert_audio_segment(chronicle_storage::AudioSegmentMetadata {
+                start_timestamp: 1_700_000_000_000,
+                end_timestamp: 1_700_000_030_000,
+                source: "mic".into(),
+                audio_path: audio_path.to_string_lossy().into_owned(),
+                transcript: None,
+                whisper_model: None,
+                language: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    /// Failed attempts on a row with no stamp and no text. `AudioSegment` does
+    /// not carry the column, so this reads it through `needs_transcription`.
+    async fn attempts(storage: &Storage, row_id: i64) -> u32 {
+        let path = PathBuf::from(storage.get_audio_segment(row_id).await.unwrap().audio_path);
+        for n in 0..=10 {
+            if storage
+                .needs_transcription(row_id, &path, n + 1)
+                .await
+                .unwrap()
+            {
+                return n;
+            }
+        }
+        panic!("row {row_id} is stamped, has text, or has more than 10 attempts");
+    }
+
     // Persist a row whose audio_path points at a real .opus file. Returns the
     // TempDir so the caller keeps it (and the file) alive for the test's duration.
     async fn persist_segment_with_opus()
     -> (Arc<Storage>, i64, std::path::PathBuf, tempfile::TempDir) {
-        use chronicle_audio::OggOpusEncoder;
         let (storage, dir) = temp_storage().await;
         let path = dir.path().join("seg.opus");
-        let samples: Vec<f32> = (0..48_000)
-            .map(|i| (i as f32 * 220.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.2)
-            .collect();
-        OggOpusEncoder::new(1, 24_000, opus::Application::Voip)
-            .encode_to_file(&samples, &path)
-            .unwrap();
+        write_opus(&path, 0.2);
         let row_id = storage
             .insert_audio_segment(chronicle_storage::AudioSegmentMetadata {
                 start_timestamp: 1_700_000_000_000,
@@ -1532,19 +1727,114 @@ mod tests {
 
     #[tokio::test]
     async fn transcribe_loop_continues_on_missing_file() {
-        let (storage, row_id, _opus_path, _dir) = persist_segment_with_opus().await;
+        let (storage, dir) = temp_storage().await;
+        let missing = dir.path().join("missing.opus");
+        let row_id = insert_pending_row(&storage, &missing).await;
         let engine = handle_with(base_engine("x"));
         let (tx, rx) = mpsc::channel(4);
         tx.send(crate::pipeline::sinks::TranscriptionJob {
             row_id,
-            audio_path: "/no/such.opus".into(),
+            audio_path: missing,
         })
         .await
         .unwrap();
         drop(tx);
         transcribe_loop(engine, storage.clone(), rx, never_stop()).await;
+
         let seg = storage.get_audio_segment(row_id).await.unwrap();
         assert!(seg.transcript.is_none());
+        assert!(seg.whisper_model.is_none());
+        assert_eq!(
+            attempts(&storage, row_id).await,
+            1,
+            "a live job on a missing file fails decode and counts"
+        );
+    }
+
+    #[tokio::test]
+    async fn transcribe_loop_records_attempt_on_engine_error() {
+        let (storage, row_id, opus_path, _dir) = persist_segment_with_opus().await;
+        let engine = ScriptedTranscriber::new(Script::WhisperErr);
+        let (tx, rx) = mpsc::channel(4);
+        tx.send(crate::pipeline::sinks::TranscriptionJob {
+            row_id,
+            audio_path: opus_path,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        transcribe_loop(
+            handle_with_scripted(&engine),
+            storage.clone(),
+            rx,
+            never_stop(),
+        )
+        .await;
+
+        let seg = storage.get_audio_segment(row_id).await.unwrap();
+        assert!(seg.whisper_model.is_none(), "a failure is not a stamp");
+        assert_eq!(attempts(&storage, row_id).await, 1);
+        assert_eq!(
+            engine.signals(),
+            vec![true],
+            "the engine saw the fixture's tone"
+        );
+    }
+
+    #[tokio::test]
+    async fn transcribe_loop_records_attempt_on_panic() {
+        let (storage, row_id, opus_path, _dir) = persist_segment_with_opus().await;
+        let engine = ScriptedTranscriber::new(Script::Panic);
+        let (tx, rx) = mpsc::channel(4);
+        tx.send(crate::pipeline::sinks::TranscriptionJob {
+            row_id,
+            audio_path: opus_path,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        transcribe_loop(
+            handle_with_scripted(&engine),
+            storage.clone(),
+            rx,
+            never_stop(),
+        )
+        .await;
+
+        let seg = storage.get_audio_segment(row_id).await.unwrap();
+        assert!(seg.whisper_model.is_none());
+        assert_eq!(attempts(&storage, row_id).await, 1);
+    }
+
+    #[tokio::test]
+    async fn transcribe_loop_skips_live_job_for_capped_row() {
+        use crate::pipeline::backfill::MAX_TRANSCRIBE_ATTEMPTS;
+        let (storage, row_id, opus_path, _dir) = persist_segment_with_opus().await;
+        for _ in 0..MAX_TRANSCRIBE_ATTEMPTS {
+            storage
+                .record_transcription_failure(row_id, &opus_path)
+                .await
+                .unwrap();
+        }
+        let engine = ScriptedTranscriber::new(Script::Text("late"));
+        let (tx, rx) = mpsc::channel(4);
+        tx.send(crate::pipeline::sinks::TranscriptionJob {
+            row_id,
+            audio_path: opus_path,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        transcribe_loop(
+            handle_with_scripted(&engine),
+            storage.clone(),
+            rx,
+            never_stop(),
+        )
+        .await;
+
+        assert_eq!(engine.calls(), 0, "a capped row never reaches the engine");
+        assert_eq!(attempts(&storage, row_id).await, MAX_TRANSCRIBE_ATTEMPTS);
     }
 
     /// `audio_pipeline.stop()` flushes the session's final partial segments, so they

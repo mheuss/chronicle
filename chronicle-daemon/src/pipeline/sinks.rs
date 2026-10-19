@@ -79,6 +79,19 @@ pub enum TranscriptionEnqueueResult {
     Disabled,
 }
 
+/// What happened to one transcription job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackfillOutcome {
+    Transcribed,
+    NoSpeech,
+    /// The audio file is missing or does not decode. Counted as an attempt.
+    DecodeFailed,
+    /// Whisper failed, the task panicked, or the result could not be written.
+    EngineFailed,
+    /// Not run: no engine, or the row is no longer pending.
+    Skipped,
+}
+
 /// `tokio::mpsc`-backed `TranscriptionSink`, gated on the engine handle:
 /// while no engine is loaded, enqueues report `Disabled` (idle, not a drop)
 /// — bit-for-bit the old `NoopTranscriptionSink` counter semantics.
