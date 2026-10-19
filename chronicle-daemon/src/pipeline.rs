@@ -278,7 +278,7 @@ async fn process_job(
                     // recording can reuse its id, and the guarded write then
                     // fails "not found". That is not an engine fault.
                     Ok(false) => {
-                        log::debug!("segment {row_id} was deleted while it was transcribed");
+                        log::debug!("segment {row_id} is no longer pending after transcription");
                         BackfillOutcome::Skipped
                     }
                     _ => {
@@ -414,6 +414,7 @@ pub async fn transcribe_loop(
         // shutdown grace expires, and the whole point is that the segment already
         // in flight still gets persisted. Breaking here (rather than `run`
         // dropping our JoinHandle) is what keeps that write from being discarded.
+        // The skip branch above has no write but must still fall through to here.
         if stop_after_current.load(Ordering::Relaxed) {
             warn_abandoned_queue(rx.len());
             break;
@@ -1800,6 +1801,11 @@ mod tests {
         let seg = storage.get_audio_segment(row_id).await.unwrap();
         assert!(seg.whisper_model.is_none());
         assert_eq!(attempts(&storage, row_id).await, 1);
+        assert_eq!(
+            engine.calls(),
+            1,
+            "the panic came from the engine, not decode"
+        );
     }
 
     #[tokio::test]
@@ -1831,6 +1837,47 @@ mod tests {
 
         assert_eq!(engine.calls(), 0, "a capped row never reaches the engine");
         assert_eq!(attempts(&storage, row_id).await, MAX_TRANSCRIBE_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn transcribe_loop_stops_after_skipped_job() {
+        let (storage, stamped, opus_path, _dir) = persist_segment_with_opus().await;
+        storage
+            .update_transcript_full(stamped, &opus_path, None, "base".into(), None)
+            .await
+            .unwrap();
+        let queued = insert_pending_row(&storage, &opus_path).await;
+        let engine = ScriptedTranscriber::new(Script::Text("x"));
+        let (tx, rx) = mpsc::channel(4);
+        for id in [stamped, queued] {
+            tx.send(crate::pipeline::sinks::TranscriptionJob {
+                row_id: id,
+                audio_path: opus_path.clone(),
+            })
+            .await
+            .unwrap();
+        }
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        // Sender stays alive, so the flag is the only way out. A `continue` on
+        // the skip path would bypass the bottom check and run the queued job.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            transcribe_loop(handle_with_scripted(&engine), storage.clone(), rx, stop),
+        )
+        .await
+        .expect("a skipped job must not bypass stop_after_current");
+
+        assert_eq!(
+            engine.calls(),
+            0,
+            "the skipped job ran nothing and the loop stopped"
+        );
+        assert_eq!(
+            attempts(&storage, queued).await,
+            0,
+            "the queued row is still pending"
+        );
+        drop(tx);
     }
 
     /// `audio_pipeline.stop()` flushes the session's final partial segments, so they
