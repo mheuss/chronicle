@@ -571,12 +571,12 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
     );
     // One handle, one sink, one loop — unconditionally. The loop also reads a
     // capacity-1 backfill channel, after live work. "No model" is just an
-    // empty handle: the sink gates on it, so every enqueue
-    // short-circuits to `Disabled` without touching the channel, identical to
-    // the old `NoopTranscriptionSink` (design §3.4). Spawning the loop even
-    // with no engine is what lets a mid-session `SetWhisperModel` start
-    // transcribing without a restart — there is no loop to create later.
-    // Bounded channel (64), matching the audio bridge: drop-on-full.
+    // empty handle: the sink gates on it, so every enqueue short-circuits to
+    // `Disabled` without touching the live channel, identical to the old
+    // `NoopTranscriptionSink` (design §3.4). Spawning the loop even with no
+    // engine is what lets a mid-session `SetWhisperModel` start transcribing
+    // without a restart — there is no loop to create later. The live channel
+    // is bounded (64), matching the audio bridge: drop-on-full.
     let (transcription_tx, transcription_rx) = tokio::sync::mpsc::channel(64);
     let (_backfill_tx, backfill_rx) = tokio::sync::mpsc::channel(1);
     let transcription_sink: Arc<dyn pipeline::sinks::TranscriptionSink> =
