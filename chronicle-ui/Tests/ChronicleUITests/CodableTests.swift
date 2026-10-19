@@ -533,6 +533,11 @@ struct CodableTests {
         #expect(t.downloadTotalBytes == nil)
     }
 
+    @Test("Search filter raw values match the daemon's wire names")
+    func searchFilterWireNames() {
+        #expect([SearchFilter.all, .screen, .audio].map(\.rawValue) == ["all", "screen", "audio"])
+    }
+
     // MARK: - Forward compatibility on closed wire enums
     //
     // A closed String enum on a wire field throws on an unknown value, and the

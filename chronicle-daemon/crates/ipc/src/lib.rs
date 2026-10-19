@@ -611,6 +611,15 @@ mod tests {
     }
 
     #[test]
+    fn request_search_with_unknown_filter_is_rejected() {
+        let err = serde_json::from_str::<Request>(
+            r#"{"type":"search","query":"q","limit":5,"offset":0,"filter":"video"}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown variant `video`"), "{err}");
+    }
+
+    #[test]
     fn search_hit_serializes_with_audio_source() {
         let hit = SearchHit {
             id: 9,
