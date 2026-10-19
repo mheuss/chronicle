@@ -70,6 +70,15 @@ pub struct TranscriptionJob {
     pub audio_path: PathBuf,
 }
 
+/// A pending row sent by the backfill task. The worker answers on `reply`.
+pub struct BackfillJob {
+    pub row_id: i64,
+    pub audio_path: PathBuf,
+    pub reply: tokio::sync::oneshot::Sender<BackfillOutcome>,
+    /// The backfill task's token. The worker starts no job after it fires.
+    pub cancel: chronicle_ipc::CancellationToken,
+}
+
 /// Result of attempting to enqueue a transcription job.
 pub enum TranscriptionEnqueueResult {
     Enqueued,
@@ -88,7 +97,8 @@ pub enum BackfillOutcome {
     DecodeFailed,
     /// Whisper failed, the task panicked, or the result could not be written.
     EngineFailed,
-    /// Nothing was recorded: the row is no longer pending.
+    /// Nothing was recorded: no engine is loaded, or the row is no longer
+    /// pending.
     Skipped,
 }
 
