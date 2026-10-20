@@ -27,6 +27,7 @@ chronicle-daemon/crates/storage/src/media.rs
 chronicle-daemon/crates/storage/src/migrations/001_initial_schema.sql
 chronicle-daemon/crates/storage/src/migrations/002_path_indexes.sql
 chronicle-daemon/crates/storage/src/migrations/003_null_marker_transcripts.sql
+chronicle-daemon/crates/storage/src/migrations/004_transcribe_attempts.sql
 chronicle-daemon/crates/storage/src/models.rs
 chronicle-daemon/crates/storage/src/retention.rs
 chronicle-daemon/crates/storage/src/schema.rs
@@ -42,6 +43,7 @@ chronicle-daemon/src/main.rs
 chronicle-daemon/src/media_presence.rs
 chronicle-daemon/src/permissions.rs
 chronicle-daemon/src/pipeline.rs
+chronicle-daemon/src/pipeline/backfill.rs
 chronicle-daemon/src/pipeline/counters.rs
 chronicle-daemon/src/pipeline/metadata.rs
 chronicle-daemon/src/pipeline/sinks.rs

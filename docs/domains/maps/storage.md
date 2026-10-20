@@ -21,7 +21,7 @@
 - outside: the status shape that crosses the wire — `chronicle-daemon/crates/ipc/src/lib.rs` — `StorageStats`
 
 **Placement test:** Does the file put a capture on disk, get it back, or define the shape it is stored in? Deciding *when* to do that, and showing the user what came back, belong elsewhere.
-**Document comparison:** deliberately matches — `docs/guides/storage-engine.md:71` already draws this line. It states that the inner modules are `pub(crate)` and "callers only interact through the `Storage` struct". Measured 2026-09-17 and re-measured 2026-09-21: all seven importers reach the crate through `Storage` or a `models` type. None names a `pub(crate)` module.
+**Document comparison:** deliberately matches — `docs/guides/storage-engine.md:73` already draws this line. It states that the inner modules are `pub(crate)` and "callers only interact through the `Storage` struct". Measured 2026-09-17 and re-measured 2026-09-21: all seven importers reach the crate through `Storage` or a `models` type. None names a `pub(crate)` module.
 
 ## Owned Files
 
@@ -33,6 +33,7 @@
 - chronicle-daemon/crates/storage/src/migrations/001_initial_schema.sql
 - chronicle-daemon/crates/storage/src/migrations/002_path_indexes.sql
 - chronicle-daemon/crates/storage/src/migrations/003_null_marker_transcripts.sql
+- chronicle-daemon/crates/storage/src/migrations/004_transcribe_attempts.sql
 - chronicle-daemon/crates/storage/src/models.rs
 - chronicle-daemon/crates/storage/src/retention.rs
 - chronicle-daemon/crates/storage/src/schema.rs
@@ -60,13 +61,13 @@
 
 | Document | Said | Verdict |
 |---|---|---|
-| `docs/guides/storage-engine.md:71` | "The inner modules (`screenshots`, `audio`, `search`, `retention`, `files`, `schema`) are all `pub(crate)` — callers only interact through the `Storage` struct" | accurate — verified against `lib.rs:14-24`, and against all seven importers |
-| `docs/guides/storage-engine.md:70-72` | Its `migrations/` listing shows `001_initial_schema.sql` and `002_path_indexes.sql` | stale — `003_null_marker_transcripts.sql` exists, is 123 lines, and is embedded at `schema.rs:8` alongside the other two. Added by CHR-38 |
-| `docs/guides/storage-engine.md:139-140` | "Retention cleanup and orphan sweeping are two independent operations in `retention.rs`, with different callers. They are not two phases of one pass." | accurate |
+| `docs/guides/storage-engine.md:73` | "The inner modules (`screenshots`, `audio`, `search`, `retention`, `files`, `schema`) are all `pub(crate)` — callers only interact through the `Storage` struct" | accurate — verified against `lib.rs:14-24`, and against all seven importers |
+| `docs/guides/storage-engine.md:64-68` | Its `migrations/` listing shows `001_initial_schema.sql` through `004_transcribe_attempts.sql` | accurate (was stale: the CHR-38 omission of `003_null_marker_transcripts.sql`, which is 123 lines and embedded at `schema.rs:8`). CHR-15 added `004_transcribe_attempts.sql` and listed 001 to 004 |
+| `docs/guides/storage-engine.md:144-145` | "Retention cleanup and orphan sweeping are two independent operations in `retention.rs`, with different callers. They are not two phases of one pass." | accurate |
 | `docs/use-cases/storage.md` | Eight solutions, located in `migrations/001`, `schema.rs`, `media.rs`, `search.rs`, and `lib.rs` | accurate — including its `search.rs` entry, which the sitting-10 merge confirmed belongs here |
 | `docs/use-cases/INDEX.md:9` | Code Location `chronicle-daemon/crates/storage/` | accurate — the whole crate, which after the sitting-10 merge is what this domain owns. The column is superseded regardless; see CHR-151 |
 | `docs/use-cases/INDEX.md` | Has **no** `search` row; its six domains are `pipeline`, `background-work`, `storage`, `audio-encoding`, `transcription`, `ipc-compat` | accurate as an absence, and evidence for the merge. Control: the file's only match for "search\|fts5\|snippet" is the literal `FTS5` at `:9`, so the search would have matched had a row existed |
-| `docs/guides/storage-engine.md:63, 79-111` | Lists `search.rs` in the storage module table as "Unified FTS5 search across screenshots and audio", and documents "How search works" as a section of the storage guide | accurate — no document anywhere treats search as a domain of its own |
+| `docs/guides/storage-engine.md:61, 81-113` | Lists `search.rs` in the storage module table as "Unified FTS5 search across screenshots and audio", and documents "How search works" as a section of the storage guide | accurate — no document anywhere treats search as a domain of its own |
 | `docs/decisions/015-shared-value-types-live-in-the-ipc-crate.md` | This crate depends on `chronicle-ipc` so `Retention` can be shared, and the backwards arrow is deliberate | accurate — `crates/storage/Cargo.toml` carries `chronicle-ipc`, and it is this domain's only workspace dependency |
 | `docs/decisions/011-chronicle-ui-sandbox-approach.md:26-27` | The daemon writes the database, screenshots and settings under `~/Library/Application Support/Chronicle/`, and sandboxing moves all of it | accurate — `MediaManager` is what moves |
 | `.claude/audit/security.md:18-19` | Capture history is persisted unencrypted and FTS5 duplicates the sensitive text in searchable form | accurate — still true, and untracked. CHR-90 closed 2026-04-06 as an audit-sweep umbrella without addressing it. Re-filed as CHR-156 |

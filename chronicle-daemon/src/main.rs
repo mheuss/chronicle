@@ -569,14 +569,16 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
         storage.base_dir(),
         boot_load_failed,
     );
-    // One handle, one channel, one sink, one loop — unconditionally. "No
-    // model" is just an empty handle: the sink gates on it, so every enqueue
-    // short-circuits to `Disabled` without touching the channel, identical to
-    // the old `NoopTranscriptionSink` (design §3.4). Spawning the loop even
-    // with no engine is what lets a mid-session `SetWhisperModel` start
-    // transcribing without a restart — there is no loop to create later.
-    // Bounded channel (64), matching the audio bridge: drop-on-full.
+    // One handle, one sink, one loop — unconditionally. The loop also reads a
+    // capacity-1 backfill channel, after live work. "No model" is just an
+    // empty handle: the sink gates on it, so every enqueue short-circuits to
+    // `Disabled` without touching the live channel, identical to the old
+    // `NoopTranscriptionSink` (design §3.4). Spawning the loop even with no
+    // engine is what lets a mid-session `SetWhisperModel` start transcribing
+    // without a restart — there is no loop to create later. The live channel
+    // is bounded (64), matching the audio bridge: drop-on-full.
     let (transcription_tx, transcription_rx) = tokio::sync::mpsc::channel(64);
+    let (backfill_tx, backfill_rx) = tokio::sync::mpsc::channel(1);
     let transcription_sink: Arc<dyn pipeline::sinks::TranscriptionSink> =
         Arc::new(pipeline::sinks::TokioTranscriptionSink {
             tx: transcription_tx,
@@ -590,7 +592,16 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
         Arc::clone(&engine_handle),
         Arc::clone(&storage),
         transcription_rx,
+        backfill_rx,
         Arc::clone(&stop_transcription),
+    ));
+    // Stops on the shared token; see "Graceful Multi-Stage Shutdown" in
+    // docs/use-cases/pipeline.md for why it is joined before the drain.
+    let backfill_handle = tokio::spawn(pipeline::backfill::backfill_loop(
+        Arc::clone(&engine_handle),
+        Arc::clone(&storage),
+        backfill_tx,
+        cancel.clone(),
     ));
     let audio_store_handle = tokio::spawn(pipeline::audio_store_loop(
         audio_storage,
@@ -993,6 +1004,13 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
         log::error!("Audio store task failed: {e}");
     }
 
+    // `cancel.cancel()` above already told it to stop. Joined before the drain
+    // so no backfill job is sent while the queue empties.
+    if let Err(e) = backfill_handle.await {
+        shutdown_failed = true;
+        log::error!("Backfill task failed: {e}");
+    }
+
     // Transcription drains LAST, and that ordering is load-bearing.
     // `audio_pipeline.stop()` above flushed the session's final partial segments
     // and `audio_store_handle` just persisted and enqueued them, so the queue is
@@ -1012,7 +1030,8 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
         // never the sole consumer of, and is less so now that the provision
         // wait above can add up to 5s. The unbounded steps between them
         // (`ipc_server.shutdown`, `supervisor.shutdown`, the bridge join, the
-        // audio-store await) are the ones with no ceiling. Neither is this one.
+        // audio-store await, the backfill join) are the ones with no ceiling.
+        // Neither is this one.
         // The three graces differ in what expiry does. The provision wait
         // aborts its task, though not a `spawn_blocking` load already running.
         // This one raises `stop_transcription`, so the loop abandons whatever

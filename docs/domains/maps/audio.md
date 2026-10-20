@@ -49,8 +49,8 @@
 ## Why transcription Is Not A Dependent
 
 `transcription` is deliberately absent from `## Depended On By`. Its only
-`chronicle_audio` use is `OggOpusEncoder`, at four sites — `lib.rs:912`, `:946`,
-`:981`, `:1209` — all inside the `#[cfg(test)] mod tests` that opens at `:535`,
+`chronicle_audio` use is `OggOpusEncoder`, at four sites — `lib.rs:897`, `:931`,
+`:966`, `:1195` — all inside the `#[cfg(test)] mod tests` that opens at `:531`,
 and `chronicle-audio` is declared in its `[dev-dependencies]`. It does not depend
 on this domain in production, even though `OggOpusEncoder` is now owned here. The
 two are joined by the file format rather than by an import — see

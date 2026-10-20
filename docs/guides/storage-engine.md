@@ -57,13 +57,15 @@ chronicle-daemon/crates/storage/src/
 ├── schema.rs          Connection PRAGMAs, migration runner (user_version-based)
 ├── files.rs           Date-bucketed path generation, directory creation
 ├── screenshots.rs     Insert, get, get_timeline, update_ocr_text
-├── audio.rs           Insert, get, update_transcript
+├── audio.rs           Insert, get, transcript writes, pending-transcription queries
 ├── search.rs          Unified FTS5 search across screenshots and audio
 ├── media.rs           Path allocation, canonicalization, recursive walk, delete
 ├── retention.rs       Batch cleanup, orphan file sweep
 └── migrations/
     ├── 001_initial_schema.sql
-    └── 002_path_indexes.sql
+    ├── 002_path_indexes.sql
+    ├── 003_null_marker_transcripts.sql
+    └── 004_transcribe_attempts.sql
 ```
 
 `lib.rs` is the public API surface. Every public method is `async` and uses
@@ -116,11 +118,12 @@ ellipsis for context trimming.
 Say you want to add `browser_url` to screenshots.
 
 1. **Create a new migration file.** Add
-   `migrations/003_add_browser_url.sql` with the `ALTER TABLE` statement. Do not
+   `migrations/NNN_add_browser_url.sql` with the `ALTER TABLE` statement. Do not
    modify a migration that already shipped — existing databases have run it.
-   Number it after the highest existing file; `002_path_indexes.sql` is taken.
+   For `NNN`, use the next number after the highest file already in
+   `migrations/`.
 2. **Register the migration.** In `schema.rs`, append the new file to the
-   `MIGRATIONS` array: `include_str!("migrations/003_add_browser_url.sql")`.
+   `MIGRATIONS` array: `include_str!("migrations/NNN_add_browser_url.sql")`.
    Order matters — the runner uses the array index plus one as the version
    number and tracks progress in `PRAGMA user_version`, so append, never insert.
    It will run the new one automatically on next open, inside a transaction with

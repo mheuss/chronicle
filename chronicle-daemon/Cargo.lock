@@ -294,6 +294,7 @@ dependencies = [
  "objc2-foundation",
  "opus",
  "reqwest",
+ "rusqlite",
  "serde_json",
  "sha1",
  "tempfile",

@@ -29,6 +29,7 @@
 - chronicle-daemon/src/instance_lock.rs
 - chronicle-daemon/src/main.rs
 - chronicle-daemon/src/pipeline.rs
+- chronicle-daemon/src/pipeline/backfill.rs
 - chronicle-daemon/src/pipeline/counters.rs
 - chronicle-daemon/src/pipeline/metadata.rs
 - chronicle-daemon/src/pipeline/sinks.rs

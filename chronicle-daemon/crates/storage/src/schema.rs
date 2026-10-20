@@ -6,6 +6,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/001_initial_schema.sql"),
     include_str!("migrations/002_path_indexes.sql"),
     include_str!("migrations/003_null_marker_transcripts.sql"),
+    include_str!("migrations/004_transcribe_attempts.sql"),
 ];
 
 /// Configure connection-level PRAGMAs. Call on every new connection.
@@ -41,16 +42,15 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             // The migration and its version stamp must land together. As two
             // separate autocommit statements, a crash between them leaves the
             // schema at version N stamped N-1, and the replay re-runs the whole
-            // migration. That is harmless today, but by two different
-            // mechanisms: 001 and 002 are entirely `IF NOT EXISTS` /
+            // migration. For 001-003 that is harmless. Two different mechanisms
+            // make it so: 001 and 002 are entirely `IF NOT EXISTS` /
             // `INSERT OR IGNORE`, while 003 is a data UPDATE that cannot
             // re-touch a row it already cleared — every clause of its WHERE
             // propagates NULL, so a cleared (NULL) transcript makes the whole
             // predicate NULL (asserted by
-            // `migration_003_nulls_marker_transcripts_only`).
-            // Do not assume `IF NOT EXISTS` is the only pattern in play — the
-            // next migration need not be idempotent at all, and
-            // `ALTER TABLE ADD COLUMN` has no idempotent form.
+            // `migration_003_nulls_marker_transcripts_only`). 004 is an
+            // `ALTER TABLE ADD COLUMN`, which has no idempotent form and fails
+            // on replay, so this transaction is the only thing protecting it.
             //
             // Announce before running. 003 is the first migration that mutates
             // existing user data rather than only shaping the schema, and it
@@ -149,7 +149,8 @@ mod tests {
     use rusqlite::Connection;
 
     /// Migration 003 clears whisper's own markers from persisted transcripts.
-    /// Stops at version 2 first, so `migrate` below runs only 003.
+    /// Stops at version 2 first, so `migrate` below runs 003 and every later
+    /// migration. Only 003 touches transcripts.
     ///
     /// The fixture is built so that removing any single element of the
     /// predicate changes the outcome. The principle: when two clauses can each
@@ -572,6 +573,51 @@ mod tests {
         assert_eq!(
             retention, "30",
             "migration 002 must not disturb seeded config"
+        );
+    }
+
+    #[test]
+    fn migration_004_adds_transcribe_attempts_at_zero() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_connection(&conn).unwrap();
+        for migration in &MIGRATIONS[..3] {
+            conn.execute_batch(migration).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 3u32).unwrap();
+        conn.execute(
+            "INSERT INTO audio_segments (start_timestamp, end_timestamp, source, audio_path)
+             VALUES (1, 2, 'mic', '/tmp/x.opus')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let attempts: i64 = conn
+            .query_row("SELECT transcribe_attempts FROM audio_segments", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(attempts, 0, "existing rows start with no attempts");
+        let not_null: i64 = conn
+            .query_row(
+                "SELECT \"notnull\" FROM pragma_table_info('audio_segments')
+                 WHERE name = 'transcribe_attempts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            not_null, 1,
+            "a NULL count would fall out of the pending predicate"
+        );
+        let version: u32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.len() as u32);
+        assert!(
+            conn.execute_batch(MIGRATIONS[3]).is_err(),
+            "004 fails on replay, so only migrate's transaction protects it"
         );
     }
 
