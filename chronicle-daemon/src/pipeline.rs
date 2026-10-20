@@ -187,17 +187,6 @@ fn warn_abandoned_queue(abandoned: usize) {
     );
 }
 
-/// Count a failed attempt against `row_id`, logging rather than propagating a
-/// write error so the loop keeps going.
-async fn record_failure(storage: &Storage, row_id: i64, audio_path: &std::path::Path) {
-    if let Err(e) = storage
-        .record_transcription_failure(row_id, audio_path)
-        .await
-    {
-        log::error!("failed to record transcription failure for segment {row_id}: {e}");
-    }
-}
-
 /// Decode, transcribe and write one segment with `engine`.
 async fn process_job(
     engine: Arc<dyn chronicle_transcription::Transcriber>,
@@ -207,6 +196,16 @@ async fn process_job(
 ) -> crate::pipeline::sinks::BackfillOutcome {
     use crate::pipeline::backfill::MAX_TRANSCRIBE_ATTEMPTS;
     use crate::pipeline::sinks::BackfillOutcome;
+
+    // Counted before decode and whisper run, not after they fail: a call that
+    // kills the process never returns, and the row would otherwise be retried
+    // on every start. A successful write then stamps the row anyway.
+    if let Err(e) = storage
+        .record_transcription_attempt(row_id, &audio_path)
+        .await
+    {
+        log::error!("failed to record transcription attempt for segment {row_id}: {e}");
+    }
 
     // Clone a separate Arc for the blocking closure; `engine` stays owned so
     // `engine.variant()` is usable after the await.
@@ -292,7 +291,6 @@ async fn process_job(
         }
         Ok(Err(e)) => {
             log::warn!("transcription failed for segment {row_id}: {e}");
-            record_failure(storage, row_id, &audio_path).await;
             if matches!(e, chronicle_transcription::TranscriptionError::Decode(_)) {
                 BackfillOutcome::DecodeFailed
             } else {
@@ -304,7 +302,6 @@ async fn process_job(
         // `transcribe_loop` means a cancellation is never observed here.
         Err(e) => {
             log::error!("transcription task failed for segment {row_id}: {e}");
-            record_failure(storage, row_id, &audio_path).await;
             BackfillOutcome::EngineFailed
         }
     }
@@ -356,11 +353,12 @@ async fn run_backfill(
 /// was never transcribed (CHR-38). It is deliberately not skipped; see the
 /// comment on the empty branch in `process_job`.
 ///
-/// A failed attempt (decode error, engine error, or panic) increments the
-/// row's `transcribe_attempts` and leaves `whisper_model` NULL, so the row
-/// stays pending until it reaches `MAX_TRANSCRIBE_ATTEMPTS` (CHR-15). Each job
-/// is first checked with `Storage::needs_transcription`, so a row already
-/// stamped or at the cap is skipped without an attempt.
+/// Every job that runs increments the row's `transcribe_attempts` before decode
+/// and whisper start. A failure (decode error, engine error, or panic) leaves
+/// `whisper_model` NULL, so the row stays pending until it reaches
+/// `MAX_TRANSCRIBE_ATTEMPTS` (CHR-15). Each job is first checked with
+/// `Storage::needs_transcription`, so a row already stamped or at the cap is
+/// skipped without an attempt.
 ///
 /// **Shutdown contract — this loop must outlive `audio_store_loop`.** It exits
 /// when the channel closes (every `TranscriptionSink` clone dropped) or when
@@ -1989,12 +1987,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transcribe_loop_records_attempt_before_the_engine_runs() {
+        let (storage, row_id, opus_path, _dir) = persist_segment_with_opus().await;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let engine = Arc::new(ScriptedTranscriber {
+            script: Script::Text("words"),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            signals: std::sync::Mutex::new(Vec::new()),
+            gate: Some(TranscribeGate {
+                entered: std::sync::Mutex::new(Some(entered_tx)),
+                release: std::sync::Mutex::new(Some(release_rx)),
+            }),
+        });
+        let (tx, rx) = mpsc::channel(4);
+        tx.send(crate::pipeline::sinks::TranscriptionJob {
+            row_id,
+            audio_path: opus_path,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        let loop_handle = tokio::spawn(transcribe_loop(
+            handle_with_scripted(&engine),
+            storage.clone(),
+            rx,
+            no_backfill(),
+            never_stop(),
+        ));
+
+        // A call that kills the process never returns, so the attempt must
+        // already be on the row while the engine runs.
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered_rx)
+            .await
+            .expect("timed out waiting for the job to enter transcribe")
+            .expect("job never entered transcribe");
+        assert_eq!(attempts(&storage, row_id).await, 1);
+        release_tx.send(()).unwrap();
+        loop_handle.await.unwrap();
+
+        let seg = storage.get_audio_segment(row_id).await.unwrap();
+        assert_eq!(seg.transcript.as_deref(), Some("words"));
+    }
+
+    #[tokio::test]
     async fn transcribe_loop_skips_live_job_for_capped_row() {
         use crate::pipeline::backfill::MAX_TRANSCRIBE_ATTEMPTS;
         let (storage, row_id, opus_path, _dir) = persist_segment_with_opus().await;
         for _ in 0..MAX_TRANSCRIBE_ATTEMPTS {
             storage
-                .record_transcription_failure(row_id, &opus_path)
+                .record_transcription_attempt(row_id, &opus_path)
                 .await
                 .unwrap();
         }

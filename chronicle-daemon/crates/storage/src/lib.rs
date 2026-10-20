@@ -352,22 +352,22 @@ impl Storage {
         .await?
     }
 
-    /// Count one failed transcription attempt against the row at `id`
+    /// Count one transcription attempt against the row at `id`
     /// holding `audio_path`. A row that no longer exists, or now holds a
     /// different recording, is not an error and is left alone.
-    pub async fn record_transcription_failure(&self, id: i64, audio_path: &Path) -> Result<()> {
+    pub async fn record_transcription_attempt(&self, id: i64, audio_path: &Path) -> Result<()> {
         let pool = self.pool.clone();
         let audio_path = audio_path.to_path_buf();
         tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
-            audio::record_transcription_failure(&conn, id, &audio_path)
+            audio::record_transcription_attempt(&conn, id, &audio_path)
         })
         .await?
     }
 
     /// Up to `limit` rows still owed a transcription attempt, in id order,
     /// after `after_id`. A row is pending while `whisper_model` and
-    /// `transcript` are NULL and it has fewer than `max_attempts` failures.
+    /// `transcript` are NULL and it has fewer than `max_attempts` attempts.
     pub async fn pending_transcriptions(
         &self,
         after_id: i64,

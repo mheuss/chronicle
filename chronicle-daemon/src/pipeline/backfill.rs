@@ -2,7 +2,7 @@
 //!
 //! A row is pending while `Storage::pending_transcriptions` returns it: no
 //! `whisper_model`, no transcript, and fewer than `MAX_TRANSCRIBE_ATTEMPTS`
-//! failed attempts. That predicate is the checkpoint, so a restart resumes
+//! attempts. That predicate is the checkpoint, so a restart resumes
 //! with nothing extra stored.
 
 use std::sync::Arc;
@@ -15,8 +15,8 @@ use tokio::sync::{mpsc, oneshot};
 use crate::pipeline::sinks::{BackfillJob, BackfillOutcome};
 use crate::provisioning::EngineHandle;
 
-/// Recorded failed attempts after which a row is given up on. Live and backfill
-/// jobs both check it before running a row.
+/// Attempts after which an unstamped row is given up on. Live and backfill jobs
+/// both check it before running a row.
 pub const MAX_TRANSCRIBE_ATTEMPTS: u32 = 3;
 /// How often to look for a loaded model while none is loaded.
 pub const IDLE_POLL: Duration = Duration::from_secs(30);

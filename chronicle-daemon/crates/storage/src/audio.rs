@@ -102,7 +102,7 @@ pub(crate) fn update_transcript_full(
 /// under the cap. `?2` is the cap in every query that uses it.
 const PENDING: &str = "whisper_model IS NULL AND transcript IS NULL AND transcribe_attempts < ?2";
 
-pub(crate) fn record_transcription_failure(
+pub(crate) fn record_transcription_attempt(
     conn: &Connection,
     id: i64,
     audio_path: &Path,
@@ -433,13 +433,13 @@ mod tests {
     }
 
     #[test]
-    fn record_transcription_failure_counts_up_and_ignores_missing_rows() {
+    fn record_transcription_attempt_counts_up_and_ignores_missing_rows() {
         let conn = setup_db();
         let id = insert_shaped(&conn, "/a.opus", None, None);
-        record_transcription_failure(&conn, id, Path::new("/a.opus")).unwrap();
-        record_transcription_failure(&conn, id, Path::new("/a.opus")).unwrap();
+        record_transcription_attempt(&conn, id, Path::new("/a.opus")).unwrap();
+        record_transcription_attempt(&conn, id, Path::new("/a.opus")).unwrap();
         assert_eq!(attempts(&conn, id), 2);
-        record_transcription_failure(&conn, id + 1_000, Path::new("/a.opus")).unwrap();
+        record_transcription_attempt(&conn, id + 1_000, Path::new("/a.opus")).unwrap();
     }
 
     /// Replace the row at `id` with a different recording at `new_path`, as
@@ -466,7 +466,7 @@ mod tests {
             update_transcript_full(&conn, id, old, Some("stale"), "base", None).is_err(),
             "the old recording's row is gone"
         );
-        record_transcription_failure(&conn, id, old).unwrap();
+        record_transcription_attempt(&conn, id, old).unwrap();
         assert!(!needs_transcription(&conn, id, old, 3).unwrap());
 
         let row = get(&conn, id).unwrap();
@@ -484,7 +484,7 @@ mod tests {
         let unstamped_text = insert_shaped(&conn, "/text.opus", Some("hello"), None);
         let capped = insert_shaped(&conn, "/capped.opus", None, None);
         for _ in 0..3 {
-            record_transcription_failure(&conn, capped, Path::new("/capped.opus")).unwrap();
+            record_transcription_attempt(&conn, capped, Path::new("/capped.opus")).unwrap();
         }
         let last = insert_shaped(&conn, "/last.opus", None, None);
 
