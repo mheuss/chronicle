@@ -349,8 +349,8 @@ async fn run_backfill(
 ///
 /// Heavy work (Opus decode + whisper) runs inside `spawn_blocking` so it never
 /// starves tokio workers (cf. CHR-66). Each pulled job is processed to
-/// completion before the next `recv`, so at most one whisper call is in flight
-/// (sequential). An empty result is **recorded as an attempt** — `whisper_model`
+/// completion before the next job is taken, so at most one whisper call is in
+/// flight (sequential). An empty result is **recorded as an attempt** — `whisper_model`
 /// set, `transcript` and `language` NULL — so blank text still never reaches
 /// `audio_fts` while the row stays distinguishable from one that was never
 /// transcribed (CHR-38). It is deliberately not skipped; see the comment on the

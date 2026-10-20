@@ -15,8 +15,8 @@ use tokio::sync::{mpsc, oneshot};
 use crate::pipeline::sinks::{BackfillJob, BackfillOutcome};
 use crate::provisioning::EngineHandle;
 
-/// Attempts after which a row is given up on. Shared by every path that
-/// transcribes, so a row is tried at most this many times in total.
+/// Recorded failed attempts after which a row is given up on. Live and backfill
+/// jobs both check it before running a row.
 pub const MAX_TRANSCRIBE_ATTEMPTS: u32 = 3;
 /// How often to look for a loaded model while none is loaded.
 pub const IDLE_POLL: Duration = Duration::from_secs(30);
