@@ -28,8 +28,7 @@ const BATCH: u32 = 32;
 
 /// How a pass ended.
 enum PassEnd {
-    /// Out of rows, stopped at an engine failure, the model unloaded, or the
-    /// query failed.
+    /// Out of rows, stopped at an engine failure, or the query failed.
     Done,
     /// Cancelled, or the worker is gone.
     Stopped,
@@ -47,7 +46,7 @@ pub async fn backfill_loop(
         // The pass decides the wait, so a model that loads between two checks
         // still gets `IDLE_POLL`, not a full `PASS_INTERVAL`.
         let wait = if engine.is_loaded() {
-            match run_pass(&engine, &storage, &tx, &cancel).await {
+            match run_pass(&storage, &tx, &cancel).await {
                 PassEnd::Stopped => break,
                 PassEnd::Done => PASS_INTERVAL,
             }
@@ -65,13 +64,13 @@ pub async fn backfill_loop(
 
 /// One walk over the pending rows in id order. Each row is sent at most once.
 async fn run_pass(
-    engine: &EngineHandle,
     storage: &Storage,
     tx: &mpsc::Sender<BackfillJob>,
     cancel: &CancellationToken,
 ) -> PassEnd {
     let mut cursor = 0;
     let mut sent = 0usize;
+    let mut skipped = 0usize;
     let end = 'pass: loop {
         // Cancel-aware: the query waits on the connection pool. A dropped
         // query finishes on its blocking thread and changes nothing.
@@ -92,9 +91,6 @@ async fn run_pass(
         }
         for row in rows {
             cursor = row.id;
-            if !engine.is_loaded() {
-                break 'pass PassEnd::Done;
-            }
             let (reply_tx, reply_rx) = oneshot::channel();
             let job = BackfillJob {
                 row_id: row.id,
@@ -125,12 +121,13 @@ async fn run_pass(
                     );
                     break 'pass PassEnd::Done;
                 }
+                Some(BackfillOutcome::Skipped) => skipped += 1,
                 Some(_) => {}
             }
         }
     };
     if sent > 0 {
-        log::info!("backfill pass sent {sent} segment(s)");
+        log::info!("backfill pass sent {sent} segment(s), {skipped} skipped");
     }
     end
 }

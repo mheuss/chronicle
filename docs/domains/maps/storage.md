@@ -62,7 +62,7 @@
 | Document | Said | Verdict |
 |---|---|---|
 | `docs/guides/storage-engine.md:73` | "The inner modules (`screenshots`, `audio`, `search`, `retention`, `files`, `schema`) are all `pub(crate)` — callers only interact through the `Storage` struct" | accurate — verified against `lib.rs:14-24`, and against all seven importers |
-| `docs/guides/storage-engine.md:64-68` | Its `migrations/` listing shows `001_initial_schema.sql` and `002_path_indexes.sql` | accurate (was stale: the CHR-38 omission of `003_null_marker_transcripts.sql`, which is 123 lines and embedded at `schema.rs:8`). CHR-15 added `004_transcribe_attempts.sql` and listed 001 to 004 |
+| `docs/guides/storage-engine.md:64-68` | Its `migrations/` listing shows `001_initial_schema.sql` through `004_transcribe_attempts.sql` | accurate (was stale: the CHR-38 omission of `003_null_marker_transcripts.sql`, which is 123 lines and embedded at `schema.rs:8`). CHR-15 added `004_transcribe_attempts.sql` and listed 001 to 004 |
 | `docs/guides/storage-engine.md:144-145` | "Retention cleanup and orphan sweeping are two independent operations in `retention.rs`, with different callers. They are not two phases of one pass." | accurate |
 | `docs/use-cases/storage.md` | Eight solutions, located in `migrations/001`, `schema.rs`, `media.rs`, `search.rs`, and `lib.rs` | accurate — including its `search.rs` entry, which the sitting-10 merge confirmed belongs here |
 | `docs/use-cases/INDEX.md:9` | Code Location `chronicle-daemon/crates/storage/` | accurate — the whole crate, which after the sitting-10 merge is what this domain owns. The column is superseded regardless; see CHR-151 |

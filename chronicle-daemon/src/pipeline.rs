@@ -2209,6 +2209,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_backfill_starts_nothing_once_cancel_has_fired() {
+        use crate::pipeline::sinks::BackfillOutcome;
+        // The worker checks the token before calling `run_backfill`, but
+        // cancel can fire during its pending check. This calls it directly
+        // with a fired token to pin the second check.
+        let (storage, row_id, opus_path, _dir) = persist_segment_with_opus().await;
+        let engine = ScriptedTranscriber::new(Script::Text("x"));
+        let handle = handle_with_scripted(&engine);
+        let fired = chronicle_ipc::CancellationToken::new();
+        fired.cancel();
+
+        let outcome = run_backfill(&handle, &storage, &fired, row_id, opus_path).await;
+
+        assert_eq!(outcome, BackfillOutcome::Skipped);
+        assert_eq!(engine.calls(), 0);
+        assert_eq!(attempts(&storage, row_id).await, 0);
+    }
+
+    #[tokio::test]
     async fn transcribe_loop_runs_waiting_live_job_before_backfill() {
         use crate::pipeline::sinks::{BackfillJob, BackfillOutcome, TranscriptionJob};
         // Tone for the live jobs, silence for the backfill job, so the
@@ -2744,7 +2763,11 @@ mod tests {
             crate::pipeline::counters::PipelineCounters::new(),
         )
         .await;
-        let row_id = 1;
+        let row_id = storage
+            .pending_transcriptions(0, backfill::MAX_TRANSCRIBE_ATTEMPTS, 1)
+            .await
+            .unwrap()[0]
+            .id;
 
         // Offset by one second so neither check shares an instant with a
         // poll, which would make the order of the two timers a tie.
@@ -2924,12 +2947,21 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn backfill_pages_past_one_batch() {
-        // One more row than `BATCH`, so the pass must query a second page.
-        let (storage, first, opus_path, _dir) = persist_segment_with_opus().await;
-        let mut last = first;
+        // `BATCH` corrupt rows, then one good row. The corrupt rows stay
+        // pending, so the second page is only reached if the cursor moves
+        // past them.
+        let (storage, fixture_row, opus_path, dir) = persist_segment_with_opus().await;
+        storage
+            .update_transcript_full(fixture_row, &opus_path, None, "base".into(), None)
+            .await
+            .unwrap();
+        let corrupt_path = dir.path().join("corrupt.opus");
+        std::fs::write(&corrupt_path, b"not an ogg stream").unwrap();
+        let mut corrupt = Vec::new();
         for _ in 0..32 {
-            last = insert_pending_row(&storage, &opus_path).await;
+            corrupt.push(insert_pending_row(&storage, &corrupt_path).await);
         }
+        let last = insert_pending_row(&storage, &opus_path).await;
         let engine = ScriptedTranscriber::new(Script::Text("paged"));
         let start = tokio::time::Instant::now();
         let worker = start_worker(handle_with_scripted(&engine), Arc::clone(&storage));
@@ -2951,7 +2983,10 @@ mod tests {
             "all 33 rows ran in the first pass"
         );
         worker.stop().await;
-        assert_eq!(engine.calls(), 33, "each row ran exactly once");
+        for row in corrupt {
+            assert_eq!(attempts(&storage, row).await, 1, "row {row} ran once");
+        }
+        assert_eq!(engine.calls(), 1, "only the good row reached the engine");
     }
 
     #[tokio::test(start_paused = true)]

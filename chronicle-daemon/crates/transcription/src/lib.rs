@@ -454,9 +454,9 @@ impl TranscriptionEngine {
 impl Transcriber for TranscriptionEngine {
     fn transcribe(&self, pcm_16k_mono: &[f32]) -> Result<Transcript, TranscriptionError> {
         // Guard before the slot, not inside it. Whisper rejects a too-short
-        // buffer before it does any GPU work, so letting that call reach
-        // `StateSlot::with` would discard a state that never ran, and the next
-        // segment would pay a full backend rebuild for nothing.
+        // buffer before it does any GPU work. Inside `StateSlot::with` that
+        // rejection is an `Err`, which discards a state that never ran, and the
+        // next segment would pay a full backend rebuild for nothing.
         //
         // Nothing the daemon writes lands in that band today: the Opus encoder
         // pads to whole frames, so the shortest decodable segment is 216
@@ -1111,8 +1111,11 @@ mod tests {
         // 1) Cold: the short-PCM guard must answer before the slot is ever
         // populated, or a too-short first segment pays a full backend build.
         assert_eq!(
-            engine.transcribe(&[0.0; 1]).unwrap().text,
-            "",
+            engine.transcribe(&[0.0; 1]).unwrap(),
+            Transcript {
+                text: String::new(),
+                language: None,
+            },
             "a too-short buffer is an empty answer"
         );
         assert_eq!(
@@ -1161,8 +1164,11 @@ mod tests {
         // 4) Warm: the same guard with the slot populated. Without it the `Err`
         // from `full()` reaches `StateSlot::with` and discards a healthy state.
         assert_eq!(
-            engine.transcribe(&[]).unwrap().text,
-            "",
+            engine.transcribe(&[]).unwrap(),
+            Transcript {
+                text: String::new(),
+                language: None,
+            },
             "empty PCM is an empty answer"
         );
 

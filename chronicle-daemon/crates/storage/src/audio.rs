@@ -91,8 +91,7 @@ pub(crate) fn update_transcript_full(
     )?;
     if rows_affected == 0 {
         return Err(crate::error::StorageError::Other(format!(
-            "not found: id {}",
-            id
+            "not found: id {id} with this audio_path"
         )));
     }
     Ok(())
@@ -440,6 +439,7 @@ mod tests {
         record_transcription_attempt(&conn, id, Path::new("/a.opus")).unwrap();
         assert_eq!(attempts(&conn, id), 2);
         record_transcription_attempt(&conn, id + 1_000, Path::new("/a.opus")).unwrap();
+        assert_eq!(attempts(&conn, id), 2, "a missing id changes no other row");
     }
 
     /// Replace the row at `id` with a different recording at `new_path`, as

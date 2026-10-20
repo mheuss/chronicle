@@ -42,8 +42,8 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             // The migration and its version stamp must land together. As two
             // separate autocommit statements, a crash between them leaves the
             // schema at version N stamped N-1, and the replay re-runs the whole
-            // migration. For 001-003 that is harmless, by two different
-            // mechanisms: 001 and 002 are entirely `IF NOT EXISTS` /
+            // migration. For 001-003 that is harmless. Two different mechanisms
+            // make it so: 001 and 002 are entirely `IF NOT EXISTS` /
             // `INSERT OR IGNORE`, while 003 is a data UPDATE that cannot
             // re-touch a row it already cleared — every clause of its WHERE
             // propagates NULL, so a cleared (NULL) transcript makes the whole
@@ -149,8 +149,8 @@ mod tests {
     use rusqlite::Connection;
 
     /// Migration 003 clears whisper's own markers from persisted transcripts.
-    /// Stops at version 2 first, so `migrate` below runs 003 and then 004. Only
-    /// 003 touches transcripts.
+    /// Stops at version 2 first, so `migrate` below runs 003 and every later
+    /// migration. Only 003 touches transcripts.
     ///
     /// The fixture is built so that removing any single element of the
     /// predicate changes the outcome. The principle: when two clauses can each
@@ -599,10 +599,26 @@ mod tests {
             })
             .unwrap();
         assert_eq!(attempts, 0, "existing rows start with no attempts");
+        let not_null: i64 = conn
+            .query_row(
+                "SELECT \"notnull\" FROM pragma_table_info('audio_segments')
+                 WHERE name = 'transcribe_attempts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            not_null, 1,
+            "a NULL count would fall out of the pending predicate"
+        );
         let version: u32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, MIGRATIONS.len() as u32);
+        assert!(
+            conn.execute_batch(MIGRATIONS[3]).is_err(),
+            "004 fails on replay, so only migrate's transaction protects it"
+        );
     }
 
     #[test]

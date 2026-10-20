@@ -294,7 +294,7 @@ impl Storage {
     /// Routine work selects with [`Storage::pending_transcriptions`]:
     /// `whisper_model IS NULL AND transcript IS NULL`, under an attempt cap.
     /// `transcript IS NULL` alone is the wrong predicate — it re-queues every
-    /// silent segment forever. But note what that costs: before CHR-38 a segment that produced
+    /// silent segment forever. But note what the routine predicate costs: before CHR-38 a segment that produced
     /// no text stayed NULL and was retried on the next pass, so an engine-side
     /// regression healed itself. Now such a row is stamped with `whisper_model`
     /// and routine backfill will never revisit it. That is not hypothetical —
