@@ -187,14 +187,15 @@ fn warn_abandoned_queue(abandoned: usize) {
     );
 }
 
-/// Decode, transcribe and write one segment with `engine`.
+/// Decode, transcribe and write one segment with `engine`. A backfill job
+/// passes its token, and nothing starts once it has fired.
 async fn process_job(
     engine: Arc<dyn chronicle_transcription::Transcriber>,
     storage: &Storage,
     row_id: i64,
     audio_path: PathBuf,
+    cancel: Option<&chronicle_ipc::CancellationToken>,
 ) -> crate::pipeline::sinks::BackfillOutcome {
-    use crate::pipeline::backfill::MAX_TRANSCRIBE_ATTEMPTS;
     use crate::pipeline::sinks::BackfillOutcome;
 
     // Counted before decode and whisper run, not after they fail: a call that
@@ -205,6 +206,11 @@ async fn process_job(
         .await
     {
         log::error!("failed to record transcription attempt for segment {row_id}: {e}");
+    }
+    // The write above can wait on the database, and cancel can fire meanwhile.
+    // The row keeps that attempt, which the cap absorbs.
+    if cancel.is_some_and(|c| c.is_cancelled()) {
+        return BackfillOutcome::Skipped;
     }
 
     // Clone a separate Arc for the blocking closure; `engine` stays owned so
@@ -269,8 +275,10 @@ async fn process_job(
                 .await
             {
                 Ok(()) => outcome,
+                // No cap here: this run already counted, so on a row's last
+                // attempt the capped check would read a failed write as a skip.
                 Err(e) => match storage
-                    .needs_transcription(row_id, &audio_path, MAX_TRANSCRIBE_ATTEMPTS)
+                    .needs_transcription(row_id, &audio_path, u32::MAX)
                     .await
                 {
                     // Retention can delete the row while whisper runs, or a new
@@ -333,7 +341,7 @@ async fn run_backfill(
     {
         // Cancel can fire during the check above. Nothing starts after it.
         Ok(true) if cancel.is_cancelled() => BackfillOutcome::Skipped,
-        Ok(true) => process_job(engine, storage, row_id, audio_path).await,
+        Ok(true) => process_job(engine, storage, row_id, audio_path, Some(cancel)).await,
         Ok(false) => BackfillOutcome::Skipped,
         Err(e) => {
             log::warn!("backfill could not check segment {row_id}: {e}");
@@ -462,7 +470,7 @@ pub async fn transcribe_loop(
                 if matches!(pending, Ok(false)) {
                     log::debug!("segment {} is no longer pending; skipping", job.row_id);
                 } else {
-                    process_job(engine, &storage, job.row_id, job.audio_path).await;
+                    process_job(engine, &storage, job.row_id, job.audio_path, None).await;
                 }
             }
             Next::Backfill(job) => {
@@ -1650,7 +1658,7 @@ mod tests {
             .unwrap()
     }
 
-    /// Failed attempts on a row with no stamp and no text. `AudioSegment` does
+    /// Attempts recorded on a row with no stamp and no text. `AudioSegment` does
     /// not carry the column, so this reads it through `needs_transcription`.
     async fn attempts(storage: &Storage, row_id: i64) -> u32 {
         let path = PathBuf::from(storage.get_audio_segment(row_id).await.unwrap().audio_path);
@@ -2225,6 +2233,74 @@ mod tests {
         assert_eq!(outcome, BackfillOutcome::Skipped);
         assert_eq!(engine.calls(), 0);
         assert_eq!(attempts(&storage, row_id).await, 0);
+    }
+
+    /// A second connection to the test database at `dir`.
+    fn raw_connection(dir: &tempfile::TempDir) -> rusqlite::Connection {
+        rusqlite::Connection::open(dir.path().join("chronicle.db")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn backfill_job_reports_a_failed_write_on_the_last_attempt() {
+        use crate::pipeline::backfill::MAX_TRANSCRIBE_ATTEMPTS;
+        use crate::pipeline::sinks::BackfillOutcome;
+        let (storage, row_id, opus_path, dir) = persist_segment_with_opus().await;
+        for _ in 1..MAX_TRANSCRIBE_ATTEMPTS {
+            storage
+                .record_transcription_attempt(row_id, &opus_path)
+                .await
+                .unwrap();
+        }
+        raw_connection(&dir)
+            .execute_batch(
+                "CREATE TRIGGER fail_result BEFORE UPDATE OF transcript ON audio_segments
+                 BEGIN SELECT RAISE(ABORT, 'forced write failure'); END;",
+            )
+            .unwrap();
+        let engine = ScriptedTranscriber::new(Script::Text("words"));
+
+        let outcome = run_one_backfill(
+            handle_with_scripted(&engine),
+            storage.clone(),
+            row_id,
+            opus_path,
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            BackfillOutcome::EngineFailed,
+            "a failed write on a row that is still there is not a skip"
+        );
+        assert_eq!(engine.calls(), 1);
+        assert_eq!(attempts(&storage, row_id).await, MAX_TRANSCRIBE_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn run_backfill_starts_nothing_if_cancel_fires_during_the_attempt_write() {
+        use crate::pipeline::sinks::BackfillOutcome;
+        let (storage, row_id, opus_path, dir) = persist_segment_with_opus().await;
+        let engine = ScriptedTranscriber::new(Script::Text("x"));
+        let handle = handle_with_scripted(&engine);
+        let cancel = chronicle_ipc::CancellationToken::new();
+        // Hold the write lock so the attempt write waits on `busy_timeout`.
+        let blocker = raw_connection(&dir);
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let task = tokio::spawn({
+            let storage = Arc::clone(&storage);
+            let cancel = cancel.clone();
+            async move { run_backfill(&handle, &storage, &cancel, row_id, opus_path).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        cancel.cancel();
+        blocker.execute_batch("COMMIT").unwrap();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+            .await
+            .expect("run_backfill hung")
+            .unwrap();
+        assert_eq!(outcome, BackfillOutcome::Skipped);
+        assert_eq!(engine.calls(), 0, "nothing starts after cancel");
     }
 
     #[tokio::test]
@@ -2948,8 +3024,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn backfill_pages_past_one_batch() {
         // `BATCH` corrupt rows, then one good row. The corrupt rows stay
-        // pending, so the second page is only reached if the cursor moves
-        // past them.
+        // pending, so without the cursor advance they would re-run until
+        // capped and each would show more than one attempt.
         let (storage, fixture_row, opus_path, dir) = persist_segment_with_opus().await;
         storage
             .update_transcript_full(fixture_row, &opus_path, None, "base".into(), None)

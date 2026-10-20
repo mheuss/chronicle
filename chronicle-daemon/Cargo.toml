@@ -83,6 +83,10 @@ env_filter = "1"
 # already arrive via chronicle-ipc, but naming them here keeps our tests from
 # depending on another crate's feature choices.
 tokio = { version = "1", features = ["test-util", "net", "io-util"] }
+# A second connection to a test database, so a pipeline test can hold the
+# write lock or install a trigger that forces a write to fail. Same version and
+# features as chronicle-storage, so it adds no new build.
+rusqlite = { version = "0.39", features = ["bundled-full"] }
 # The downloader tests compute digests in-test rather than hardcoding them.
 # chronicle-transcription's sha1 is a private transitive dep, not importable.
 sha1 = "0.10"
