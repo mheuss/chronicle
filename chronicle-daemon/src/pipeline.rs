@@ -350,11 +350,11 @@ async fn run_backfill(
 /// Heavy work (Opus decode + whisper) runs inside `spawn_blocking` so it never
 /// starves tokio workers (cf. CHR-66). Each pulled job is processed to
 /// completion before the next job is taken, so at most one whisper call is in
-/// flight (sequential). An empty result is **recorded as an attempt** — `whisper_model`
-/// set, `transcript` and `language` NULL — so blank text still never reaches
-/// `audio_fts` while the row stays distinguishable from one that was never
-/// transcribed (CHR-38). It is deliberately not skipped; see the comment on the
-/// empty branch in `process_job`.
+/// flight (sequential). An empty result is **recorded as an attempt** —
+/// `whisper_model` set, `transcript` and `language` NULL — so blank text still
+/// never reaches `audio_fts` while the row stays distinguishable from one that
+/// was never transcribed (CHR-38). It is deliberately not skipped; see the
+/// comment on the empty branch in `process_job`.
 ///
 /// A failed attempt (decode error, engine error, or panic) increments the
 /// row's `transcribe_attempts` and leaves `whisper_model` NULL, so the row
@@ -2773,7 +2773,6 @@ mod tests {
         drop(tx);
         drop(storage);
 
-        // Next start: reopen the same database.
         let storage = Arc::new(
             Storage::open(StorageConfig {
                 base_dir: dir.path().to_path_buf(),

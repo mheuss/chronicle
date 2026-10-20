@@ -1030,7 +1030,8 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
         // never the sole consumer of, and is less so now that the provision
         // wait above can add up to 5s. The unbounded steps between them
         // (`ipc_server.shutdown`, `supervisor.shutdown`, the bridge join, the
-        // audio-store await, the backfill join) are the ones with no ceiling. Neither is this one.
+        // audio-store await, the backfill join) are the ones with no ceiling.
+        // Neither is this one.
         // The three graces differ in what expiry does. The provision wait
         // aborts its task, though not a `spawn_blocking` load already running.
         // This one raises `stop_transcription`, so the loop abandons whatever
