@@ -2301,6 +2301,11 @@ mod tests {
             .unwrap();
         assert_eq!(outcome, BackfillOutcome::Skipped);
         assert_eq!(engine.calls(), 0, "nothing starts after cancel");
+        assert_eq!(
+            attempts(&storage, row_id).await,
+            1,
+            "the job got past the pre-check and kept its attempt"
+        );
     }
 
     #[tokio::test]
