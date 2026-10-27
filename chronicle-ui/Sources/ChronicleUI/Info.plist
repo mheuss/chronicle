@@ -20,7 +20,5 @@
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>Chronicle records microphone audio, when you turn the mic on, so you can search what was said.</string>
-    <key>NSScreenCaptureUsageDescription</key>
-    <string>Chronicle records your screen so you can search what you saw.</string>
 </dict>
 </plist>
