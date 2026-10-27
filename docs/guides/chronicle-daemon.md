@@ -283,12 +283,16 @@ cargo build            # debug
 cargo build --release  # release
 ```
 
-The repo-root `.cargo/config.toml` carries two things the binary needs:
+The repo-root `.cargo/config.toml` carries four things the binary needs:
 
 - the `/usr/lib/swift` rpath, without which any binary touching
   ScreenCaptureKit crashes at launch with "no LC_RPATH's found"
 - `CMAKE_POLICY_VERSION_MINIMUM=3.5`, without which the vendored Opus build in
   `audiopus_sys` fails to configure under CMake 4
+- `MACOSX_DEPLOYMENT_TARGET=14.0`, so the C and C++ dependencies build for
+  macOS 14 instead of the host SDK's version
+- `CMAKE_SYSTEM_NAME=Darwin`, which turns off whisper.cpp's host-CPU tuning so
+  the binary runs on every Apple Silicon chip, M1 included
 
 Cargo finds that file by walking up from the directory it is invoked in, so it
 applies from the repo root, `chronicle-daemon/`, and anywhere below. Building

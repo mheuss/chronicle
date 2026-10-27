@@ -20,3 +20,17 @@ rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]
 # coming; CHR-55 tracks moving off it.
 [env]
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+
+# Chronicle.app runs on any Apple Silicon Mac with macOS 14 or later (CHR-75).
+# Without these, whisper.cpp builds for the host SDK's macOS version and with
+# -mcpu=native, which emits i8mm instructions an M1 cannot run.
+# whisper-rs-sys forwards only WHISPER_* and CMAKE_* variables to CMake, so
+# GGML_NATIVE cannot be set directly. A set CMAKE_SYSTEM_NAME makes CMake treat
+# the build as a cross-compile, and ggml turns GGML_NATIVE off for those.
+# Both apply to every build, so dev builds run what ships. force = true keeps
+# an exported MACOSX_DEPLOYMENT_TARGET from overriding them.
+# whisper-rs-sys does not rebuild when these change, and an existing CMake cache
+# keeps GGML_NATIVE=ON. After changing them, run `cargo clean -p whisper-rs-sys`
+# for each profile.
+MACOSX_DEPLOYMENT_TARGET = { value = "14.0", force = true }
+CMAKE_SYSTEM_NAME = { value = "Darwin", force = true }
