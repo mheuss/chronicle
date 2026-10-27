@@ -26,21 +26,45 @@ METADATA="$(cargo metadata --no-deps --format-version 1 --manifest-path "$MANIFE
 VERSION="$(/usr/bin/python3 -c 'import json, sys
 m = json.load(sys.stdin)
 print(next(p["version"] for p in m["packages"] if p["name"] == "chronicle-daemon"))' <<<"$METADATA")"
-TARGET_DIR="$(/usr/bin/python3 -c 'import json, sys
-print(json.load(sys.stdin)["target_directory"])' <<<"$METADATA")"
 BUILD="$(git rev-list --count HEAD)"
 
 echo "Building chronicle-daemon ($CONFIG)..."
+CARGO_ARGS=(--manifest-path "$MANIFEST" --message-format=json-render-diagnostics)
 if [ "$CONFIG" = "release" ]; then
-    CHRONICLE_BUILD_NUMBER="$BUILD" cargo build --release --manifest-path "$MANIFEST"
-else
-    CHRONICLE_BUILD_NUMBER="$BUILD" cargo build --manifest-path "$MANIFEST"
+    CARGO_ARGS+=(--release)
 fi
-DAEMON_BIN="$TARGET_DIR/$CONFIG/chronicle-daemon"
+CARGO_JSON="$(CHRONICLE_BUILD_NUMBER="$BUILD" cargo build "${CARGO_ARGS[@]}")"
+DAEMON_BIN="$(/usr/bin/python3 -c 'import json, sys
+for line in sys.stdin:
+    m = json.loads(line)
+    if m.get("reason") == "compiler-artifact" and m["target"]["name"] == "chronicle-daemon" and m.get("executable"):
+        print(m["executable"])' <<<"$CARGO_JSON")"
+NATIVE_LIB_DIRS="$(/usr/bin/python3 -c 'import json, sys
+for line in sys.stdin:
+    m = json.loads(line)
+    if m.get("reason") == "build-script-executed" and m["package_id"].split("#")[-1].split("@")[0] in ("whisper-rs-sys", "audiopus_sys"):
+        print(m["out_dir"] + "/lib")' <<<"$CARGO_JSON")"
+
+# The linker stamps the binary with its own minos, whatever the linked
+# objects were built for, so a stale CMake build only shows up here.
+if [ "$(wc -l <<<"$NATIVE_LIB_DIRS")" -ne 2 ]; then
+    echo "Expected the whisper-rs-sys and audiopus_sys build dirs, got: $NATIVE_LIB_DIRS" >&2
+    exit 1
+fi
+while read -r dir; do
+    for lib in "$dir"/*.a; do
+        load_cmds="$(otool -l "$lib")"
+        bad="$(grep -A3 LC_BUILD_VERSION <<<"$load_cmds" | grep minos | grep -v 'minos 14.0$' || true)"
+        if [ -n "$bad" ]; then
+            echo "$lib has objects built for another macOS; clear the stale native builds as .cargo/config.toml describes" >&2
+            exit 1
+        fi
+    done
+done <<<"$NATIVE_LIB_DIRS"
 
 echo "Building ChronicleUI ($CONFIG)..."
 UI_BIN="$(cd chronicle-ui && swift build -c "$CONFIG" --show-bin-path)/ChronicleUI"
-# SwiftPM does not relink when only the -sectcreate Info.plist changes.
+# SwiftPM doesn't always relink when only the -sectcreate Info.plist changes.
 rm -f "$UI_BIN"
 (cd chronicle-ui && swift build -c "$CONFIG")
 
@@ -61,9 +85,18 @@ for bin in "$DAEMON_BIN" "$UI_BIN"; do
     fi
 done
 
-smmla="$(otool -tv "$DAEMON_BIN" | grep -c smmla || true)"
+disasm="$(otool -tv "$DAEMON_BIN")"
+smmla="$(grep -c smmla <<<"$disasm" || true)"
 if [ "$smmla" != "0" ]; then
     echo "$DAEMON_BIN has $smmla i8mm instructions; clear the stale native builds as .cargo/config.toml describes" >&2
+    exit 1
+fi
+
+daemon_mic="$(launchctl plist __TEXT,__info_plist "$DAEMON_BIN" | /usr/bin/python3 -c 'import re, sys
+print(re.search(r"\"NSMicrophoneUsageDescription\" = \"(.*)\";", sys.stdin.read()).group(1))')"
+ui_mic="$(/usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' chronicle-ui/Sources/ChronicleUI/Info.plist)"
+if [ "$daemon_mic" != "$ui_mic" ]; then
+    echo "NSMicrophoneUsageDescription differs between chronicle-daemon/build.rs and the UI Info.plist" >&2
     exit 1
 fi
 
