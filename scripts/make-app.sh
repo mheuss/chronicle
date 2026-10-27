@@ -63,7 +63,7 @@ done
 
 smmla="$(otool -tv "$DAEMON_BIN" | grep -c smmla || true)"
 if [ "$smmla" != "0" ]; then
-    echo "$DAEMON_BIN has $smmla i8mm instructions; run cargo clean -p whisper-rs-sys" >&2
+    echo "$DAEMON_BIN has $smmla i8mm instructions; clear the stale native builds as .cargo/config.toml describes" >&2
     exit 1
 fi
 
