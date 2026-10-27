@@ -47,8 +47,9 @@ for line in sys.stdin:
     crate = re.search(r"[#/](whisper-rs-sys|audiopus_sys)(?:[@#]|$)", m["package_id"])
     if not crate:
         continue
-    if not any(p.split("=")[-1].startswith(m["out_dir"]) for p in m["linked_paths"]):
-        sys.exit(crate.group(1) + " linked a library from outside its own build; expected the vendored CMake build")
+    out = m["out_dir"]
+    if not any((d := p.split("=")[-1]) == out or d.startswith(out + "/") for p in m["linked_paths"]):
+        sys.exit(crate.group(1) + " linked a library from outside its own build. For audiopus_sys, set OPUS_NO_PKG_CONFIG=1, unset LIBOPUS_LIB_DIR and OPUS_LIB_DIR, then run cargo clean -p audiopus_sys")
     print(m["out_dir"] + "/lib")' <<<"$CARGO_JSON")"
 
 # The linker sets the binary's minos itself. A stale CMake build only shows in the .a files.

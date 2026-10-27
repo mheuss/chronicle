@@ -78,8 +78,8 @@ nine keys are `CFBundle*` identity. `LSMinimumSystemVersion` is a deployment
 floor. `NSHighResolutionCapable` is a rendering capability.
 `NSMicrophoneUsageDescription` is the purpose string macOS shows when the
 microphone is first used. `LSUIElement` is the one that decides what kind of
-app this is — a menu bar agent with no Dock icon. `scripts/make-app.sh` copies this file
-into `Chronicle.app` and stamps the version keys into that copy.
+app this is — a menu bar agent with no Dock icon. `scripts/make-app.sh` copies
+this file into `Chronicle.app` and stamps the version keys into that copy.
 
 ## Offshoots Filed
 
