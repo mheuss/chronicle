@@ -56,3 +56,6 @@ chronicle-daemon/docs/
 
 # Recorded audio never lands in git.
 *.wav
+
+# Bundle output (scripts/make-app.sh)
+dist/
