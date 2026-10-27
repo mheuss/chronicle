@@ -289,8 +289,8 @@ The repo-root `.cargo/config.toml` carries four things the binary needs:
   ScreenCaptureKit crashes at launch with "no LC_RPATH's found"
 - `CMAKE_POLICY_VERSION_MINIMUM=3.5`, without which the vendored Opus build in
   `audiopus_sys` fails to configure under CMake 4
-- `MACOSX_DEPLOYMENT_TARGET=14.0`, so the C and C++ dependencies build for
-  macOS 14 instead of the host SDK's version
+- `MACOSX_DEPLOYMENT_TARGET=14.0`, so the binary and its C and C++ dependencies
+  target macOS 14 instead of the host SDK's version
 - `CMAKE_SYSTEM_NAME=Darwin`, which turns off whisper.cpp's host-CPU tuning so
   the binary runs on every Apple Silicon chip, M1 included
 
