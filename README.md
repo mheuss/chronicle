@@ -14,7 +14,7 @@ Chronicle uses a two-process design:
 - **chronicle-daemon** (Rust): Background service that handles screen capture,
   OCR, audio capture, storage, and IPC. Listens on a Unix domain socket. Today
   it is started manually in development; persistent background install will
-  land alongside `.app` bundle packaging.
+  land with CHR-120.
 
 - **chronicle-ui** (Swift/SwiftUI): Menu bar app that connects to the daemon
   over IPC. Left-click for a search popover over screen history and audio

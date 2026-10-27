@@ -290,13 +290,22 @@ The repo-root `.cargo/config.toml` carries four things the binary needs:
 - `CMAKE_POLICY_VERSION_MINIMUM=3.5`, without which the vendored Opus build in
   `audiopus_sys` fails to configure under CMake 4
 - `MACOSX_DEPLOYMENT_TARGET=14.0`, so the binary and its C and C++ dependencies
-  target macOS 14 instead of the host SDK's version
+  all target macOS 14
 - `CMAKE_SYSTEM_NAME=Darwin`, which turns off whisper.cpp's host-CPU tuning so
   the binary runs on every Apple Silicon chip, M1 included
 
 Cargo finds that file by walking up from the directory it is invoked in, so it
 applies from the repo root, `chronicle-daemon/`, and anywhere below. Building
 from the root with `--manifest-path chronicle-daemon/Cargo.toml` works too.
+
+The CMake builds in `whisper-rs-sys` and `audiopus_sys` don't rerun when the
+last two settings change. A checkout that built before they existed keeps
+linking the old objects. Clear them once per profile:
+
+```bash
+cargo clean -p whisper-rs-sys -p audiopus_sys            # debug
+cargo clean -p whisper-rs-sys -p audiopus_sys --release  # release
+```
 
 ## Testing
 
