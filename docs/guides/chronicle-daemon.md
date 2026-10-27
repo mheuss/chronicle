@@ -129,7 +129,7 @@ still running. The kernel releases the lock when the process exits.
 
 **Two-process architecture:** The daemon and UI are separate
 processes. If the UI crashes, capture continues. Persistent install at login
-is deferred to packaging work (see CHR-81).
+lands with CHR-120.
 
 **Async OCR (and future transcription):** Capture and storage are the
 critical path. OCR already runs behind the main ingestion loop, and any future
