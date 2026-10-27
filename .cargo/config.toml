@@ -22,8 +22,9 @@ rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
 
 # whisper-rs-sys forwards only WHISPER_* and CMAKE_* variables to CMake. Setting
-# CMAKE_SYSTEM_NAME makes CMake treat the build as a cross-compile, which turns
-# off ggml's GGML_NATIVE (-mcpu=native) so the binary runs on an M1 (CHR-75).
+# CMAKE_SYSTEM_NAME makes CMake treat the build as a cross-compile. That turns
+# off ggml's GGML_NATIVE option, which passes -mcpu=native. The binary then
+# runs on an M1 (CHR-75).
 # The CMake-based build scripts don't rerun when these change. After changing
 # them, run `cargo clean -p whisper-rs-sys -p audiopus_sys` for each profile.
 MACOSX_DEPLOYMENT_TARGET = { value = "14.0", force = true }
