@@ -1,3 +1,4 @@
+chronicle-daemon/build.rs
 chronicle-daemon/crates/audio/src/accumulator.rs
 chronicle-daemon/crates/audio/src/device.rs
 chronicle-daemon/crates/audio/src/drops.rs
