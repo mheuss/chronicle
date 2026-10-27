@@ -39,20 +39,31 @@ for line in sys.stdin:
     m = json.loads(line)
     if m.get("reason") == "compiler-artifact" and m["target"]["name"] == "chronicle-daemon" and m.get("executable"):
         print(m["executable"])' <<<"$CARGO_JSON")"
-NATIVE_LIB_DIRS="$(/usr/bin/python3 -c 'import json, sys
+NATIVE_LIB_DIRS="$(/usr/bin/python3 -c 'import json, re, sys
 for line in sys.stdin:
     m = json.loads(line)
-    if m.get("reason") == "build-script-executed" and m["package_id"].split("#")[-1].split("@")[0] in ("whisper-rs-sys", "audiopus_sys"):
-        print(m["out_dir"] + "/lib")' <<<"$CARGO_JSON")"
+    if m.get("reason") != "build-script-executed":
+        continue
+    crate = re.search(r"[#/](whisper-rs-sys|audiopus_sys)(?:[@#]|$)", m["package_id"])
+    if not crate:
+        continue
+    if not any(p.split("=")[-1].startswith(m["out_dir"]) for p in m["linked_paths"]):
+        sys.exit(crate.group(1) + " linked a library from outside its own build; expected the vendored CMake build")
+    print(m["out_dir"] + "/lib")' <<<"$CARGO_JSON")"
 
-# The linker stamps the binary with its own minos, whatever the linked
-# objects were built for, so a stale CMake build only shows up here.
+# The linker sets the binary's minos itself. A stale CMake build only shows in the .a files.
 if [ "$(wc -l <<<"$NATIVE_LIB_DIRS")" -ne 2 ]; then
     echo "Expected the whisper-rs-sys and audiopus_sys build dirs, got: $NATIVE_LIB_DIRS" >&2
     exit 1
 fi
+shopt -s nullglob
 while read -r dir; do
-    for lib in "$dir"/*.a; do
+    libs=("$dir"/*.a)
+    if [ "${#libs[@]}" -eq 0 ]; then
+        echo "No static libraries in $dir" >&2
+        exit 1
+    fi
+    for lib in "${libs[@]}"; do
         load_cmds="$(otool -l "$lib")"
         bad="$(grep -A3 LC_BUILD_VERSION <<<"$load_cmds" | grep minos | grep -v 'minos 14.0$' || true)"
         if [ -n "$bad" ]; then
