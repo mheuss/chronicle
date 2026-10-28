@@ -5,9 +5,9 @@
 # Usage:
 #   scripts/make-app.sh           # debug build (default)
 #   scripts/make-app.sh release   # release build
-#   scripts/make-app.sh dist      # release build, then a notarized DMG
+#   scripts/make-app.sh dist      # release build from a clean tree
 #
-# Produces: dist/Chronicle.app, and for dist also dist/Chronicle-<version>.dmg
+# Produces: dist/Chronicle.app
 # One-time setup: docs/guides/signing-and-notarization.md
 
 set -euo pipefail
@@ -49,7 +49,7 @@ resolve_identity() {
 IDENTITY="$(resolve_identity)"
 
 if [ "$CONFIG" = "dist" ]; then
-    if [ -n "$(git status --porcelain)" ]; then
+    if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
         echo "dist needs a clean working tree. Commit or stash your changes first." >&2
         exit 1
     fi
