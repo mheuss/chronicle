@@ -85,8 +85,9 @@ export CHRONICLE_NOTARY_PROFILE=my-profile
 All three write `dist/Chronicle.app`. `dist` also writes
 `dist/Chronicle-<version>.dmg`.
 
-- `dist` refuses to run with uncommitted changes. The build number is the
-  commit count, so a dirty build would ship code that number doesn't name.
+- `dist` refuses to run with uncommitted changes or untracked files. The build
+  number is the commit count, so a dirty build would ship code that number
+  doesn't name.
 - Notarization usually takes a few minutes. The script waits up to 30 minutes.
 - Debug builds carry `get-task-allow`, so a debugger can attach. Release and
   dist builds don't, and the script checks that.
@@ -103,22 +104,26 @@ the code hash.
 
 The bundled daemon gets its own grants only when it runs as its own process,
 for example under launchd. A daemon you start from Terminal uses Terminal's
-grants.
+grants. Nothing in the repo starts the bundled daemon as its own process yet.
+That comes with login-item registration. Until then, these steps apply when you
+run it under launchd yourself.
 
-1. Open System Settings > Privacy & Security > Screen & System Audio Recording.
+1. Open System Settings > Privacy & Security > Screen & System Audio Recording
+   (called Screen Recording on macOS 14).
    Remove any old `chronicle-daemon` or `Chronicle` entry with the − button.
 2. The daemon checks Screen Recording at startup and exits when it's missing.
    It doesn't show a prompt. So add it by hand: click +, press Cmd-Shift-G,
    paste the full path to `Chronicle.app/Contents/MacOS/chronicle-daemon`, and
    click Open. Turn the new entry on.
-3. Start the daemon and turn the mic on from the menu bar. macOS asks whether
+3. Start the daemon as its own process and turn the mic on from the menu bar. macOS asks whether
    `chronicle-daemon` may use the microphone. Click Allow.
 
 ## Troubleshooting
 
 **The script found 0 identities, but you made a certificate.**
 `security find-identity -v` lists only valid identities. Check that the
-certificate hasn't expired and that its private key is in the same keychain. If
+certificate hasn't expired and that its private key is in the same keychain.
+Check that `CHRONICLE_SIGN_IDENTITY` is unset or names a current certificate. If
 `security find-identity -p codesigning` without `-v` shows it as
 `CSSMERR_TP_NOT_TRUSTED`, install the Developer ID G2 intermediate certificate
 from <https://www.apple.com/certificateauthority/>.
@@ -145,7 +150,7 @@ spctl --assess --type open --context context:primary-signature -v dist/Chronicle
 
 - `accepted` with `source=Notarized Developer ID` means Gatekeeper will open
   the DMG on another Mac.
-- `accepted` with `source=Developer ID` means the signature is good but no
-  ticket was found. Stapling failed or didn't run.
-- `rejected` means the signature is broken or isn't from a Developer ID
-  certificate.
+- `rejected` with `source=Unnotarized Developer ID` means the signature is
+  good but Apple has no notarization ticket for it.
+- `rejected` with any other source means the signature is broken or isn't from
+  a Developer ID certificate.
