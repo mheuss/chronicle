@@ -21,6 +21,27 @@ case "$CONFIG" in
         ;;
 esac
 
+GUIDE="docs/guides/signing-and-notarization.md"
+
+resolve_identity() {
+    local matches
+    matches="$(security find-identity -v -p codesigning | grep '"Developer ID Application: ' || true)"
+    if [ -n "${CHRONICLE_SIGN_IDENTITY:-}" ]; then
+        matches="$(grep -F -- "$CHRONICLE_SIGN_IDENTITY" <<<"$matches" || true)"
+    fi
+    local count
+    count="$(grep -c . <<<"$matches" || true)"
+    if [ "$count" -ne 1 ]; then
+        echo "Found $count matching Developer ID Application identities; expected 1." >&2
+        [ -n "$matches" ] && echo "$matches" >&2
+        echo "Set CHRONICLE_SIGN_IDENTITY, or see $GUIDE#certificate" >&2
+        exit 1
+    fi
+    awk '{print $2}' <<<"$matches"
+}
+
+IDENTITY="$(resolve_identity)"
+
 MANIFEST="chronicle-daemon/Cargo.toml"
 METADATA="$(cargo metadata --no-deps --format-version 1 --manifest-path "$MANIFEST")"
 VERSION="$(/usr/bin/python3 -c 'import json, sys
