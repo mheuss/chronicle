@@ -48,7 +48,8 @@ for line in sys.stdin:
     if not crate:
         continue
     out = m["out_dir"]
-    if not any((d := p.split("=")[-1]) == out or d.startswith(out + "/") for p in m["linked_paths"]):
+    dirs = [p.split("=")[-1] for p in m["linked_paths"]]
+    if not dirs or not all(d == out or d.startswith(out + "/") for d in dirs):
         sys.exit(crate.group(1) + " linked a library from outside its own build. For audiopus_sys, set OPUS_NO_PKG_CONFIG=1, unset LIBOPUS_LIB_DIR and OPUS_LIB_DIR, then run cargo clean -p audiopus_sys")
     print(m["out_dir"] + "/lib")' <<<"$CARGO_JSON")"
 
