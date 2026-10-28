@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 #
-# Build Chronicle.app from the daemon and UI builds.
+# Build and sign Chronicle.app from the daemon and UI builds.
 #
 # Usage:
 #   scripts/make-app.sh           # debug build (default)
 #   scripts/make-app.sh release   # release build
+#   scripts/make-app.sh dist      # release build, then a notarized DMG
 #
-# Produces: dist/Chronicle.app
+# Produces: dist/Chronicle.app, and for dist also dist/Chronicle-<version>.dmg
+# One-time setup: docs/guides/signing-and-notarization.md
 
 set -euo pipefail
 
@@ -14,12 +16,16 @@ cd "$(dirname "$0")/.."
 
 CONFIG="${1:-debug}"
 case "$CONFIG" in
-    debug|release) ;;
+    debug|release|dist) ;;
     *)
-        echo "Unknown config: $CONFIG (expected: debug or release)" >&2
+        echo "Unknown config: $CONFIG (expected: debug, release or dist)" >&2
         exit 2
         ;;
 esac
+BUILD_CONFIG="$CONFIG"
+if [ "$CONFIG" = "dist" ]; then
+    BUILD_CONFIG="release"
+fi
 
 GUIDE="docs/guides/signing-and-notarization.md"
 
@@ -42,6 +48,19 @@ resolve_identity() {
 
 IDENTITY="$(resolve_identity)"
 
+if [ "$CONFIG" = "dist" ]; then
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "dist needs a clean working tree. Commit or stash your changes first." >&2
+        exit 1
+    fi
+    PROFILE="${CHRONICLE_NOTARY_PROFILE:-chronicle-notary}"
+    if ! notary_check="$(xcrun notarytool history --keychain-profile "$PROFILE" 2>&1)"; then
+        echo "$notary_check" >&2
+        echo "Notary profile '$PROFILE' is not usable. See $GUIDE#notary-profile" >&2
+        exit 1
+    fi
+fi
+
 MANIFEST="chronicle-daemon/Cargo.toml"
 METADATA="$(cargo metadata --no-deps --format-version 1 --manifest-path "$MANIFEST")"
 VERSION="$(/usr/bin/python3 -c 'import json, sys
@@ -49,9 +68,9 @@ m = json.load(sys.stdin)
 print(next(p["version"] for p in m["packages"] if p["name"] == "chronicle-daemon"))' <<<"$METADATA")"
 BUILD="$(git rev-list --count HEAD)"
 
-echo "Building chronicle-daemon ($CONFIG)..."
+echo "Building chronicle-daemon ($BUILD_CONFIG)..."
 CARGO_ARGS=(--manifest-path "$MANIFEST" --message-format=json-render-diagnostics)
-if [ "$CONFIG" = "release" ]; then
+if [ "$BUILD_CONFIG" = "release" ]; then
     CARGO_ARGS+=(--release)
 fi
 CARGO_JSON="$(CHRONICLE_BUILD_NUMBER="$BUILD" cargo build "${CARGO_ARGS[@]}")"
@@ -92,11 +111,11 @@ while read -r rlib; do
     fi
 done <<<"$NATIVE_RLIBS"
 
-echo "Building ChronicleUI ($CONFIG)..."
-UI_BIN="$(cd chronicle-ui && swift build -c "$CONFIG" --show-bin-path)/ChronicleUI"
+echo "Building ChronicleUI ($BUILD_CONFIG)..."
+UI_BIN="$(cd chronicle-ui && swift build -c "$BUILD_CONFIG" --show-bin-path)/ChronicleUI"
 # SwiftPM doesn't always relink when only the -sectcreate Info.plist changes.
 rm -f "$UI_BIN"
-(cd chronicle-ui && swift build -c "$CONFIG")
+(cd chronicle-ui && swift build -c "$BUILD_CONFIG")
 
 for bin in "$DAEMON_BIN" "$UI_BIN"; do
     if [ ! -f "$bin" ]; then
