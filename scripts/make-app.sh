@@ -168,9 +168,46 @@ printf 'APPL????' > "$CONTENTS/PkgInfo"
     "$CONTENTS/Info.plist"
 plutil -lint "$CONTENTS/Info.plist" "$CONTENTS/Library/LaunchAgents/$AGENT_PLIST"
 
-# CHR-70: replace with Developer ID signing, hardened runtime and entitlements.
-codesign --force --sign - "$CONTENTS/MacOS/chronicle-daemon"
-codesign --force --sign - "$APP"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+DAEMON_ENT="packaging/daemon.entitlements"
+UI_ENT="packaging/ui.entitlements"
+TIMESTAMP_ARGS=(--timestamp)
+if [ "$CONFIG" = "debug" ]; then
+    TIMESTAMP_ARGS=(--timestamp=none)
+    cp "$DAEMON_ENT" "$WORK/daemon.entitlements"
+    cp "$UI_ENT" "$WORK/ui.entitlements"
+    DAEMON_ENT="$WORK/daemon.entitlements"
+    UI_ENT="$WORK/ui.entitlements"
+    for ent in "$DAEMON_ENT" "$UI_ENT"; do
+        /usr/libexec/PlistBuddy -c "Add :com.apple.security.get-task-allow bool true" "$ent"
+    done
+fi
+
+sign() {
+    codesign --force --sign "$IDENTITY" --options runtime "${TIMESTAMP_ARGS[@]}" "$@"
+}
+
+echo "Signing $APP..."
+sign --identifier dev.heuss.chronicle.daemon --entitlements "$DAEMON_ENT" "$CONTENTS/MacOS/chronicle-daemon"
+sign --entitlements "$UI_ENT" "$APP"
+codesign --verify --strict --deep --verbose=2 "$APP"
+
+for code in "$CONTENTS/MacOS/chronicle-daemon" "$APP"; do
+    info="$(codesign -dvv "$code" 2>&1)"
+    if ! grep -q '^Authority=Developer ID Application: ' <<<"$info"; then
+        echo "$code is not signed by a Developer ID Application identity" >&2
+        exit 1
+    fi
+    if [ "$CONFIG" != "debug" ]; then
+        ents="$(codesign -d --entitlements - --xml "$code" 2>/dev/null)"
+        if grep -q 'com.apple.security.get-task-allow' <<<"$ents"; then
+            echo "$code carries get-task-allow in a $CONFIG build" >&2
+            exit 1
+        fi
+    fi
+done
 
 echo ""
 echo "Built: $APP (version $VERSION, build $BUILD)"
