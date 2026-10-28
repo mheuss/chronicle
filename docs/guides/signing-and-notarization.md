@@ -18,11 +18,27 @@ keychain.
 2. Enter your email and name. Choose "Saved to disk" and save the
    `.certSigningRequest` file.
 3. Sign in at <https://developer.apple.com/account/resources/certificates>.
-   Click +, choose Developer ID Application, pick the G2 Sub-CA, and upload the
-   request file.
-4. Download the `.cer` file and double-click it. Keychain Access adds it to your
-   login keychain, next to the private key from step 1.
-5. Check that macOS sees it:
+   Click +, choose Developer ID Application under Software, pick the G2 Sub-CA,
+   and upload the request file. Apple Development and Mac App Distribution
+   certificates won't work.
+4. Download the `.cer` file and import it into your login keychain, next to the
+   private key from step 1:
+
+   ```sh
+   security import ~/Downloads/developerID_application.cer -k ~/Library/Keychains/login.keychain-db
+   ```
+
+   Double-clicking the file can fail with error -25294 and hang Keychain
+   Access.
+5. Install Apple's Developer ID G2 intermediate certificate. Without it, macOS
+   can't trust your certificate, and step 6 shows 0 valid identities.
+
+   ```sh
+   curl -fsSLo ~/Downloads/DeveloperIDG2CA.cer https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+   security import ~/Downloads/DeveloperIDG2CA.cer -k ~/Library/Keychains/login.keychain-db
+   ```
+
+6. Check that macOS sees it:
 
    ```sh
    security find-identity -v -p codesigning
@@ -124,9 +140,9 @@ run it under launchd yourself.
 `security find-identity -v` lists only valid identities. Check that the
 certificate hasn't expired and that its private key is in the same keychain.
 Check that `CHRONICLE_SIGN_IDENTITY` is unset or names a current certificate. If
-`security find-identity -p codesigning` without `-v` shows it as
-`CSSMERR_TP_NOT_TRUSTED`, install the Developer ID G2 intermediate certificate
-from <https://www.apple.com/certificateauthority/>.
+`security find-identity -p codesigning` without `-v` lists the certificate under
+"Matching identities" but the valid count is 0, the G2 intermediate is missing.
+Install it as in step 5 of [Certificate](#certificate).
 
 **Notarization was rejected.** The script prints the submission ID and the
 notary log. The log is JSON. Each entry under `issues` names a file in the DMG
