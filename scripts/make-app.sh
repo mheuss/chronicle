@@ -39,41 +39,37 @@ for line in sys.stdin:
     m = json.loads(line)
     if m.get("reason") == "compiler-artifact" and m["target"]["name"] == "chronicle-daemon" and m.get("executable"):
         print(m["executable"])' <<<"$CARGO_JSON")"
-NATIVE_LIB_DIRS="$(/usr/bin/python3 -c 'import json, re, sys
+NATIVE_RLIBS="$(/usr/bin/python3 -c 'import json, re, sys
 for line in sys.stdin:
     m = json.loads(line)
+    if m.get("reason") == "compiler-artifact" and m["target"]["name"] in ("whisper_rs_sys", "audiopus_sys"):
+        print(*(f for f in m["filenames"] if f.endswith(".rlib")), sep="\n")
     if m.get("reason") != "build-script-executed":
         continue
     crate = re.search(r"[#/](whisper-rs-sys|audiopus_sys)(?:[@#]|$)", m["package_id"])
     if not crate:
         continue
     out = m["out_dir"]
-    dirs = [p.split("=")[-1] for p in m["linked_paths"]]
+    dirs = [re.sub(r"^(native|crate|dependency|framework|all)=", "", p) for p in m["linked_paths"]]
     if not dirs or not all(d == out or d.startswith(out + "/") for d in dirs):
-        sys.exit(crate.group(1) + " linked a library from outside its own build. For audiopus_sys, set OPUS_NO_PKG_CONFIG=1, unset LIBOPUS_LIB_DIR and OPUS_LIB_DIR, then run cargo clean -p audiopus_sys")
-    print(m["out_dir"] + "/lib")' <<<"$CARGO_JSON")"
+        sys.exit(crate.group(1) + " linked a library from outside its own build. For audiopus_sys, set OPUS_NO_PKG_CONFIG=1, unset LIBOPUS_LIB_DIR and OPUS_LIB_DIR, then run cargo clean -p audiopus_sys")' <<<"$CARGO_JSON")"
 
-# The linker sets the binary's minos itself. A stale CMake build only shows in the .a files.
-if [ "$(wc -l <<<"$NATIVE_LIB_DIRS")" -ne 2 ]; then
-    echo "Expected the whisper-rs-sys and audiopus_sys build dirs, got: $NATIVE_LIB_DIRS" >&2
+# The linker sets the binary's minos itself, so check the rlibs, which hold the native objects rustc linked.
+if [ "$(wc -l <<<"$NATIVE_RLIBS")" -ne 2 ]; then
+    echo "Expected the whisper-rs-sys and audiopus_sys rlibs, got: $NATIVE_RLIBS" >&2
     exit 1
 fi
-shopt -s nullglob
-while read -r dir; do
-    libs=("$dir"/*.a)
-    if [ "${#libs[@]}" -eq 0 ]; then
-        echo "No static libraries in $dir" >&2
+while read -r rlib; do
+    minos="$(otool -l "$rlib" | grep -A3 LC_BUILD_VERSION | grep minos || true)"
+    if [ -z "$minos" ]; then
+        echo "No build version found in $rlib" >&2
         exit 1
     fi
-    for lib in "${libs[@]}"; do
-        load_cmds="$(otool -l "$lib")"
-        bad="$(grep -A3 LC_BUILD_VERSION <<<"$load_cmds" | grep minos | grep -v 'minos 14.0$' || true)"
-        if [ -n "$bad" ]; then
-            echo "$lib has objects built for another macOS; clear the stale native builds as .cargo/config.toml describes" >&2
-            exit 1
-        fi
-    done
-done <<<"$NATIVE_LIB_DIRS"
+    if grep -qv 'minos 14.0$' <<<"$minos"; then
+        echo "$rlib has objects built for another macOS. Clear the stale native builds as .cargo/config.toml describes, and check RUSTFLAGS for an outside -L" >&2
+        exit 1
+    fi
+done <<<"$NATIVE_RLIBS"
 
 echo "Building ChronicleUI ($CONFIG)..."
 UI_BIN="$(cd chronicle-ui && swift build -c "$CONFIG" --show-bin-path)/ChronicleUI"
