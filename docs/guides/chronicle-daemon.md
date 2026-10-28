@@ -129,7 +129,7 @@ still running. The kernel releases the lock when the process exits.
 
 **Two-process architecture:** The daemon and UI are separate
 processes. If the UI crashes, capture continues. Persistent install at login
-is deferred to packaging work (see CHR-81).
+lands with CHR-120.
 
 **Async OCR (and future transcription):** Capture and storage are the
 critical path. OCR already runs behind the main ingestion loop, and any future
@@ -283,16 +283,29 @@ cargo build            # debug
 cargo build --release  # release
 ```
 
-The repo-root `.cargo/config.toml` carries two things the binary needs:
+The repo-root `.cargo/config.toml` carries four things the binary needs:
 
 - the `/usr/lib/swift` rpath, without which any binary touching
   ScreenCaptureKit crashes at launch with "no LC_RPATH's found"
 - `CMAKE_POLICY_VERSION_MINIMUM=3.5`, without which the vendored Opus build in
   `audiopus_sys` fails to configure under CMake 4
+- `MACOSX_DEPLOYMENT_TARGET=14.0`, so the binary and its C and C++ dependencies
+  all target macOS 14
+- `CMAKE_SYSTEM_NAME=Darwin`, which turns off whisper.cpp's host-CPU tuning so
+  the binary runs on every Apple Silicon chip, M1 included
 
 Cargo finds that file by walking up from the directory it is invoked in, so it
 applies from the repo root, `chronicle-daemon/`, and anywhere below. Building
 from the root with `--manifest-path chronicle-daemon/Cargo.toml` works too.
+
+The CMake builds in `whisper-rs-sys` and `audiopus_sys` don't rerun when the
+last two settings change. A checkout that built before they existed keeps
+linking the old objects. Clear them once per profile:
+
+```bash
+cargo clean -p whisper-rs-sys -p audiopus_sys            # debug
+cargo clean -p whisper-rs-sys -p audiopus_sys --release  # release
+```
 
 ## Testing
 

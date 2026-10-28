@@ -14,7 +14,7 @@ Chronicle uses a two-process design:
 - **chronicle-daemon** (Rust): Background service that handles screen capture,
   OCR, audio capture, storage, and IPC. Listens on a Unix domain socket. Today
   it is started manually in development; persistent background install will
-  land alongside `.app` bundle packaging.
+  land with CHR-120.
 
 - **chronicle-ui** (Swift/SwiftUI): Menu bar app that connects to the daemon
   over IPC. Left-click for a search popover over screen history and audio
@@ -59,21 +59,22 @@ cd chronicle-daemon
 cargo build --release
 ```
 
-**UI:**
+**App bundle:**
 
-The UI needs to run from a `.app` bundle, not a bare `swift run` binary —
-modern macOS Control Center won't register a menu bar icon for a loose
-executable. A helper script assembles a minimal bundle from the SPM build:
+Build both the daemon and the menu bar app into one bundle from the repo root:
 
 ```sh
-cd chronicle-ui
-./scripts/make-app.sh           # debug build (default)
-./scripts/make-app.sh release   # or release
+scripts/make-app.sh           # debug build (default)
+scripts/make-app.sh release   # release build
 ```
 
-The script writes to `.build/Chronicle.app`. Re-run it after any code change.
-(Proper code-signed packaging and an autostart `SMAppService` are tracked
-separately under CHR-83.)
+The script writes `dist/Chronicle.app`. It holds the menu bar app, the daemon
+at `Contents/MacOS/chronicle-daemon`, and the daemon's launch agent plist. Re-run
+it after any code change. The bundle is ad-hoc signed until CHR-70 adds
+Developer ID signing. Nothing starts the daemon at login until CHR-120.
+
+The UI must run from a `.app` bundle, not a bare `swift run` binary. Modern
+macOS Control Center won't register a menu bar icon for a loose executable.
 
 ## Running
 
@@ -88,7 +89,7 @@ Wait for the `IPC server listening` log line, then in a second terminal from
 the repo root launch the UI:
 
 ```sh
-open chronicle-ui/.build/Chronicle.app
+open dist/Chronicle.app
 ```
 
 An icon should appear in the menu bar. A red `xmark.circle` means the UI cannot

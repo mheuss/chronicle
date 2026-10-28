@@ -2,7 +2,7 @@
 
 **Status:** Decided 2026-09-17, revised 2026-09-18, revised 2026-09-21, revised 2026-10-05
 **Owns:** The daemon binary itself — the stage loops that move a captured item to storage, the contracts they run on, the counters they report through, and the process that wires them together.
-**Code:** `chronicle-daemon/src/pipeline.rs`, `chronicle-daemon/src/pipeline/`, `chronicle-daemon/src/main.rs`, `chronicle-daemon/src/instance_lock.rs`, `chronicle-daemon/src/settings.rs`, `chronicle-daemon/src/drop_reporter.rs`
+**Code:** `chronicle-daemon/src/pipeline.rs`, `chronicle-daemon/src/pipeline/`, `chronicle-daemon/src/main.rs`, `chronicle-daemon/src/instance_lock.rs`, `chronicle-daemon/src/settings.rs`, `chronicle-daemon/src/drop_reporter.rs`, `chronicle-daemon/build.rs`
 
 ## Boundary
 
@@ -25,6 +25,7 @@
 
 ## Owned Files
 
+- chronicle-daemon/build.rs
 - chronicle-daemon/src/drop_reporter.rs
 - chronicle-daemon/src/instance_lock.rs
 - chronicle-daemon/src/main.rs
