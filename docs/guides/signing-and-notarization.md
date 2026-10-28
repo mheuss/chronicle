@@ -33,11 +33,15 @@ keychain.
 
 The script finds that identity on its own. After a renewal you may have two
 valid Developer ID Application certificates. The script then stops and lists
-both. Pick one by name or by its SHA-1 hash:
+both. A renewed certificate usually keeps the old one's name, so pick one by
+its SHA-1 hash, the 40-character value in the `find-identity` output:
 
 ```sh
-export CHRONICLE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+export CHRONICLE_SIGN_IDENTITY=0123456789ABCDEF0123456789ABCDEF01234567
 ```
+
+Copy the hash as printed, in uppercase. A name works too when it matches only
+one certificate.
 
 ## Notary profile
 
