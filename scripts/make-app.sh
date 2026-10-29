@@ -149,12 +149,15 @@ if [ "$daemon_mic" != "$ui_mic" ]; then
     exit 1
 fi
 
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
 APP="dist/Chronicle.app"
-CONTENTS="$APP/Contents"
+STAGE="$WORK/app/Chronicle.app"
+CONTENTS="$STAGE/Contents"
 AGENT_PLIST="dev.heuss.chronicle.daemon.plist"
 
 echo "Assembling $APP..."
-rm -rf "$APP"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Library/LaunchAgents"
 cp chronicle-ui/Sources/ChronicleUI/Info.plist "$CONTENTS/Info.plist"
 cp "$UI_BIN" "$CONTENTS/MacOS/ChronicleUI"
@@ -167,9 +170,6 @@ printf 'APPL????' > "$CONTENTS/PkgInfo"
     -c "Add :CFBundleVersion string $BUILD" \
     "$CONTENTS/Info.plist"
 plutil -lint "$CONTENTS/Info.plist" "$CONTENTS/Library/LaunchAgents/$AGENT_PLIST"
-
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
 
 DAEMON_ENT="packaging/daemon.entitlements"
 UI_ENT="packaging/ui.entitlements"
@@ -191,10 +191,10 @@ sign() {
 
 echo "Signing $APP..."
 sign --identifier dev.heuss.chronicle.daemon --entitlements "$DAEMON_ENT" "$CONTENTS/MacOS/chronicle-daemon"
-sign --entitlements "$UI_ENT" "$APP"
-codesign --verify --strict --deep --verbose=2 "$APP"
+sign --entitlements "$UI_ENT" "$STAGE"
+codesign --verify --strict --deep --verbose=2 "$STAGE"
 
-for code in "$CONTENTS/MacOS/chronicle-daemon" "$APP"; do
+for code in "$CONTENTS/MacOS/chronicle-daemon" "$STAGE"; do
     info="$(codesign -dvv "$code" 2>&1)"
     if ! grep -q '^Authority=Developer ID Application: ' <<<"$info"; then
         echo "$code is not signed by a Developer ID Application identity" >&2
@@ -208,6 +208,10 @@ for code in "$CONTENTS/MacOS/chronicle-daemon" "$APP"; do
         fi
     fi
 done
+
+mkdir -p dist
+rm -rf "$APP"
+mv "$STAGE" "$APP"
 
 echo ""
 echo "Built: $APP (version $VERSION, build $BUILD)"
