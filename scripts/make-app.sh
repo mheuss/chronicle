@@ -40,7 +40,11 @@ resolve_identity() {
     if [ "$count" -ne 1 ]; then
         echo "Found $count matching Developer ID Application identities; expected 1." >&2
         [ -n "$matches" ] && echo "$matches" >&2
-        echo "Set CHRONICLE_SIGN_IDENTITY, or see $GUIDE#certificate" >&2
+        if [ -n "${CHRONICLE_SIGN_IDENTITY:-}" ]; then
+            echo "CHRONICLE_SIGN_IDENTITY is set to '$CHRONICLE_SIGN_IDENTITY'. Change or unset it, or see $GUIDE#certificate" >&2
+        else
+            echo "Set CHRONICLE_SIGN_IDENTITY, or see $GUIDE#certificate" >&2
+        fi
         exit 1
     fi
     awk '{print $2}' <<<"$matches"
@@ -57,7 +61,11 @@ except (ValueError, AttributeError):
 IDENTITY="$(resolve_identity)"
 
 if [ "$CONFIG" = "dist" ]; then
-    if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+    if ! tree_status="$(git status --porcelain --untracked-files=normal)"; then
+        echo "dist could not check the working tree: git status failed." >&2
+        exit 1
+    fi
+    if [ -n "$tree_status" ]; then
         echo "dist needs a clean working tree. Commit or stash your changes first." >&2
         exit 1
     fi
@@ -165,7 +173,7 @@ STAGE="$WORK/app/Chronicle.app"
 CONTENTS="$STAGE/Contents"
 AGENT_PLIST="dev.heuss.chronicle.daemon.plist"
 
-echo "Assembling $APP..."
+echo "Assembling Chronicle.app..."
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Library/LaunchAgents"
 cp chronicle-ui/Sources/ChronicleUI/Info.plist "$CONTENTS/Info.plist"
 cp "$UI_BIN" "$CONTENTS/MacOS/ChronicleUI"
@@ -197,7 +205,7 @@ sign() {
     codesign --force --sign "$IDENTITY" --options runtime "${TIMESTAMP_ARGS[@]}" "$@"
 }
 
-echo "Signing $APP..."
+echo "Signing Chronicle.app..."
 sign --identifier dev.heuss.chronicle.daemon --entitlements "$DAEMON_ENT" "$CONTENTS/MacOS/chronicle-daemon"
 sign --entitlements "$UI_ENT" "$STAGE"
 codesign --verify --strict --deep --verbose=2 "$STAGE"
@@ -205,27 +213,42 @@ codesign --verify --strict --deep --verbose=2 "$STAGE"
 for code in "$CONTENTS/MacOS/chronicle-daemon" "$STAGE"; do
     info="$(codesign -dvv "$code" 2>&1)"
     if ! grep -q '^Authority=Developer ID Application: ' <<<"$info"; then
-        echo "$code is not signed by a Developer ID Application identity" >&2
+        echo "${code#"$WORK/app/"} is not signed by a Developer ID Application identity" >&2
         exit 1
     fi
     if [ "$CONFIG" != "debug" ]; then
         ents="$(codesign -d --entitlements - --xml "$code" 2>/dev/null)"
         if grep -q 'com.apple.security.get-task-allow' <<<"$ents"; then
-            echo "$code carries get-task-allow in a $CONFIG build" >&2
+            echo "${code#"$WORK/app/"} carries get-task-allow in a $CONFIG build" >&2
             exit 1
         fi
     fi
 done
 
 mkdir -p dist
-rm -rf "$APP"
-mv "$STAGE" "$APP"
+PREVIOUS="dist/Chronicle.app.previous"
+rm -rf "$PREVIOUS"
+if [ -e "$APP" ]; then
+    mv "$APP" "$PREVIOUS"
+fi
+if ! mv "$STAGE" "$APP"; then
+    rm -rf "$APP"
+    if [ -e "$PREVIOUS" ]; then
+        mv "$PREVIOUS" "$APP"
+    fi
+    echo "Could not move the new bundle into $APP. The previous bundle is back in place." >&2
+    exit 1
+fi
+rm -rf "$PREVIOUS"
 
 if [ "$CONFIG" = "dist" ]; then
     DMG="dist/Chronicle-$VERSION.dmg"
     PENDING="dist/Chronicle-$VERSION.pending.dmg"
     NOTARY_TIMEOUT_MIN=30
-    FINISH_CMD="xcrun stapler staple $PENDING && xcrun stapler validate $PENDING && spctl --assess --type open --context context:primary-signature -v $PENDING 2>&1 | paste -sd ' ' - | grep -q 'accepted source=Notarized Developer ID' && mv -f $PENDING $DMG"
+    Q_PENDING="$(printf '%q' "$PWD/$PENDING")"
+    Q_DMG="$(printf '%q' "$PWD/$DMG")"
+    Q_PROFILE="$(printf '%q' "$PROFILE")"
+    FINISH_CMD="xcrun stapler staple $Q_PENDING && xcrun stapler validate $Q_PENDING && spctl --assess --type open --context context:primary-signature -v $Q_PENDING 2>&1 | paste -sd ' ' - | grep -q 'accepted source=Notarized Developer ID' && mv -f $Q_PENDING $Q_DMG"
     echo "Packaging $PENDING..."
     mkdir "$WORK/dmg"
     ditto "$APP" "$WORK/dmg/Chronicle.app"
@@ -255,7 +278,7 @@ if [ "$CONFIG" = "dist" ]; then
         Invalid|Rejected)
             echo "Notarization $NOTARY_STATUS. Submission ID: $NOTARY_ID" >&2
             if ! xcrun notarytool log "$NOTARY_ID" --keychain-profile "$PROFILE" >&2; then
-                echo "Warning: could not fetch the notary log. Retry with: xcrun notarytool log $NOTARY_ID --keychain-profile $PROFILE" >&2
+                echo "Warning: could not fetch the notary log. Retry with: xcrun notarytool log $NOTARY_ID --keychain-profile $Q_PROFILE" >&2
             fi
             echo "See $GUIDE#troubleshooting" >&2
             exit 1
@@ -263,17 +286,19 @@ if [ "$CONFIG" = "dist" ]; then
         "In Progress")
             echo "Notarization did not finish within $NOTARY_TIMEOUT_MIN minutes. Submission ID: $NOTARY_ID" >&2
             echo "Apple keeps processing it. Run this as one line to finish:" >&2
-            echo "  xcrun notarytool wait $NOTARY_ID --keychain-profile $PROFILE && $FINISH_CMD" >&2
+            echo "  xcrun notarytool wait $NOTARY_ID --keychain-profile $Q_PROFILE && $FINISH_CMD" >&2
             exit 1
             ;;
         *)
             echo "notarytool submit failed or printed no usable result:" >&2
-            echo "$NOTARY_JSON" >&2
+            if [ -n "$NOTARY_JSON" ]; then
+                echo "$NOTARY_JSON" >&2
+            fi
             if [ -n "$NOTARY_ID" ]; then
                 echo "Submission ID: $NOTARY_ID" >&2
-                echo "Check it with: xcrun notarytool info $NOTARY_ID --keychain-profile $PROFILE" >&2
+                echo "Check it with: xcrun notarytool info $NOTARY_ID --keychain-profile $Q_PROFILE" >&2
             else
-                echo "Check recent submissions with: xcrun notarytool history --keychain-profile $PROFILE" >&2
+                echo "Check recent submissions with: xcrun notarytool history --keychain-profile $Q_PROFILE" >&2
             fi
             exit 1
             ;;
