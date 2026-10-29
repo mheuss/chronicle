@@ -244,7 +244,7 @@ if [ "$CONFIG" = "dist" ]; then
         NOTARY_STATUS=""
     fi
     # On timeout, notarytool exits 124 and prints JSON with no status to stderr.
-    if [ "$notary_rc" -eq 124 ] && [ -z "$NOTARY_STATUS" ]; then
+    if [ "$notary_rc" -eq 124 ] && [ -z "$NOTARY_STATUS" ] && [ -n "$NOTARY_ID" ]; then
         NOTARY_STATUS="In Progress"
     fi
     case "$NOTARY_STATUS" in
