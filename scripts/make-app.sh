@@ -41,13 +41,17 @@ resolve_identity() {
         echo "Found $count matching Developer ID Application identities; expected 1." >&2
         [ -n "$matches" ] && echo "$matches" >&2
         if [ -n "${CHRONICLE_SIGN_IDENTITY:-}" ]; then
-            echo "CHRONICLE_SIGN_IDENTITY is set to '$CHRONICLE_SIGN_IDENTITY'. Change or unset it, or see $GUIDE#certificate" >&2
+            echo "CHRONICLE_SIGN_IDENTITY is set to '$CHRONICLE_SIGN_IDENTITY'. Change or unset it. See $GUIDE#certificate" >&2
         else
             echo "Set CHRONICLE_SIGN_IDENTITY, or see $GUIDE#certificate" >&2
         fi
         exit 1
     fi
     awk '{print $2}' <<<"$matches"
+}
+
+shell_quote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
 notary_field() {
@@ -225,18 +229,27 @@ for code in "$CONTENTS/MacOS/chronicle-daemon" "$STAGE"; do
     fi
 done
 
+# The swap below is two renames on the same volume. A run interrupted between
+# them leaves the last good bundle only in $PREVIOUS, so restore it first.
 mkdir -p dist
+NEW="dist/.Chronicle.app.new"
 PREVIOUS="dist/Chronicle.app.previous"
-rm -rf "$PREVIOUS"
+if [ ! -e "$APP" ] && [ -e "$PREVIOUS" ]; then
+    mv "$PREVIOUS" "$APP"
+fi
+rm -rf "$NEW" "$PREVIOUS"
+ditto "$STAGE" "$NEW"
+codesign --verify --strict --deep "$NEW"
 if [ -e "$APP" ]; then
     mv "$APP" "$PREVIOUS"
 fi
-if ! mv "$STAGE" "$APP"; then
-    rm -rf "$APP"
+if ! mv "$NEW" "$APP"; then
     if [ -e "$PREVIOUS" ]; then
         mv "$PREVIOUS" "$APP"
+        echo "Could not move the new bundle into $APP. The previous bundle is back in place." >&2
+    else
+        echo "Could not move the new bundle into $APP." >&2
     fi
-    echo "Could not move the new bundle into $APP. The previous bundle is back in place." >&2
     exit 1
 fi
 rm -rf "$PREVIOUS"
@@ -245,9 +258,9 @@ if [ "$CONFIG" = "dist" ]; then
     DMG="dist/Chronicle-$VERSION.dmg"
     PENDING="dist/Chronicle-$VERSION.pending.dmg"
     NOTARY_TIMEOUT_MIN=30
-    Q_PENDING="$(printf '%q' "$PWD/$PENDING")"
-    Q_DMG="$(printf '%q' "$PWD/$DMG")"
-    Q_PROFILE="$(printf '%q' "$PROFILE")"
+    Q_PENDING="$(shell_quote "$PWD/$PENDING")"
+    Q_DMG="$(shell_quote "$PWD/$DMG")"
+    Q_PROFILE="$(shell_quote "$PROFILE")"
     FINISH_CMD="xcrun stapler staple $Q_PENDING && xcrun stapler validate $Q_PENDING && spctl --assess --type open --context context:primary-signature -v $Q_PENDING 2>&1 | paste -sd ' ' - | grep -q 'accepted source=Notarized Developer ID' && mv -f $Q_PENDING $Q_DMG"
     echo "Packaging $PENDING..."
     mkdir "$WORK/dmg"
@@ -324,4 +337,4 @@ echo "Built: $APP (version $VERSION, build $BUILD)"
 if [ "$CONFIG" = "dist" ]; then
     echo "Notarized: $DMG"
 fi
-echo "Launch with: open $APP"
+echo "Launch with: open $(shell_quote "$PWD/$APP")"
