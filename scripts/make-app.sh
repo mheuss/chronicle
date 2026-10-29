@@ -46,6 +46,14 @@ resolve_identity() {
     awk '{print $2}' <<<"$matches"
 }
 
+notary_field() {
+    /usr/bin/python3 -c 'import json, sys
+try:
+    print(json.load(sys.stdin).get(sys.argv[1], ""))
+except (ValueError, AttributeError):
+    pass' "$1"
+}
+
 IDENTITY="$(resolve_identity)"
 
 if [ "$CONFIG" = "dist" ]; then
@@ -221,6 +229,46 @@ if [ "$CONFIG" = "dist" ]; then
     ln -s /Applications "$WORK/dmg/Applications"
     hdiutil create -volname Chronicle -srcfolder "$WORK/dmg" -fs HFS+ -format UDZO -ov "$DMG"
     codesign --sign "$IDENTITY" --timestamp "$DMG"
+
+    echo "Notarizing $DMG. This usually takes a few minutes..."
+    notary_rc=0
+    if ! NOTARY_JSON="$(xcrun notarytool submit "$DMG" --keychain-profile "$PROFILE" --wait --timeout 30m --output-format json)"; then
+        notary_rc=1
+    fi
+    NOTARY_ID="$(notary_field id <<<"$NOTARY_JSON")"
+    NOTARY_STATUS="$(notary_field status <<<"$NOTARY_JSON")"
+    if [ "$notary_rc" -ne 0 ] && [ "$NOTARY_STATUS" = "Accepted" ]; then
+        NOTARY_STATUS=""
+    fi
+    case "$NOTARY_STATUS" in
+        Accepted) ;;
+        Invalid|Rejected)
+            echo "Notarization $NOTARY_STATUS. Submission ID: $NOTARY_ID" >&2
+            if ! xcrun notarytool log "$NOTARY_ID" --keychain-profile "$PROFILE" >&2; then
+                echo "Warning: could not fetch the notary log. Retry with: xcrun notarytool log $NOTARY_ID --keychain-profile $PROFILE" >&2
+            fi
+            echo "See $GUIDE#troubleshooting" >&2
+            exit 1
+            ;;
+        "In Progress")
+            echo "Notarization did not finish within 30 minutes. Submission ID: $NOTARY_ID" >&2
+            echo "Apple keeps processing it. When it finishes, run:" >&2
+            echo "  xcrun notarytool wait $NOTARY_ID --keychain-profile $PROFILE" >&2
+            echo "  xcrun stapler staple $DMG" >&2
+            exit 1
+            ;;
+        *)
+            echo "notarytool submit failed or printed no usable result:" >&2
+            echo "$NOTARY_JSON" >&2
+            if [ -n "$NOTARY_ID" ]; then
+                echo "Submission ID: $NOTARY_ID" >&2
+                echo "Check it with: xcrun notarytool info $NOTARY_ID --keychain-profile $PROFILE" >&2
+            else
+                echo "Check recent submissions with: xcrun notarytool history --keychain-profile $PROFILE" >&2
+            fi
+            exit 1
+            ;;
+    esac
 fi
 
 echo ""
