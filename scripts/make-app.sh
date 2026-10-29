@@ -5,7 +5,7 @@
 # Usage:
 #   scripts/make-app.sh           # debug build (default)
 #   scripts/make-app.sh release   # release build
-#   scripts/make-app.sh dist      # release build, then a signed DMG
+#   scripts/make-app.sh dist      # release build, then a notarized DMG
 #
 # Produces: dist/Chronicle.app, and for dist also dist/Chronicle-<version>.dmg
 # One-time setup: docs/guides/signing-and-notarization.md
@@ -269,8 +269,21 @@ if [ "$CONFIG" = "dist" ]; then
             exit 1
             ;;
     esac
+
+    xcrun stapler staple "$DMG"
+    xcrun stapler validate "$DMG"
+    if ! assess="$(spctl --assess --type open --context context:primary-signature -v "$DMG" 2>&1)" \
+        || ! grep -q 'source=Notarized Developer ID' <<<"$assess"; then
+        echo "$assess" >&2
+        echo "Gatekeeper did not accept $DMG as notarized. See $GUIDE#troubleshooting" >&2
+        exit 1
+    fi
+    echo "$assess"
 fi
 
 echo ""
 echo "Built: $APP (version $VERSION, build $BUILD)"
+if [ "$CONFIG" = "dist" ]; then
+    echo "Notarized: $DMG"
+fi
 echo "Launch with: open $APP"
