@@ -225,7 +225,7 @@ if [ "$CONFIG" = "dist" ]; then
     DMG="dist/Chronicle-$VERSION.dmg"
     PENDING="dist/Chronicle-$VERSION.pending.dmg"
     NOTARY_TIMEOUT_MIN=30
-    FINISH_CMD="xcrun stapler staple $PENDING && xcrun stapler validate $PENDING && spctl --assess --type open --context context:primary-signature -v $PENDING 2>&1 | grep -q 'source=Notarized Developer ID' && mv $PENDING $DMG"
+    FINISH_CMD="xcrun stapler staple $PENDING && xcrun stapler validate $PENDING && spctl --assess --type open --context context:primary-signature -v $PENDING 2>&1 | paste -sd ' ' - | grep -q 'accepted source=Notarized Developer ID' && mv -f $PENDING $DMG"
     echo "Packaging $PENDING..."
     mkdir "$WORK/dmg"
     ditto "$APP" "$WORK/dmg/Chronicle.app"
