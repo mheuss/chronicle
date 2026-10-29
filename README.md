@@ -66,13 +66,15 @@ Build both the daemon and the menu bar app into one bundle from the repo root:
 ```sh
 scripts/make-app.sh           # debug build (default)
 scripts/make-app.sh release   # release build
+scripts/make-app.sh dist      # release build, then a notarized DMG
 ```
 
 The script writes `dist/Chronicle.app`. It holds the menu bar app, the daemon
 at `Contents/MacOS/chronicle-daemon`, and the daemon's launch agent plist. Re-run
 it after any code change. Every mode signs the bundle with a Developer ID
-certificate. See [Signing and Notarization](docs/guides/signing-and-notarization.md)
-for the one-time setup. Nothing starts the daemon at login until CHR-120.
+certificate. `dist` also writes a notarized `dist/Chronicle-<version>.dmg`. See
+[Signing and Notarization](docs/guides/signing-and-notarization.md) for the
+one-time setup. Nothing starts the daemon at login until CHR-120.
 
 The UI must run from a `.app` bundle, not a bare `swift run` binary. Modern
 macOS Control Center won't register a menu bar icon for a loose executable.
