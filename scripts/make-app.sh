@@ -232,13 +232,20 @@ if [ "$CONFIG" = "dist" ]; then
 
     echo "Notarizing $DMG. This usually takes a few minutes..."
     notary_rc=0
-    if ! NOTARY_JSON="$(xcrun notarytool submit "$DMG" --keychain-profile "$PROFILE" --wait --timeout 30m --output-format json)"; then
-        notary_rc=1
+    NOTARY_JSON="$(xcrun notarytool submit "$DMG" --keychain-profile "$PROFILE" --wait --timeout 30m --output-format json 2>"$WORK/notary.err")" || notary_rc=$?
+    if [ -n "$NOTARY_JSON" ]; then
+        cat "$WORK/notary.err" >&2
+    else
+        NOTARY_JSON="$(cat "$WORK/notary.err")"
     fi
     NOTARY_ID="$(notary_field id <<<"$NOTARY_JSON")"
     NOTARY_STATUS="$(notary_field status <<<"$NOTARY_JSON")"
     if [ "$notary_rc" -ne 0 ] && [ "$NOTARY_STATUS" = "Accepted" ]; then
         NOTARY_STATUS=""
+    fi
+    # On timeout, notarytool exits 124 and prints JSON with no status to stderr.
+    if [ "$notary_rc" -eq 124 ] && [ -z "$NOTARY_STATUS" ]; then
+        NOTARY_STATUS="In Progress"
     fi
     case "$NOTARY_STATUS" in
         Accepted) ;;
