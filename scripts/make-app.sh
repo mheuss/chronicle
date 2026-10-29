@@ -225,6 +225,7 @@ if [ "$CONFIG" = "dist" ]; then
     DMG="dist/Chronicle-$VERSION.dmg"
     PENDING="dist/Chronicle-$VERSION.pending.dmg"
     NOTARY_TIMEOUT_MIN=30
+    FINISH_CMD="xcrun stapler staple $PENDING && xcrun stapler validate $PENDING && spctl --assess --type open --context context:primary-signature -v $PENDING 2>&1 | grep -q 'source=Notarized Developer ID' && mv $PENDING $DMG"
     echo "Packaging $PENDING..."
     mkdir "$WORK/dmg"
     ditto "$APP" "$WORK/dmg/Chronicle.app"
@@ -261,10 +262,8 @@ if [ "$CONFIG" = "dist" ]; then
             ;;
         "In Progress")
             echo "Notarization did not finish within $NOTARY_TIMEOUT_MIN minutes. Submission ID: $NOTARY_ID" >&2
-            echo "Apple keeps processing it. When it finishes, run:" >&2
-            echo "  xcrun notarytool wait $NOTARY_ID --keychain-profile $PROFILE" >&2
-            echo "  xcrun stapler staple $PENDING" >&2
-            echo "  mv $PENDING $DMG" >&2
+            echo "Apple keeps processing it. Run this as one line to finish:" >&2
+            echo "  xcrun notarytool wait $NOTARY_ID --keychain-profile $PROFILE && $FINISH_CMD" >&2
             exit 1
             ;;
         *)
@@ -281,9 +280,8 @@ if [ "$CONFIG" = "dist" ]; then
     esac
 
     if ! xcrun stapler staple "$PENDING" || ! xcrun stapler validate "$PENDING"; then
-        echo "Notarized, but stapling failed. Retry with:" >&2
-        echo "  xcrun stapler staple $PENDING" >&2
-        echo "  mv $PENDING $DMG" >&2
+        echo "Notarized, but stapling failed. Retry this as one line:" >&2
+        echo "  $FINISH_CMD" >&2
         exit 1
     fi
     if ! assess="$(spctl --assess --type open --context context:primary-signature -v "$PENDING" 2>&1)" \

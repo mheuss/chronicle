@@ -100,8 +100,9 @@ export CHRONICLE_NOTARY_PROFILE=my-profile
 
 All three write `dist/Chronicle.app`. `dist` also writes
 `dist/Chronicle-<version>.dmg`. It builds the DMG as
-`dist/Chronicle-<version>.pending.dmg` and renames it only after Gatekeeper
-accepts it. A failed run leaves the last good DMG in place.
+`dist/Chronicle-<version>.pending.dmg`. It renames the file only after
+Gatekeeper accepts it. A failed run leaves the last good DMG in place, with the
+pending DMG beside it.
 
 - `dist` refuses to run with uncommitted changes or untracked files. The build
   number is the commit count. A dirty build would ship code that number doesn't
@@ -163,15 +164,16 @@ xcrun notarytool log <submission ID> --keychain-profile chronicle-notary
 ```
 
 **Notarization timed out.** Apple keeps processing after the script stops
-waiting. The script prints the commands that finish the job. They are
-`notarytool wait`, `stapler staple`, and a `mv` that gives the DMG its final
-name.
+waiting. The script prints one command that finishes the job. It waits for
+Apple, staples and checks the pending DMG, and then gives it its final name.
+Run it as one line. Each step runs only if the one before it passed. Finish it
+before you run `dist` again, because a new run replaces the pending DMG.
 
-**Stapling failed after notarization.** Apple's ticket can take a short while
-to become available. The script prints the `stapler staple` and `mv` commands
-to retry.
+**Stapling failed after notarization.** The script prints one command that
+retries the staple, checks the DMG, and renames it. Run it as one line.
 
-**Reading `spctl --assess`.** `dist` runs this on the stapled DMG:
+**Reading `spctl --assess`.** `dist` runs this on the stapled pending DMG
+before it renames it. To check the final DMG yourself, run:
 
 ```sh
 spctl --assess --type open --context context:primary-signature -v dist/Chronicle-<version>.dmg
