@@ -114,25 +114,30 @@ All three write `dist/Chronicle.app`. `dist` also writes
 
 macOS ties Screen Recording and Microphone grants to an app's signature. Builds
 before Developer ID signing were ad-hoc signed, and their grants don't carry
-over. After your first Developer ID build, grant both once more. Later rebuilds
-keep the grants, because the signature names the identifier and team instead of
-the code hash.
+over. After your first Developer ID build, grant Screen Recording once more.
+Later rebuilds keep the grant, because the signature names the identifier and
+team instead of the code hash.
 
-The bundled daemon gets its own grants only when it runs as its own process,
-for example under launchd. A daemon you start from Terminal uses Terminal's
-grants. Nothing in the repo starts the bundled daemon as its own process yet.
-That comes with login-item registration. Until then, these steps apply when you
-run it under launchd yourself.
+A daemon you start from Terminal uses Terminal's grants, for both Screen
+Recording and the microphone. That is the usual way to run it today.
+
+Under launchd, no Terminal stands behind the daemon. macOS then checks the
+grants of `Chronicle.app`, the bundle the daemon lives in, not the daemon
+itself. Nothing in the repo starts the daemon under launchd yet. That comes
+with login-item registration. Until then, these steps apply when you run it
+under launchd yourself.
 
 1. Open System Settings > Privacy & Security > Screen & System Audio Recording
    (called Screen Recording on macOS 14).
    Remove any old `chronicle-daemon` or `Chronicle` entry with the − button.
 2. The daemon checks Screen Recording at startup and exits when it's missing.
-   It doesn't show a prompt. So add it by hand: click +, press Cmd-Shift-G,
-   paste the full path to `Chronicle.app/Contents/MacOS/chronicle-daemon`, and
-   click Open. Turn the new entry on.
-3. Start the daemon as its own process and turn the mic on from the menu bar. macOS asks whether
-   `chronicle-daemon` may use the microphone. Click Allow.
+   It doesn't show a prompt. So add the app by hand: click +, choose
+   `Chronicle.app`, and click Open. Turn the new entry on. An entry for
+   `chronicle-daemon` itself has no effect.
+3. The microphone can't be granted under launchd yet. Nothing in Chronicle asks
+   macOS for mic access, and the Microphone list has no + button. The startup
+   log shows `Microphone permission: NotDetermined`, and the mic records
+   silence. To record the mic, start the daemon from Terminal.
 
 ## Troubleshooting
 
