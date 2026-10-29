@@ -49,6 +49,8 @@ chronicle-ui/              Swift package
 - Screen Recording permission
 - Microphone permission
 - Rust 1.89+ toolchain (to build the daemon)
+- A Developer ID Application certificate, which needs a paid Apple Developer
+  Program membership (to build `Chronicle.app`)
 
 ## Building
 

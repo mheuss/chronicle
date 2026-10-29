@@ -99,7 +99,9 @@ export CHRONICLE_NOTARY_PROFILE=my-profile
 | `scripts/make-app.sh dist` | release | Same as `release`, plus a signed, notarized and stapled DMG | Timestamp server and notary service |
 
 All three write `dist/Chronicle.app`. `dist` also writes
-`dist/Chronicle-<version>.dmg`.
+`dist/Chronicle-<version>.dmg`. It builds the DMG as
+`dist/Chronicle-<version>.pending.dmg` and renames it only after Gatekeeper
+accepts it. A failed run leaves the last good DMG in place.
 
 - `dist` refuses to run with uncommitted changes or untracked files. The build
   number is the commit count. A dirty build would ship code that number doesn't
@@ -161,8 +163,13 @@ xcrun notarytool log <submission ID> --keychain-profile chronicle-notary
 ```
 
 **Notarization timed out.** Apple keeps processing after the script stops
-waiting. The script prints the two commands that finish the job. They are
-`notarytool wait` and `stapler staple`.
+waiting. The script prints the commands that finish the job. They are
+`notarytool wait`, `stapler staple`, and a `mv` that gives the DMG its final
+name.
+
+**Stapling failed after notarization.** Apple's ticket can take a short while
+to become available. The script prints the `stapler staple` and `mv` commands
+to retry.
 
 **Reading `spctl --assess`.** `dist` runs this on the stapled DMG:
 

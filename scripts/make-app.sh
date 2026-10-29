@@ -31,7 +31,7 @@ GUIDE="docs/guides/signing-and-notarization.md"
 
 resolve_identity() {
     local matches
-    matches="$(security find-identity -v -p codesigning | grep '"Developer ID Application: ' || true)"
+    matches="$(security find-identity -v -p codesigning | grep '"Developer ID Application: ' | awk '!seen[$2]++' || true)"
     if [ -n "${CHRONICLE_SIGN_IDENTITY:-}" ]; then
         matches="$(grep -F -- "$CHRONICLE_SIGN_IDENTITY" <<<"$matches" || true)"
     fi
@@ -223,16 +223,18 @@ mv "$STAGE" "$APP"
 
 if [ "$CONFIG" = "dist" ]; then
     DMG="dist/Chronicle-$VERSION.dmg"
-    echo "Packaging $DMG..."
+    PENDING="dist/Chronicle-$VERSION.pending.dmg"
+    NOTARY_TIMEOUT_MIN=30
+    echo "Packaging $PENDING..."
     mkdir "$WORK/dmg"
     ditto "$APP" "$WORK/dmg/Chronicle.app"
     ln -s /Applications "$WORK/dmg/Applications"
-    hdiutil create -volname Chronicle -srcfolder "$WORK/dmg" -fs HFS+ -format UDZO -ov "$DMG"
-    codesign --sign "$IDENTITY" --timestamp "$DMG"
+    hdiutil create -volname Chronicle -srcfolder "$WORK/dmg" -fs HFS+ -format UDZO -ov "$PENDING"
+    codesign --sign "$IDENTITY" --timestamp "$PENDING"
 
-    echo "Notarizing $DMG. This usually takes a few minutes..."
+    echo "Notarizing $PENDING. This usually takes a few minutes..."
     notary_rc=0
-    NOTARY_JSON="$(xcrun notarytool submit "$DMG" --keychain-profile "$PROFILE" --wait --timeout 30m --output-format json 2>"$WORK/notary.err")" || notary_rc=$?
+    NOTARY_JSON="$(xcrun notarytool submit "$PENDING" --keychain-profile "$PROFILE" --wait --timeout "${NOTARY_TIMEOUT_MIN}m" --output-format json 2>"$WORK/notary.err")" || notary_rc=$?
     if [ -n "$NOTARY_JSON" ]; then
         cat "$WORK/notary.err" >&2
     else
@@ -258,10 +260,11 @@ if [ "$CONFIG" = "dist" ]; then
             exit 1
             ;;
         "In Progress")
-            echo "Notarization did not finish within 30 minutes. Submission ID: $NOTARY_ID" >&2
+            echo "Notarization did not finish within $NOTARY_TIMEOUT_MIN minutes. Submission ID: $NOTARY_ID" >&2
             echo "Apple keeps processing it. When it finishes, run:" >&2
             echo "  xcrun notarytool wait $NOTARY_ID --keychain-profile $PROFILE" >&2
-            echo "  xcrun stapler staple $DMG" >&2
+            echo "  xcrun stapler staple $PENDING" >&2
+            echo "  mv $PENDING $DMG" >&2
             exit 1
             ;;
         *)
@@ -277,15 +280,20 @@ if [ "$CONFIG" = "dist" ]; then
             ;;
     esac
 
-    xcrun stapler staple "$DMG"
-    xcrun stapler validate "$DMG"
-    if ! assess="$(spctl --assess --type open --context context:primary-signature -v "$DMG" 2>&1)" \
+    if ! xcrun stapler staple "$PENDING" || ! xcrun stapler validate "$PENDING"; then
+        echo "Notarized, but stapling failed. Retry with:" >&2
+        echo "  xcrun stapler staple $PENDING" >&2
+        echo "  mv $PENDING $DMG" >&2
+        exit 1
+    fi
+    if ! assess="$(spctl --assess --type open --context context:primary-signature -v "$PENDING" 2>&1)" \
         || ! grep -q 'source=Notarized Developer ID' <<<"$assess"; then
         echo "$assess" >&2
-        echo "Gatekeeper did not accept $DMG as notarized. See $GUIDE#troubleshooting" >&2
+        echo "Gatekeeper did not accept $PENDING as notarized. See $GUIDE#troubleshooting" >&2
         exit 1
     fi
     echo "$assess"
+    mv -f "$PENDING" "$DMG"
 fi
 
 echo ""
