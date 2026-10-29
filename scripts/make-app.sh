@@ -14,6 +14,15 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# The bundle swap at the end is two renames. A run interrupted between them
+# leaves the last good bundle only in $PREVIOUS, so put it back before anything
+# else can fail.
+APP="dist/Chronicle.app"
+PREVIOUS="dist/Chronicle.app.previous"
+if [ ! -e "$APP" ] && [ -e "$PREVIOUS" ]; then
+    mv "$PREVIOUS" "$APP"
+fi
+
 CONFIG="${1:-debug}"
 case "$CONFIG" in
     debug|release|dist) ;;
@@ -172,7 +181,6 @@ fi
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-APP="dist/Chronicle.app"
 STAGE="$WORK/app/Chronicle.app"
 CONTENTS="$STAGE/Contents"
 AGENT_PLIST="dev.heuss.chronicle.daemon.plist"
@@ -229,14 +237,8 @@ for code in "$CONTENTS/MacOS/chronicle-daemon" "$STAGE"; do
     fi
 done
 
-# The swap below is two renames on the same volume. A run interrupted between
-# them leaves the last good bundle only in $PREVIOUS, so restore it first.
 mkdir -p dist
 NEW="dist/.Chronicle.app.new"
-PREVIOUS="dist/Chronicle.app.previous"
-if [ ! -e "$APP" ] && [ -e "$PREVIOUS" ]; then
-    mv "$PREVIOUS" "$APP"
-fi
 rm -rf "$NEW" "$PREVIOUS"
 ditto "$STAGE" "$NEW"
 codesign --verify --strict --deep "$NEW"
@@ -261,7 +263,7 @@ if [ "$CONFIG" = "dist" ]; then
     Q_PENDING="$(shell_quote "$PWD/$PENDING")"
     Q_DMG="$(shell_quote "$PWD/$DMG")"
     Q_PROFILE="$(shell_quote "$PROFILE")"
-    FINISH_CMD="xcrun stapler staple $Q_PENDING && xcrun stapler validate $Q_PENDING && spctl --assess --type open --context context:primary-signature -v $Q_PENDING 2>&1 | paste -sd ' ' - | grep -q 'accepted source=Notarized Developer ID' && mv -f $Q_PENDING $Q_DMG"
+    FINISH_CMD="xcrun stapler staple $Q_PENDING && xcrun stapler validate $Q_PENDING && spctl --assess --type open --context context:primary-signature $Q_PENDING && spctl --assess --type open --context context:primary-signature -v $Q_PENDING 2>&1 | grep -qx 'source=Notarized Developer ID' && mv -f $Q_PENDING $Q_DMG"
     echo "Packaging $PENDING..."
     mkdir "$WORK/dmg"
     ditto "$APP" "$WORK/dmg/Chronicle.app"
@@ -323,7 +325,7 @@ if [ "$CONFIG" = "dist" ]; then
         exit 1
     fi
     if ! assess="$(spctl --assess --type open --context context:primary-signature -v "$PENDING" 2>&1)" \
-        || ! grep -q 'source=Notarized Developer ID' <<<"$assess"; then
+        || ! grep -qx 'source=Notarized Developer ID' <<<"$assess"; then
         echo "$assess" >&2
         echo "Gatekeeper did not accept $PENDING as notarized. See $GUIDE#troubleshooting" >&2
         exit 1
