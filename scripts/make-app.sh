@@ -5,9 +5,9 @@
 # Usage:
 #   scripts/make-app.sh           # debug build (default)
 #   scripts/make-app.sh release   # release build
-#   scripts/make-app.sh dist      # release build from a clean tree
+#   scripts/make-app.sh dist      # release build, then a signed DMG
 #
-# Produces: dist/Chronicle.app
+# Produces: dist/Chronicle.app, and for dist also dist/Chronicle-<version>.dmg
 # One-time setup: docs/guides/signing-and-notarization.md
 
 set -euo pipefail
@@ -212,6 +212,16 @@ done
 mkdir -p dist
 rm -rf "$APP"
 mv "$STAGE" "$APP"
+
+if [ "$CONFIG" = "dist" ]; then
+    DMG="dist/Chronicle-$VERSION.dmg"
+    echo "Packaging $DMG..."
+    mkdir "$WORK/dmg"
+    ditto "$APP" "$WORK/dmg/Chronicle.app"
+    ln -s /Applications "$WORK/dmg/Applications"
+    hdiutil create -volname Chronicle -srcfolder "$WORK/dmg" -fs HFS+ -format UDZO -ov "$DMG"
+    codesign --sign "$IDENTITY" --timestamp "$DMG"
+fi
 
 echo ""
 echo "Built: $APP (version $VERSION, build $BUILD)"
