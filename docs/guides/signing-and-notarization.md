@@ -31,7 +31,7 @@ keychain.
    Double-clicking the file can fail with error -25294 and hang Keychain
    Access.
 5. Install Apple's Developer ID G2 intermediate certificate. Without it, macOS
-   can't trust your certificate, and step 6 shows 0 valid identities.
+   can't trust your certificate. Step 6 then shows 0 valid identities.
 
    ```sh
    curl -fsSLo ~/Downloads/DeveloperIDG2CA.cer https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
@@ -49,8 +49,8 @@ keychain.
 
 The script finds that identity on its own. After a renewal you may have two
 valid Developer ID Application certificates. The script then stops and lists
-both. A renewed certificate usually keeps the old one's name, so pick one by
-its SHA-1 hash, the 40-character value in the `find-identity` output:
+both. A renewed certificate usually keeps the old one's name. So pick one by its
+SHA-1 hash. That is the 40-character value in the `find-identity` output:
 
 ```sh
 export CHRONICLE_SIGN_IDENTITY=0123456789ABCDEF0123456789ABCDEF01234567
@@ -102,19 +102,19 @@ All three write `dist/Chronicle.app`. `dist` also writes
 `dist/Chronicle-<version>.dmg`.
 
 - `dist` refuses to run with uncommitted changes or untracked files. The build
-  number is the commit count, so a dirty build would ship code that number
-  doesn't name.
+  number is the commit count. A dirty build would ship code that number doesn't
+  name.
 - Notarization usually takes a few minutes. The script waits up to 30 minutes.
-- Debug builds carry `get-task-allow`, so a debugger can attach. Release and
-  dist builds don't, and the script checks that.
+- Debug builds carry `get-task-allow`. A debugger can attach to them. Release
+  and dist builds don't carry it. The script checks that.
 - Every mode stops before it builds when it can't find exactly one usable
-  certificate. There is no ad-hoc fallback, and the previous bundle stays.
+  certificate. There is no ad-hoc fallback. The previous bundle stays.
 
 ## First launch
 
-A daemon you start directly in Terminal uses Terminal's grants, for both Screen
-Recording and the microphone. That is the usual way to run it today. Start it
-in a plain Terminal window, not inside tmux. Under tmux the mic records
+A daemon you start directly in Terminal uses Terminal's grants. That covers both
+Screen Recording and the microphone. That is the usual way to run it today.
+Start it in a plain Terminal window, not inside tmux. Under tmux the mic records
 silence.
 
 Under launchd, no Terminal stands behind the daemon. On macOS 27, macOS then
@@ -124,22 +124,21 @@ comes with login-item registration. Until then, these steps apply when you run
 it under launchd yourself.
 
 macOS ties these grants to an app's signature. Builds before Developer ID
-signing were ad-hoc signed, and their grants don't carry over. Later rebuilds
-keep the grant, because the signature names the identifier and team instead of
-the code hash.
+signing were ad-hoc signed. Their grants don't carry over. Later rebuilds keep
+the grant. The signature names the identifier and team instead of the code hash.
 
-1. Open System Settings > Privacy & Security > Screen & System Audio Recording
-   (called Screen Recording on macOS 14).
-   Remove any old `chronicle-daemon` or `Chronicle` entry with the − button.
+1. Open System Settings > Privacy & Security > Screen & System Audio Recording.
+   macOS 14 calls it Screen Recording. Remove any old `chronicle-daemon` or
+   `Chronicle` entry with the − button.
 2. The daemon checks Screen Recording at startup and exits when it's missing.
    It doesn't show a prompt. So add the app by hand: click +, press
    Cmd-Shift-G, paste the full path to the repo's `dist/Chronicle.app`, and
    click Open. Turn the new entry on. On macOS 27, an entry for
    `chronicle-daemon` itself had no effect.
 3. The microphone can't be granted under launchd yet. Nothing in Chronicle asks
-   macOS for mic access, and the Microphone list has no + button. The startup
-   log shows `Microphone permission: NotDetermined`, and the mic records
-   silence. To record the mic, start the daemon from Terminal.
+   macOS for mic access. The Microphone list has no + button. The startup log
+   shows `Microphone permission: NotDetermined`. The mic records silence. To
+   record the mic, start the daemon from Terminal.
 
 ## Troubleshooting
 
@@ -162,8 +161,8 @@ xcrun notarytool log <submission ID> --keychain-profile chronicle-notary
 ```
 
 **Notarization timed out.** Apple keeps processing after the script stops
-waiting. The script prints the two commands that finish the job, a
-`notarytool wait` and a `stapler staple`.
+waiting. The script prints the two commands that finish the job. They are
+`notarytool wait` and `stapler staple`.
 
 **Reading `spctl --assess`.** `dist` runs this on the stapled DMG:
 
