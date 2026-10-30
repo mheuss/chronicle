@@ -281,15 +281,18 @@ enum BootDisposition {
     Exit,
 }
 
-/// A start failure that began at boot escalates a poisoned engine until the
-/// incident clears: a poisoned start may leave streams alive, so only a fresh
-/// process is safe.
+/// A poisoned stop always exits, and a start failure that began at boot
+/// escalates a poisoned start until the incident clears: either may leave
+/// streams alive, so only a fresh process is safe.
 fn route_reconcile_outcome(
     outcome: &ReconcileOutcome,
     boot_incident: &mut bool,
     start_retry: &mut StartRetry,
     retry_tx: &tokio::sync::mpsc::Sender<()>,
 ) -> BootDisposition {
+    if *outcome == ReconcileOutcome::StopPoisoned {
+        return BootDisposition::Exit;
+    }
     if *boot_incident
         && matches!(
             outcome,
@@ -764,7 +767,7 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
     // finishes, so a new switch can win the slot while the old handle is
     // technically still unfinished. Harmless: by then the superseded task has
     // already sent its event and has nothing left but to return.)
-    let mut boot_poisoned = false;
+    let mut loop_poisoned = false;
     let mut provision_task: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         tokio::select! {
@@ -816,8 +819,8 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
                 );
                 let _ = cmd.reply.send(paused);
                 if disposition == BootDisposition::Exit {
-                    log::error!("boot recovery hit a poisoned capture start; shutting down");
-                    boot_poisoned = true;
+                    log::error!("capture engine poisoned; shutting down for a fresh process");
+                    loop_poisoned = true;
                     break;
                 }
             }
@@ -870,8 +873,8 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
                     &retry_tx,
                 );
                 if disposition == BootDisposition::Exit {
-                    log::error!("boot recovery hit a poisoned capture start; shutting down");
-                    boot_poisoned = true;
+                    log::error!("capture engine poisoned; shutting down for a fresh process");
+                    loop_poisoned = true;
                     break;
                 }
             }
@@ -892,14 +895,14 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
                     &retry_tx,
                 );
                 if disposition == BootDisposition::Exit {
-                    log::error!("boot recovery hit a poisoned capture start; shutting down");
-                    boot_poisoned = true;
+                    log::error!("capture engine poisoned; shutting down for a fresh process");
+                    loop_poisoned = true;
                     break;
                 }
             }
         }
     }
-    if boot_poisoned {
+    if loop_poisoned {
         spawn_poison_exit_watchdog(POISON_EXIT_GRACE);
     }
     // Set when an owned task/thread panic is OBSERVED during shutdown — for
@@ -1170,7 +1173,7 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
     }
 
     log::info!("chronicle-daemon stopped");
-    if poisoned || boot_poisoned {
+    if poisoned || loop_poisoned {
         log::error!("daemon exiting with code 3 (engine poisoned)");
         std::process::exit(3);
     }
@@ -1534,6 +1537,27 @@ mod tests {
             rx.try_recv().is_ok(),
             "outside a boot incident the retry still arms"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_poisoned_exits_at_any_time() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(4);
+        for in_boot_incident in [true, false] {
+            let mut retry = StartRetry::new();
+            let mut boot_incident = in_boot_incident;
+
+            let d = route_reconcile_outcome(
+                &ReconcileOutcome::StopPoisoned,
+                &mut boot_incident,
+                &mut retry,
+                &tx,
+            );
+
+            assert_eq!(d, BootDisposition::Exit, "boot_incident={in_boot_incident}");
+            assert_eq!(retry.attempt(), 0, "an exit must not arm a retry");
+        }
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert!(rx.try_recv().is_err(), "an exit must not arm a retry");
     }
 
     #[tokio::test(start_paused = true)]

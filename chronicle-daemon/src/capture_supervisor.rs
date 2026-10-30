@@ -44,9 +44,9 @@ fn decide(should_run: bool, running: bool) -> ReconcileAction {
 }
 
 /// The result of a `reconcile()` call. `route_reconcile_outcome` in `main.rs`
-/// escalates `StartFailed { partial_teardown: true }` to `exit(3)` while a
-/// start failure that began at boot is still open; otherwise callers log and
-/// retry.
+/// escalates `StopPoisoned`, and `StartFailed { partial_teardown: true }` while
+/// a start failure that began at boot is still open, to `exit(3)`; otherwise
+/// callers log and retry.
 ///
 /// `must_use`: discarding an outcome silently skips the StartRetry arm/reset
 /// bookkeeping (`note_reconcile_outcome`) — exactly the bug class CHR-136
@@ -57,7 +57,11 @@ pub enum ReconcileOutcome {
     Started,
     Stopped,
     NoChange,
-    StartFailed { partial_teardown: bool },
+    StartFailed {
+        partial_teardown: bool,
+    },
+    /// A stop that left a stream possibly running.
+    StopPoisoned,
 }
 
 /// Retry budget for failed capture starts at boot, wake, or resume.
@@ -362,10 +366,17 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     /// Persisted `capture_paused` is NOT written here — pause persistence
     /// belongs to the IPC pause path, not to flag-driven stops (sleep).
     async fn stop_capture(&mut self, audio: &'a AudioPipeline) -> ReconcileOutcome {
+        let mut poisoned = false;
         if let Some(rt) = self.runtime.take()
             && let Err(e) = rt.stop().await
         {
             log::error!("CaptureRuntime stop failed: {e}");
+            poisoned = matches!(
+                e,
+                CaptureRuntimeError::Engine(
+                    CaptureError::PartialTeardown { .. } | CaptureError::Poisoned
+                )
+            );
         }
         *self.probe_holder.lock().unwrap() = None;
 
@@ -382,7 +393,11 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
             log::error!("failed to flush system segment on stop: {e}");
         }
 
-        ReconcileOutcome::Stopped
+        if poisoned {
+            ReconcileOutcome::StopPoisoned
+        } else {
+            ReconcileOutcome::Stopped
+        }
     }
 }
 
