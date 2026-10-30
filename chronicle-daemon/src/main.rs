@@ -991,9 +991,10 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
     // `run`, so they outlive the pipeline and the supervisor.
     //
     // This runs on the poisoned path too. `supervisor.shutdown()` set
-    // `poisoned` above, but exit(3) does not happen until the end of `run`,
-    // after the drain — so suppressing the report here would only hide drops
-    // in the very run where something went wrong enough to poison the engine.
+    // `poisoned` above, but exit(3) normally happens at the end of `run`, after
+    // the drain (or from the poison-exit watchdog if teardown hangs) — so
+    // suppressing the report here would only hide drops in the very run where
+    // something went wrong enough to poison the engine.
     //
     // The await is unbounded, deliberately: the final read is seven relaxed
     // atomic loads, a format, and at most one log line. `tokio::time::timeout`
