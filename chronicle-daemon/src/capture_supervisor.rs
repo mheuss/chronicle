@@ -16,7 +16,7 @@ use chronicle_audio::{AudioPipeline, CHANNEL_COUNT, SAMPLE_RATE};
 use chronicle_capture::{CaptureConfig, CaptureError, EngineStatusProbe};
 use chronicle_storage::Storage;
 
-use crate::capture_runtime::{CaptureRuntime, CaptureRuntimeError};
+use crate::capture_runtime::{CaptureRuntime, CaptureRuntimeError, engine_poisoned};
 use crate::ipc_handler;
 use crate::permissions;
 use crate::pipeline::counters::PipelineCounters;
@@ -353,6 +353,10 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
                 );
                 true
             }
+            Err(CaptureRuntimeError::Engine(ref e)) if engine_poisoned(e) => {
+                log::error!("runtime stop failed; engine poisoned: {e}");
+                true
+            }
             Err(e) => {
                 log::error!("runtime stop failed: {e}");
                 false
@@ -371,12 +375,8 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
             && let Err(e) = rt.stop().await
         {
             log::error!("CaptureRuntime stop failed: {e}");
-            poisoned = matches!(
-                e,
-                CaptureRuntimeError::Engine(
-                    CaptureError::PartialTeardown { .. } | CaptureError::Poisoned
-                )
-            );
+            let CaptureRuntimeError::Engine(engine_err) = &e;
+            poisoned = engine_poisoned(engine_err);
         }
         *self.probe_holder.lock().unwrap() = None;
 

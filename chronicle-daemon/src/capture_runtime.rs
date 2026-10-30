@@ -128,7 +128,7 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureRuntime<'a, M> {
     /// drops, which signals `ocr_loop` to exit. We `await` both joins
     /// to confirm clean teardown.
     ///
-    /// After a `PartialTeardown` the joins are aborted instead: a surviving
+    /// After a poisoned stop (`engine_poisoned`) the joins are aborted instead: a surviving
     /// stream can keep its handler's frame sender alive, so the channel may
     /// never close.
     pub async fn stop(mut self) -> Result<()> {
@@ -144,10 +144,7 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureRuntime<'a, M> {
             r
         };
 
-        let poisoned = matches!(
-            stop_result,
-            Err(CaptureError::PartialTeardown { .. } | CaptureError::Poisoned)
-        );
+        let poisoned = stop_result.as_ref().is_err_and(engine_poisoned);
         join_downstream(
             [
                 ("capture_store_loop", store_handle),
@@ -158,6 +155,14 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureRuntime<'a, M> {
         .await;
         stop_result.map_err(CaptureRuntimeError::Engine)
     }
+}
+
+/// True for a stop error that may leave a stream running.
+pub(crate) fn engine_poisoned(e: &CaptureError) -> bool {
+    matches!(
+        e,
+        CaptureError::PartialTeardown { .. } | CaptureError::Poisoned
+    )
 }
 
 async fn join_downstream(handles: [(&str, Option<JoinHandle<()>>); 2], poisoned: bool) {
@@ -195,6 +200,21 @@ impl<M: AppMetadataProvider + 'static + ?Sized> Drop for CaptureRuntime<'_, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_poisoned_only_for_errors_that_may_leave_streams_running() {
+        let partial = CaptureError::PartialTeardown {
+            survivors: vec![1],
+            stop_errors: vec![(1, "hung".into())],
+            original: Box::new(CaptureError::ScreenCaptureKit("boom".into())),
+        };
+        assert!(engine_poisoned(&partial));
+        assert!(engine_poisoned(&CaptureError::Poisoned));
+        assert!(!engine_poisoned(&CaptureError::ScreenCaptureKit(
+            "boom".into()
+        )));
+        assert!(!engine_poisoned(&CaptureError::NoDisplays));
+    }
 
     #[tokio::test]
     async fn join_downstream_aborts_a_hung_task_when_poisoned() {

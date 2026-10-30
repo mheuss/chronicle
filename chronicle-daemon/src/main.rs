@@ -1034,7 +1034,7 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
     // no-op.
     //
     // shutdown() returns true only when the engine is poisoned
-    // (PartialTeardown) — escalates to exit(3) below. Consumes the
+    // (`engine_poisoned`) — escalates to exit(3) below. Consumes the
     // supervisor, which releases the &audio_pipeline borrow so
     // audio_pipeline.stop() (which needs &mut self) can run next.
     let poisoned = supervisor.shutdown().await;
@@ -1554,10 +1554,13 @@ mod tests {
             );
 
             assert_eq!(d, BootDisposition::Exit, "boot_incident={in_boot_incident}");
-            assert_eq!(retry.attempt(), 0, "an exit must not arm a retry");
+            assert_eq!(retry.attempt(), 0, "an exit must not consume an attempt");
         }
         tokio::time::sleep(Duration::from_secs(120)).await;
-        assert!(rx.try_recv().is_err(), "an exit must not arm a retry");
+        assert!(
+            rx.try_recv().is_err(),
+            "an exit must not spawn a retry nudge"
+        );
     }
 
     #[tokio::test(start_paused = true)]
