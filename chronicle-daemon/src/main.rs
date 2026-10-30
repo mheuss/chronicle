@@ -737,16 +737,16 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
                 // Always persist the user's intent so the supervisor's next Start
                 // restores it.
                 settings::write_mic_setting(storage.base_dir(), cmd.enabled);
-                let state = if supervisor.should_run() {
+                let state = if supervisor.is_running() {
                     let outcome = audio_pipeline.set_microphone_enabled(cmd.enabled);
                     let s = ipc_handler::map_outcome(outcome, permissions::check_microphone());
                     log::info!("mic toggle: requested enabled={}, result={s:?}", cmd.enabled);
                     s
                 } else {
-                    // Capture is stopped (pause or sleep) — record the preference but do
-                    // not engage the device. The mic genuinely is not running.
+                    // No runtime (pause, sleep, or a failed start): save the
+                    // preference only. `start()` restores it.
                     log::info!(
-                        "mic toggle: requested enabled={} while capture stopped — \
+                        "mic toggle: requested enabled={} while capture not running — \
                          preference saved, device left off",
                         cmd.enabled,
                     );

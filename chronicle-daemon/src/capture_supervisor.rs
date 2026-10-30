@@ -195,6 +195,11 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         !self.user_paused && !self.system_asleep
     }
 
+    /// True when a capture runtime exists.
+    pub fn is_running(&self) -> bool {
+        self.runtime.is_some()
+    }
+
     /// Test-only snapshot of the flags as `(user_paused, system_asleep)`.
     /// Used to verify setter side-effects without exposing the fields
     /// publicly.
@@ -724,5 +729,27 @@ mod tests {
 
         let poisoned = supervisor.shutdown().await;
         assert!(!poisoned, "shutdown with no runtime must report no poison");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn is_running_false_without_runtime() {
+        let (dir, _audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+
+        let supervisor = CaptureSupervisor::new(
+            false,
+            storage,
+            metadata,
+            counters,
+            1024,
+            probe_holder,
+            capture_paused,
+            mic_atom,
+            dir.path().to_path_buf(),
+            Arc::new(chronicle_capture::CaptureDropCounters::default()),
+        );
+
+        assert!(supervisor.should_run(), "no stop flag is set");
+        assert!(!supervisor.is_running(), "no runtime has been started");
     }
 }
