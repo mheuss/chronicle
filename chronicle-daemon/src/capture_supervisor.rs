@@ -58,12 +58,12 @@ pub enum ReconcileOutcome {
     StartFailed { partial_teardown: bool },
 }
 
-/// Retry budget for failed capture starts after a wake or resume.
+/// Retry budget for failed capture starts at boot, wake, or resume.
 ///
 /// A start that fails at wake+~2 s usually races display re-registration —
 /// SCK enumerates a transient, non-startable display (Task 20 runs 1–2 saw
 /// transient IDs 146–151 and 4/4 wake-start failures at realistic cadence).
-/// Boot and settled-state starts succeed, so a short-delay retry recovers.
+/// A login launch can land in the same window, so boot retries too.
 /// Schedule: 5, 10, 20, 30, 30 s — at most `MAX_ATTEMPTS` armed retries per
 /// incident. Any non-StartFailed reconcile outcome ends the incident; the
 /// caller resets the budget.
