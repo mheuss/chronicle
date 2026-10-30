@@ -43,8 +43,10 @@ fn decide(should_run: bool, running: bool) -> ReconcileAction {
     }
 }
 
-/// The result of a `reconcile()` call. The boot caller escalates
-/// `StartFailed { partial_teardown: true }` to `exit(3)`; other callers log.
+/// The result of a `reconcile()` call. `route_reconcile_outcome` in `main.rs`
+/// escalates `StartFailed { partial_teardown: true }` to `exit(3)` while a
+/// start failure that began at boot is still open; otherwise callers log and
+/// retry.
 ///
 /// `must_use`: discarding an outcome silently skips the StartRetry arm/reset
 /// bookkeeping (`note_reconcile_outcome`) — exactly the bug class CHR-136
@@ -241,7 +243,8 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     /// disabled; `MicState::Off` matches the atom's initial value).
     ///
     /// Failures log and return `StartFailed`; this method never exits the
-    /// process. The boot caller decides whether to escalate `partial_teardown`.
+    /// process. `route_reconcile_outcome` decides whether to escalate
+    /// `partial_teardown`.
     fn start(&mut self, audio: &'a AudioPipeline) -> ReconcileOutcome {
         let capture_config = self.capture_config(audio.token(SAMPLE_RATE, CHANNEL_COUNT));
         match CaptureRuntime::start(
@@ -324,8 +327,8 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     /// ADR-009 borrow-checker dance — see `docs/development/objc2-interop.md`
     /// "Global Shutdown Order".
     ///
-    /// Returns `true` if teardown poisoned the engine (the boot caller
-    /// escalates this; runtime callers log).
+    /// Returns `true` if teardown poisoned the engine; `run` escalates this to
+    /// `exit(3)`.
     pub async fn shutdown(mut self) -> bool {
         let Some(rt) = self.runtime.take() else {
             return false;
