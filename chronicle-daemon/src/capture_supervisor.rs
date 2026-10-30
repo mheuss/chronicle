@@ -44,9 +44,9 @@ fn decide(should_run: bool, running: bool) -> ReconcileAction {
 }
 
 /// The result of a `reconcile()` call. `route_reconcile_outcome` in `main.rs`
-/// escalates `StopPoisoned`, and `StartFailed { partial_teardown: true }` while
-/// a start failure that began at boot is still open, to `exit(3)`; otherwise
-/// callers log and retry.
+/// escalates `StopPoisoned`, and `StartFailed { partial_teardown: true }`
+/// before the first successful start, to `exit(3)`; otherwise callers log and
+/// retry.
 ///
 /// `must_use`: discarding an outcome silently skips the StartRetry arm/reset
 /// bookkeeping (`note_reconcile_outcome`) — exactly the bug class CHR-136

@@ -283,7 +283,7 @@ enum BootDisposition {
 
 /// A poisoned stop always exits, and a poisoned start exits until the first
 /// start succeeds: either may leave streams alive, so only a fresh process is
-/// safe.
+/// safe. `boot_incident` outlives a retry-budget reset; only `Started` clears it.
 fn route_reconcile_outcome(
     outcome: &ReconcileOutcome,
     boot_incident: &mut bool,
