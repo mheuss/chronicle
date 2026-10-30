@@ -17,6 +17,8 @@
 //!   Dropping the engine before awaiting is load-bearing: `engine.stop()`
 //!   alone does NOT close the frame channel, because the engine keeps a
 //!   `Sender` clone alive in `_sender` until the engine itself drops.
+//!   A poisoned engine stop aborts the joins instead, because a surviving
+//!   stream can keep the channel open.
 //! - `drop` without `stop`: aborts both JoinHandles via `JoinHandle::abort`
 //!   for best-effort cleanup. The engine's own `Drop` impl tears down
 //!   SCStreams. Final state is not guaranteed clean — prefer `stop().await`.
@@ -142,22 +144,33 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureRuntime<'a, M> {
             r
         };
 
-        let poisoned = matches!(stop_result, Err(CaptureError::PartialTeardown { .. }));
-        for (name, handle) in [
-            ("capture_store_loop", store_handle),
-            ("ocr_loop", ocr_handle),
-        ] {
-            let Some(h) = handle else { continue };
-            if poisoned {
-                h.abort();
-            }
-            if let Err(e) = h.await
-                && !e.is_cancelled()
-            {
-                log::error!("{name} join failed: {e}");
-            }
-        }
+        let poisoned = matches!(
+            stop_result,
+            Err(CaptureError::PartialTeardown { .. } | CaptureError::Poisoned)
+        );
+        join_downstream(
+            [
+                ("capture_store_loop", store_handle),
+                ("ocr_loop", ocr_handle),
+            ],
+            poisoned,
+        )
+        .await;
         stop_result.map_err(CaptureRuntimeError::Engine)
+    }
+}
+
+async fn join_downstream(handles: [(&str, Option<JoinHandle<()>>); 2], poisoned: bool) {
+    for (name, handle) in handles {
+        let Some(h) = handle else { continue };
+        if poisoned {
+            h.abort();
+        }
+        if let Err(e) = h.await
+            && !e.is_cancelled()
+        {
+            log::error!("{name} join failed: {e}");
+        }
     }
 }
 
@@ -182,6 +195,43 @@ impl<M: AppMetadataProvider + 'static + ?Sized> Drop for CaptureRuntime<'_, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn join_downstream_aborts_a_hung_task_when_poisoned() {
+        let (tx, mut rx) = mpsc::channel::<()>(1);
+        let hung = tokio::spawn(async move {
+            let _ = rx.recv().await;
+        });
+
+        let joined = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            join_downstream([("hung", Some(hung)), ("absent", None)], true),
+        )
+        .await;
+
+        assert!(
+            joined.is_ok(),
+            "a poisoned stop must not wait on a task whose sender survives"
+        );
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn join_downstream_awaits_completion_when_not_poisoned() {
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&finished);
+        let task = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        join_downstream([("task", Some(task)), ("absent", None)], false).await;
+
+        assert!(
+            finished.load(std::sync::atomic::Ordering::SeqCst),
+            "a clean stop must let the task run to completion"
+        );
+    }
 
     #[test]
     fn capture_runtime_error_renders_human_readable() {

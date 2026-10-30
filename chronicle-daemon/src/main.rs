@@ -1024,7 +1024,8 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
     ipc_server.shutdown().await;
 
     // Stop the capture runtime FIRST (if active) — stops SCStream and joins
-    // the downstream store/ocr tasks. Must run before `audio_pipeline.stop()`
+    // the downstream store/ocr tasks (aborts them if the stop poisoned the
+    // engine). Must run before `audio_pipeline.stop()`
     // so the handler Retained ref is released and the audio buffer channel
     // can close. If no runtime is active (paused at shutdown), this is a
     // no-op.
@@ -1111,8 +1112,9 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
         // never the sole consumer of, and is less so now that the provision
         // wait above can add up to 5s. The unbounded steps between them
         // (`ipc_server.shutdown`, `supervisor.shutdown`, the bridge join, the
-        // audio-store await, the backfill join) are the ones with no ceiling.
-        // Neither is this one.
+        // audio-store await, the backfill join) are the ones with no ceiling
+        // on a clean shutdown; a poisoned one is cut off by the poison-exit
+        // watchdog. Neither is this one.
         // The three graces differ in what expiry does. The provision wait
         // aborts its task, though not a `spawn_blocking` load already running.
         // This one raises `stop_transcription`, so the loop abandons whatever
