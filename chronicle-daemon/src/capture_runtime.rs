@@ -128,9 +128,9 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureRuntime<'a, M> {
     /// drops, which signals `ocr_loop` to exit. We `await` both joins
     /// to confirm clean teardown.
     ///
-    /// After a poisoned stop (`engine_poisoned`) the joins are aborted instead: a surviving
-    /// stream can keep its handler's frame sender alive, so the channel may
-    /// never close.
+    /// After a poisoned stop (`engine_poisoned`) the joins are aborted
+    /// instead: a surviving stream can keep its handler's frame sender alive,
+    /// so the channel may never close.
     pub async fn stop(mut self) -> Result<()> {
         let store_handle = self.store_handle.take();
         let ocr_handle = self.ocr_handle.take();

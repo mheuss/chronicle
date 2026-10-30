@@ -281,9 +281,9 @@ enum BootDisposition {
     Exit,
 }
 
-/// A poisoned stop always exits, and a start failure that began at boot
-/// escalates a poisoned start until the incident clears: either may leave
-/// streams alive, so only a fresh process is safe.
+/// A poisoned stop always exits, and a poisoned start exits until the first
+/// start succeeds: either may leave streams alive, so only a fresh process is
+/// safe.
 fn route_reconcile_outcome(
     outcome: &ReconcileOutcome,
     boot_incident: &mut bool,
@@ -303,7 +303,7 @@ fn route_reconcile_outcome(
     {
         return BootDisposition::Exit;
     }
-    if !matches!(outcome, ReconcileOutcome::StartFailed { .. }) {
+    if *outcome == ReconcileOutcome::Started {
         *boot_incident = false;
     }
     note_reconcile_outcome(outcome, start_retry, retry_tx);
@@ -1502,11 +1502,55 @@ mod tests {
             let d = route_reconcile_outcome(&outcome, &mut boot_incident, &mut retry, &tx);
 
             assert_eq!(d, BootDisposition::Continue, "{outcome:?}");
-            assert!(!boot_incident, "{outcome:?} must end the boot incident");
+            assert_eq!(
+                boot_incident,
+                outcome != ReconcileOutcome::Started,
+                "only Started may end the boot incident ({outcome:?})"
+            );
             assert_eq!(retry.attempt(), 0, "{outcome:?}");
         }
         tokio::time::sleep(Duration::from_secs(120)).await;
         assert!(rx.try_recv().is_err(), "no outcome here may arm a retry");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn boot_incident_survives_a_pause_before_any_start() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<()>(4);
+        let mut retry = StartRetry::new();
+        let mut boot_incident = true;
+
+        let _ = route_reconcile_outcome(&failed(), &mut boot_incident, &mut retry, &tx);
+        let paused = route_reconcile_outcome(
+            &ReconcileOutcome::NoChange,
+            &mut boot_incident,
+            &mut retry,
+            &tx,
+        );
+        let resumed = route_reconcile_outcome(&poisoned(), &mut boot_incident, &mut retry, &tx);
+
+        assert_eq!(paused, BootDisposition::Continue);
+        assert!(boot_incident, "a pause is not a successful start");
+        assert_eq!(resumed, BootDisposition::Exit);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn boot_incident_poison_exits_after_the_budget_runs_out() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<()>(8);
+        let mut retry = StartRetry::new();
+        let mut boot_incident = true;
+
+        for _ in 0..=StartRetry::MAX_ATTEMPTS {
+            let d = route_reconcile_outcome(&failed(), &mut boot_incident, &mut retry, &tx);
+            assert_eq!(d, BootDisposition::Continue);
+        }
+        assert_eq!(retry.attempt(), StartRetry::MAX_ATTEMPTS);
+        let d = route_reconcile_outcome(&poisoned(), &mut boot_incident, &mut retry, &tx);
+
+        assert_eq!(
+            d,
+            BootDisposition::Exit,
+            "an exhausted budget does not end the incident"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1520,6 +1564,7 @@ mod tests {
 
         assert_eq!(first, BootDisposition::Continue);
         assert_eq!(second, BootDisposition::Exit);
+        assert_eq!(retry.attempt(), 1, "the exit must not arm another retry");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1580,6 +1625,11 @@ mod tests {
 
         assert!(!boot_incident);
         assert_eq!(later, BootDisposition::Continue);
+        assert_eq!(
+            retry.attempt(),
+            1,
+            "a later poisoned start arms a wake-style retry"
+        );
     }
 
     #[tokio::test(start_paused = true)]

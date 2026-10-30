@@ -601,6 +601,7 @@ fn rollback_started<T>(
     stop: impl Fn(&T) -> std::result::Result<(), String>,
     original: CaptureError,
 ) -> CaptureError {
+    debug_assert_eq!(streams.len(), display_ids.len());
     let mut stop_errors: Vec<(u32, String)> = Vec::new();
     let mut survivors: Vec<u32> = Vec::new();
     for (started, started_id) in streams.iter().zip(display_ids.iter()) {

@@ -277,10 +277,8 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
             }
             Err(e) => {
                 log::error!("capture startup failed: {e}");
-                let partial_teardown = matches!(
-                    e,
-                    CaptureRuntimeError::Engine(CaptureError::PartialTeardown { .. })
-                );
+                let CaptureRuntimeError::Engine(engine_err) = &e;
+                let partial_teardown = engine_poisoned(engine_err);
                 ReconcileOutcome::StartFailed { partial_teardown }
             }
         }
@@ -342,19 +340,20 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
                 log::info!("capture runtime stopped cleanly");
                 false
             }
-            Err(CaptureRuntimeError::Engine(CaptureError::PartialTeardown {
-                survivors,
-                stop_errors,
-                ..
-            })) => {
-                log::error!(
-                    "runtime stop failed; engine poisoned. survivors={survivors:?} \
-                     stop_errors={stop_errors:?}"
-                );
-                true
-            }
             Err(CaptureRuntimeError::Engine(ref e)) if engine_poisoned(e) => {
-                log::error!("runtime stop failed; engine poisoned: {e}");
+                if let CaptureError::PartialTeardown {
+                    survivors,
+                    stop_errors,
+                    ..
+                } = e
+                {
+                    log::error!(
+                        "runtime stop failed; engine poisoned. survivors={survivors:?} \
+                         stop_errors={stop_errors:?}"
+                    );
+                } else {
+                    log::error!("runtime stop failed; engine poisoned: {e}");
+                }
                 true
             }
             Err(e) => {
