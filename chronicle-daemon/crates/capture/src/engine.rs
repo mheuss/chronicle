@@ -883,11 +883,20 @@ mod tests {
 
     #[test]
     fn rollback_started_reports_survivors_when_a_stop_fails() {
+        let stopped = std::cell::RefCell::new(Vec::new());
         let err = rollback_started(
             &[10u32, 20, 30],
             &[1, 2, 3],
-            |s: &u32| if *s == 20 { Err("hung".into()) } else { Ok(()) },
+            |s: &u32| {
+                stopped.borrow_mut().push(*s);
+                if *s == 20 { Err("hung".into()) } else { Ok(()) }
+            },
             CaptureError::ScreenCaptureKit("boom".into()),
+        );
+        assert_eq!(
+            *stopped.borrow(),
+            vec![10, 20, 30],
+            "a failed stop must not end the rollback"
         );
         match err {
             CaptureError::PartialTeardown {
