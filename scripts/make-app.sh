@@ -1,36 +1,110 @@
 #!/usr/bin/env bash
 #
-# Build Chronicle.app from the daemon and UI builds.
+# Build and sign Chronicle.app from the daemon and UI builds.
 #
 # Usage:
 #   scripts/make-app.sh           # debug build (default)
 #   scripts/make-app.sh release   # release build
+#   scripts/make-app.sh dist      # release build, then a notarized DMG
 #
-# Produces: dist/Chronicle.app
+# Produces: dist/Chronicle.app, and for dist also dist/Chronicle-<version>.dmg
+# One-time setup: docs/guides/signing-and-notarization.md
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# The bundle swap at the end is two renames. A run interrupted between them
+# leaves the last good bundle only in $PREVIOUS, so put it back before anything
+# else can fail.
+APP="dist/Chronicle.app"
+PREVIOUS="dist/Chronicle.app.previous"
+if [ ! -e "$APP" ] && [ -e "$PREVIOUS" ]; then
+    mv "$PREVIOUS" "$APP"
+fi
+
 CONFIG="${1:-debug}"
 case "$CONFIG" in
-    debug|release) ;;
+    debug|release|dist) ;;
     *)
-        echo "Unknown config: $CONFIG (expected: debug or release)" >&2
+        echo "Unknown config: $CONFIG (expected: debug, release or dist)" >&2
         exit 2
         ;;
 esac
+BUILD_CONFIG="$CONFIG"
+if [ "$CONFIG" = "dist" ]; then
+    BUILD_CONFIG="release"
+fi
+
+GUIDE="docs/guides/signing-and-notarization.md"
+
+resolve_identity() {
+    local matches
+    matches="$(security find-identity -v -p codesigning | grep '"Developer ID Application: ' | awk '!seen[$2]++' || true)"
+    if [ -n "${CHRONICLE_SIGN_IDENTITY:-}" ]; then
+        matches="$(grep -F -- "$CHRONICLE_SIGN_IDENTITY" <<<"$matches" || true)"
+    fi
+    local count
+    count="$(grep -c . <<<"$matches" || true)"
+    if [ "$count" -ne 1 ]; then
+        echo "Found $count matching Developer ID Application identities; expected 1." >&2
+        [ -n "$matches" ] && echo "$matches" >&2
+        if [ -n "${CHRONICLE_SIGN_IDENTITY:-}" ]; then
+            echo "CHRONICLE_SIGN_IDENTITY is set to '$CHRONICLE_SIGN_IDENTITY'. Change or unset it. See $GUIDE#certificate" >&2
+        else
+            echo "Set CHRONICLE_SIGN_IDENTITY, or see $GUIDE#certificate" >&2
+        fi
+        exit 1
+    fi
+    awk '{print $2}' <<<"$matches"
+}
+
+shell_quote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+notary_field() {
+    /usr/bin/python3 -c 'import json, sys
+try:
+    print(json.load(sys.stdin).get(sys.argv[1], ""))
+except (ValueError, AttributeError):
+    pass' "$1"
+}
+
+IDENTITY="$(resolve_identity)"
+
+if [ "$CONFIG" = "dist" ]; then
+    if ! tree_status="$(git status --porcelain --untracked-files=normal)"; then
+        echo "dist could not check the working tree: git status failed." >&2
+        exit 1
+    fi
+    if [ -n "$tree_status" ]; then
+        echo "dist needs a clean working tree. Commit or stash your changes first." >&2
+        exit 1
+    fi
+    PROFILE="${CHRONICLE_NOTARY_PROFILE:-chronicle-notary}"
+    if ! notary_check="$(xcrun notarytool history --keychain-profile "$PROFILE" 2>&1)"; then
+        echo "$notary_check" >&2
+        echo "Notary profile '$PROFILE' is not usable. See $GUIDE#notary-profile" >&2
+        exit 1
+    fi
+fi
 
 MANIFEST="chronicle-daemon/Cargo.toml"
+CARGO_ARGS=(--manifest-path "$MANIFEST" --message-format=json-render-diagnostics)
+SWIFT_ARGS=(-c "$BUILD_CONFIG")
+if [ "$CONFIG" = "dist" ]; then
+    CARGO_ARGS+=(--locked)
+    SWIFT_ARGS+=(--only-use-versions-from-resolved-file)
+fi
 METADATA="$(cargo metadata --no-deps --format-version 1 --manifest-path "$MANIFEST")"
 VERSION="$(/usr/bin/python3 -c 'import json, sys
 m = json.load(sys.stdin)
 print(next(p["version"] for p in m["packages"] if p["name"] == "chronicle-daemon"))' <<<"$METADATA")"
 BUILD="$(git rev-list --count HEAD)"
 
-echo "Building chronicle-daemon ($CONFIG)..."
-CARGO_ARGS=(--manifest-path "$MANIFEST" --message-format=json-render-diagnostics)
-if [ "$CONFIG" = "release" ]; then
+echo "Building chronicle-daemon ($BUILD_CONFIG)..."
+if [ "$BUILD_CONFIG" = "release" ]; then
     CARGO_ARGS+=(--release)
 fi
 CARGO_JSON="$(CHRONICLE_BUILD_NUMBER="$BUILD" cargo build "${CARGO_ARGS[@]}")"
@@ -71,11 +145,11 @@ while read -r rlib; do
     fi
 done <<<"$NATIVE_RLIBS"
 
-echo "Building ChronicleUI ($CONFIG)..."
-UI_BIN="$(cd chronicle-ui && swift build -c "$CONFIG" --show-bin-path)/ChronicleUI"
+echo "Building ChronicleUI ($BUILD_CONFIG)..."
+UI_BIN="$(cd chronicle-ui && swift build "${SWIFT_ARGS[@]}" --show-bin-path)/ChronicleUI"
 # SwiftPM doesn't always relink when only the -sectcreate Info.plist changes.
 rm -f "$UI_BIN"
-(cd chronicle-ui && swift build -c "$CONFIG")
+(cd chronicle-ui && swift build "${SWIFT_ARGS[@]}")
 
 for bin in "$DAEMON_BIN" "$UI_BIN"; do
     if [ ! -f "$bin" ]; then
@@ -109,12 +183,14 @@ if [ "$daemon_mic" != "$ui_mic" ]; then
     exit 1
 fi
 
-APP="dist/Chronicle.app"
-CONTENTS="$APP/Contents"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+STAGE="$WORK/app/Chronicle.app"
+CONTENTS="$STAGE/Contents"
 AGENT_PLIST="dev.heuss.chronicle.daemon.plist"
 
-echo "Assembling $APP..."
-rm -rf "$APP"
+echo "Assembling Chronicle.app..."
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Library/LaunchAgents"
 cp chronicle-ui/Sources/ChronicleUI/Info.plist "$CONTENTS/Info.plist"
 cp "$UI_BIN" "$CONTENTS/MacOS/ChronicleUI"
@@ -128,10 +204,144 @@ printf 'APPL????' > "$CONTENTS/PkgInfo"
     "$CONTENTS/Info.plist"
 plutil -lint "$CONTENTS/Info.plist" "$CONTENTS/Library/LaunchAgents/$AGENT_PLIST"
 
-# CHR-70: replace with Developer ID signing, hardened runtime and entitlements.
-codesign --force --sign - "$CONTENTS/MacOS/chronicle-daemon"
-codesign --force --sign - "$APP"
+DAEMON_ENT="packaging/daemon.entitlements"
+UI_ENT="packaging/ui.entitlements"
+TIMESTAMP_ARGS=(--timestamp)
+if [ "$CONFIG" = "debug" ]; then
+    TIMESTAMP_ARGS=(--timestamp=none)
+    cp "$DAEMON_ENT" "$WORK/daemon.entitlements"
+    cp "$UI_ENT" "$WORK/ui.entitlements"
+    DAEMON_ENT="$WORK/daemon.entitlements"
+    UI_ENT="$WORK/ui.entitlements"
+    for ent in "$DAEMON_ENT" "$UI_ENT"; do
+        /usr/libexec/PlistBuddy -c "Add :com.apple.security.get-task-allow bool true" "$ent"
+    done
+fi
+
+sign() {
+    codesign --force --sign "$IDENTITY" --options runtime "${TIMESTAMP_ARGS[@]}" "$@"
+}
+
+echo "Signing Chronicle.app..."
+sign --identifier dev.heuss.chronicle.daemon --entitlements "$DAEMON_ENT" "$CONTENTS/MacOS/chronicle-daemon"
+sign --entitlements "$UI_ENT" "$STAGE"
+codesign --verify --strict --deep --verbose=2 "$STAGE"
+
+for code in "$CONTENTS/MacOS/chronicle-daemon" "$STAGE"; do
+    info="$(codesign -dvv "$code" 2>&1)"
+    if ! grep -q '^Authority=Developer ID Application: ' <<<"$info"; then
+        echo "${code#"$WORK/app/"} is not signed by a Developer ID Application identity" >&2
+        exit 1
+    fi
+    if [ "$CONFIG" != "debug" ]; then
+        ents="$(codesign -d --entitlements - --xml "$code" 2>/dev/null)"
+        if grep -q 'com.apple.security.get-task-allow' <<<"$ents"; then
+            echo "${code#"$WORK/app/"} carries get-task-allow in a $CONFIG build" >&2
+            exit 1
+        fi
+    fi
+done
+
+mkdir -p dist
+NEW="dist/.Chronicle.app.new"
+rm -rf "$NEW" "$PREVIOUS"
+ditto "$STAGE" "$NEW"
+codesign --verify --strict --deep "$NEW"
+if [ -e "$APP" ]; then
+    mv "$APP" "$PREVIOUS"
+fi
+if ! mv "$NEW" "$APP"; then
+    if [ -e "$PREVIOUS" ]; then
+        mv "$PREVIOUS" "$APP"
+        echo "Could not move the new bundle into $APP. The previous bundle is back in place." >&2
+    else
+        echo "Could not move the new bundle into $APP." >&2
+    fi
+    exit 1
+fi
+rm -rf "$PREVIOUS"
+
+if [ "$CONFIG" = "dist" ]; then
+    DMG="dist/Chronicle-$VERSION.dmg"
+    PENDING="dist/Chronicle-$VERSION.pending.dmg"
+    NOTARY_TIMEOUT_MIN=30
+    Q_PENDING="$(shell_quote "$PWD/$PENDING")"
+    Q_DMG="$(shell_quote "$PWD/$DMG")"
+    Q_PROFILE="$(shell_quote "$PROFILE")"
+    FINISH_CMD="xcrun stapler staple $Q_PENDING && xcrun stapler validate $Q_PENDING && spctl --assess --type open --context context:primary-signature $Q_PENDING && spctl --assess --type open --context context:primary-signature -v $Q_PENDING 2>&1 | grep -qx 'source=Notarized Developer ID' && mv -f $Q_PENDING $Q_DMG"
+    echo "Packaging $PENDING..."
+    mkdir "$WORK/dmg"
+    ditto "$APP" "$WORK/dmg/Chronicle.app"
+    ln -s /Applications "$WORK/dmg/Applications"
+    hdiutil create -volname Chronicle -srcfolder "$WORK/dmg" -fs HFS+ -format UDZO -ov "$PENDING"
+    codesign --sign "$IDENTITY" --timestamp "$PENDING"
+
+    echo "Notarizing $PENDING. This usually takes a few minutes..."
+    notary_rc=0
+    NOTARY_JSON="$(xcrun notarytool submit "$PENDING" --keychain-profile "$PROFILE" --wait --timeout "${NOTARY_TIMEOUT_MIN}m" --output-format json 2>"$WORK/notary.err")" || notary_rc=$?
+    if [ -n "$NOTARY_JSON" ]; then
+        cat "$WORK/notary.err" >&2
+    else
+        NOTARY_JSON="$(cat "$WORK/notary.err")"
+    fi
+    NOTARY_ID="$(notary_field id <<<"$NOTARY_JSON")"
+    NOTARY_STATUS="$(notary_field status <<<"$NOTARY_JSON")"
+    if [ "$notary_rc" -ne 0 ] && [ "$NOTARY_STATUS" = "Accepted" ]; then
+        NOTARY_STATUS=""
+    fi
+    # On timeout, notarytool exits 124 and prints JSON with no status to stderr.
+    if [ "$notary_rc" -eq 124 ] && [ -z "$NOTARY_STATUS" ] && [ -n "$NOTARY_ID" ]; then
+        NOTARY_STATUS="In Progress"
+    fi
+    case "$NOTARY_STATUS" in
+        Accepted) ;;
+        Invalid|Rejected)
+            echo "Notarization $NOTARY_STATUS. Submission ID: $NOTARY_ID" >&2
+            if ! xcrun notarytool log "$NOTARY_ID" --keychain-profile "$PROFILE" >&2; then
+                echo "Warning: could not fetch the notary log. Retry with: xcrun notarytool log $NOTARY_ID --keychain-profile $Q_PROFILE" >&2
+            fi
+            echo "See $GUIDE#troubleshooting" >&2
+            exit 1
+            ;;
+        "In Progress")
+            echo "Notarization did not finish within $NOTARY_TIMEOUT_MIN minutes. Submission ID: $NOTARY_ID" >&2
+            echo "Apple keeps processing it. Run this as one line to finish:" >&2
+            echo "  xcrun notarytool wait $NOTARY_ID --keychain-profile $Q_PROFILE && $FINISH_CMD" >&2
+            exit 1
+            ;;
+        *)
+            echo "notarytool submit failed or printed no usable result:" >&2
+            if [ -n "$NOTARY_JSON" ]; then
+                echo "$NOTARY_JSON" >&2
+            fi
+            if [ -n "$NOTARY_ID" ]; then
+                echo "Submission ID: $NOTARY_ID" >&2
+                echo "Check it with: xcrun notarytool info $NOTARY_ID --keychain-profile $Q_PROFILE" >&2
+            else
+                echo "Check recent submissions with: xcrun notarytool history --keychain-profile $Q_PROFILE" >&2
+            fi
+            exit 1
+            ;;
+    esac
+
+    if ! xcrun stapler staple "$PENDING" || ! xcrun stapler validate "$PENDING"; then
+        echo "Notarized, but stapling failed. Retry this as one line:" >&2
+        echo "  $FINISH_CMD" >&2
+        exit 1
+    fi
+    if ! assess="$(spctl --assess --type open --context context:primary-signature -v "$PENDING" 2>&1)" \
+        || ! grep -qx 'source=Notarized Developer ID' <<<"$assess"; then
+        echo "$assess" >&2
+        echo "Gatekeeper did not accept $PENDING as notarized. See $GUIDE#troubleshooting" >&2
+        exit 1
+    fi
+    echo "$assess"
+    mv -f "$PENDING" "$DMG"
+fi
 
 echo ""
 echo "Built: $APP (version $VERSION, build $BUILD)"
-echo "Launch with: open $APP"
+if [ "$CONFIG" = "dist" ]; then
+    echo "Notarized: $DMG"
+fi
+echo "Launch with: open $(shell_quote "$PWD/$APP")"
