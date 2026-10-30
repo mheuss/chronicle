@@ -223,7 +223,7 @@ impl<'a> CaptureEngine<'a> {
             let queue =
                 DispatchQueue::new(&format!("com.chronicle.capture.display-{display_id}"), None);
 
-            autoreleasepool(|_| unsafe {
+            if let Err(e) = autoreleasepool(|_| unsafe {
                 stream
                     .addStreamOutput_type_sampleHandlerQueue_error(
                         handler.as_protocol_object(),
@@ -236,13 +236,20 @@ impl<'a> CaptureEngine<'a> {
                             e.localizedDescription()
                         ))
                     })
-            })?;
+            }) {
+                return Err(rollback_started(
+                    &streams,
+                    &started_display_ids,
+                    |s: &Retained<SCStream>| (deps.stop_stream)(s),
+                    e,
+                ));
+            }
 
             // Register audio handler on the primary display's stream.
             if is_primary && let Some(ref audio) = config.audio {
                 // System audio — hard error. Core functionality.
                 let system_handler = audio.handler_clone();
-                autoreleasepool(|_| unsafe {
+                if let Err(e) = autoreleasepool(|_| unsafe {
                     stream
                         .addStreamOutput_type_sampleHandlerQueue_error(
                             &system_handler,
@@ -255,7 +262,14 @@ impl<'a> CaptureEngine<'a> {
                                 e.localizedDescription()
                             ))
                         })
-                })?;
+                }) {
+                    return Err(rollback_started(
+                        &streams,
+                        &started_display_ids,
+                        |s: &Retained<SCStream>| (deps.stop_stream)(s),
+                        e,
+                    ));
+                }
 
                 log::info!("Registered audio handler on primary display {display_id}");
             }
