@@ -73,6 +73,24 @@ fn spawn_start_retry(tx: tokio::sync::mpsc::Sender<()>, delay: std::time::Durati
     });
 }
 
+/// Exit with code 3 after `grace` if the poisoned shutdown has not finished.
+/// A survivor stream can hold an audio sender and block `audio_pipeline.stop()`.
+fn spawn_poison_exit_watchdog(grace: std::time::Duration) {
+    let spawned = std::thread::Builder::new()
+        .name("poison-exit-watchdog".into())
+        .spawn(move || {
+            std::thread::sleep(grace);
+            log::error!(
+                "poisoned shutdown did not finish within {}s; exiting with code 3",
+                grace.as_secs()
+            );
+            std::process::exit(3);
+        });
+    if let Err(e) = spawned {
+        log::error!("poison-exit watchdog failed to start: {e}");
+    }
+}
+
 /// A [`StopSignal`](chronicle_storage::StopSignal) that is true once `cancel`
 /// has been cancelled.
 ///
@@ -957,6 +975,10 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
     // supervisor, which releases the &audio_pipeline borrow so
     // audio_pipeline.stop() (which needs &mut self) can run next.
     let poisoned = supervisor.shutdown().await;
+    const POISON_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
+    if poisoned {
+        spawn_poison_exit_watchdog(POISON_EXIT_GRACE);
+    }
 
     // Stop audio pipeline — encoding thread sees EOF, flushes segments.
     if let Err(e) = audio_pipeline.stop() {
