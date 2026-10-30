@@ -73,6 +73,8 @@ fn spawn_start_retry(tx: tokio::sync::mpsc::Sender<()>, delay: std::time::Durati
     });
 }
 
+const POISON_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Exit with code 3 after `grace` if the poisoned shutdown has not finished.
 /// A survivor stream can hold an audio sender and block `audio_pipeline.stop()`.
 fn spawn_poison_exit_watchdog(grace: std::time::Duration) {
@@ -280,8 +282,8 @@ enum BootDisposition {
 }
 
 /// A start failure that began at boot escalates a poisoned engine until the
-/// incident clears: a start whose rollback failed may leave streams alive, so
-/// only a fresh process is safe.
+/// incident clears: a poisoned start may leave streams alive, so only a fresh
+/// process is safe.
 fn route_reconcile_outcome(
     outcome: &ReconcileOutcome,
     boot_incident: &mut bool,
@@ -541,7 +543,7 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
     if route_reconcile_outcome(&outcome, &mut boot_incident, &mut start_retry, &retry_tx)
         == BootDisposition::Exit
     {
-        log::error!("capture startup rollback failed; exiting");
+        log::error!("capture start left streams possibly running; exiting with code 3");
         std::process::exit(3);
     }
 
@@ -814,7 +816,7 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
                 );
                 let _ = cmd.reply.send(paused);
                 if disposition == BootDisposition::Exit {
-                    log::error!("capture start rollback failed during boot recovery; shutting down");
+                    log::error!("boot recovery hit a poisoned capture start; shutting down");
                     boot_poisoned = true;
                     break;
                 }
@@ -861,10 +863,14 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
                     power::PowerEvent::SystemWake =>
                         supervisor.set_system_awake(&audio_pipeline).await,
                 };
-                if route_reconcile_outcome(&outcome, &mut boot_incident, &mut start_retry, &retry_tx)
-                    == BootDisposition::Exit
-                {
-                    log::error!("capture start rollback failed during boot recovery; shutting down");
+                let disposition = route_reconcile_outcome(
+                    &outcome,
+                    &mut boot_incident,
+                    &mut start_retry,
+                    &retry_tx,
+                );
+                if disposition == BootDisposition::Exit {
+                    log::error!("boot recovery hit a poisoned capture start; shutting down");
                     boot_poisoned = true;
                     break;
                 }
@@ -879,15 +885,22 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
                 if outcome == ReconcileOutcome::Started {
                     log::info!("capture recovered on retry");
                 }
-                if route_reconcile_outcome(&outcome, &mut boot_incident, &mut start_retry, &retry_tx)
-                    == BootDisposition::Exit
-                {
-                    log::error!("capture start rollback failed during boot recovery; shutting down");
+                let disposition = route_reconcile_outcome(
+                    &outcome,
+                    &mut boot_incident,
+                    &mut start_retry,
+                    &retry_tx,
+                );
+                if disposition == BootDisposition::Exit {
+                    log::error!("boot recovery hit a poisoned capture start; shutting down");
                     boot_poisoned = true;
                     break;
                 }
             }
         }
+    }
+    if boot_poisoned {
+        spawn_poison_exit_watchdog(POISON_EXIT_GRACE);
     }
     // Set when an owned task/thread panic is OBSERVED during shutdown — for
     // the provision join below, the panic itself may have happened much
@@ -1021,8 +1034,7 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
     // supervisor, which releases the &audio_pipeline borrow so
     // audio_pipeline.stop() (which needs &mut self) can run next.
     let poisoned = supervisor.shutdown().await;
-    const POISON_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
-    if poisoned || boot_poisoned {
+    if poisoned {
         spawn_poison_exit_watchdog(POISON_EXIT_GRACE);
     }
 

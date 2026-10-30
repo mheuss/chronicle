@@ -91,6 +91,8 @@ impl<'a> CaptureEngine<'a> {
     ///
     /// * `CaptureError::NoDisplays` -- no displays found
     /// * `CaptureError::ScreenCaptureKit` -- SCK returned an error
+    /// * `CaptureError::PartialTeardown` -- a per-display start step failed and
+    ///   rollback could not stop a started stream, or SCK never confirmed a start
     pub fn start(config: CaptureConfig<'a>) -> Result<(Self, mpsc::Receiver<CapturedFrame>)> {
         Self::start_with_deps(config, EngineDeps::default())
     }
