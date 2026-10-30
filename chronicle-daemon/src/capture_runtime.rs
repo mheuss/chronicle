@@ -125,6 +125,10 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureRuntime<'a, M> {
     /// the store loop returns, its `ocr_sink` (holding the OCR sender)
     /// drops, which signals `ocr_loop` to exit. We `await` both joins
     /// to confirm clean teardown.
+    ///
+    /// After a `PartialTeardown` the joins are aborted instead: a surviving
+    /// stream can keep its handler's frame sender alive, so the channel may
+    /// never close.
     pub async fn stop(mut self) -> Result<()> {
         let store_handle = self.store_handle.take();
         let ocr_handle = self.ocr_handle.take();
@@ -138,15 +142,20 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureRuntime<'a, M> {
             r
         };
 
-        if let Some(h) = store_handle
-            && let Err(e) = h.await
-        {
-            log::error!("capture_store_loop join failed: {e}");
-        }
-        if let Some(h) = ocr_handle
-            && let Err(e) = h.await
-        {
-            log::error!("ocr_loop join failed: {e}");
+        let poisoned = matches!(stop_result, Err(CaptureError::PartialTeardown { .. }));
+        for (name, handle) in [
+            ("capture_store_loop", store_handle),
+            ("ocr_loop", ocr_handle),
+        ] {
+            let Some(h) = handle else { continue };
+            if poisoned {
+                h.abort();
+            }
+            if let Err(e) = h.await
+                && !e.is_cancelled()
+            {
+                log::error!("{name} join failed: {e}");
+            }
         }
         stop_result.map_err(CaptureRuntimeError::Engine)
     }
