@@ -290,6 +290,7 @@ impl<'a> CaptureEngine<'a> {
                     original,
                 );
                 return Err(if unconfirmed {
+                    log::error!("start on display {display_id} unconfirmed: {reason}");
                     mark_unconfirmed(err, display_id, reason)
                 } else {
                     err
