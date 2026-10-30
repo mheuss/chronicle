@@ -91,6 +91,12 @@ if [ "$CONFIG" = "dist" ]; then
 fi
 
 MANIFEST="chronicle-daemon/Cargo.toml"
+CARGO_ARGS=(--manifest-path "$MANIFEST" --message-format=json-render-diagnostics)
+SWIFT_ARGS=(-c "$BUILD_CONFIG")
+if [ "$CONFIG" = "dist" ]; then
+    CARGO_ARGS+=(--locked)
+    SWIFT_ARGS+=(--only-use-versions-from-resolved-file)
+fi
 METADATA="$(cargo metadata --no-deps --format-version 1 --manifest-path "$MANIFEST")"
 VERSION="$(/usr/bin/python3 -c 'import json, sys
 m = json.load(sys.stdin)
@@ -98,7 +104,6 @@ print(next(p["version"] for p in m["packages"] if p["name"] == "chronicle-daemon
 BUILD="$(git rev-list --count HEAD)"
 
 echo "Building chronicle-daemon ($BUILD_CONFIG)..."
-CARGO_ARGS=(--manifest-path "$MANIFEST" --message-format=json-render-diagnostics)
 if [ "$BUILD_CONFIG" = "release" ]; then
     CARGO_ARGS+=(--release)
 fi
@@ -141,10 +146,10 @@ while read -r rlib; do
 done <<<"$NATIVE_RLIBS"
 
 echo "Building ChronicleUI ($BUILD_CONFIG)..."
-UI_BIN="$(cd chronicle-ui && swift build -c "$BUILD_CONFIG" --show-bin-path)/ChronicleUI"
+UI_BIN="$(cd chronicle-ui && swift build "${SWIFT_ARGS[@]}" --show-bin-path)/ChronicleUI"
 # SwiftPM doesn't always relink when only the -sectcreate Info.plist changes.
 rm -f "$UI_BIN"
-(cd chronicle-ui && swift build -c "$BUILD_CONFIG")
+(cd chronicle-ui && swift build "${SWIFT_ARGS[@]}")
 
 for bin in "$DAEMON_BIN" "$UI_BIN"; do
     if [ ! -f "$bin" ]; then
