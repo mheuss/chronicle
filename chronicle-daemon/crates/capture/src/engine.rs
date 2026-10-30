@@ -262,29 +262,15 @@ impl<'a> CaptureEngine<'a> {
 
             // Start capture.
             if let Err(start_err) = (deps.start_stream)(&stream) {
-                let mut stop_errors: Vec<(u32, String)> = Vec::new();
-                let mut survivors: Vec<u32> = Vec::new();
-                for (started, started_id) in streams.iter().zip(started_display_ids.iter()) {
-                    if let Err(stop_err) = (deps.stop_stream)(started) {
-                        log::error!(
-                            "rollback stop_stream failed for display {started_id}: {stop_err}"
-                        );
-                        stop_errors.push((*started_id, stop_err));
-                        survivors.push(*started_id);
-                    }
-                }
                 let original = CaptureError::ScreenCaptureKit(format!(
                     "failed to start capture on display {display_id}: {start_err}"
                 ));
-                return if stop_errors.is_empty() {
-                    Err(original)
-                } else {
-                    Err(CaptureError::PartialTeardown {
-                        survivors,
-                        stop_errors,
-                        original: Box::new(original),
-                    })
-                };
+                return Err(rollback_started(
+                    &streams,
+                    &started_display_ids,
+                    |s: &Retained<SCStream>| (deps.stop_stream)(s),
+                    original,
+                ));
             }
 
             log::info!(
@@ -570,6 +556,34 @@ pub(crate) fn stop_stream(stream: &SCStream) -> std::result::Result<(), String> 
     }
 }
 
+/// Stop every stream that already started, then classify the failure.
+/// Generic so tests can pass fake streams.
+fn rollback_started<T>(
+    streams: &[T],
+    display_ids: &[u32],
+    stop: impl Fn(&T) -> std::result::Result<(), String>,
+    original: CaptureError,
+) -> CaptureError {
+    let mut stop_errors: Vec<(u32, String)> = Vec::new();
+    let mut survivors: Vec<u32> = Vec::new();
+    for (started, started_id) in streams.iter().zip(display_ids.iter()) {
+        if let Err(stop_err) = stop(started) {
+            log::error!("rollback stop_stream failed for display {started_id}: {stop_err}");
+            stop_errors.push((*started_id, stop_err));
+            survivors.push(*started_id);
+        }
+    }
+    if stop_errors.is_empty() {
+        original
+    } else {
+        CaptureError::PartialTeardown {
+            survivors,
+            stop_errors,
+            original: Box::new(original),
+        }
+    }
+}
+
 /// Convert a fractional-seconds interval into a `CMTime`.
 ///
 /// Uses millisecond precision (timescale = 1000) so values like 0.5 s or 2.0 s
@@ -842,5 +856,50 @@ mod tests {
         let snap2 = probe.snapshot();
         assert_eq!(snap2.state, EngineState::Idle);
         assert_eq!(snap2.active_displays, 0);
+    }
+
+    #[test]
+    fn rollback_started_returns_original_when_all_stops_succeed() {
+        let stopped = std::cell::RefCell::new(Vec::new());
+        let err = rollback_started(
+            &[10u32, 20],
+            &[1, 2],
+            |s: &u32| {
+                stopped.borrow_mut().push(*s);
+                Ok(())
+            },
+            CaptureError::ScreenCaptureKit("boom".into()),
+        );
+        assert_eq!(
+            *stopped.borrow(),
+            vec![10, 20],
+            "each started stream stops once"
+        );
+        assert!(
+            matches!(err, CaptureError::ScreenCaptureKit(ref m) if m == "boom"),
+            "all stops succeeded, so the original error is returned, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rollback_started_reports_survivors_when_a_stop_fails() {
+        let err = rollback_started(
+            &[10u32, 20, 30],
+            &[1, 2, 3],
+            |s: &u32| if *s == 20 { Err("hung".into()) } else { Ok(()) },
+            CaptureError::ScreenCaptureKit("boom".into()),
+        );
+        match err {
+            CaptureError::PartialTeardown {
+                survivors,
+                stop_errors,
+                original,
+            } => {
+                assert_eq!(survivors, vec![2]);
+                assert_eq!(stop_errors, vec![(2, "hung".to_string())]);
+                assert!(matches!(*original, CaptureError::ScreenCaptureKit(ref m) if m == "boom"));
+            }
+            other => panic!("expected PartialTeardown, got {other:?}"),
+        }
     }
 }
