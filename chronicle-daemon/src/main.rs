@@ -73,6 +73,26 @@ fn spawn_start_retry(tx: tokio::sync::mpsc::Sender<()>, delay: std::time::Durati
     });
 }
 
+const POISON_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Exit with code 3 after `grace` if the poisoned shutdown has not finished.
+/// A survivor stream can hold an audio sender and block `audio_pipeline.stop()`.
+fn spawn_poison_exit_watchdog(grace: std::time::Duration) {
+    let spawned = std::thread::Builder::new()
+        .name("poison-exit-watchdog".into())
+        .spawn(move || {
+            std::thread::sleep(grace);
+            log::error!(
+                "poisoned shutdown did not finish within {}s; exiting with code 3",
+                grace.as_secs()
+            );
+            std::process::exit(3);
+        });
+    if let Err(e) = spawned {
+        log::error!("poison-exit watchdog failed to start: {e}");
+    }
+}
+
 /// A [`StopSignal`](chronicle_storage::StopSignal) that is true once `cancel`
 /// has been cancelled.
 ///
@@ -255,6 +275,41 @@ fn note_reconcile_outcome(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum BootDisposition {
+    Continue,
+    Exit,
+}
+
+/// A poisoned stop always exits, and a poisoned start exits until the first
+/// start succeeds: either may leave streams alive, so only a fresh process is
+/// safe. `boot_incident` outlives a retry-budget reset; only `Started` clears it.
+fn route_reconcile_outcome(
+    outcome: &ReconcileOutcome,
+    boot_incident: &mut bool,
+    start_retry: &mut StartRetry,
+    retry_tx: &tokio::sync::mpsc::Sender<()>,
+) -> BootDisposition {
+    if *outcome == ReconcileOutcome::StopPoisoned {
+        return BootDisposition::Exit;
+    }
+    if *boot_incident
+        && matches!(
+            outcome,
+            ReconcileOutcome::StartFailed {
+                partial_teardown: true
+            }
+        )
+    {
+        return BootDisposition::Exit;
+    }
+    if *outcome == ReconcileOutcome::Started {
+        *boot_incident = false;
+    }
+    note_reconcile_outcome(outcome, start_retry, retry_tx);
+    BootDisposition::Continue
+}
+
 /// The filter applied when `RUST_LOG` is unset.
 ///
 /// `chronicle` is a prefix match, not a crate name — `env_filter` compares with
@@ -387,9 +442,9 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
              capture continues normally"
         ),
     }
-    // Start-retry channel (CHR-136). When a wake/resume reconcile fails to
-    // start capture — typically racing display re-registration right after
-    // wake — a detached sleeper sends one unit event here to re-run
+    // Start-retry channel (CHR-136, CHR-134). When a boot, wake, or resume
+    // reconcile fails to start capture — typically racing display
+    // re-registration — a detached sleeper sends one unit event here to re-run
     // reconcile. Stale nudges after recovery are harmless: reconcile is
     // idempotent.
     let (retry_tx, mut retry_rx) = tokio::sync::mpsc::channel::<()>(4);
@@ -486,22 +541,13 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
         log::info!("Capture is paused (persisted setting); skipping runtime start");
     }
 
-    match supervisor.reconcile(&audio_pipeline).await {
-        ReconcileOutcome::StartFailed {
-            partial_teardown: true,
-        } => {
-            log::error!("capture startup rollback failed; exiting");
-            std::process::exit(3);
-        }
-        ReconcileOutcome::StartFailed {
-            partial_teardown: false,
-        } => {
-            return Err(anyhow::anyhow!(
-                "capture boot aborted (underlying engine error logged by \
-                 CaptureSupervisor::start)"
-            ));
-        }
-        _ => {}
+    let mut boot_incident = true;
+    let outcome = supervisor.reconcile(&audio_pipeline).await;
+    if route_reconcile_outcome(&outcome, &mut boot_incident, &mut start_retry, &retry_tx)
+        == BootDisposition::Exit
+    {
+        log::error!("capture start left streams possibly running; exiting with code 3");
+        std::process::exit(3);
     }
 
     // Bounded channel (64) with blocking_send — backpressure over data loss
@@ -721,6 +767,7 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
     // finishes, so a new switch can win the slot while the old handle is
     // technically still unfinished. Harmless: by then the superseded task has
     // already sent its event and has nothing left but to return.)
+    let mut loop_poisoned = false;
     let mut provision_task: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         tokio::select! {
@@ -737,16 +784,16 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
                 // Always persist the user's intent so the supervisor's next Start
                 // restores it.
                 settings::write_mic_setting(storage.base_dir(), cmd.enabled);
-                let state = if supervisor.should_run() {
+                let state = if supervisor.is_running() {
                     let outcome = audio_pipeline.set_microphone_enabled(cmd.enabled);
                     let s = ipc_handler::map_outcome(outcome, permissions::check_microphone());
                     log::info!("mic toggle: requested enabled={}, result={s:?}", cmd.enabled);
                     s
                 } else {
-                    // Capture is stopped (pause or sleep) — record the preference but do
-                    // not engage the device. The mic genuinely is not running.
+                    // No runtime (pause, sleep, or a failed start): save the
+                    // preference only. `start()` restores it.
                     log::info!(
-                        "mic toggle: requested enabled={} while capture stopped — \
+                        "mic toggle: requested enabled={} while capture not running — \
                          preference saved, device left off",
                         cmd.enabled,
                     );
@@ -764,8 +811,18 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
                         (false, supervisor.set_user_paused(false, &audio_pipeline).await)
                     }
                 };
-                note_reconcile_outcome(&outcome, &mut start_retry, &retry_tx);
+                let disposition = route_reconcile_outcome(
+                    &outcome,
+                    &mut boot_incident,
+                    &mut start_retry,
+                    &retry_tx,
+                );
                 let _ = cmd.reply.send(paused);
+                if disposition == BootDisposition::Exit {
+                    log::error!("capture engine poisoned; shutting down for a fresh process");
+                    loop_poisoned = true;
+                    break;
+                }
             }
             Some(cmd) = model_rx.recv() => {
                 // Accept = the provisioner slot was free. try_begin commits
@@ -809,7 +866,17 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
                     power::PowerEvent::SystemWake =>
                         supervisor.set_system_awake(&audio_pipeline).await,
                 };
-                note_reconcile_outcome(&outcome, &mut start_retry, &retry_tx);
+                let disposition = route_reconcile_outcome(
+                    &outcome,
+                    &mut boot_incident,
+                    &mut start_retry,
+                    &retry_tx,
+                );
+                if disposition == BootDisposition::Exit {
+                    log::error!("capture engine poisoned; shutting down for a fresh process");
+                    loop_poisoned = true;
+                    break;
+                }
             }
             Some(()) = retry_rx.recv() => {
                 log::info!(
@@ -821,9 +888,22 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
                 if outcome == ReconcileOutcome::Started {
                     log::info!("capture recovered on retry");
                 }
-                note_reconcile_outcome(&outcome, &mut start_retry, &retry_tx);
+                let disposition = route_reconcile_outcome(
+                    &outcome,
+                    &mut boot_incident,
+                    &mut start_retry,
+                    &retry_tx,
+                );
+                if disposition == BootDisposition::Exit {
+                    log::error!("capture engine poisoned; shutting down for a fresh process");
+                    loop_poisoned = true;
+                    break;
+                }
             }
         }
+    }
+    if loop_poisoned {
+        spawn_poison_exit_watchdog(POISON_EXIT_GRACE);
     }
     // Set when an owned task/thread panic is OBSERVED during shutdown — for
     // the provision join below, the panic itself may have happened much
@@ -947,16 +1027,20 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
     ipc_server.shutdown().await;
 
     // Stop the capture runtime FIRST (if active) — stops SCStream and joins
-    // the downstream store/ocr tasks. Must run before `audio_pipeline.stop()`
+    // the downstream store/ocr tasks (aborts them if the stop poisoned the
+    // engine). Must run before `audio_pipeline.stop()`
     // so the handler Retained ref is released and the audio buffer channel
     // can close. If no runtime is active (paused at shutdown), this is a
     // no-op.
     //
     // shutdown() returns true only when the engine is poisoned
-    // (PartialTeardown) — escalates to exit(3) below. Consumes the
+    // (`engine_poisoned`) — escalates to exit(3) below. Consumes the
     // supervisor, which releases the &audio_pipeline borrow so
     // audio_pipeline.stop() (which needs &mut self) can run next.
     let poisoned = supervisor.shutdown().await;
+    if poisoned {
+        spawn_poison_exit_watchdog(POISON_EXIT_GRACE);
+    }
 
     // Stop audio pipeline — encoding thread sees EOF, flushes segments.
     if let Err(e) = audio_pipeline.stop() {
@@ -969,9 +1053,10 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
     // `run`, so they outlive the pipeline and the supervisor.
     //
     // This runs on the poisoned path too. `supervisor.shutdown()` set
-    // `poisoned` above, but exit(3) does not happen until the end of `run`,
-    // after the drain — so suppressing the report here would only hide drops
-    // in the very run where something went wrong enough to poison the engine.
+    // `poisoned` above, but exit(3) normally happens at the end of `run`, after
+    // the drain (or from the poison-exit watchdog if teardown hangs) — so
+    // suppressing the report here would only hide drops in the very run where
+    // something went wrong enough to poison the engine.
     //
     // The await is unbounded, deliberately: the final read is seven relaxed
     // atomic loads, a format, and at most one log line. `tokio::time::timeout`
@@ -1030,8 +1115,9 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
         // never the sole consumer of, and is less so now that the provision
         // wait above can add up to 5s. The unbounded steps between them
         // (`ipc_server.shutdown`, `supervisor.shutdown`, the bridge join, the
-        // audio-store await, the backfill join) are the ones with no ceiling.
-        // Neither is this one.
+        // audio-store await, the backfill join) are the ones with no ceiling
+        // on a clean shutdown; a poisoned one is cut off by the poison-exit
+        // watchdog. Neither is this one.
         // The three graces differ in what expiry does. The provision wait
         // aborts its task, though not a `spawn_blocking` load already running.
         // This one raises `stop_transcription`, so the loop abandons whatever
@@ -1087,7 +1173,7 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
     }
 
     log::info!("chronicle-daemon stopped");
-    if poisoned {
+    if poisoned || loop_poisoned {
         log::error!("daemon exiting with code 3 (engine poisoned)");
         std::process::exit(3);
     }
@@ -1354,6 +1440,196 @@ mod tests {
                 "{outcome:?} must end the incident and restore the budget"
             );
         }
+    }
+
+    fn poisoned() -> ReconcileOutcome {
+        ReconcileOutcome::StartFailed {
+            partial_teardown: true,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn boot_recoverable_failure_continues_and_arms_a_retry() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(4);
+        let mut retry = StartRetry::new();
+        let mut boot_incident = true;
+
+        let d = route_reconcile_outcome(&failed(), &mut boot_incident, &mut retry, &tx);
+
+        assert_eq!(d, BootDisposition::Continue);
+        assert!(
+            boot_incident,
+            "a recoverable failure keeps the boot incident open"
+        );
+        assert_eq!(retry.attempt(), 1);
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "nudge must not fire before the 5s backoff"
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            rx.try_recv().is_ok(),
+            "nudge must fire once the backoff elapses"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn boot_poisoned_failure_exits_without_arming() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(4);
+        let mut retry = StartRetry::new();
+        let mut boot_incident = true;
+
+        let d = route_reconcile_outcome(&poisoned(), &mut boot_incident, &mut retry, &tx);
+
+        assert_eq!(d, BootDisposition::Exit);
+        assert_eq!(retry.attempt(), 0);
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert!(rx.try_recv().is_err(), "an exit must not arm a retry");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn boot_non_failure_outcomes_continue_without_arming() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(4);
+        for outcome in [
+            ReconcileOutcome::Started,
+            ReconcileOutcome::Stopped,
+            ReconcileOutcome::NoChange,
+        ] {
+            let mut retry = StartRetry::new();
+            let mut boot_incident = true;
+
+            let d = route_reconcile_outcome(&outcome, &mut boot_incident, &mut retry, &tx);
+
+            assert_eq!(d, BootDisposition::Continue, "{outcome:?}");
+            assert_eq!(
+                boot_incident,
+                outcome != ReconcileOutcome::Started,
+                "only Started may end the boot incident ({outcome:?})"
+            );
+            assert_eq!(retry.attempt(), 0, "{outcome:?}");
+        }
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert!(rx.try_recv().is_err(), "no outcome here may arm a retry");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn boot_incident_survives_a_pause_before_any_start() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<()>(4);
+        let mut retry = StartRetry::new();
+        let mut boot_incident = true;
+
+        let _ = route_reconcile_outcome(&failed(), &mut boot_incident, &mut retry, &tx);
+        let paused = route_reconcile_outcome(
+            &ReconcileOutcome::NoChange,
+            &mut boot_incident,
+            &mut retry,
+            &tx,
+        );
+        let resumed = route_reconcile_outcome(&poisoned(), &mut boot_incident, &mut retry, &tx);
+
+        assert_eq!(paused, BootDisposition::Continue);
+        assert!(boot_incident, "a pause is not a successful start");
+        assert_eq!(resumed, BootDisposition::Exit);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn boot_incident_poison_exits_after_the_budget_runs_out() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<()>(8);
+        let mut retry = StartRetry::new();
+        let mut boot_incident = true;
+
+        for _ in 0..=StartRetry::MAX_ATTEMPTS {
+            let d = route_reconcile_outcome(&failed(), &mut boot_incident, &mut retry, &tx);
+            assert_eq!(d, BootDisposition::Continue);
+        }
+        assert_eq!(retry.attempt(), StartRetry::MAX_ATTEMPTS);
+        let d = route_reconcile_outcome(&poisoned(), &mut boot_incident, &mut retry, &tx);
+
+        assert_eq!(
+            d,
+            BootDisposition::Exit,
+            "an exhausted budget does not end the incident"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn boot_incident_poisoned_retry_exits() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<()>(4);
+        let mut retry = StartRetry::new();
+        let mut boot_incident = true;
+
+        let first = route_reconcile_outcome(&failed(), &mut boot_incident, &mut retry, &tx);
+        let second = route_reconcile_outcome(&poisoned(), &mut boot_incident, &mut retry, &tx);
+
+        assert_eq!(first, BootDisposition::Continue);
+        assert_eq!(second, BootDisposition::Exit);
+        assert_eq!(retry.attempt(), 1, "the exit must not arm another retry");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wake_incident_poisoned_outcome_still_retries() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(4);
+        let mut retry = StartRetry::new();
+        let mut boot_incident = false;
+
+        let d = route_reconcile_outcome(&poisoned(), &mut boot_incident, &mut retry, &tx);
+
+        assert_eq!(d, BootDisposition::Continue);
+        assert_eq!(retry.attempt(), 1);
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        assert!(
+            rx.try_recv().is_ok(),
+            "outside a boot incident the retry still arms"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_poisoned_exits_at_any_time() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(4);
+        for in_boot_incident in [true, false] {
+            let mut retry = StartRetry::new();
+            let mut boot_incident = in_boot_incident;
+
+            let d = route_reconcile_outcome(
+                &ReconcileOutcome::StopPoisoned,
+                &mut boot_incident,
+                &mut retry,
+                &tx,
+            );
+
+            assert_eq!(d, BootDisposition::Exit, "boot_incident={in_boot_incident}");
+            assert_eq!(retry.attempt(), 0, "an exit must not consume an attempt");
+        }
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "an exit must not spawn a retry nudge"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn boot_incident_clears_on_recovery() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<()>(4);
+        let mut retry = StartRetry::new();
+        let mut boot_incident = true;
+
+        let _ = route_reconcile_outcome(&failed(), &mut boot_incident, &mut retry, &tx);
+        let _ = route_reconcile_outcome(
+            &ReconcileOutcome::Started,
+            &mut boot_incident,
+            &mut retry,
+            &tx,
+        );
+        let later = route_reconcile_outcome(&poisoned(), &mut boot_incident, &mut retry, &tx);
+
+        assert!(!boot_incident);
+        assert_eq!(later, BootDisposition::Continue);
+        assert_eq!(
+            retry.attempt(),
+            1,
+            "a later poisoned start arms a wake-style retry"
+        );
     }
 
     #[tokio::test(start_paused = true)]

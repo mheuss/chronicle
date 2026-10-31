@@ -17,11 +17,12 @@ pub enum CaptureError {
 
     /// One or more capture streams could not be torn down cleanly.
     ///
-    /// Returned from both startup rollback (when a `start_stream` failure
-    /// triggers stop of already-started peers) and `CaptureEngine::stop()`
-    /// (when one or more `stop_stream` calls fail). Survivors are identified
-    /// by display ID. The `original` cause is the error that triggered the
-    /// teardown.
+    /// Returned from startup rollback (when a per-display start step fails and
+    /// a stop of an already-started peer fails, or when SCK never confirmed a
+    /// start) and from `CaptureEngine::stop()` (when one or more `stop_stream`
+    /// calls fail). Survivors are identified by display ID; an unconfirmed
+    /// start's reason is recorded in `stop_errors` alongside failed stops. The
+    /// `original` cause is the error that triggered the teardown.
     #[error("capture teardown failed; {} stream(s) may still be running: {survivors:?}", survivors.len())]
     PartialTeardown {
         survivors: Vec<u32>,
