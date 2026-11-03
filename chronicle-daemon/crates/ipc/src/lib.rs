@@ -121,16 +121,16 @@ pub enum Response {
         data: StatusData,
     },
     /// Result of a `SetMicEnabled` request. `ok` is true only when `state` is
-    /// `On` or `Off`. See `pending` for a reply whose wait timed out.
+    /// `On` or `Off`.
     SetMicEnabled {
         ok: bool,
         state: MicState,
-        /// The daemon accepted the command, but no completion reply arrived
-        /// before the wait expired. It may still be queued or already running,
-        /// and it is processed unless the daemon shuts down first. Processed
-        /// does not mean succeeded. `ok` is false, and `state` is a snapshot
-        /// that a later `Status` may replace. `Status` carries no completion
-        /// signal for the command.
+        /// `true` means the daemon accepted the command, but no completion
+        /// reply arrived before the wait expired. It may still be queued or
+        /// already running, and it is processed unless the daemon shuts down
+        /// first. Processed does not mean succeeded. `ok` is false, and `state`
+        /// is a snapshot that a later `Status` may replace. `Status` carries no
+        /// completion signal for the command.
         #[serde(default)]
         pending: bool,
     },
