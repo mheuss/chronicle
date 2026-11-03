@@ -247,9 +247,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn join_downstream_runs_poison_hook_before_awaiting_an_unabortable_task() {
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
         let stuck = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
             let _ = release_rx.recv();
         });
+        started_rx.await.unwrap();
         let hook_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = std::sync::Arc::clone(&hook_ran);
 
