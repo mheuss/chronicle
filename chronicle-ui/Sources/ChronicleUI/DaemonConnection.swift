@@ -174,14 +174,14 @@ final class DaemonConnection {
         return response
     }
 
-    /// Toggle microphone capture on the daemon. Returns the resulting state.
-    /// Callers read the outcome from the returned `MicState`.
-    func setMicEnabled(_ enabled: Bool) async throws -> MicState {
-        let response = try await sendRequest(
+    /// Toggle microphone capture on the daemon. Returns the daemon's reply.
+    /// `pending == true` means the outcome is not confirmed yet; `Status`
+    /// shows the observed mic state but not whether this command finished.
+    func setMicEnabled(_ enabled: Bool) async throws -> SetMicEnabledResponse {
+        try await sendRequest(
             SetMicEnabledRequest(type: "set_mic_enabled", enabled: enabled),
             expecting: SetMicEnabledResponse.self
         )
-        return response.state
     }
 
     /// Select (and download if needed) a whisper model variant.
@@ -507,6 +507,11 @@ struct SetMicEnabledResponse: Codable, Sendable {
     let type: String
     let ok: Bool
     let state: MicState
+    /// `true` when the daemon's reply wait timed out. The command may still
+    /// apply, so `state` is a snapshot, and `Status` shows observed state but
+    /// not whether the command finished. `nil` only from a daemon built
+    /// before the field existed.
+    let pending: Bool?
 }
 
 struct StatusResponse: Decodable, Sendable {
@@ -789,6 +794,9 @@ struct PauseResumeResponse: Codable, Sendable {
     let type: String
     let ok: Bool
     let paused: Bool
+    /// Same meaning as `SetMicEnabledResponse.pending`, with `paused` as the
+    /// snapshot.
+    let pending: Bool?
 }
 
 // MARK: - Errors
