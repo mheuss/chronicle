@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -543,16 +544,26 @@ impl RequestHandler for DaemonHandler {
                 // block_in_place keeps the runtime healthy. The 20s timeout is
                 // a wedged-daemon backstop — a real toggle replies in well
                 // under a second.
-                let state =
-                    tokio::task::block_in_place(|| reply_rx.recv_timeout(self.mic_reply_timeout))
-                        .unwrap_or(MicState::Error);
-                // `ok` and `state` must agree: the toggle succeeded only if the
-                // mic is now On or Off; Error/PermissionDenied mean it did not.
-                let ok = matches!(state, MicState::On | MicState::Off);
-                Response::SetMicEnabled {
-                    ok,
-                    state,
-                    pending: false,
+                match tokio::task::block_in_place(|| reply_rx.recv_timeout(self.mic_reply_timeout))
+                {
+                    Ok(state) => Response::SetMicEnabled {
+                        ok: matches!(state, MicState::On | MicState::Off),
+                        state,
+                        pending: false,
+                    },
+                    Err(RecvTimeoutError::Timeout) => {
+                        log::warn!("mic toggle reply timed out; outcome unconfirmed");
+                        Response::SetMicEnabled {
+                            ok: false,
+                            state: MicState::from_u8(self.mic_state.load(Ordering::Acquire)),
+                            pending: true,
+                        }
+                    }
+                    Err(RecvTimeoutError::Disconnected) => Response::SetMicEnabled {
+                        ok: false,
+                        state: MicState::Error,
+                        pending: false,
+                    },
                 }
             }
             Request::SetWhisperModel { variant } => self.set_whisper_model(&variant),
@@ -938,15 +949,20 @@ mod tests {
 
         let resp = handler.handle(Request::SetMicEnabled { enabled: true });
         match resp {
-            Response::SetMicEnabled { state, .. } => assert_eq!(state, MicState::Error),
+            Response::SetMicEnabled { ok, state, pending } => {
+                assert!(!ok);
+                assert_eq!(state, MicState::Error);
+                assert!(!pending, "a dropped or rejected command is not pending");
+            }
             other => panic!("expected SetMicEnabled response, got: {other:?}"),
         }
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn set_mic_enabled_reply_timeout() {
-        let (mut handler, mut mic_rx, _atom, _dir) = handler_with_mic_channel(8, true).await;
+        let (mut handler, mut mic_rx, mic_atom, _dir) = handler_with_mic_channel(8, true).await;
         handler.mic_reply_timeout = std::time::Duration::from_millis(50);
+        mic_atom.store(MicState::On as u8, std::sync::atomic::Ordering::Release);
 
         // Receive the command but never reply — keep it alive so the reply
         // sender is not dropped; the handler must hit the timeout.
@@ -958,7 +974,11 @@ mod tests {
 
         let resp = handler.handle(Request::SetMicEnabled { enabled: true });
         match resp {
-            Response::SetMicEnabled { state, .. } => assert_eq!(state, MicState::Error),
+            Response::SetMicEnabled { ok, state, pending } => {
+                assert!(!ok, "ok must be false on reply timeout");
+                assert_eq!(state, MicState::On, "state must be the last known value");
+                assert!(pending, "a timed-out reply must say pending");
+            }
             other => panic!("expected SetMicEnabled response, got: {other:?}"),
         }
     }
@@ -977,7 +997,11 @@ mod tests {
 
         let resp = handler.handle(Request::SetMicEnabled { enabled: true });
         match resp {
-            Response::SetMicEnabled { state, .. } => assert_eq!(state, MicState::Error),
+            Response::SetMicEnabled { ok, state, pending } => {
+                assert!(!ok);
+                assert_eq!(state, MicState::Error);
+                assert!(!pending, "a dropped or rejected command is not pending");
+            }
             other => panic!("expected SetMicEnabled response, got: {other:?}"),
         }
     }
