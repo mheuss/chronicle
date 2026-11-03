@@ -137,8 +137,16 @@ impl DaemonHandler {
         if !self.capture_ready.load(Ordering::Acquire) {
             let paused = self.capture_paused.load(Ordering::Acquire);
             return match action {
-                CaptureAction::Pause => Response::PauseCapture { ok: false, paused },
-                CaptureAction::Resume => Response::ResumeCapture { ok: false, paused },
+                CaptureAction::Pause => Response::PauseCapture {
+                    ok: false,
+                    paused,
+                    pending: false,
+                },
+                CaptureAction::Resume => Response::ResumeCapture {
+                    ok: false,
+                    paused,
+                    pending: false,
+                },
             };
         }
         let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel::<bool>(1);
@@ -152,8 +160,16 @@ impl DaemonHandler {
         {
             let paused = self.capture_paused.load(Ordering::Acquire);
             return match action {
-                CaptureAction::Pause => Response::PauseCapture { ok: false, paused },
-                CaptureAction::Resume => Response::ResumeCapture { ok: false, paused },
+                CaptureAction::Pause => Response::PauseCapture {
+                    ok: false,
+                    paused,
+                    pending: false,
+                },
+                CaptureAction::Resume => Response::ResumeCapture {
+                    ok: false,
+                    paused,
+                    pending: false,
+                },
             };
         }
         // Match recv_timeout explicitly so a timeout or sender-drop produces
@@ -170,8 +186,16 @@ impl DaemonHandler {
             };
         log::info!("capture {:?} -> ok={ok} paused={paused}", action);
         match action {
-            CaptureAction::Pause => Response::PauseCapture { ok, paused },
-            CaptureAction::Resume => Response::ResumeCapture { ok, paused },
+            CaptureAction::Pause => Response::PauseCapture {
+                ok,
+                paused,
+                pending: false,
+            },
+            CaptureAction::Resume => Response::ResumeCapture {
+                ok,
+                paused,
+                pending: false,
+            },
         }
     }
 
@@ -497,6 +521,7 @@ impl RequestHandler for DaemonHandler {
                     return Response::SetMicEnabled {
                         ok: false,
                         state: MicState::Error,
+                        pending: false,
                     };
                 }
                 let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel::<MicState>(1);
@@ -511,6 +536,7 @@ impl RequestHandler for DaemonHandler {
                     return Response::SetMicEnabled {
                         ok: false,
                         state: MicState::Error,
+                        pending: false,
                     };
                 }
                 // handle() is sync but runs inside the async IPC server;
@@ -523,7 +549,11 @@ impl RequestHandler for DaemonHandler {
                 // `ok` and `state` must agree: the toggle succeeded only if the
                 // mic is now On or Off; Error/PermissionDenied mean it did not.
                 let ok = matches!(state, MicState::On | MicState::Off);
-                Response::SetMicEnabled { ok, state }
+                Response::SetMicEnabled {
+                    ok,
+                    state,
+                    pending: false,
+                }
             }
             Request::SetWhisperModel { variant } => self.set_whisper_model(&variant),
         }
@@ -846,7 +876,8 @@ mod tests {
         let resp = handler.handle(Request::SetMicEnabled { enabled: true });
         match resp {
             // A successful toggle reports ok: true alongside the On state.
-            Response::SetMicEnabled { ok, state } => {
+            Response::SetMicEnabled { ok, state, pending } => {
+                assert!(!pending);
                 assert!(ok);
                 assert_eq!(state, MicState::On);
             }
@@ -864,7 +895,8 @@ mod tests {
 
         let resp = handler.handle(Request::SetMicEnabled { enabled: true });
         match resp {
-            Response::SetMicEnabled { ok, state } => {
+            Response::SetMicEnabled { ok, state, pending } => {
+                assert!(!pending);
                 assert!(!ok, "ok must be false when the toggle was rejected");
                 assert_eq!(state, MicState::Error);
             }
@@ -881,7 +913,8 @@ mod tests {
         let resp = handler.handle(Request::SetMicEnabled { enabled: true });
         match resp {
             // A failed try_send reports ok: false alongside the Error state.
-            Response::SetMicEnabled { ok, state } => {
+            Response::SetMicEnabled { ok, state, pending } => {
+                assert!(!pending);
                 assert!(!ok);
                 assert_eq!(state, MicState::Error);
             }
@@ -1671,7 +1704,12 @@ mod tests {
             handler_with_full_channels_and_capture_ready(8, true, false).await;
         let resp = handler.handle(Request::PauseCapture);
         match resp {
-            Response::PauseCapture { ok, paused } => {
+            Response::PauseCapture {
+                ok,
+                paused,
+                pending,
+            } => {
+                assert!(!pending);
                 assert!(!ok, "ok must be false when capture_ready is false");
                 assert!(!paused, "paused should reflect current (false) state");
             }
@@ -1693,7 +1731,12 @@ mod tests {
 
         let resp = handler.handle(Request::PauseCapture);
         match resp {
-            Response::PauseCapture { ok, paused } => {
+            Response::PauseCapture {
+                ok,
+                paused,
+                pending,
+            } => {
+                assert!(!pending);
                 assert!(ok);
                 assert!(paused);
             }
@@ -1718,7 +1761,8 @@ mod tests {
             resp,
             Response::ResumeCapture {
                 ok: true,
-                paused: false
+                paused: false,
+                pending: false
             }
         ));
     }
@@ -1747,7 +1791,12 @@ mod tests {
 
         let resp = handler.handle(Request::PauseCapture);
         match resp {
-            Response::PauseCapture { ok, paused } => {
+            Response::PauseCapture {
+                ok,
+                paused,
+                pending,
+            } => {
+                let _ = pending;
                 assert!(!ok, "ok must be false on reply timeout");
                 assert!(paused, "paused should reflect cached value (true)");
             }

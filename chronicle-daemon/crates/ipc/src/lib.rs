@@ -122,6 +122,14 @@ pub enum Response {
     SetMicEnabled {
         ok: bool,
         state: MicState,
+        /// The daemon accepted the command, but no completion reply arrived
+        /// before the wait expired. It may still be queued or already running,
+        /// and it is processed unless the daemon shuts down first. Processed
+        /// does not mean succeeded. `ok` is false, and `state` is a snapshot
+        /// that a later `Status` may replace. `Status` carries no completion
+        /// signal for the command.
+        #[serde(default)]
+        pending: bool,
     },
     /// Result of a `Search` request.
     Search {
@@ -140,11 +148,19 @@ pub enum Response {
     PauseCapture {
         ok: bool,
         paused: bool,
+        /// Same meaning as `SetMicEnabled::pending`, with `paused` as the
+        /// snapshot.
+        #[serde(default)]
+        pending: bool,
     },
     /// Result of a `ResumeCapture` request. `paused` is the resulting state.
     ResumeCapture {
         ok: bool,
         paused: bool,
+        /// Same meaning as `SetMicEnabled::pending`, with `paused` as the
+        /// snapshot.
+        #[serde(default)]
+        pending: bool,
     },
     /// Result of `SetWhisperModel`. `ok: false` = unknown variant, an
     /// operation already in flight, or the daemon isn't ready. `status` is
@@ -533,12 +549,42 @@ mod tests {
         let resp = Response::SetMicEnabled {
             ok: true,
             state: MicState::On,
+            pending: false,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["type"], "set_mic_enabled");
         assert_eq!(value["ok"], true);
         assert_eq!(value["state"], "on");
+        assert_eq!(value["pending"], false);
+    }
+
+    #[test]
+    fn response_set_mic_enabled_serializes_pending_true() {
+        let resp = Response::SetMicEnabled {
+            ok: false,
+            state: MicState::Off,
+            pending: true,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["state"], "off");
+        assert_eq!(value["pending"], true);
+    }
+
+    #[test]
+    fn response_set_mic_enabled_decodes_without_pending() {
+        let resp: Response =
+            serde_json::from_str(r#"{"type":"set_mic_enabled","ok":true,"state":"on"}"#).unwrap();
+        assert_eq!(
+            resp,
+            Response::SetMicEnabled {
+                ok: true,
+                state: MicState::On,
+                pending: false,
+            }
+        );
     }
 
     #[test]
@@ -738,12 +784,14 @@ mod tests {
         let resp = Response::PauseCapture {
             ok: true,
             paused: true,
+            pending: false,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "pause_capture");
         assert_eq!(v["ok"], true);
         assert_eq!(v["paused"], true);
+        assert_eq!(v["pending"], false);
     }
 
     #[test]
@@ -751,11 +799,13 @@ mod tests {
         let resp = Response::ResumeCapture {
             ok: true,
             paused: false,
+            pending: false,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "resume_capture");
         assert_eq!(v["paused"], false);
+        assert_eq!(v["pending"], false);
     }
 
     #[test]

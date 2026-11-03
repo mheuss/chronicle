@@ -299,6 +299,7 @@ mod tests {
                 Request::SetMicEnabled { .. } => Response::SetMicEnabled {
                     ok: true,
                     state: MicState::On,
+                    pending: false,
                 },
                 Request::Search { .. } => Response::Search {
                     ok: true,
@@ -311,10 +312,12 @@ mod tests {
                 Request::PauseCapture => Response::PauseCapture {
                     ok: true,
                     paused: false,
+                    pending: false,
                 },
                 Request::ResumeCapture => Response::ResumeCapture {
                     ok: true,
                     paused: false,
+                    pending: false,
                 },
                 Request::SetWhisperModel { .. } => Response::SetWhisperModel {
                     ok: true,
