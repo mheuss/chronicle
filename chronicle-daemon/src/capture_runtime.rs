@@ -17,6 +17,8 @@
 //!   Dropping the engine before awaiting is load-bearing: `engine.stop()`
 //!   alone does NOT close the frame channel, because the engine keeps a
 //!   `Sender` clone alive in `_sender` until the engine itself drops.
+//!   A poisoned engine stop aborts the joins instead, because a surviving
+//!   stream can keep the channel open.
 //! - `drop` without `stop`: aborts both JoinHandles via `JoinHandle::abort`
 //!   for best-effort cleanup. The engine's own `Drop` impl tears down
 //!   SCStreams. Final state is not guaranteed clean — prefer `stop().await`.
@@ -125,7 +127,12 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureRuntime<'a, M> {
     /// the store loop returns, its `ocr_sink` (holding the OCR sender)
     /// drops, which signals `ocr_loop` to exit. We `await` both joins
     /// to confirm clean teardown.
-    pub async fn stop(mut self) -> Result<()> {
+    ///
+    /// After a poisoned stop (`engine_poisoned`) the joins are aborted
+    /// instead: a surviving stream can keep its handler's frame sender alive,
+    /// so the channel may never close. `on_poisoned` runs before those joins,
+    /// because abort cannot stop a task that is blocked without yielding.
+    pub async fn stop(mut self, on_poisoned: impl FnOnce()) -> Result<()> {
         let store_handle = self.store_handle.take();
         let ocr_handle = self.ocr_handle.take();
 
@@ -138,17 +145,45 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureRuntime<'a, M> {
             r
         };
 
-        if let Some(h) = store_handle
-            && let Err(e) = h.await
-        {
-            log::error!("capture_store_loop join failed: {e}");
-        }
-        if let Some(h) = ocr_handle
-            && let Err(e) = h.await
-        {
-            log::error!("ocr_loop join failed: {e}");
-        }
+        let poisoned = stop_result.as_ref().is_err_and(engine_poisoned);
+        join_downstream(
+            [
+                ("capture_store_loop", store_handle),
+                ("ocr_loop", ocr_handle),
+            ],
+            poisoned.then_some(on_poisoned),
+        )
+        .await;
         stop_result.map_err(CaptureRuntimeError::Engine)
+    }
+}
+
+/// True for a stop error that may leave a stream running.
+pub(crate) fn engine_poisoned(e: &CaptureError) -> bool {
+    matches!(
+        e,
+        CaptureError::PartialTeardown { .. } | CaptureError::Poisoned
+    )
+}
+
+async fn join_downstream(
+    handles: [(&str, Option<JoinHandle<()>>); 2],
+    on_poisoned: Option<impl FnOnce()>,
+) {
+    let poisoned = on_poisoned.is_some();
+    if let Some(hook) = on_poisoned {
+        hook();
+    }
+    for (name, handle) in handles {
+        let Some(h) = handle else { continue };
+        if poisoned {
+            h.abort();
+        }
+        if let Err(e) = h.await
+            && !e.is_cancelled()
+        {
+            log::error!("{name} join failed: {e}");
+        }
     }
 }
 
@@ -173,6 +208,91 @@ impl<M: AppMetadataProvider + 'static + ?Sized> Drop for CaptureRuntime<'_, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_poisoned_only_for_errors_that_may_leave_streams_running() {
+        let partial = CaptureError::PartialTeardown {
+            survivors: vec![1],
+            stop_errors: vec![(1, "hung".into())],
+            original: Box::new(CaptureError::ScreenCaptureKit("boom".into())),
+        };
+        assert!(engine_poisoned(&partial));
+        assert!(engine_poisoned(&CaptureError::Poisoned));
+        assert!(!engine_poisoned(&CaptureError::ScreenCaptureKit(
+            "boom".into()
+        )));
+        assert!(!engine_poisoned(&CaptureError::NoDisplays));
+    }
+
+    #[tokio::test]
+    async fn join_downstream_aborts_a_hung_task_when_poisoned() {
+        let (tx, mut rx) = mpsc::channel::<()>(1);
+        let hung = tokio::spawn(async move {
+            let _ = rx.recv().await;
+        });
+
+        let joined = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            join_downstream([("hung", Some(hung)), ("absent", None)], Some(|| {})),
+        )
+        .await;
+
+        assert!(
+            joined.is_ok(),
+            "a poisoned stop must not wait on a task whose sender survives"
+        );
+        drop(tx);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn join_downstream_runs_poison_hook_before_awaiting_an_unabortable_task() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let stuck = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            let _ = release_rx.recv();
+        });
+        started_rx.await.unwrap();
+        let hook_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&hook_ran);
+
+        let join = tokio::spawn(join_downstream(
+            [("stuck", Some(stuck)), ("absent", None)],
+            Some(move || flag.store(true, std::sync::atomic::Ordering::SeqCst)),
+        ));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !hook_ran.load(std::sync::atomic::Ordering::SeqCst)
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let ran_while_stuck = hook_ran.load(std::sync::atomic::Ordering::SeqCst);
+        release_tx.send(()).unwrap();
+        join.await.unwrap();
+
+        assert!(
+            ran_while_stuck,
+            "the poison hook must run before the join waits on a task abort cannot stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn join_downstream_awaits_completion_when_not_poisoned() {
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&finished);
+        let task = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        join_downstream([("task", Some(task)), ("absent", None)], None::<fn()>).await;
+
+        assert!(
+            finished.load(std::sync::atomic::Ordering::SeqCst),
+            "a clean stop must let the task run to completion"
+        );
+    }
 
     #[test]
     fn capture_runtime_error_renders_human_readable() {

@@ -91,6 +91,8 @@ impl<'a> CaptureEngine<'a> {
     ///
     /// * `CaptureError::NoDisplays` -- no displays found
     /// * `CaptureError::ScreenCaptureKit` -- SCK returned an error
+    /// * `CaptureError::PartialTeardown` -- a per-display start step failed and
+    ///   rollback could not stop a started stream, or SCK never confirmed a start
     pub fn start(config: CaptureConfig<'a>) -> Result<(Self, mpsc::Receiver<CapturedFrame>)> {
         Self::start_with_deps(config, EngineDeps::default())
     }
@@ -223,7 +225,7 @@ impl<'a> CaptureEngine<'a> {
             let queue =
                 DispatchQueue::new(&format!("com.chronicle.capture.display-{display_id}"), None);
 
-            autoreleasepool(|_| unsafe {
+            if let Err(e) = autoreleasepool(|_| unsafe {
                 stream
                     .addStreamOutput_type_sampleHandlerQueue_error(
                         handler.as_protocol_object(),
@@ -236,13 +238,20 @@ impl<'a> CaptureEngine<'a> {
                             e.localizedDescription()
                         ))
                     })
-            })?;
+            }) {
+                return Err(rollback_started(
+                    &streams,
+                    &started_display_ids,
+                    |s: &Retained<SCStream>| (deps.stop_stream)(s),
+                    e,
+                ));
+            }
 
             // Register audio handler on the primary display's stream.
             if is_primary && let Some(ref audio) = config.audio {
                 // System audio — hard error. Core functionality.
                 let system_handler = audio.handler_clone();
-                autoreleasepool(|_| unsafe {
+                if let Err(e) = autoreleasepool(|_| unsafe {
                     stream
                         .addStreamOutput_type_sampleHandlerQueue_error(
                             &system_handler,
@@ -255,36 +264,39 @@ impl<'a> CaptureEngine<'a> {
                                 e.localizedDescription()
                             ))
                         })
-                })?;
+                }) {
+                    return Err(rollback_started(
+                        &streams,
+                        &started_display_ids,
+                        |s: &Retained<SCStream>| (deps.stop_stream)(s),
+                        e,
+                    ));
+                }
 
                 log::info!("Registered audio handler on primary display {display_id}");
             }
 
             // Start capture.
             if let Err(start_err) = (deps.start_stream)(&stream) {
-                let mut stop_errors: Vec<(u32, String)> = Vec::new();
-                let mut survivors: Vec<u32> = Vec::new();
-                for (started, started_id) in streams.iter().zip(started_display_ids.iter()) {
-                    if let Err(stop_err) = (deps.stop_stream)(started) {
-                        log::error!(
-                            "rollback stop_stream failed for display {started_id}: {stop_err}"
-                        );
-                        stop_errors.push((*started_id, stop_err));
-                        survivors.push(*started_id);
-                    }
-                }
-                let original = CaptureError::ScreenCaptureKit(format!(
-                    "failed to start capture on display {display_id}: {start_err}"
-                ));
-                return if stop_errors.is_empty() {
-                    Err(original)
-                } else {
-                    Err(CaptureError::PartialTeardown {
-                        survivors,
-                        stop_errors,
-                        original: Box::new(original),
-                    })
+                let (reason, unconfirmed) = match start_err {
+                    StartStreamError::Failed(m) => (m, false),
+                    StartStreamError::Unconfirmed(m) => (m, true),
                 };
+                let original = CaptureError::ScreenCaptureKit(format!(
+                    "failed to start capture on display {display_id}: {reason}"
+                ));
+                let err = rollback_started(
+                    &streams,
+                    &started_display_ids,
+                    |s: &Retained<SCStream>| (deps.stop_stream)(s),
+                    original,
+                );
+                return Err(if unconfirmed {
+                    log::error!("start on display {display_id} unconfirmed: {reason}");
+                    mark_unconfirmed(err, display_id, reason)
+                } else {
+                    err
+                });
             }
 
             log::info!(
@@ -486,11 +498,20 @@ pub(crate) fn enumerate_displays() -> Result<Vec<Retained<SCDisplay>>> {
     }
 }
 
+/// Why `start_stream` did not confirm a start.
+#[derive(Debug)]
+pub(crate) enum StartStreamError {
+    /// SCK reported an error; the stream did not start.
+    Failed(String),
+    /// No completion arrived; the stream may still start later.
+    Unconfirmed(String),
+}
+
 /// Start the SCStream capture, blocking until the completion handler fires.
 ///
 /// Times out after 10 seconds to avoid hanging indefinitely if SCK
 /// never invokes the completion handler.
-pub(crate) fn start_stream(stream: &SCStream) -> std::result::Result<(), String> {
+pub(crate) fn start_stream(stream: &SCStream) -> std::result::Result<(), StartStreamError> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<Option<String>>(1);
 
     let block = RcBlock::new(move |error: *mut NSError| {
@@ -508,11 +529,13 @@ pub(crate) fn start_stream(stream: &SCStream) -> std::result::Result<(), String>
 
     match rx.recv_timeout(std::time::Duration::from_secs(10)) {
         Ok(None) => Ok(()),
-        Ok(Some(err)) => Err(err),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err("start capture timed out".into()),
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            Err("start capture completion handler channel closed".into())
-        }
+        Ok(Some(err)) => Err(StartStreamError::Failed(err)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(StartStreamError::Unconfirmed(
+            "start capture timed out".into(),
+        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(StartStreamError::Unconfirmed(
+            "start capture completion handler channel closed".into(),
+        )),
     }
 }
 
@@ -567,6 +590,60 @@ pub(crate) fn stop_stream(stream: &SCStream) -> std::result::Result<(), String> 
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             Err("stop capture completion handler channel closed".into())
         }
+    }
+}
+
+/// Stop every stream that already started, then classify the failure.
+/// Generic so tests can pass fake streams.
+fn rollback_started<T>(
+    streams: &[T],
+    display_ids: &[u32],
+    stop: impl Fn(&T) -> std::result::Result<(), String>,
+    original: CaptureError,
+) -> CaptureError {
+    debug_assert_eq!(streams.len(), display_ids.len());
+    let mut stop_errors: Vec<(u32, String)> = Vec::new();
+    let mut survivors: Vec<u32> = Vec::new();
+    for (started, started_id) in streams.iter().zip(display_ids.iter()) {
+        if let Err(stop_err) = stop(started) {
+            log::error!("rollback stop_stream failed for display {started_id}: {stop_err}");
+            stop_errors.push((*started_id, stop_err));
+            survivors.push(*started_id);
+        }
+    }
+    if stop_errors.is_empty() {
+        original
+    } else {
+        CaptureError::PartialTeardown {
+            survivors,
+            stop_errors,
+            original: Box::new(original),
+        }
+    }
+}
+
+/// A start SCK never confirmed may still come up, so count its display as a
+/// survivor.
+fn mark_unconfirmed(err: CaptureError, display_id: u32, reason: String) -> CaptureError {
+    match err {
+        CaptureError::PartialTeardown {
+            mut survivors,
+            mut stop_errors,
+            original,
+        } => {
+            survivors.push(display_id);
+            stop_errors.push((display_id, reason));
+            CaptureError::PartialTeardown {
+                survivors,
+                stop_errors,
+                original,
+            }
+        }
+        other => CaptureError::PartialTeardown {
+            survivors: vec![display_id],
+            stop_errors: vec![(display_id, reason)],
+            original: Box::new(other),
+        },
     }
 }
 
@@ -643,7 +720,7 @@ mod tests {
         fn empty_displays() -> Result<Vec<Retained<SCDisplay>>> {
             Ok(Vec::new())
         }
-        fn unreachable_start(_: &SCStream) -> std::result::Result<(), String> {
+        fn unreachable_start(_: &SCStream) -> std::result::Result<(), StartStreamError> {
             unreachable!("start should not be called when there are no displays")
         }
         fn unreachable_stop(_: &SCStream) -> std::result::Result<(), String> {
@@ -671,10 +748,12 @@ mod tests {
         static START_CALLS: AtomicUsize = AtomicUsize::new(0);
         static STOP_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-        fn fail_on_third_start(_: &SCStream) -> std::result::Result<(), String> {
+        fn fail_on_third_start(_: &SCStream) -> std::result::Result<(), StartStreamError> {
             let n = START_CALLS.fetch_add(1, Ordering::SeqCst);
             if n == 2 {
-                Err("injected failure on 3rd stream".into())
+                Err(StartStreamError::Failed(
+                    "injected failure on 3rd stream".into(),
+                ))
             } else {
                 Ok(())
             }
@@ -719,10 +798,12 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static START_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-        fn fail_on_second_start(_: &SCStream) -> std::result::Result<(), String> {
+        fn fail_on_second_start(_: &SCStream) -> std::result::Result<(), StartStreamError> {
             let n = START_CALLS.fetch_add(1, Ordering::SeqCst);
             if n == 1 {
-                Err("injected failure on 2nd stream".into())
+                Err(StartStreamError::Failed(
+                    "injected failure on 2nd stream".into(),
+                ))
             } else {
                 Ok(())
             }
@@ -842,5 +923,110 @@ mod tests {
         let snap2 = probe.snapshot();
         assert_eq!(snap2.state, EngineState::Idle);
         assert_eq!(snap2.active_displays, 0);
+    }
+
+    #[test]
+    fn rollback_started_returns_original_when_all_stops_succeed() {
+        let stopped = std::cell::RefCell::new(Vec::new());
+        let err = rollback_started(
+            &[10u32, 20],
+            &[1, 2],
+            |s: &u32| {
+                stopped.borrow_mut().push(*s);
+                Ok(())
+            },
+            CaptureError::ScreenCaptureKit("boom".into()),
+        );
+        assert_eq!(
+            *stopped.borrow(),
+            vec![10, 20],
+            "each started stream stops once"
+        );
+        assert!(
+            matches!(err, CaptureError::ScreenCaptureKit(ref m) if m == "boom"),
+            "all stops succeeded, so the original error is returned, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rollback_started_reports_survivors_when_a_stop_fails() {
+        let stopped = std::cell::RefCell::new(Vec::new());
+        let err = rollback_started(
+            &[10u32, 20, 30],
+            &[1, 2, 3],
+            |s: &u32| {
+                stopped.borrow_mut().push(*s);
+                if *s == 20 { Err("hung".into()) } else { Ok(()) }
+            },
+            CaptureError::ScreenCaptureKit("boom".into()),
+        );
+        assert_eq!(
+            *stopped.borrow(),
+            vec![10, 20, 30],
+            "a failed stop must not end the rollback"
+        );
+        match err {
+            CaptureError::PartialTeardown {
+                survivors,
+                stop_errors,
+                original,
+            } => {
+                assert_eq!(survivors, vec![2]);
+                assert_eq!(stop_errors, vec![(2, "hung".to_string())]);
+                assert!(matches!(*original, CaptureError::ScreenCaptureKit(ref m) if m == "boom"));
+            }
+            other => panic!("expected PartialTeardown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unconfirmed_start_poisons_a_clean_rollback() {
+        let err = mark_unconfirmed(
+            CaptureError::ScreenCaptureKit("boom".into()),
+            7,
+            "start capture timed out".into(),
+        );
+        match err {
+            CaptureError::PartialTeardown {
+                survivors,
+                stop_errors,
+                original,
+            } => {
+                assert_eq!(survivors, vec![7]);
+                assert_eq!(
+                    stop_errors,
+                    vec![(7, "start capture timed out".to_string())]
+                );
+                assert!(matches!(*original, CaptureError::ScreenCaptureKit(ref m) if m == "boom"));
+            }
+            other => panic!("expected PartialTeardown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unconfirmed_start_joins_existing_survivors() {
+        let existing = CaptureError::PartialTeardown {
+            survivors: vec![2],
+            stop_errors: vec![(2, "hung".into())],
+            original: Box::new(CaptureError::ScreenCaptureKit("boom".into())),
+        };
+        let err = mark_unconfirmed(existing, 7, "start capture timed out".into());
+        match err {
+            CaptureError::PartialTeardown {
+                survivors,
+                stop_errors,
+                ..
+            } => {
+                assert_eq!(survivors, vec![2, 7]);
+                assert_eq!(
+                    stop_errors,
+                    vec![
+                        (2, "hung".to_string()),
+                        (7, "start capture timed out".to_string())
+                    ]
+                );
+            }
+            other => panic!("expected PartialTeardown, got {other:?}"),
+        }
     }
 }

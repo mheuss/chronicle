@@ -16,7 +16,7 @@ use chronicle_audio::{AudioPipeline, CHANNEL_COUNT, SAMPLE_RATE};
 use chronicle_capture::{CaptureConfig, CaptureError, EngineStatusProbe};
 use chronicle_storage::Storage;
 
-use crate::capture_runtime::{CaptureRuntime, CaptureRuntimeError};
+use crate::capture_runtime::{CaptureRuntime, CaptureRuntimeError, engine_poisoned};
 use crate::ipc_handler;
 use crate::permissions;
 use crate::pipeline::counters::PipelineCounters;
@@ -43,8 +43,10 @@ fn decide(should_run: bool, running: bool) -> ReconcileAction {
     }
 }
 
-/// The result of a `reconcile()` call. The boot caller escalates
-/// `StartFailed { partial_teardown: true }` to `exit(3)`; other callers log.
+/// The result of a `reconcile()` call. `route_reconcile_outcome` in `main.rs`
+/// escalates `StopPoisoned`, and `StartFailed { partial_teardown: true }`
+/// before the first successful start, to `exit(3)`; otherwise callers log and
+/// retry.
 ///
 /// `must_use`: discarding an outcome silently skips the StartRetry arm/reset
 /// bookkeeping (`note_reconcile_outcome`) — exactly the bug class CHR-136
@@ -55,15 +57,19 @@ pub enum ReconcileOutcome {
     Started,
     Stopped,
     NoChange,
-    StartFailed { partial_teardown: bool },
+    StartFailed {
+        partial_teardown: bool,
+    },
+    /// A stop that left a stream possibly running.
+    StopPoisoned,
 }
 
-/// Retry budget for failed capture starts after a wake or resume.
+/// Retry budget for failed capture starts at boot, wake, or resume.
 ///
 /// A start that fails at wake+~2 s usually races display re-registration —
 /// SCK enumerates a transient, non-startable display (Task 20 runs 1–2 saw
 /// transient IDs 146–151 and 4/4 wake-start failures at realistic cadence).
-/// Boot and settled-state starts succeed, so a short-delay retry recovers.
+/// A login launch can land in the same window, so boot retries too.
 /// Schedule: 5, 10, 20, 30, 30 s — at most `MAX_ATTEMPTS` armed retries per
 /// incident. Any non-StartFailed reconcile outcome ends the incident; the
 /// caller resets the budget.
@@ -131,6 +137,7 @@ pub struct CaptureSupervisor<'a, M: AppMetadataProvider + 'static + ?Sized> {
     /// reset each cycle, making the reporter's deltas lossy and its totals
     /// non-monotonic.
     capture_drops: Arc<chronicle_capture::CaptureDropCounters>,
+    on_stop_poisoned: fn(),
 }
 
 impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
@@ -163,7 +170,15 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
             mic_state_atom,
             base_dir,
             capture_drops,
+            on_stop_poisoned: || {},
         }
+    }
+
+    /// Run `hook` as soon as a runtime stop is known to be poisoned, before
+    /// the stop waits on its downstream tasks.
+    pub fn with_on_stop_poisoned(mut self, hook: fn()) -> Self {
+        self.on_stop_poisoned = hook;
+        self
     }
 
     /// Build the config for one engine start.
@@ -193,6 +208,11 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     /// True when neither stop flag is set.
     pub fn should_run(&self) -> bool {
         !self.user_paused && !self.system_asleep
+    }
+
+    /// True when a capture runtime exists.
+    pub fn is_running(&self) -> bool {
+        self.runtime.is_some()
     }
 
     /// Test-only snapshot of the flags as `(user_paused, system_asleep)`.
@@ -236,7 +256,8 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     /// disabled; `MicState::Off` matches the atom's initial value).
     ///
     /// Failures log and return `StartFailed`; this method never exits the
-    /// process. The boot caller decides whether to escalate `partial_teardown`.
+    /// process. `route_reconcile_outcome` decides whether to escalate
+    /// `partial_teardown`.
     fn start(&mut self, audio: &'a AudioPipeline) -> ReconcileOutcome {
         let capture_config = self.capture_config(audio.token(SAMPLE_RATE, CHANNEL_COUNT));
         match CaptureRuntime::start(
@@ -265,10 +286,8 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
             }
             Err(e) => {
                 log::error!("capture startup failed: {e}");
-                let partial_teardown = matches!(
-                    e,
-                    CaptureRuntimeError::Engine(CaptureError::PartialTeardown { .. })
-                );
+                let CaptureRuntimeError::Engine(engine_err) = &e;
+                let partial_teardown = engine_poisoned(engine_err);
                 ReconcileOutcome::StartFailed { partial_teardown }
             }
         }
@@ -319,26 +338,31 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     /// ADR-009 borrow-checker dance — see `docs/development/objc2-interop.md`
     /// "Global Shutdown Order".
     ///
-    /// Returns `true` if teardown poisoned the engine (the boot caller
-    /// escalates this; runtime callers log).
+    /// Returns `true` if teardown poisoned the engine; `run` escalates this to
+    /// `exit(3)`.
     pub async fn shutdown(mut self) -> bool {
         let Some(rt) = self.runtime.take() else {
             return false;
         };
-        match rt.stop().await {
+        match rt.stop(self.on_stop_poisoned).await {
             Ok(()) => {
                 log::info!("capture runtime stopped cleanly");
                 false
             }
-            Err(CaptureRuntimeError::Engine(CaptureError::PartialTeardown {
-                survivors,
-                stop_errors,
-                ..
-            })) => {
-                log::error!(
-                    "runtime stop failed; engine poisoned. survivors={survivors:?} \
-                     stop_errors={stop_errors:?}"
-                );
+            Err(CaptureRuntimeError::Engine(ref e)) if engine_poisoned(e) => {
+                if let CaptureError::PartialTeardown {
+                    survivors,
+                    stop_errors,
+                    ..
+                } = e
+                {
+                    log::error!(
+                        "runtime stop failed; engine poisoned. survivors={survivors:?} \
+                         stop_errors={stop_errors:?}"
+                    );
+                } else {
+                    log::error!("runtime stop failed; engine poisoned: {e}");
+                }
                 true
             }
             Err(e) => {
@@ -354,10 +378,13 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     /// Persisted `capture_paused` is NOT written here — pause persistence
     /// belongs to the IPC pause path, not to flag-driven stops (sleep).
     async fn stop_capture(&mut self, audio: &'a AudioPipeline) -> ReconcileOutcome {
+        let mut poisoned = false;
         if let Some(rt) = self.runtime.take()
-            && let Err(e) = rt.stop().await
+            && let Err(e) = rt.stop(self.on_stop_poisoned).await
         {
             log::error!("CaptureRuntime stop failed: {e}");
+            let CaptureRuntimeError::Engine(engine_err) = &e;
+            poisoned = engine_poisoned(engine_err);
         }
         *self.probe_holder.lock().unwrap() = None;
 
@@ -374,7 +401,11 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
             log::error!("failed to flush system segment on stop: {e}");
         }
 
-        ReconcileOutcome::Stopped
+        if poisoned {
+            ReconcileOutcome::StopPoisoned
+        } else {
+            ReconcileOutcome::Stopped
+        }
     }
 }
 
@@ -724,5 +755,27 @@ mod tests {
 
         let poisoned = supervisor.shutdown().await;
         assert!(!poisoned, "shutdown with no runtime must report no poison");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn is_running_false_without_runtime() {
+        let (dir, _audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+
+        let supervisor = CaptureSupervisor::new(
+            false,
+            storage,
+            metadata,
+            counters,
+            1024,
+            probe_holder,
+            capture_paused,
+            mic_atom,
+            dir.path().to_path_buf(),
+            Arc::new(chronicle_capture::CaptureDropCounters::default()),
+        );
+
+        assert!(supervisor.should_run(), "no stop flag is set");
+        assert!(!supervisor.is_running(), "no runtime has been started");
     }
 }
