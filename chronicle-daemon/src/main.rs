@@ -535,7 +535,8 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
         Arc::clone(&mic_state_atom),
         storage.base_dir().to_path_buf(),
         Arc::clone(&capture_drops),
-    );
+    )
+    .with_on_stop_poisoned(|| spawn_poison_exit_watchdog(POISON_EXIT_GRACE));
 
     if initial_capture_paused {
         log::info!("Capture is paused (persisted setting); skipping runtime start");
@@ -1034,13 +1035,11 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
     // no-op.
     //
     // shutdown() returns true only when the engine is poisoned
-    // (`engine_poisoned`) — escalates to exit(3) below. Consumes the
+    // (`engine_poisoned`) — escalates to exit(3) below. The poison-exit
+    // watchdog is already armed by then, from inside the stop. Consumes the
     // supervisor, which releases the &audio_pipeline borrow so
     // audio_pipeline.stop() (which needs &mut self) can run next.
     let poisoned = supervisor.shutdown().await;
-    if poisoned {
-        spawn_poison_exit_watchdog(POISON_EXIT_GRACE);
-    }
 
     // Stop audio pipeline — encoding thread sees EOF, flushes segments.
     if let Err(e) = audio_pipeline.stop() {

@@ -137,6 +137,7 @@ pub struct CaptureSupervisor<'a, M: AppMetadataProvider + 'static + ?Sized> {
     /// reset each cycle, making the reporter's deltas lossy and its totals
     /// non-monotonic.
     capture_drops: Arc<chronicle_capture::CaptureDropCounters>,
+    on_stop_poisoned: fn(),
 }
 
 impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
@@ -169,7 +170,15 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
             mic_state_atom,
             base_dir,
             capture_drops,
+            on_stop_poisoned: || {},
         }
+    }
+
+    /// Run `hook` as soon as a runtime stop is known to be poisoned, before
+    /// the stop waits on its downstream tasks.
+    pub fn with_on_stop_poisoned(mut self, hook: fn()) -> Self {
+        self.on_stop_poisoned = hook;
+        self
     }
 
     /// Build the config for one engine start.
@@ -335,7 +344,7 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         let Some(rt) = self.runtime.take() else {
             return false;
         };
-        match rt.stop().await {
+        match rt.stop(self.on_stop_poisoned).await {
             Ok(()) => {
                 log::info!("capture runtime stopped cleanly");
                 false
@@ -371,7 +380,7 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     async fn stop_capture(&mut self, audio: &'a AudioPipeline) -> ReconcileOutcome {
         let mut poisoned = false;
         if let Some(rt) = self.runtime.take()
-            && let Err(e) = rt.stop().await
+            && let Err(e) = rt.stop(self.on_stop_poisoned).await
         {
             log::error!("CaptureRuntime stop failed: {e}");
             let CaptureRuntimeError::Engine(engine_err) = &e;

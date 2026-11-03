@@ -130,8 +130,9 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureRuntime<'a, M> {
     ///
     /// After a poisoned stop (`engine_poisoned`) the joins are aborted
     /// instead: a surviving stream can keep its handler's frame sender alive,
-    /// so the channel may never close.
-    pub async fn stop(mut self) -> Result<()> {
+    /// so the channel may never close. `on_poisoned` runs before those joins,
+    /// because abort cannot stop a task that is blocked without yielding.
+    pub async fn stop(mut self, on_poisoned: impl FnOnce()) -> Result<()> {
         let store_handle = self.store_handle.take();
         let ocr_handle = self.ocr_handle.take();
 
@@ -150,7 +151,7 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureRuntime<'a, M> {
                 ("capture_store_loop", store_handle),
                 ("ocr_loop", ocr_handle),
             ],
-            poisoned,
+            poisoned.then_some(on_poisoned),
         )
         .await;
         stop_result.map_err(CaptureRuntimeError::Engine)
@@ -165,7 +166,14 @@ pub(crate) fn engine_poisoned(e: &CaptureError) -> bool {
     )
 }
 
-async fn join_downstream(handles: [(&str, Option<JoinHandle<()>>); 2], poisoned: bool) {
+async fn join_downstream(
+    handles: [(&str, Option<JoinHandle<()>>); 2],
+    on_poisoned: Option<impl FnOnce()>,
+) {
+    let poisoned = on_poisoned.is_some();
+    if let Some(hook) = on_poisoned {
+        hook();
+    }
     for (name, handle) in handles {
         let Some(h) = handle else { continue };
         if poisoned {
@@ -225,7 +233,7 @@ mod tests {
 
         let joined = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            join_downstream([("hung", Some(hung)), ("absent", None)], true),
+            join_downstream([("hung", Some(hung)), ("absent", None)], Some(|| {})),
         )
         .await;
 
@@ -234,6 +242,36 @@ mod tests {
             "a poisoned stop must not wait on a task whose sender survives"
         );
         drop(tx);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn join_downstream_runs_poison_hook_before_awaiting_an_unabortable_task() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let stuck = tokio::task::spawn_blocking(move || {
+            let _ = release_rx.recv();
+        });
+        let hook_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&hook_ran);
+
+        let join = tokio::spawn(join_downstream(
+            [("stuck", Some(stuck)), ("absent", None)],
+            Some(move || flag.store(true, std::sync::atomic::Ordering::SeqCst)),
+        ));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !hook_ran.load(std::sync::atomic::Ordering::SeqCst)
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let ran_while_stuck = hook_ran.load(std::sync::atomic::Ordering::SeqCst);
+        release_tx.send(()).unwrap();
+        join.await.unwrap();
+
+        assert!(
+            ran_while_stuck,
+            "the poison hook must run before the join waits on a task abort cannot stop"
+        );
     }
 
     #[tokio::test]
@@ -245,7 +283,7 @@ mod tests {
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
-        join_downstream([("task", Some(task)), ("absent", None)], false).await;
+        join_downstream([("task", Some(task)), ("absent", None)], None::<fn()>).await;
 
         assert!(
             finished.load(std::sync::atomic::Ordering::SeqCst),
