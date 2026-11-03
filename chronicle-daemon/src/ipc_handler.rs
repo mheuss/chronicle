@@ -175,8 +175,8 @@ impl DaemonHandler {
         }
         // Match recv_timeout explicitly so a timeout or sender-drop produces
         // ok:false (with the last known paused state) rather than misleading
-        // the UI with ok:true. Only a timeout is pending: the loop still holds
-        // the command.
+        // the UI with ok:true. Only a timeout is pending: the loop has the
+        // command, queued or already running.
         let (ok, paused, pending) =
             match tokio::task::block_in_place(|| reply_rx.recv_timeout(self.capture_reply_timeout))
             {
