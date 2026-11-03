@@ -175,27 +175,32 @@ impl DaemonHandler {
         }
         // Match recv_timeout explicitly so a timeout or sender-drop produces
         // ok:false (with the last known paused state) rather than misleading
-        // the UI with ok:true.
-        let (ok, paused) =
+        // the UI with ok:true. Only a timeout is pending: the loop still holds
+        // the command.
+        let (ok, paused, pending) =
             match tokio::task::block_in_place(|| reply_rx.recv_timeout(self.capture_reply_timeout))
             {
-                Ok(p) => (true, p),
-                Err(e) => {
+                Ok(p) => (true, p, false),
+                Err(RecvTimeoutError::Timeout) => {
+                    log::warn!("capture {action:?} reply timed out; outcome unconfirmed");
+                    (false, self.capture_paused.load(Ordering::Acquire), true)
+                }
+                Err(e @ RecvTimeoutError::Disconnected) => {
                     log::warn!("capture command reply failed: {e}");
-                    (false, self.capture_paused.load(Ordering::Acquire))
+                    (false, self.capture_paused.load(Ordering::Acquire), false)
                 }
             };
-        log::info!("capture {:?} -> ok={ok} paused={paused}", action);
+        log::info!("capture {action:?} -> ok={ok} paused={paused} pending={pending}");
         match action {
             CaptureAction::Pause => Response::PauseCapture {
                 ok,
                 paused,
-                pending: false,
+                pending,
             },
             CaptureAction::Resume => Response::ResumeCapture {
                 ok,
                 paused,
-                pending: false,
+                pending,
             },
         }
     }
@@ -1820,9 +1825,58 @@ mod tests {
                 paused,
                 pending,
             } => {
-                let _ = pending;
+                assert!(pending, "a timed-out reply must say pending");
                 assert!(!ok, "ok must be false on reply timeout");
                 assert!(paused, "paused should reflect cached value (true)");
+            }
+            other => panic!("expected PauseCapture, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resume_capture_reply_timeout_returns_pending_with_cached_paused() {
+        let (mut handler, _mic_rx, _mic_atom, mut capture_rx, capture_paused, _ss, _tcell, _dir) =
+            handler_with_full_channels(8, true).await;
+        handler.capture_reply_timeout = std::time::Duration::from_millis(50);
+        capture_paused.store(true, std::sync::atomic::Ordering::Release);
+
+        tokio::spawn(async move {
+            let cmd = capture_rx.recv().await.expect("command should arrive");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            drop(cmd);
+        });
+
+        let resp = handler.handle(Request::ResumeCapture);
+        match resp {
+            Response::ResumeCapture {
+                ok,
+                paused,
+                pending,
+            } => {
+                assert!(!ok, "ok must be false on reply timeout");
+                assert!(paused, "paused should reflect cached value (true)");
+                assert!(pending, "a timed-out reply must say pending");
+            }
+            other => panic!("expected ResumeCapture, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pause_capture_reply_sender_dropped_is_not_pending() {
+        let (mut handler, _mic_rx, _mic_atom, mut capture_rx, _capture_paused, _ss, _tcell, _dir) =
+            handler_with_full_channels(8, true).await;
+        handler.capture_reply_timeout = std::time::Duration::from_millis(500);
+
+        tokio::spawn(async move {
+            let cmd = capture_rx.recv().await.expect("command should arrive");
+            drop(cmd.reply);
+        });
+
+        let resp = handler.handle(Request::PauseCapture);
+        match resp {
+            Response::PauseCapture { ok, pending, .. } => {
+                assert!(!ok, "ok must be false when the reply sender is dropped");
+                assert!(!pending, "a dropped command is not pending");
             }
             other => panic!("expected PauseCapture, got {other:?}"),
         }
