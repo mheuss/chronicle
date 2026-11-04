@@ -320,7 +320,7 @@ fn route_reconcile_outcome(
 /// be exercised twice in a process, but the string it is handed can.
 const DEFAULT_LOG_FILTER: &str = "warn,chronicle=info";
 
-/// What `main` does with the instance-lock result.
+/// What `run_main` does with the instance-lock result.
 #[derive(Debug)]
 enum Startup {
     Run(instance_lock::InstanceLock),
@@ -357,9 +357,9 @@ fn main() -> std::process::ExitCode {
     std::process::ExitCode::from(exit_code_for(run_main()))
 }
 
-/// The process exit status for `run_main`'s result. An error is logged first,
-/// because the error `main` would otherwise return goes only to stderr, which
-/// launchd discards.
+/// The process exit status for `run_main`'s result. An error goes through the
+/// installed logger, so it lands wherever the logs do; an error returned from
+/// `main` would be printed to stderr instead.
 fn exit_code_for(result: Result<()>) -> u8 {
     match result {
         Ok(()) => 0,
