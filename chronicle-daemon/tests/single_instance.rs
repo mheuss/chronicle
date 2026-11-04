@@ -47,7 +47,7 @@ fn second_daemon_exits_before_touching_the_database() {
         .unwrap()
         .read_to_string(&mut stderr)
         .unwrap();
-    assert!(!status.success(), "daemon exited 0; stderr: {stderr}");
+    assert!(status.success(), "daemon exited non-zero; stderr: {stderr}");
     assert!(stderr.contains("already running"), "stderr: {stderr}");
     assert!(
         stderr.contains("chronicle-daemon starting"),

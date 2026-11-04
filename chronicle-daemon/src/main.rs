@@ -320,6 +320,28 @@ fn route_reconcile_outcome(
 /// be exercised twice in a process, but the string it is handed can.
 const DEFAULT_LOG_FILTER: &str = "warn,chronicle=info";
 
+/// What `main` does with the instance-lock result.
+#[derive(Debug)]
+enum Startup {
+    Run(instance_lock::InstanceLock),
+    AlreadyRunning(std::path::PathBuf),
+}
+
+/// `AlreadyRunning` is a clean exit. Under launchd's
+/// `KeepAlive{SuccessfulExit=false}` a non-zero exit would respawn the agent
+/// every `ThrottleInterval` while another daemon holds the lock.
+fn startup(
+    acquired: std::result::Result<instance_lock::InstanceLock, instance_lock::InstanceLockError>,
+) -> Result<Startup> {
+    match acquired {
+        Ok(lock) => Ok(Startup::Run(lock)),
+        Err(instance_lock::InstanceLockError::AlreadyRunning(path)) => {
+            Ok(Startup::AlreadyRunning(path))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn main() -> Result<()> {
     // `chronicle` is a prefix match, not a crate name: env_filter compares
     // with `target.starts_with(directive)`, so one directive covers
@@ -334,7 +356,16 @@ fn main() -> Result<()> {
     log::info!("chronicle-daemon starting");
 
     let storage_config = StorageConfig::default();
-    let lock = instance_lock::acquire(&storage_config.base_dir)?;
+    let lock = match startup(instance_lock::acquire(&storage_config.base_dir))? {
+        Startup::Run(lock) => lock,
+        Startup::AlreadyRunning(path) => {
+            log::warn!(
+                "another chronicle-daemon is already running on {}; exiting",
+                path.display()
+            );
+            return Ok(());
+        }
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -1184,6 +1215,27 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn startup_maps_a_held_lock_to_a_clean_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = startup(instance_lock::acquire(dir.path())).unwrap();
+        assert!(matches!(first, Startup::Run(_)));
+        match startup(instance_lock::acquire(dir.path())).unwrap() {
+            Startup::AlreadyRunning(path) => assert_eq!(path, dir.path()),
+            other => panic!("expected AlreadyRunning, got {other:?}"),
+        }
+        drop(first);
+    }
+
+    #[test]
+    fn startup_propagates_an_io_lock_error() {
+        let err = instance_lock::InstanceLockError::Io {
+            path: std::path::PathBuf::from("/nonexistent"),
+            source: std::io::Error::other("boom"),
+        };
+        assert!(startup(Err(err)).is_err());
+    }
 
     #[test]
     fn default_log_filter_admits_chronicle_info_but_not_dependency_info() {
