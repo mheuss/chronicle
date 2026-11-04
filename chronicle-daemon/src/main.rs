@@ -1234,7 +1234,11 @@ mod tests {
             path: std::path::PathBuf::from("/nonexistent"),
             source: std::io::Error::other("boom"),
         };
-        assert!(startup(Err(err)).is_err());
+        let err = startup(Err(err)).unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<instance_lock::InstanceLockError>(),
+            Some(instance_lock::InstanceLockError::Io { .. })
+        ));
     }
 
     #[test]
