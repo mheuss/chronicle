@@ -1867,9 +1867,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn pause_capture_reply_sender_dropped_is_not_pending() {
-        let (mut handler, _mic_rx, _mic_atom, mut capture_rx, _capture_paused, _ss, _tcell, _dir) =
+        let (mut handler, _mic_rx, _mic_atom, mut capture_rx, capture_paused, _ss, _tcell, _dir) =
             handler_with_full_channels(8, true).await;
         handler.capture_reply_timeout = std::time::Duration::from_millis(500);
+        capture_paused.store(false, std::sync::atomic::Ordering::Release);
 
         tokio::spawn(async move {
             let cmd = capture_rx.recv().await.expect("command should arrive");
