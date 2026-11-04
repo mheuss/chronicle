@@ -3,6 +3,7 @@ mod capture_supervisor;
 mod drop_reporter;
 mod instance_lock;
 mod ipc_handler;
+mod logging;
 mod media_presence;
 mod permissions;
 mod pipeline;
@@ -343,16 +344,7 @@ fn startup(
 }
 
 fn main() -> std::process::ExitCode {
-    // `chronicle` is a prefix match, not a crate name: env_filter compares
-    // with `target.starts_with(directive)`, so one directive covers
-    // chronicle_daemon, chronicle_audio, chronicle_capture and every future
-    // chronicle_* crate without enumerating them. Dependencies stay at warn,
-    // so a model download does not narrate itself.
-    //
-    // `Env::default()` still reads RUST_LOG; `default_filter_or` only supplies
-    // the fallback, so RUST_LOG keeps overriding in both directions.
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(DEFAULT_LOG_FILTER))
-        .init();
+    logging::init(DEFAULT_LOG_FILTER);
     log::info!("chronicle-daemon starting");
     std::process::ExitCode::from(exit_code_for(run_main()))
 }
