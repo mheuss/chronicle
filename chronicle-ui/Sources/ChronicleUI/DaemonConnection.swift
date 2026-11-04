@@ -507,10 +507,8 @@ struct SetMicEnabledResponse: Codable, Sendable {
     let type: String
     let ok: Bool
     let state: MicState
-    /// `true` when the daemon's reply wait timed out. The command may still
-    /// apply, so `state` is a snapshot, and `Status` shows observed state but
-    /// not whether the command finished. `nil` only from a daemon built
-    /// before the field existed.
+    /// `true` when the daemon's reply wait timed out, so `state` is only a
+    /// snapshot. `nil` only from a daemon built before the field existed.
     let pending: Bool?
 }
 

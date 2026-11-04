@@ -126,11 +126,8 @@ pub enum Response {
         ok: bool,
         state: MicState,
         /// `true` means the daemon accepted the command, but no completion
-        /// reply arrived before the wait expired. It may still be queued or
-        /// already running, and it is processed unless the daemon shuts down
-        /// first. Processed does not mean succeeded. `ok` is false, and `state`
-        /// is a snapshot that a later `Status` may replace. `Status` carries no
-        /// completion signal for the command.
+        /// reply arrived before the wait expired. It may still run, so `ok` is
+        /// false and `state` is only a snapshot.
         #[serde(default)]
         pending: bool,
     },
