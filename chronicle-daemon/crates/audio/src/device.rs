@@ -47,9 +47,8 @@ fn escape(value: &str) -> String {
 
 static DEVICE_IDENTITY_IN_LOGS: AtomicBool = AtomicBool::new(true);
 
-/// Whether log lines carry the microphone's name and UID. The daemon turns this
-/// off for its unified-logging backend, which keeps messages in the system log
-/// store.
+/// Whether log lines carry the microphone's name and UID. Turn it off when log
+/// lines go to a store that keeps messages, such as the system log.
 pub fn set_device_identity_in_logs(on: bool) {
     DEVICE_IDENTITY_IN_LOGS.store(on, Ordering::Relaxed);
 }
