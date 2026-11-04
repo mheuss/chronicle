@@ -279,7 +279,8 @@ final class DaemonConnection {
         return response.hit
     }
 
-    /// Pause screen + audio capture. Returns the resulting paused state.
+    /// Pause screen + audio capture. Returns the `paused` value from the
+    /// daemon's reply, which is a snapshot when the reply is `pending`.
     /// Issues a status refresh on success so the menu bar icon, Settings,
     /// and any banner observers see the new state immediately.
     func pauseCapture() async throws -> Bool {
@@ -293,7 +294,7 @@ final class DaemonConnection {
         return response.paused
     }
 
-    /// Resume capture. Returns the resulting paused state.
+    /// Resume capture. Returns the `paused` value from the daemon's reply.
     /// Issues a status refresh on success (see `pauseCapture`).
     func resumeCapture() async throws -> Bool {
         let response = try await sendRequest(

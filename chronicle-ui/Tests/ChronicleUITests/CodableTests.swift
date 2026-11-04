@@ -353,6 +353,23 @@ struct CodableTests {
         #expect(r.pending == nil)
     }
 
+    @Test("An old UI decoder ignores the pending field")
+    func oldUIDecoderIgnoresPending() throws {
+        struct OldSetMicEnabledResponse: Decodable {
+            let type: String
+            let ok: Bool
+            let state: MicState
+        }
+        let json = """
+        {"type":"set_mic_enabled","ok":false,"state":"off","pending":true}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let old = try decoder.decode(OldSetMicEnabledResponse.self, from: Data(json.utf8))
+        #expect(old.ok == false)
+        #expect(old.state == .off)
+    }
+
     @Test("SetMicEnabledResponse decodes a pending timeout reply")
     func setMicEnabledResponseDecodesPending() throws {
         let json = """

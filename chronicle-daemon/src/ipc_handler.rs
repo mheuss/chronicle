@@ -101,7 +101,8 @@ pub struct DaemonHandler {
     /// toggle has no consumer, so the handler rejects it instead of blocking
     /// the caller for the full reply timeout.
     mic_ready: Arc<AtomicBool>,
-    /// Backstop for a wedged daemon — a real toggle replies well under 1 s.
+    /// A toggle can wait behind a slow pause or resume, so a timeout replies
+    /// `pending` rather than a failure.
     mic_reply_timeout: Duration,
     /// Control channel to the `run()` event loop for capture pause/resume.
     capture_tx: mpsc::Sender<CaptureCommand>,
@@ -546,9 +547,7 @@ impl RequestHandler for DaemonHandler {
                     };
                 }
                 // handle() is sync but runs inside the async IPC server;
-                // block_in_place keeps the runtime healthy. The 20s timeout is
-                // a wedged-daemon backstop — a real toggle replies in well
-                // under a second.
+                // block_in_place keeps the runtime healthy.
                 match tokio::task::block_in_place(|| reply_rx.recv_timeout(self.mic_reply_timeout))
                 {
                     Ok(state) => Response::SetMicEnabled {
@@ -557,18 +556,23 @@ impl RequestHandler for DaemonHandler {
                         pending: false,
                     },
                     Err(RecvTimeoutError::Timeout) => {
-                        log::warn!("mic toggle reply timed out; outcome unconfirmed");
+                        log::warn!(
+                            "mic toggle enabled={enabled} reply timed out; outcome unconfirmed"
+                        );
                         Response::SetMicEnabled {
                             ok: false,
                             state: MicState::from_u8(self.mic_state.load(Ordering::Acquire)),
                             pending: true,
                         }
                     }
-                    Err(RecvTimeoutError::Disconnected) => Response::SetMicEnabled {
-                        ok: false,
-                        state: MicState::Error,
-                        pending: false,
-                    },
+                    Err(e @ RecvTimeoutError::Disconnected) => {
+                        log::warn!("mic toggle reply failed: {e}");
+                        Response::SetMicEnabled {
+                            ok: false,
+                            state: MicState::Error,
+                            pending: false,
+                        }
+                    }
                 }
             }
             Request::SetWhisperModel { variant } => self.set_whisper_model(&variant),
@@ -977,7 +981,7 @@ mod tests {
             drop(cmd);
         });
 
-        let resp = handler.handle(Request::SetMicEnabled { enabled: true });
+        let resp = handler.handle(Request::SetMicEnabled { enabled: false });
         match resp {
             Response::SetMicEnabled { ok, state, pending } => {
                 assert!(!ok, "ok must be false on reply timeout");
@@ -1800,14 +1804,14 @@ mod tests {
     async fn pause_capture_reply_timeout_returns_error_with_cached_paused() {
         // Override capture_reply_timeout to a short value so the test runs fast.
         // The spawned task receives the CaptureCommand but never replies, forcing
-        // recv_timeout into the Err branch. The handler should return ok:false
-        // with the current capture_paused value.
+        // recv_timeout into the Timeout arm. The handler should return ok:false,
+        // pending:true, and the cached capture_paused value.
         let (mut handler, _mic_rx, _mic_atom, mut capture_rx, capture_paused, _ss, _tcell, _dir) =
             handler_with_full_channels(8, true).await;
         handler.capture_reply_timeout = std::time::Duration::from_millis(50);
 
-        // Seed the cached paused state so the assertion is meaningful (not just zero).
-        capture_paused.store(true, std::sync::atomic::Ordering::Release);
+        // Seed the opposite of the requested pause, so echoing the request fails.
+        capture_paused.store(false, std::sync::atomic::Ordering::Release);
 
         // Receive but never reply — keep the command alive so the reply sender
         // is not dropped; the handler must hit the timeout, not the disconnected
@@ -1827,7 +1831,7 @@ mod tests {
             } => {
                 assert!(pending, "a timed-out reply must say pending");
                 assert!(!ok, "ok must be false on reply timeout");
-                assert!(paused, "paused should reflect cached value (true)");
+                assert!(!paused, "paused should reflect cached value (false)");
             }
             other => panic!("expected PauseCapture, got {other:?}"),
         }
@@ -1874,8 +1878,13 @@ mod tests {
 
         let resp = handler.handle(Request::PauseCapture);
         match resp {
-            Response::PauseCapture { ok, pending, .. } => {
+            Response::PauseCapture {
+                ok,
+                paused,
+                pending,
+            } => {
                 assert!(!ok, "ok must be false when the reply sender is dropped");
+                assert!(!paused, "paused should reflect cached value (false)");
                 assert!(!pending, "a dropped command is not pending");
             }
             other => panic!("expected PauseCapture, got {other:?}"),

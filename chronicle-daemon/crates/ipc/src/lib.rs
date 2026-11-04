@@ -126,8 +126,9 @@ pub enum Response {
         ok: bool,
         state: MicState,
         /// `true` means the daemon accepted the command, but no completion
-        /// reply arrived before the wait expired. It may still run, so `ok` is
-        /// false and `state` is only a snapshot.
+        /// reply arrived before the wait expired, so `ok` is false. The command
+        /// is processed unless the daemon shuts down first, and `state` is only
+        /// a snapshot.
         #[serde(default)]
         pending: bool,
     },
@@ -144,7 +145,8 @@ pub enum Response {
     },
     /// Result of a `PauseCapture` request. `paused` is the state after the
     /// command, or the last known state when `ok` is false. `ok: false` when
-    /// the daemon isn't ready, the command queue is full, or no reply arrived.
+    /// the daemon isn't ready, the command queue is full or closed, or no
+    /// reply arrived.
     PauseCapture {
         ok: bool,
         paused: bool,
@@ -793,6 +795,30 @@ mod tests {
         assert_eq!(v["ok"], true);
         assert_eq!(v["paused"], true);
         assert_eq!(v["pending"], false);
+    }
+
+    #[test]
+    fn response_pause_and_resume_decode_without_pending() {
+        let pause: Response =
+            serde_json::from_str(r#"{"type":"pause_capture","ok":true,"paused":true}"#).unwrap();
+        assert_eq!(
+            pause,
+            Response::PauseCapture {
+                ok: true,
+                paused: true,
+                pending: false,
+            }
+        );
+        let resume: Response =
+            serde_json::from_str(r#"{"type":"resume_capture","ok":true,"paused":false}"#).unwrap();
+        assert_eq!(
+            resume,
+            Response::ResumeCapture {
+                ok: true,
+                paused: false,
+                pending: false,
+            }
+        );
     }
 
     #[test]
