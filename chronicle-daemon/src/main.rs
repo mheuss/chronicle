@@ -317,8 +317,9 @@ fn route_reconcile_outcome(
 /// `target.starts_with(directive)` — so one directive covers every current and
 /// future `chronicle_*` crate while dependencies stay at `warn`.
 ///
-/// Named rather than inlined so a test can pin it. `env_logger::init()` cannot
-/// be exercised twice in a process, but the string it is handed can.
+/// Named rather than inlined so a test can pin it. A logger cannot be installed
+/// twice in a process, but the filter string handed to `logging::init` can be
+/// tested.
 const DEFAULT_LOG_FILTER: &str = "warn,chronicle=info";
 
 /// What `run_main` does with the instance-lock result.

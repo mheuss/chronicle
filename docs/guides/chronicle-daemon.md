@@ -49,8 +49,9 @@ flowchart TD
 
 ### Startup Sequence
 
-1. `env_logger::Builder::from_env(...)` — logging, defaulting to
-   `warn,chronicle=info` when `RUST_LOG` is unset
+1. `logging::init(...)` — logging, defaulting to `warn,chronicle=info` when
+   `RUST_LOG` is unset. It logs to stderr through env_logger, or to unified
+   logging when `CHRONICLE_LOG_BACKEND=oslog`
 2. `instance_lock::acquire()` — takes an exclusive lock on `chronicle.lock` in
    the data directory, before the Tokio runtime exists. Exits with "another
    chronicle-daemon is already running" if another daemon holds it.
