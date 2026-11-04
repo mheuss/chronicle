@@ -174,4 +174,28 @@ struct DaemonConnectionMethodsTests {
 
         #expect(paused == false)
     }
+
+    @Test("setMicEnabled returns the full response, including pending")
+    func setMicEnabledReturnsPendingResponse() async throws {
+        let pair = try SocketPairHelper.make()
+        let conn = DaemonConnection(testingSocketFD: pair.clientFD)
+        let serverFD = pair.serverFD
+
+        let reply = #"{"type":"set_mic_enabled","ok":false,"state":"off","pending":true}"#
+        let daemonTask = blockingServer {
+            let reqBytes = readLineSync(from: serverFD)
+            let req = reqBytes.flatMap { String(bytes: $0, encoding: .utf8) } ?? ""
+            #expect(req.contains("\"type\":\"set_mic_enabled\""))
+            #expect(req.contains("\"enabled\":true"))
+            writeAll(reply + "\n", to: serverFD)
+            Darwin.close(serverFD)
+        }
+
+        let response = try await conn.setMicEnabled(true)
+        _ = await daemonTask.value
+
+        #expect(response.ok == false)
+        #expect(response.state == .off)
+        #expect(response.pending == true)
+    }
 }

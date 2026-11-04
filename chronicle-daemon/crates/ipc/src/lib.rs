@@ -101,9 +101,11 @@ impl MicState {
 
 /// A response from the daemon to the UI.
 ///
-/// Only ever decoded by a same-version client over the live IPC socket, so
-/// the `Error.code` field is required (no `#[serde(default)]`). Cross-version
-/// decoding is out of scope until protocol version negotiation (CHR-77).
+/// The `Error.code` field is required (no `#[serde(default)]`), because only a
+/// same-version client decodes `Error`. Cross-version decoding in general is out
+/// of scope until protocol version negotiation (CHR-77). An additive field such
+/// as `pending` still carries `#[serde(default)]`, so a reply from an older
+/// daemon decodes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 // `Response::Status` is inherently the fat variant: it carries the whole
@@ -118,10 +120,17 @@ pub enum Response {
         ok: bool,
         data: StatusData,
     },
-    /// Result of a `SetMicEnabled` request: the resulting microphone state.
+    /// Result of a `SetMicEnabled` request. `ok` is true only when `state` is
+    /// `On` or `Off`.
     SetMicEnabled {
         ok: bool,
         state: MicState,
+        /// `true` means the daemon accepted the command, but no completion
+        /// reply arrived before the wait expired, so `ok` is false. The command
+        /// is processed unless the daemon shuts down first, and `state` is only
+        /// a snapshot.
+        #[serde(default)]
+        pending: bool,
     },
     /// Result of a `Search` request.
     Search {
@@ -134,17 +143,27 @@ pub enum Response {
         ok: bool,
         hit: Option<SearchHit>,
     },
-    /// Result of a `PauseCapture` request. `paused` is the resulting state.
-    /// `ok: false` when the daemon isn't ready to accept the command yet
-    /// (early startup).
+    /// Result of a `PauseCapture` request. `paused` is the state after the
+    /// command, or the last known state when `ok` is false. `ok: false` when
+    /// the daemon isn't ready, the command queue is full or closed, or no
+    /// reply arrived.
     PauseCapture {
         ok: bool,
         paused: bool,
+        /// Same meaning as `SetMicEnabled::pending`, with `paused` as the
+        /// snapshot.
+        #[serde(default)]
+        pending: bool,
     },
-    /// Result of a `ResumeCapture` request. `paused` is the resulting state.
+    /// Result of a `ResumeCapture` request. Same `ok` and `paused` meaning as
+    /// `PauseCapture`.
     ResumeCapture {
         ok: bool,
         paused: bool,
+        /// Same meaning as `SetMicEnabled::pending`, with `paused` as the
+        /// snapshot.
+        #[serde(default)]
+        pending: bool,
     },
     /// Result of `SetWhisperModel`. `ok: false` = unknown variant, an
     /// operation already in flight, or the daemon isn't ready. `status` is
@@ -533,12 +552,42 @@ mod tests {
         let resp = Response::SetMicEnabled {
             ok: true,
             state: MicState::On,
+            pending: false,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["type"], "set_mic_enabled");
         assert_eq!(value["ok"], true);
         assert_eq!(value["state"], "on");
+        assert_eq!(value["pending"], false);
+    }
+
+    #[test]
+    fn response_set_mic_enabled_serializes_pending_true() {
+        let resp = Response::SetMicEnabled {
+            ok: false,
+            state: MicState::Off,
+            pending: true,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["state"], "off");
+        assert_eq!(value["pending"], true);
+    }
+
+    #[test]
+    fn response_set_mic_enabled_decodes_without_pending() {
+        let resp: Response =
+            serde_json::from_str(r#"{"type":"set_mic_enabled","ok":true,"state":"on"}"#).unwrap();
+        assert_eq!(
+            resp,
+            Response::SetMicEnabled {
+                ok: true,
+                state: MicState::On,
+                pending: false,
+            }
+        );
     }
 
     #[test]
@@ -738,12 +787,38 @@ mod tests {
         let resp = Response::PauseCapture {
             ok: true,
             paused: true,
+            pending: false,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "pause_capture");
         assert_eq!(v["ok"], true);
         assert_eq!(v["paused"], true);
+        assert_eq!(v["pending"], false);
+    }
+
+    #[test]
+    fn response_pause_and_resume_decode_without_pending() {
+        let pause: Response =
+            serde_json::from_str(r#"{"type":"pause_capture","ok":true,"paused":true}"#).unwrap();
+        assert_eq!(
+            pause,
+            Response::PauseCapture {
+                ok: true,
+                paused: true,
+                pending: false,
+            }
+        );
+        let resume: Response =
+            serde_json::from_str(r#"{"type":"resume_capture","ok":true,"paused":false}"#).unwrap();
+        assert_eq!(
+            resume,
+            Response::ResumeCapture {
+                ok: true,
+                paused: false,
+                pending: false,
+            }
+        );
     }
 
     #[test]
@@ -751,11 +826,13 @@ mod tests {
         let resp = Response::ResumeCapture {
             ok: true,
             paused: false,
+            pending: false,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "resume_capture");
         assert_eq!(v["paused"], false);
+        assert_eq!(v["pending"], false);
     }
 
     #[test]

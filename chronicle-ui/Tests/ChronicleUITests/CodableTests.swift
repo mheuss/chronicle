@@ -252,6 +252,7 @@ struct CodableTests {
         #expect(response.type == "set_mic_enabled")
         #expect(response.ok == true)
         #expect(response.state == .on)
+        #expect(response.pending == nil)
     }
 
     @Test("SearchResponse decodes from Rust wire format")
@@ -341,6 +342,7 @@ struct CodableTests {
         let p = try decoder.decode(PauseResumeResponse.self, from: Data(pauseJson.utf8))
         #expect(p.type == "pause_capture")
         #expect(p.paused == true)
+        #expect(p.pending == nil)
 
         let resumeJson = """
         {"type":"resume_capture","ok":true,"paused":false}
@@ -348,6 +350,50 @@ struct CodableTests {
         let r = try decoder.decode(PauseResumeResponse.self, from: Data(resumeJson.utf8))
         #expect(r.type == "resume_capture")
         #expect(r.paused == false)
+        #expect(r.pending == nil)
+    }
+
+    @Test("An old UI decoder ignores the pending field")
+    func oldUIDecoderIgnoresPending() throws {
+        struct OldSetMicEnabledResponse: Decodable {
+            let type: String
+            let ok: Bool
+            let state: MicState
+        }
+        let json = """
+        {"type":"set_mic_enabled","ok":false,"state":"off","pending":true}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let old = try decoder.decode(OldSetMicEnabledResponse.self, from: Data(json.utf8))
+        #expect(old.ok == false)
+        #expect(old.state == .off)
+    }
+
+    @Test("SetMicEnabledResponse decodes a pending timeout reply")
+    func setMicEnabledResponseDecodesPending() throws {
+        let json = """
+        {"type":"set_mic_enabled","ok":false,"state":"off","pending":true}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let response = try decoder.decode(SetMicEnabledResponse.self, from: Data(json.utf8))
+        #expect(response.ok == false)
+        #expect(response.state == .off)
+        #expect(response.pending == true)
+    }
+
+    @Test("PauseResumeResponse decodes a pending timeout reply")
+    func pauseResumeResponseDecodesPending() throws {
+        let json = """
+        {"type":"pause_capture","ok":false,"paused":false,"pending":true}
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let response = try decoder.decode(PauseResumeResponse.self, from: Data(json.utf8))
+        #expect(response.ok == false)
+        #expect(response.paused == false)
+        #expect(response.pending == true)
     }
 
     @Test("Expanded StatusData decodes new fields")

@@ -174,14 +174,14 @@ final class DaemonConnection {
         return response
     }
 
-    /// Toggle microphone capture on the daemon. Returns the resulting state.
-    /// Callers read the outcome from the returned `MicState`.
-    func setMicEnabled(_ enabled: Bool) async throws -> MicState {
-        let response = try await sendRequest(
+    /// Toggle microphone capture on the daemon. Returns the daemon's reply.
+    /// `pending == true` means the outcome is not confirmed yet; `Status`
+    /// shows the observed mic state but not whether this command finished.
+    func setMicEnabled(_ enabled: Bool) async throws -> SetMicEnabledResponse {
+        try await sendRequest(
             SetMicEnabledRequest(type: "set_mic_enabled", enabled: enabled),
             expecting: SetMicEnabledResponse.self
         )
-        return response.state
     }
 
     /// Select (and download if needed) a whisper model variant.
@@ -279,7 +279,8 @@ final class DaemonConnection {
         return response.hit
     }
 
-    /// Pause screen + audio capture. Returns the resulting paused state.
+    /// Pause screen + audio capture. Returns the `paused` value from the
+    /// daemon's reply, which is a snapshot when the reply is `pending`.
     /// Issues a status refresh on success so the menu bar icon, Settings,
     /// and any banner observers see the new state immediately.
     func pauseCapture() async throws -> Bool {
@@ -293,7 +294,7 @@ final class DaemonConnection {
         return response.paused
     }
 
-    /// Resume capture. Returns the resulting paused state.
+    /// Resume capture. Returns the `paused` value from the daemon's reply.
     /// Issues a status refresh on success (see `pauseCapture`).
     func resumeCapture() async throws -> Bool {
         let response = try await sendRequest(
@@ -507,6 +508,9 @@ struct SetMicEnabledResponse: Codable, Sendable {
     let type: String
     let ok: Bool
     let state: MicState
+    /// `true` when the daemon's reply wait timed out, so `state` is only a
+    /// snapshot. `nil` only from a daemon built before the field existed.
+    let pending: Bool?
 }
 
 struct StatusResponse: Decodable, Sendable {
@@ -789,6 +793,9 @@ struct PauseResumeResponse: Codable, Sendable {
     let type: String
     let ok: Bool
     let paused: Bool
+    /// Same meaning as `SetMicEnabledResponse.pending`, with `paused` as the
+    /// snapshot.
+    let pending: Bool?
 }
 
 // MARK: - Errors
