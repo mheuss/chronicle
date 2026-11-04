@@ -15,6 +15,7 @@ mod engine;
 pub mod handler;
 pub mod microphone;
 
+pub use device::set_device_identity_in_logs;
 pub use drops::{AudioDropCounters, AudioDropSnapshot};
 pub use encoder::OggOpusEncoder;
 pub use engine::{AudioHandlerToken, AudioPipeline, MicToggleOutcome};
