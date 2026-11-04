@@ -342,7 +342,7 @@ fn startup(
     }
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
     // `chronicle` is a prefix match, not a crate name: env_filter compares
     // with `target.starts_with(directive)`, so one directive covers
     // chronicle_daemon, chronicle_audio, chronicle_capture and every future
@@ -354,7 +354,23 @@ fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(DEFAULT_LOG_FILTER))
         .init();
     log::info!("chronicle-daemon starting");
+    std::process::ExitCode::from(exit_code_for(run_main()))
+}
 
+/// The process exit status for `run_main`'s result. An error is logged first,
+/// because the error `main` would otherwise return goes only to stderr, which
+/// launchd discards.
+fn exit_code_for(result: Result<()>) -> u8 {
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            log::error!("chronicle-daemon failed: {e:#}");
+            1
+        }
+    }
+}
+
+fn run_main() -> Result<()> {
     let storage_config = StorageConfig::default();
     let lock = match startup(instance_lock::acquire(&storage_config.base_dir))? {
         Startup::Run(lock) => lock,
@@ -1226,6 +1242,12 @@ mod tests {
             other => panic!("expected AlreadyRunning, got {other:?}"),
         }
         drop(first);
+    }
+
+    #[test]
+    fn exit_code_for_maps_ok_and_err() {
+        assert_eq!(exit_code_for(Ok(())), 0);
+        assert_eq!(exit_code_for(Err(anyhow::anyhow!("boom"))), 1);
     }
 
     #[test]
