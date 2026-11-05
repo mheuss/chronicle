@@ -88,7 +88,7 @@ macOS Control Center won't register a menu bar icon for a loose executable.
    macOS shows "App Background Activity: Chronicle can run in the
    background." The daemon and the menu bar app start now and at every
    login. A copy opened from anywhere else does not register itself. Its
-   Settings toggle still reads on, so switch it off and back on to register
+   Settings toggle still reads on. Switch it off and back on to register
    that copy.
 2. Grant Screen Recording: System Settings → Privacy & Security → Screen &
    System Audio Recording. Click +, choose Chronicle.app in Applications,
@@ -102,8 +102,8 @@ macOS Control Center won't register a menu bar icon for a loose executable.
 
 To turn it off, switch off "Capture in the background" under Settings → Run at
 login. Do this before you delete the app. Moving it to the Trash does not
-remove the login items. launchd keeps starting the daemon from the Trash, even
-after a restart, until you empty the Trash. Removing Chronicle from Open at
+remove the login items. launchd keeps starting the daemon from the Trash
+until you empty it. This holds after a restart. Removing Chronicle from Open at
 Login in System Settings lasts only until you next open the app or bring it to
 the front. While the toggle is on, that adds it back.
 
