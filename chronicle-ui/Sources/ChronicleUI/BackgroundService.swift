@@ -27,6 +27,7 @@ final class BackgroundService {
     @ObservationIgnored private let fingerprint: String
     @ObservationIgnored private let isInApplicationsFolder: Bool
     @ObservationIgnored private var tail: Task<Void, Never>?
+    @ObservationIgnored private var pending = 0
 
     private(set) var agentStatus: SMAppService.Status
     private(set) var lastError: String?
@@ -66,6 +67,8 @@ final class BackgroundService {
     /// safe only after the async unregister completes, and the old daemon holds
     /// the instance lock until it exits.
     private func enqueue(allowOutsideApplications: Bool) async {
+        pending += 1
+        isBusy = true
         let previous = tail
         let next = Task {
             await previous?.value
@@ -73,15 +76,13 @@ final class BackgroundService {
         }
         tail = next
         await next.value
+        pending -= 1
+        isBusy = pending > 0
     }
 
     private func reconcile(allowOutsideApplications: Bool) async {
-        isBusy = true
         lastError = nil
-        defer {
-            agentStatus = agent.status
-            isBusy = false
-        }
+        defer { agentStatus = agent.status }
 
         guard isEnabled else {
             for service in [agent, mainApp]

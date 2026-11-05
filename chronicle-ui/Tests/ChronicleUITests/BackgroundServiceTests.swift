@@ -42,6 +42,7 @@ final class FakeLoginService: LoginService {
     }
 
     func release() {
+        holdUnregister = false
         gate?.resume()
         gate = nil
     }
@@ -49,14 +50,17 @@ final class FakeLoginService: LoginService {
 
 struct Boom: Error {}
 
+// Serialized because every test shares one preferences domain; a fresh
+// domain per test left one empty plist per run in ~/Library/Preferences.
 @MainActor
-@Suite("BackgroundService", .timeLimit(.minutes(1)))
+@Suite("BackgroundService", .serialized, .timeLimit(.minutes(1)))
 final class BackgroundServiceTests {
     let log = CallLog()
     let defaults: UserDefaults
-    let suite = "BackgroundServiceTests.\(UUID().uuidString)"
+    let suite = "dev.heuss.chronicle.tests.BackgroundService"
 
     init() {
+        UserDefaults().removePersistentDomain(forName: suite)
         defaults = UserDefaults(suiteName: suite)!
     }
 
@@ -85,8 +89,9 @@ final class BackgroundServiceTests {
         #expect(log.entries.isEmpty)
     }
 
-    @Test func changedFingerprintReplacesTheAgentInOrder() async {
-        defaults.set("fp-old", forKey: BackgroundService.fingerprintKey)
+    @Test(arguments: [nil, "fp-old"] as [String?])
+    func changedFingerprintReplacesTheAgentInOrder(recorded: String?) async {
+        if let recorded { defaults.set(recorded, forKey: BackgroundService.fingerprintKey) }
         let agent = FakeLoginService("agent", status: .enabled, log: log)
         let app = FakeLoginService("app", status: .enabled, log: log)
         await make(agent: agent, mainApp: app).reconcileOnLaunch()
@@ -117,6 +122,7 @@ final class BackgroundServiceTests {
 
     @Test func choiceOffRetriesAFailedUnregister() async {
         defaults.set(false, forKey: BackgroundService.enabledKey)
+        defaults.set("fp-1", forKey: BackgroundService.fingerprintKey)
         let agent = FakeLoginService("agent", status: .enabled, log: log)
         agent.unregisterError = Boom()
         let app = FakeLoginService("app", status: .notRegistered, log: log)
@@ -124,12 +130,22 @@ final class BackgroundServiceTests {
         await first.reconcileOnLaunch()
         #expect(first.lastError != nil)
         #expect(agent.status == .enabled)
+        #expect(defaults.string(forKey: BackgroundService.fingerprintKey) == "fp-1")
 
         agent.unregisterError = nil
         log.entries.removeAll()
         await make(agent: agent, mainApp: app).reconcileOnLaunch()
         #expect(log.entries == ["agent.unregister.start", "agent.unregister.end"])
         #expect(agent.status == .notRegistered)
+        #expect(defaults.object(forKey: BackgroundService.fingerprintKey) == nil)
+    }
+
+    @Test func choiceOffUnregistersAnAgentAwaitingApproval() async {
+        defaults.set(false, forKey: BackgroundService.enabledKey)
+        let agent = FakeLoginService("agent", status: .requiresApproval, log: log)
+        let app = FakeLoginService("app", status: .notRegistered, log: log)
+        await make(agent: agent, mainApp: app).reconcileOnLaunch()
+        #expect(log.entries == ["agent.unregister.start", "agent.unregister.end"])
     }
 
     @Test func failedUnregisterSkipsTheReplacementRegister() async {
@@ -166,18 +182,22 @@ final class BackgroundServiceTests {
         #expect(service.lastError != nil)
     }
 
-    @Test func toggleOffUnregistersBoth() async {
+    @Test func toggleOffUnregistersBoth() async throws {
+        defaults.set("fp-1", forKey: BackgroundService.fingerprintKey)
         let agent = FakeLoginService("agent", status: .enabled, log: log)
         let app = FakeLoginService("app", status: .enabled, log: log)
         let service = make(agent: agent, mainApp: app)
         await service.setEnabled(false)
         #expect(log.entries == ["agent.unregister.start", "agent.unregister.end",
                                 "app.unregister.start", "app.unregister.end"])
-        #expect(service.isEnabled == false)
+        #expect(!service.isEnabled)
+        // Unwrap first: #expect never fails a Bool or Bool? equality here.
+        let storedOff = try #require(defaults.object(forKey: BackgroundService.enabledKey) as? Bool)
+        #expect(!storedOff)
         #expect(defaults.object(forKey: BackgroundService.fingerprintKey) == nil)
     }
 
-    @Test func toggleOnRegistersBothOutsideApplications() async {
+    @Test func toggleOnRegistersBothOutsideApplications() async throws {
         defaults.set(false, forKey: BackgroundService.enabledKey)
         let agent = FakeLoginService("agent", log: log)
         let app = FakeLoginService("app", log: log)
@@ -185,6 +205,8 @@ final class BackgroundServiceTests {
         await service.setEnabled(true)
         #expect(log.entries == ["agent.register", "app.register"])
         #expect(service.isEnabled)
+        let storedOn = try #require(defaults.object(forKey: BackgroundService.enabledKey) as? Bool)
+        #expect(storedOn)
     }
 
     @Test func secondRequestWaitsForTheFirst() async throws {
@@ -218,6 +240,29 @@ final class BackgroundServiceTests {
         #expect(BackgroundService.statusLabel(.notFound) == ("Not available in this build", false))
         let unknown = try #require(SMAppService.Status(rawValue: 99))
         #expect(BackgroundService.statusLabel(unknown) == ("Unknown", false))
+    }
+
+    @Test func fingerprintChangesWhenTheDaemonBinaryChanges() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fp-\(UUID().uuidString)/X.app")
+        defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
+        let contents = root.appendingPathComponent("Contents")
+        let daemon = contents.appendingPathComponent("MacOS/chronicle-daemon")
+        let plist = contents.appendingPathComponent("Library/LaunchAgents/\(BackgroundService.agentPlist)")
+        for dir in [daemon, plist] {
+            try FileManager.default.createDirectory(
+                at: dir.deletingLastPathComponent(), withIntermediateDirectories: true)
+        }
+        try Data("<plist version=\"1.0\"><dict><key>CFBundleVersion</key><string>7</string></dict></plist>".utf8)
+            .write(to: contents.appendingPathComponent("Info.plist"))
+        try Data("a".utf8).write(to: daemon)
+        try Data("p".utf8).write(to: plist)
+        let before = BackgroundService.currentFingerprint(bundle: try #require(Bundle(url: root)))
+        #expect(before.hasPrefix("7|"))
+        #expect(!before.contains("0.0-0"))
+        try Data("ab".utf8).write(to: daemon)
+        let after = BackgroundService.currentFingerprint(bundle: try #require(Bundle(url: root)))
+        #expect(before != after)
     }
 
     @Test func applicationsFolderDetection() {
