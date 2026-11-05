@@ -87,8 +87,9 @@ macOS Control Center won't register a menu bar icon for a loose executable.
 1. Copy `Chronicle.app` to `/Applications` or `~/Applications` and open it.
    macOS shows "App Background Activity: Chronicle can run in the
    background." The daemon and the menu bar app start now and at every
-   login. A copy opened from anywhere else does not register itself. Use
-   the Settings toggle there instead.
+   login. A copy opened from anywhere else does not register itself. Its
+   Settings toggle still reads on, so switch it off and back on to register
+   that copy.
 2. Grant Screen Recording: System Settings → Privacy & Security → Screen &
    System Audio Recording. Click +, choose Chronicle.app in Applications,
    and choose Later when macOS offers to quit it. Until you do, the daemon

@@ -53,8 +53,8 @@ flowchart TD
    `RUST_LOG` is unset. It logs to stderr through env_logger, or to unified
    logging when `CHRONICLE_LOG_BACKEND=oslog`
 2. `instance_lock::acquire()` — takes an exclusive lock on `chronicle.lock` in
-   the data directory, before the Tokio runtime exists. Exits with "another
-   chronicle-daemon is already running" if another daemon holds it.
+   the data directory, before the Tokio runtime exists. Exits with status 0 and
+   "another chronicle-daemon is already running" if another daemon holds it.
 3. `permissions::preflight()` — checks Screen Recording (hard gate) and
    Microphone (informational). Exits with an actionable error if Screen
    Recording is denied.
@@ -206,18 +206,23 @@ If you do set `RUST_LOG`, it replaces the default filter wholesale rather than
 adding to it, and that catches people out. `RUST_LOG=chronicle_audio=debug` is
 **not** additive: `env_filter` returns false for any target no directive
 matches, whatever its level, so a lone crate directive silences every *other*
-crate — `chronicle_daemon`'s own failures included. Lead with a level for
-everything else, as in `RUST_LOG=warn,chronicle_audio=debug`.
+crate — `chronicle_daemon`'s own log lines included. A fatal startup error
+still prints to stderr. Lead with a level for everything else, as in
+`RUST_LOG=warn,chronicle_audio=debug`.
 
-Three things to know before you trust what you read:
+Four things to know before you trust what you read:
 
 - **A second daemon on the same data directory will not start.** The daemon
   locks `chronicle.lock` in its data directory as soon as logging starts. A
   newcomer that finds the lock held exits with "another chronicle-daemon is
   already running". It exits *before* it opens the database or reaches the tap
-  install. You get no line at all, not an error about the microphone. Stop the
-  running daemon first. (The lock is per data directory: a different data
-  directory has its own lock and its own daemon.)
+  install. You get no line at all, not an error about the microphone. The
+  running daemon is usually the login agent. Follow "Developing with the agent
+  installed" in the README to stop it. (The lock is per data directory: a
+  different data directory has its own lock and its own daemon.)
+- **The system log hides the device.** Under the agent, log lines go to the
+  unified log with the microphone's name and UID replaced by `redacted`. Run
+  the daemon by hand to see them.
 - **Restart between devices.** `MicrophoneCapture` and its converter are built
   once when the pipeline is created, so changing the default input while the
   daemon runs leaves the converter built for the previous device.
