@@ -53,6 +53,10 @@ pub fn set_device_identity_in_logs(on: bool) {
     DEVICE_IDENTITY_IN_LOGS.store(on, Ordering::Relaxed);
 }
 
+pub fn device_identity_in_logs() -> bool {
+    DEVICE_IDENTITY_IN_LOGS.load(Ordering::Relaxed)
+}
+
 pub(crate) fn render_fields(device: &InputDevice) -> String {
     render_fields_with(device, DEVICE_IDENTITY_IN_LOGS.load(Ordering::Relaxed))
 }

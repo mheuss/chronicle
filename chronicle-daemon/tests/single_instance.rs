@@ -20,6 +20,7 @@ fn second_daemon_exits_before_touching_the_database() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_chronicle-daemon"))
         .env("HOME", home.path())
         .env("RUST_LOG", "warn,chronicle=info")
+        .env_remove("CHRONICLE_LOG_BACKEND")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()

@@ -352,13 +352,17 @@ fn main() -> std::process::ExitCode {
 }
 
 /// The process exit status for `run_main`'s result. An error goes through the
-/// installed logger, so it lands wherever the logs do; an error returned from
-/// `main` would be printed to stderr instead.
+/// installed logger, so it lands wherever the logs do. When `RUST_LOG` filters
+/// it out, it goes to stderr, so a failed start never exits silently.
 fn exit_code_for(result: Result<()>) -> u8 {
     match result {
         Ok(()) => 0,
         Err(e) => {
-            log::error!("chronicle-daemon failed: {e:#}");
+            if log::log_enabled!(log::Level::Error) {
+                log::error!("chronicle-daemon failed: {e:#}");
+            } else {
+                eprintln!("chronicle-daemon failed: {e:#}");
+            }
             1
         }
     }

@@ -1,7 +1,7 @@
 //! Chooses the daemon's log backend: unified logging when
 //! `CHRONICLE_LOG_BACKEND=oslog`, otherwise env_logger on stderr.
 
-pub const LOG_BACKEND_ENV: &str = "CHRONICLE_LOG_BACKEND";
+const LOG_BACKEND_ENV: &str = "CHRONICLE_LOG_BACKEND";
 const OSLOG_SUBSYSTEM: &str = "dev.heuss.chronicle";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -20,7 +20,14 @@ fn backend(value: Option<&str>) -> Backend {
 /// Installs the global logger. `RUST_LOG` overrides `default_filter` on both
 /// backends.
 pub fn init(default_filter: &str) {
-    match backend(std::env::var(LOG_BACKEND_ENV).ok().as_deref()) {
+    init_backend(
+        backend(std::env::var(LOG_BACKEND_ENV).ok().as_deref()),
+        default_filter,
+    );
+}
+
+fn init_backend(backend: Backend, default_filter: &str) {
+    match backend {
         Backend::Stderr => env_logger::Builder::from_env(
             env_logger::Env::default().default_filter_or(default_filter),
         )
@@ -100,6 +107,13 @@ mod tests {
         assert_eq!(backend(Some("oslog")), Backend::OsLog);
         assert_eq!(backend(Some("OSLOG")), Backend::Stderr);
         assert_eq!(backend(Some("stderr")), Backend::Stderr);
+    }
+
+    #[test]
+    fn oslog_backend_redacts_device_identity() {
+        assert!(chronicle_audio::device_identity_in_logs());
+        init_backend(Backend::OsLog, "off");
+        assert!(!chronicle_audio::device_identity_in_logs());
     }
 
     #[test]
