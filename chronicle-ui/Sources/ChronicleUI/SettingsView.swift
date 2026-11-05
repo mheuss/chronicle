@@ -1,4 +1,5 @@
 import SwiftUI
+import ServiceManagement
 
 /// What the Settings capture badge shows. It has one case per menu bar icon
 /// state, and both classify capture with `CaptureHealth`.
@@ -56,6 +57,7 @@ enum CaptureBadge: String, CaseIterable {
 struct SettingsView: View {
     @Environment(DaemonConnection.self) private var connection
     @Environment(TranscriptionAlertState.self) private var transcriptionAlert
+    @Environment(BackgroundService.self) private var background
     @State private var isPauseInFlight: Bool = false
     /// The variant the picker is showing. Tracks the daemon's `variant` unless
     /// the user is mid-change; a change the daemon refuses is rolled back to
@@ -77,6 +79,7 @@ struct SettingsView: View {
             // closes Settings and comes back to a message about a click they
             // made a while ago.
             provisionRejection = nil
+            background.refreshStatus()
             connection.connect()
             if connection.lastStatus == nil {
                 _ = try? await connection.requestStatus()
@@ -124,6 +127,26 @@ struct SettingsView: View {
             row("Disk usage") { Text(diskUsageText) }
             row("Retention") { Text(retentionText) }
             row("Oldest record") { Text(oldestText) }
+            row("Run at login") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Capture in the background", isOn: Binding(
+                        get: { background.isEnabled },
+                        set: { on in Task { await background.setEnabled(on) } }))
+                        .disabled(background.isBusy)
+                    let label = BackgroundService.statusLabel(background.agentStatus)
+                    HStack {
+                        Text(label.text).foregroundStyle(.secondary)
+                        if label.offersLoginItems {
+                            Button("Open Login Items") {
+                                SMAppService.openSystemSettingsLoginItems()
+                            }
+                        }
+                    }
+                    if let error = background.lastError {
+                        Text(error).font(.caption).foregroundStyle(.red)
+                    }
+                }
+            }
 
             Divider()
 
