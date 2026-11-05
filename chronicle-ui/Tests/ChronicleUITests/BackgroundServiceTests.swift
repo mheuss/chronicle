@@ -52,6 +52,8 @@ struct Boom: Error {}
 
 // Serialized because every test shares one preferences domain; a fresh
 // domain per test left one empty plist per run in ~/Library/Preferences.
+// Two `swift test` runs at once share the domain too, and can clear each
+// other's values.
 @MainActor
 @Suite("BackgroundService", .serialized, .timeLimit(.minutes(1)))
 final class BackgroundServiceTests {
@@ -242,7 +244,7 @@ final class BackgroundServiceTests {
         #expect(BackgroundService.statusLabel(unknown) == ("Unknown", false))
     }
 
-    @Test func fingerprintChangesWhenTheDaemonBinaryChanges() throws {
+    @Test func fingerprintChangesWhenTheDaemonOrPlistChanges() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("fp-\(UUID().uuidString)/X.app")
         defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
@@ -261,8 +263,11 @@ final class BackgroundServiceTests {
         #expect(before.hasPrefix("7|"))
         #expect(!before.contains("0.0-0"))
         try Data("ab".utf8).write(to: daemon)
-        let after = BackgroundService.currentFingerprint(bundle: try #require(Bundle(url: root)))
-        #expect(before != after)
+        let afterDaemon = BackgroundService.currentFingerprint(bundle: try #require(Bundle(url: root)))
+        #expect(before != afterDaemon)
+        try Data("pq".utf8).write(to: plist)
+        let afterPlist = BackgroundService.currentFingerprint(bundle: try #require(Bundle(url: root)))
+        #expect(afterDaemon != afterPlist)
     }
 
     @Test func applicationsFolderDetection() {
