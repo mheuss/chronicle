@@ -21,5 +21,12 @@
     <array>
         <string>dev.heuss.chronicle.ui</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CHRONICLE_LOG_BACKEND</key>
+        <string>oslog</string>
+    </dict>
+    <key>ExitTimeOut</key>
+    <integer>30</integer>
 </dict>
 </plist>

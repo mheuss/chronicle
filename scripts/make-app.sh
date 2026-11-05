@@ -203,6 +203,10 @@ printf 'APPL????' > "$CONTENTS/PkgInfo"
     -c "Add :CFBundleVersion string $BUILD" \
     "$CONTENTS/Info.plist"
 plutil -lint "$CONTENTS/Info.plist" "$CONTENTS/Library/LaunchAgents/$AGENT_PLIST"
+[ "$(plutil -extract EnvironmentVariables.CHRONICLE_LOG_BACKEND raw "$CONTENTS/Library/LaunchAgents/$AGENT_PLIST")" = oslog ] \
+    || { echo "agent plist is missing CHRONICLE_LOG_BACKEND=oslog" >&2; exit 1; }
+[ "$(plutil -extract ExitTimeOut raw "$CONTENTS/Library/LaunchAgents/$AGENT_PLIST")" = 30 ] \
+    || { echo "agent plist is missing ExitTimeOut=30" >&2; exit 1; }
 
 DAEMON_ENT="packaging/daemon.entitlements"
 UI_ENT="packaging/ui.entitlements"
