@@ -147,7 +147,8 @@ async fn join_cleanup_task(
         Ok(res) => report(res),
         Err(_) => {
             // Not necessarily a batch: a run blocked in `pool.get()` waits
-            // r2d2's 30s default, well past launchd's ExitTimeOut.
+            // r2d2's 30s default, which alone uses up the launch agent's 30s
+            // ExitTimeOut.
             log::warn!("cleanup still running after {grace:?}; waiting for it to finish");
             // Re-await ONLY here. Polling a `JoinHandle` after it has returned
             // `Ready` is a contract violation.
@@ -1150,7 +1151,7 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
         // drop blocks until every blocking worker finishes its current task, so
         // worst-case exit is DRAIN_GRACE plus the in-flight whisper call either way;
         // the same delay precedes the `exit(3)` poison handoff. Kept short to leave
-        // headroom inside launchd's 20s default ExitTimeOut — which this was
+        // headroom inside the launch agent's 30s ExitTimeOut — which this was
         // never the sole consumer of, and is less so now that the provision
         // wait above can add up to 5s. The unbounded steps between them
         // (`ipc_server.shutdown`, `supervisor.shutdown`, the bridge join, the
