@@ -81,8 +81,9 @@ final class BackgroundService {
     }
 
     private func reconcile(allowOutsideApplications: Bool) async {
-        lastError = nil
         defer { agentStatus = agent.status }
+        if isEnabled && !(isInApplicationsFolder || allowOutsideApplications) { return }
+        lastError = nil
 
         guard isEnabled else {
             for service in [agent, mainApp]
@@ -94,7 +95,6 @@ final class BackgroundService {
             }
             return
         }
-        guard isInApplicationsFolder || allowOutsideApplications else { return }
 
         switch agent.status {
         case .notRegistered:

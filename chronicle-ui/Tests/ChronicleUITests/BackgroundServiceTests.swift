@@ -91,6 +91,18 @@ final class BackgroundServiceTests {
         #expect(log.entries.isEmpty)
     }
 
+    @Test func launchOutsideApplicationsKeepsTheToggleError() async {
+        let agent = FakeLoginService("agent", log: log)
+        agent.registerError = Boom()
+        let app = FakeLoginService("app", log: log)
+        let service = make(agent: agent, mainApp: app, inApplications: false)
+        await service.setEnabled(true)
+        let error = try? #require(service.lastError)
+        await service.reconcileOnLaunch()
+        #expect(service.lastError == error)
+        #expect(error != nil)
+    }
+
     @Test(arguments: [nil, "fp-old"] as [String?])
     func changedFingerprintReplacesTheAgentInOrder(recorded: String?) async {
         if let recorded { defaults.set(recorded, forKey: BackgroundService.fingerprintKey) }
