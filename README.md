@@ -101,9 +101,11 @@ macOS Control Center won't register a menu bar icon for a loose executable.
    click Open Login Items and enable Chronicle.
 
 To turn it off, switch off "Capture in the background" under Settings → Run at
-login. Moving the app to the Trash also removes both login items. Removing
-Chronicle from Open at Login in System Settings lasts only until you next open
-the app or bring it to the front. While the toggle is on, that adds it back.
+login. Do this before you delete the app. Moving it to the Trash does not
+remove the login items. launchd keeps starting the daemon from the Trash, even
+after a restart, until you empty the Trash. Removing Chronicle from Open at
+Login in System Settings lasts only until you next open the app or bring it to
+the front. While the toggle is on, that adds it back.
 
 System Settings still lists Chronicle under Background App Activity after you
 turn it off. That entry is the permission, not a running process. Nothing
