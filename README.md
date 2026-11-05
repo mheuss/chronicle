@@ -84,20 +84,29 @@ macOS Control Center won't register a menu bar icon for a loose executable.
 
 ## Installing
 
-1. Grant Screen Recording to Chronicle.app first: System Settings → Privacy &
-   Security → Screen Recording. Without it the daemon exits at startup, and
-   launchd retries it every 30 s.
-2. Copy `Chronicle.app` to `/Applications` or `~/Applications` and open it.
-   macOS shows "Background Items Added". The daemon and the menu bar app start
-   now and at every login. A copy opened from anywhere else does not register
-   itself. Use the Settings toggle there instead.
-3. If Settings → Run at login shows "Needs approval in System Settings",
+1. Copy `Chronicle.app` to `/Applications` or `~/Applications` and open it.
+   macOS shows "App Background Activity: Chronicle can run in the
+   background." The daemon and the menu bar app start now and at every
+   login. A copy opened from anywhere else does not register itself. Use
+   the Settings toggle there instead.
+2. Grant Screen Recording: System Settings → Privacy & Security → Screen &
+   System Audio Recording. Click +, choose Chronicle.app in Applications,
+   and choose Later when macOS offers to quit it. Until you do, the daemon
+   exits at startup and launchd retries it every 30 s.
+3. When capture starts, macOS asks whether "dev.heuss.chronicle.daemon" may
+   bypass the private window picker. That is Chronicle's capture process.
+   Click Allow.
+4. If Settings → Run at login shows "Needs approval in System Settings",
    click Open Login Items and enable Chronicle.
 
 To turn it off, switch off "Capture in the background" under Settings → Run at
 login. Moving the app to the Trash also removes both login items. Removing
 Chronicle from Open at Login in System Settings lasts only until you next open
 the app or bring it to the front. While the toggle is on, that adds it back.
+
+System Settings still lists Chronicle under Background App Activity after you
+turn it off. That entry is the permission, not a running process. Nothing
+starts at login while the toggle is off.
 
 Logs go to the unified log under the agent:
 
