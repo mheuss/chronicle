@@ -13,8 +13,8 @@ Chronicle uses a two-process design:
 
 - **chronicle-daemon** (Rust): Background service that handles screen capture,
   OCR, audio capture, storage, and IPC. Listens on a Unix domain socket. It
-  runs as a per-user login agent registered by the app (see Installing), or by
-  hand during development.
+  runs as a per-user login agent that the app registers. During development
+  you can run it by hand. See Installing.
 
 - **chronicle-ui** (Swift/SwiftUI): Menu bar app that connects to the daemon
   over IPC. Left-click for a search popover over screen history and audio
@@ -92,7 +92,7 @@ macOS Control Center won't register a menu bar icon for a loose executable.
 2. Grant Screen Recording: System Settings → Privacy & Security → Screen &
    System Audio Recording. Click +, choose Chronicle.app in Applications,
    and choose Later when macOS offers to quit it. Until you do, the daemon
-   exits at startup and launchd retries it every 30 s.
+   exits at startup. launchd retries it every 30 s.
 3. When capture starts, macOS asks whether "dev.heuss.chronicle.daemon" may
    bypass the private window picker. That is Chronicle's capture process.
    Click Allow.
@@ -119,12 +119,12 @@ still logs to stderr. The unified log omits the microphone's name and UID.
 
 ### Developing with the agent installed
 
-The agent holds the daemon's instance lock, so a manual daemon exits
-straight away while it runs. To run the daemon by hand:
+The agent holds the daemon's instance lock. A manual daemon exits straight
+away while the agent runs. To run the daemon by hand:
 
 1. Switch off "Capture in the background" in Settings. That stops the agent
    and unregisters it.
-2. Run the daemon with `cargo run` as under Running, and stop it when done.
+2. Run the daemon with `cargo run` as under Running. Stop it when done.
 3. Switch the toggle back on. That registers and starts the agent again.
 
 If the agent's own copy exited because a manual daemon held the lock, it stays
