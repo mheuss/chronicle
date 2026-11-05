@@ -3,6 +3,9 @@
 
 const LOG_BACKEND_ENV: &str = "CHRONICLE_LOG_BACKEND";
 const OSLOG_SUBSYSTEM: &str = "dev.heuss.chronicle";
+const FATAL_TARGET: &str = "chronicle_daemon";
+
+static FATAL_FILTER: std::sync::OnceLock<env_filter::Filter> = std::sync::OnceLock::new();
 
 #[derive(Debug, PartialEq, Eq)]
 enum Backend {
@@ -22,11 +25,13 @@ fn backend(value: Option<&str>) -> Backend {
 pub fn init(default_filter: &str) {
     init_backend(
         backend(std::env::var(LOG_BACKEND_ENV).ok().as_deref()),
+        std::env::var("RUST_LOG").ok().as_deref(),
         default_filter,
     );
 }
 
-fn init_backend(backend: Backend, default_filter: &str) {
+fn init_backend(backend: Backend, rust_log: Option<&str>, default_filter: &str) {
+    let _ = FATAL_FILTER.set(build_filter(rust_log, default_filter));
     match backend {
         Backend::Stderr => env_logger::Builder::from_env(
             env_logger::Env::default().default_filter_or(default_filter),
@@ -34,7 +39,7 @@ fn init_backend(backend: Backend, default_filter: &str) {
         .init(),
         Backend::OsLog => {
             chronicle_audio::set_device_identity_in_logs(false);
-            let filter = build_filter(std::env::var("RUST_LOG").ok().as_deref(), default_filter);
+            let filter = build_filter(rust_log, default_filter);
             // set_boxed_logger leaves the global maximum level at Off.
             log::set_max_level(filter.filter());
             let _ = log::set_boxed_logger(Box::new(Filtered {
@@ -42,6 +47,25 @@ fn init_backend(backend: Backend, default_filter: &str) {
                 inner: oslog::OsLogger::new(OSLOG_SUBSYSTEM),
             }));
         }
+    }
+}
+
+/// Logs a message that ends the process. When the filter would drop it, the
+/// message goes to stderr, so the process never exits silently.
+pub fn fatal(message: &str) {
+    let admitted = FATAL_FILTER.get().is_some_and(|filter| {
+        filter.matches(
+            &log::Record::builder()
+                .level(log::Level::Error)
+                .target(FATAL_TARGET)
+                .args(format_args!("{message}"))
+                .build(),
+        )
+    });
+    if admitted {
+        log::error!(target: FATAL_TARGET, "{message}");
+    } else {
+        eprintln!("{message}");
     }
 }
 
@@ -112,7 +136,7 @@ mod tests {
     #[test]
     fn oslog_backend_redacts_device_identity() {
         assert!(chronicle_audio::device_identity_in_logs());
-        init_backend(Backend::OsLog, "off");
+        init_backend(Backend::OsLog, None, "off");
         assert!(!chronicle_audio::device_identity_in_logs());
     }
 

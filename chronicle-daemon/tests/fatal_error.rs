@@ -27,11 +27,15 @@ fn fatal_error_is_logged_once() {
         1,
         "stderr: {stderr}"
     );
+    assert!(
+        stderr.contains("could not take the instance lock"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
 fn fatal_error_reaches_stderr_when_the_filter_drops_it() {
-    for rust_log in ["off", "chronicle_audio=debug"] {
+    for rust_log in ["off", "chronicle_audio=debug", "error/zzz"] {
         let out = run_with_blocked_data_dir(rust_log);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(1), "RUST_LOG={rust_log}: {stderr}");

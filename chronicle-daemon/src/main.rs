@@ -83,10 +83,10 @@ fn spawn_poison_exit_watchdog(grace: std::time::Duration) {
         .name("poison-exit-watchdog".into())
         .spawn(move || {
             std::thread::sleep(grace);
-            log::error!(
+            logging::fatal(&format!(
                 "poisoned shutdown did not finish within {}s; exiting with code 3",
                 grace.as_secs()
-            );
+            ));
             std::process::exit(3);
         });
     if let Err(e) = spawned {
@@ -351,18 +351,12 @@ fn main() -> std::process::ExitCode {
     std::process::ExitCode::from(exit_code_for(run_main()))
 }
 
-/// The process exit status for `run_main`'s result. An error goes through the
-/// installed logger, so it lands wherever the logs do. When `RUST_LOG` filters
-/// it out, it goes to stderr, so a failed start never exits silently.
+/// The process exit status for `run_main`'s result.
 fn exit_code_for(result: Result<()>) -> u8 {
     match result {
         Ok(()) => 0,
         Err(e) => {
-            if log::log_enabled!(log::Level::Error) {
-                log::error!("chronicle-daemon failed: {e:#}");
-            } else {
-                eprintln!("chronicle-daemon failed: {e:#}");
-            }
+            logging::fatal(&format!("chronicle-daemon failed: {e:#}"));
             1
         }
     }
@@ -592,7 +586,7 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
     if route_reconcile_outcome(&outcome, &mut boot_incident, &mut start_retry, &retry_tx)
         == BootDisposition::Exit
     {
-        log::error!("capture start left streams possibly running; exiting with code 3");
+        logging::fatal("capture start left streams possibly running; exiting with code 3");
         std::process::exit(3);
     }
 
@@ -1218,7 +1212,7 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
 
     log::info!("chronicle-daemon stopped");
     if poisoned || loop_poisoned {
-        log::error!("daemon exiting with code 3 (engine poisoned)");
+        logging::fatal("daemon exiting with code 3 (engine poisoned)");
         std::process::exit(3);
     }
     if shutdown_failed {
