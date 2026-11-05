@@ -84,6 +84,16 @@ final class BackgroundServiceTests {
         #expect(defaults.string(forKey: BackgroundService.fingerprintKey) == "fp-1")
     }
 
+    @Test func launchRegistersAnAgentWithNoRecordYet() async {
+        let agent = FakeLoginService("agent", status: .notFound, log: log)
+        let app = FakeLoginService("app", log: log)
+        let service = make(agent: agent, mainApp: app)
+        await service.reconcileOnLaunch()
+        #expect(log.entries == ["agent.register", "app.register"])
+        #expect(defaults.string(forKey: BackgroundService.fingerprintKey) == "fp-1")
+        #expect(service.lastError == nil)
+    }
+
     @Test func launchOutsideApplicationsRegistersNothing() async {
         let agent = FakeLoginService("agent", log: log)
         let app = FakeLoginService("app", log: log)
@@ -251,7 +261,7 @@ final class BackgroundServiceTests {
         #expect(BackgroundService.statusLabel(.requiresApproval)
                 == ("Needs approval in System Settings", true))
         #expect(BackgroundService.statusLabel(.notRegistered) == ("Off", false))
-        #expect(BackgroundService.statusLabel(.notFound) == ("Not available in this build", false))
+        #expect(BackgroundService.statusLabel(.notFound) == ("Not registered", false))
         let unknown = try #require(SMAppService.Status(rawValue: 99))
         #expect(BackgroundService.statusLabel(unknown) == ("Unknown", false))
     }

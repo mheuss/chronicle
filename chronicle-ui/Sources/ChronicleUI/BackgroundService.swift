@@ -97,15 +97,15 @@ final class BackgroundService {
         }
 
         switch agent.status {
-        case .notRegistered:
+        // A clean Mac has no Background Task Management record for an agent
+        // that was never registered, and reports it as notFound.
+        case .notRegistered, .notFound:
             if await attempt({ try self.agent.register() }) { recordFingerprint() }
         case .enabled where defaults.string(forKey: Self.fingerprintKey) != fingerprint:
             if await attempt({ try await self.agent.unregister() }),
                await attempt({ try self.agent.register() }) {
                 recordFingerprint()
             }
-        case .notFound:
-            report("The background agent is missing from this build.")
         default:
             break
         }
@@ -141,7 +141,7 @@ final class BackgroundService {
         case .enabled: ("On", false)
         case .requiresApproval: ("Needs approval in System Settings", true)
         case .notRegistered: ("Off", false)
-        case .notFound: ("Not available in this build", false)
+        case .notFound: ("Not registered", false)
         @unknown default: ("Unknown", false)
         }
     }
