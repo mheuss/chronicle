@@ -91,8 +91,8 @@ dropped. No row here records a cross-cutting concern.
 
 ## Exclusions
 
-Empty. That is the result rather than an omission. All 67 paths in
-`INVENTORY.txt` are owned by exactly one confirmed domain. No path needs an
+Empty. That is the result rather than an omission. Every path in
+`INVENTORY.txt` is owned by exactly one confirmed domain. No path needs an
 exclusion reason. Closure check 8 enforces that rather than taking it on trust.
 
 The header row below stays with no rows under it. `check8_coverage.sh` parses this
