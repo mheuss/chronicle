@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # The check is named after this job ID. A name: field would rename it.
+  rust:
+    runs-on: xcode-27
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: chronicle-daemon
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - name: Format
+        run: cargo fmt --all --check
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: chronicle-daemon
+          key: ${{ hashFiles('.cargo/config.toml') }}
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked --workspace
+
+  # The check is named after this job ID. A name: field would rename it.
+  swift:
+    runs-on: xcode-27
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: chronicle-ui
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build
+        run: swift build --only-use-versions-from-resolved-file
+      - name: Test
+        run: swift test --only-use-versions-from-resolved-file
