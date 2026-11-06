@@ -122,9 +122,8 @@ silence.
 
 Under launchd, no Terminal stands behind the daemon. On macOS 27, macOS then
 checks the grants of `Chronicle.app`, not the daemon. The daemon lives inside
-that bundle. Nothing in the repo starts the daemon under launchd yet. That
-comes with login-item registration. Until then, these steps apply when you run
-it under launchd yourself.
+that bundle. The app's login agent runs the daemon under launchd, so these
+grants apply to every installed run.
 
 macOS ties these grants to an app's signature. Builds before Developer ID
 signing were ad-hoc signed. Their grants don't carry over. Later rebuilds keep

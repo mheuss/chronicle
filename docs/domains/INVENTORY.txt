@@ -40,6 +40,7 @@ chronicle-daemon/src/capture_supervisor.rs
 chronicle-daemon/src/drop_reporter.rs
 chronicle-daemon/src/instance_lock.rs
 chronicle-daemon/src/ipc_handler.rs
+chronicle-daemon/src/logging.rs
 chronicle-daemon/src/main.rs
 chronicle-daemon/src/media_presence.rs
 chronicle-daemon/src/permissions.rs
@@ -52,6 +53,7 @@ chronicle-daemon/src/power.rs
 chronicle-daemon/src/provisioning.rs
 chronicle-daemon/src/retention_task.rs
 chronicle-daemon/src/settings.rs
+chronicle-ui/Sources/ChronicleUI/BackgroundService.swift
 chronicle-ui/Sources/ChronicleUI/CaptureHealth.swift
 chronicle-ui/Sources/ChronicleUI/ChronicleApp.swift
 chronicle-ui/Sources/ChronicleUI/ConnectionSession.swift

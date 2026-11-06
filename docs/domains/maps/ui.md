@@ -1,6 +1,6 @@
 # Domain: UI
 
-**Status:** Decided 2026-09-18, revised 2026-09-21, revised 2026-10-05
+**Status:** Decided 2026-09-18, revised 2026-09-21, revised 2026-10-05, revised 2026-11-06
 **Owns:** Everything the person sees and interacts with — the menu bar app's scenes, its views, the state that decides when an alert fires, the copy that describes a wire value, and the bundle keys that make the process a menu bar agent.
 **Code:** `chronicle-ui/Sources/ChronicleUI/`, less `DaemonConnection.swift` and `ConnectionSession.swift`
 
@@ -12,6 +12,7 @@
 - inside: rendering one search hit, including bold runs parsed out of an FTS5 snippet — `chronicle-ui/Sources/ChronicleUI/SnippetAttributedString.swift` — `snippetAttributedString`
 - inside: deciding whether a one-shot alert has already fired, and on which snapshot — `chronicle-ui/Sources/ChronicleUI/TranscriptionAlertState.swift` — `TranscriptionAlertState`
 - inside: what a banner or a settings row *says* about a daemon state, held apart from the view so the branches are testable — `chronicle-ui/Sources/ChronicleUI/TranscriptionBannerCopy.swift` — `TranscriptionBannerCopy`
+- inside: carrying out the person's background-capture switch by registering the daemon's login agent and the app's login item, and showing what went wrong when that fails — `chronicle-ui/Sources/ChronicleUI/BackgroundService.swift` — `BackgroundService`
 - inside: the bundle keys that make this process a menu bar agent with no Dock icon — `chronicle-ui/Sources/ChronicleUI/Info.plist` — `LSUIElement`
 - outside: the socket, the reconnect loop, and the request methods these views call — `chronicle-ui/Sources/ChronicleUI/DaemonConnection.swift` — `DaemonConnection`
 - outside: declaring the wire types these views read — `chronicle-ui/Sources/ChronicleUI/DaemonConnection.swift` — `StatusData`
@@ -22,6 +23,7 @@
 
 ## Owned Files
 
+- chronicle-ui/Sources/ChronicleUI/BackgroundService.swift
 - chronicle-ui/Sources/ChronicleUI/CaptureHealth.swift
 - chronicle-ui/Sources/ChronicleUI/ChronicleApp.swift
 - chronicle-ui/Sources/ChronicleUI/Info.plist

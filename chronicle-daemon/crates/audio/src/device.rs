@@ -2,6 +2,7 @@
 
 use std::ptr;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use objc2_avf_audio::AVAudioInputNode;
 use objc2_core_audio::{
@@ -44,11 +45,30 @@ fn escape(value: &str) -> String {
     out
 }
 
+static DEVICE_IDENTITY_IN_LOGS: AtomicBool = AtomicBool::new(true);
+
+/// Sets whether log lines carry the microphone's name and UID. Turn it off when
+/// log lines go to a store that keeps messages, such as the system log.
+pub fn set_device_identity_in_logs(on: bool) {
+    DEVICE_IDENTITY_IN_LOGS.store(on, Ordering::Relaxed);
+}
+
+pub fn device_identity_in_logs() -> bool {
+    DEVICE_IDENTITY_IN_LOGS.load(Ordering::Relaxed)
+}
+
+pub(crate) fn render_fields(device: &InputDevice) -> String {
+    render_fields_with(device, DEVICE_IDENTITY_IN_LOGS.load(Ordering::Relaxed))
+}
+
 /// Renders the device fields for the log line.
 ///
 /// A function rather than a `Display` impl: the `unknown` substitution is this
 /// line's policy, not the type's identity.
-pub(crate) fn render_fields(device: &InputDevice) -> String {
+fn render_fields_with(device: &InputDevice, identity: bool) -> String {
+    if !identity {
+        return r#"device_name="redacted" device_uid="redacted""#.to_string();
+    }
     let name = match device.name.as_deref() {
         Some(value) => escape(value),
         None => "unknown".to_string(),
@@ -417,6 +437,19 @@ pub(crate) fn describe(node: &AVAudioInputNode) -> InputDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_fields_redacts_when_identity_logging_is_off() {
+        let mic = device(Some("Yeti"), Some("UID-1"));
+        assert_eq!(
+            render_fields_with(&mic, false),
+            r#"device_name="redacted" device_uid="redacted""#
+        );
+        assert_eq!(
+            render_fields_with(&mic, true),
+            r#"device_name="Yeti" device_uid="UID-1""#
+        );
+    }
 
     fn device(name: Option<&str>, uid: Option<&str>) -> InputDevice {
         InputDevice {

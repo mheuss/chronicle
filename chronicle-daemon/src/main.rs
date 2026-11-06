@@ -3,6 +3,7 @@ mod capture_supervisor;
 mod drop_reporter;
 mod instance_lock;
 mod ipc_handler;
+mod logging;
 mod media_presence;
 mod permissions;
 mod pipeline;
@@ -82,10 +83,10 @@ fn spawn_poison_exit_watchdog(grace: std::time::Duration) {
         .name("poison-exit-watchdog".into())
         .spawn(move || {
             std::thread::sleep(grace);
-            log::error!(
+            logging::fatal(&format!(
                 "poisoned shutdown did not finish within {}s; exiting with code 3",
                 grace.as_secs()
-            );
+            ));
             std::process::exit(3);
         });
     if let Err(e) = spawned {
@@ -146,7 +147,8 @@ async fn join_cleanup_task(
         Ok(res) => report(res),
         Err(_) => {
             // Not necessarily a batch: a run blocked in `pool.get()` waits
-            // r2d2's 30s default, well past launchd's ExitTimeOut.
+            // r2d2's 30s default, which alone uses up the launch agent's 30s
+            // ExitTimeOut.
             log::warn!("cleanup still running after {grace:?}; waiting for it to finish");
             // Re-await ONLY here. Polling a `JoinHandle` after it has returned
             // `Ready` is a contract violation.
@@ -316,25 +318,62 @@ fn route_reconcile_outcome(
 /// `target.starts_with(directive)` — so one directive covers every current and
 /// future `chronicle_*` crate while dependencies stay at `warn`.
 ///
-/// Named rather than inlined so a test can pin it. `env_logger::init()` cannot
-/// be exercised twice in a process, but the string it is handed can.
+/// Named rather than inlined so a test can pin it. A logger cannot be installed
+/// twice in a process, but the filter string handed to `logging::init` can be
+/// tested.
 const DEFAULT_LOG_FILTER: &str = "warn,chronicle=info";
 
-fn main() -> Result<()> {
-    // `chronicle` is a prefix match, not a crate name: env_filter compares
-    // with `target.starts_with(directive)`, so one directive covers
-    // chronicle_daemon, chronicle_audio, chronicle_capture and every future
-    // chronicle_* crate without enumerating them. Dependencies stay at warn,
-    // so a model download does not narrate itself.
-    //
-    // `Env::default()` still reads RUST_LOG; `default_filter_or` only supplies
-    // the fallback, so RUST_LOG keeps overriding in both directions.
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(DEFAULT_LOG_FILTER))
-        .init();
-    log::info!("chronicle-daemon starting");
+/// What `run_main` does with the instance-lock result.
+#[derive(Debug)]
+enum Startup {
+    Run(instance_lock::InstanceLock),
+    AlreadyRunning(std::path::PathBuf),
+}
 
+/// `AlreadyRunning` is a clean exit. Under launchd's
+/// `KeepAlive{SuccessfulExit=false}` a non-zero exit would respawn the agent
+/// every `ThrottleInterval` while another daemon holds the lock.
+fn startup(
+    acquired: std::result::Result<instance_lock::InstanceLock, instance_lock::InstanceLockError>,
+) -> Result<Startup> {
+    match acquired {
+        Ok(lock) => Ok(Startup::Run(lock)),
+        Err(instance_lock::InstanceLockError::AlreadyRunning(path)) => {
+            Ok(Startup::AlreadyRunning(path))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn main() -> std::process::ExitCode {
+    logging::init(DEFAULT_LOG_FILTER);
+    log::info!("chronicle-daemon starting");
+    std::process::ExitCode::from(exit_code_for(run_main()))
+}
+
+/// The process exit status for `run_main`'s result.
+fn exit_code_for(result: Result<()>) -> u8 {
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            logging::fatal(&format!("chronicle-daemon failed: {e:#}"));
+            1
+        }
+    }
+}
+
+fn run_main() -> Result<()> {
     let storage_config = StorageConfig::default();
-    let lock = instance_lock::acquire(&storage_config.base_dir)?;
+    let lock = match startup(instance_lock::acquire(&storage_config.base_dir))? {
+        Startup::Run(lock) => lock,
+        Startup::AlreadyRunning(path) => {
+            log::warn!(
+                "another chronicle-daemon is already running on {}; exiting",
+                path.display()
+            );
+            return Ok(());
+        }
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -547,7 +586,7 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
     if route_reconcile_outcome(&outcome, &mut boot_incident, &mut start_retry, &retry_tx)
         == BootDisposition::Exit
     {
-        log::error!("capture start left streams possibly running; exiting with code 3");
+        logging::fatal("capture start left streams possibly running; exiting with code 3");
         std::process::exit(3);
     }
 
@@ -1110,7 +1149,7 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
         // drop blocks until every blocking worker finishes its current task, so
         // worst-case exit is DRAIN_GRACE plus the in-flight whisper call either way;
         // the same delay precedes the `exit(3)` poison handoff. Kept short to leave
-        // headroom inside launchd's 20s default ExitTimeOut — which this was
+        // headroom inside the launch agent's 30s ExitTimeOut — which this was
         // never the sole consumer of, and is less so now that the provision
         // wait above can add up to 5s. The unbounded steps between them
         // (`ipc_server.shutdown`, `supervisor.shutdown`, the bridge join, the
@@ -1173,7 +1212,7 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
 
     log::info!("chronicle-daemon stopped");
     if poisoned || loop_poisoned {
-        log::error!("daemon exiting with code 3 (engine poisoned)");
+        logging::fatal("daemon exiting with code 3 (engine poisoned)");
         std::process::exit(3);
     }
     if shutdown_failed {
@@ -1184,6 +1223,37 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn startup_maps_a_held_lock_to_a_clean_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = startup(instance_lock::acquire(dir.path())).unwrap();
+        assert!(matches!(first, Startup::Run(_)));
+        match startup(instance_lock::acquire(dir.path())).unwrap() {
+            Startup::AlreadyRunning(path) => assert_eq!(path, dir.path()),
+            other => panic!("expected AlreadyRunning, got {other:?}"),
+        }
+        drop(first);
+    }
+
+    #[test]
+    fn exit_code_for_maps_ok_and_err() {
+        assert_eq!(exit_code_for(Ok(())), 0);
+        assert_eq!(exit_code_for(Err(anyhow::anyhow!("boom"))), 1);
+    }
+
+    #[test]
+    fn startup_propagates_an_io_lock_error() {
+        let err = instance_lock::InstanceLockError::Io {
+            path: std::path::PathBuf::from("/nonexistent"),
+            source: std::io::Error::other("boom"),
+        };
+        let err = startup(Err(err)).unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<instance_lock::InstanceLockError>(),
+            Some(instance_lock::InstanceLockError::Io { .. })
+        ));
+    }
 
     #[test]
     fn default_log_filter_admits_chronicle_info_but_not_dependency_info() {
