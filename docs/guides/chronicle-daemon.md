@@ -59,16 +59,29 @@ flowchart TD
    Microphone (informational). Exits with an actionable error if Screen
    Recording is denied.
 4. `Storage::open()` — opens/migrates SQLite database
-5. `IpcServer::start()` — starts the Unix-socket status server
-6. `AudioPipeline::create()` — prepares the audio handler, dispatch queue, and
+5. `storage.sweep_orphans()` — the startup orphan sweep. It walks the media
+   directory and deletes files that have no database row. It runs before
+   capture starts, so this process writes no media while it walks, and the
+   instance lock from step 2 keeps a second daemon from sweeping at the same
+   time.
+6. `storage.status()` — primes the storage status snapshot so the first
+   `Status` request doesn't see zeros. It also walks the media directory. A
+   task refreshes the snapshot every 30 seconds after that.
+7. `IpcServer::start()` — starts the Unix-socket status server. The sleep and
+   wake observer is spawned just before it.
+8. `AudioPipeline::create()` — prepares the audio handler, dispatch queue, and
    encoding thread used by ScreenCaptureKit audio callbacks, and builds the
    microphone tap (installed eagerly; capture starts only on mic-on)
-7. `CaptureEngine::start()` — enumerates displays, starts one SCStream per
-   display, registers the audio handler on the primary display, and returns a
-   frame receiver channel
-8. Spawn `capture_store_loop` (Task A) and `ocr_loop` (Task B)
-9. Spawn bridge thread and `audio_store_loop` (Task C)
-10. Block on the shutdown signal (`SIGINT` from Ctrl-C or `SIGTERM`)
+9. `CaptureSupervisor::reconcile()` — starts the capture runtime, unless
+   capture is paused in settings. The runtime is `CaptureEngine` plus
+   `capture_store_loop` (Task A) and `ocr_loop` (Task B), started and stopped
+   as one unit. A failed start at boot is retried.
+10. Spawns the background work: the audio bridge thread and `audio_store_loop`
+    (Task C), the drop reporter, the whisper model boot, `transcribe_loop`, the
+    transcription backfill, the storage status refresher, and the retention
+    cleanup loop.
+11. Runs the event loop until the shutdown signal (`SIGINT` from Ctrl-C or
+    `SIGTERM`). It serves mic toggles, pause and resume, and sleep and wake.
 
 ### Channel Topology
 
