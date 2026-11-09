@@ -68,7 +68,7 @@ flowchart TD
    `Status` request doesn't see zeros. It also walks the media directory. A
    task refreshes the snapshot every 30 seconds after that.
 7. `IpcServer::start()` — starts the Unix-socket status server. The sleep and
-   wake observer is spawned just before it.
+   wake observer is spawned earlier in `run()`, before it.
 8. `AudioPipeline::create()` — prepares the audio handler, dispatch queue, and
    encoding thread used by ScreenCaptureKit audio callbacks, and builds the
    microphone tap (installed eagerly; capture starts only on mic-on)
