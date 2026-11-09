@@ -46,7 +46,31 @@ fn init_backend(backend: Backend, rust_log: Option<&str>, default_filter: &str) 
                 filter,
                 inner: oslog::OsLogger::new(OSLOG_SUBSYSTEM),
             }));
+            // Not the `log` facade: OsLogger formats under a lock, so a panic in
+            // a Display impl would deadlock a hook that logged through it.
+            let handle = oslog::OsLog::new(OSLOG_SUBSYSTEM, FATAL_TARGET);
+            install_panic_hook(move |line| handle.with_level(oslog::Level::Fault, line));
         }
+    }
+}
+
+/// Passes each panic to `sink`, then runs the previous hook. Under launchd the
+/// sink's line is the panic's only record, because launchd discards stderr.
+fn install_panic_hook(sink: impl Fn(&str) + Send + Sync + 'static) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        sink(&panic_line(info));
+        previous(info);
+    }));
+}
+
+fn panic_line(info: &std::panic::PanicHookInfo<'_>) -> String {
+    let thread = std::thread::current();
+    let name = thread.name().unwrap_or("<unnamed>");
+    let message = info.payload_as_str().unwrap_or("Box<dyn Any>");
+    match info.location() {
+        Some(location) => format!("panic on thread '{name}' at {location}: {message}"),
+        None => format!("panic on thread '{name}': {message}"),
     }
 }
 
@@ -133,10 +157,15 @@ mod tests {
         assert_eq!(backend(Some("stderr")), Backend::Stderr);
     }
 
+    /// Serializes the tests that replace the process-wide panic hook.
+    static HOOK_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn oslog_backend_redacts_device_identity() {
+        let _hook = HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         assert!(chronicle_audio::device_identity_in_logs());
         init_backend(Backend::OsLog, None, "off");
+        drop(std::panic::take_hook());
         assert!(!chronicle_audio::device_identity_in_logs());
     }
 
@@ -152,6 +181,27 @@ mod tests {
             *logger.inner.0.lock().unwrap(),
             vec!["chronicle_daemon".to_string()]
         );
+    }
+
+    #[test]
+    fn panic_hook_logs_message_and_location_then_runs_the_previous_hook() {
+        static SINK: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        static PREVIOUS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        let _hook = HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::panic::set_hook(Box::new(|info| {
+            PREVIOUS.lock().unwrap().push(panic_line(info));
+        }));
+        install_panic_hook(|line| SINK.lock().unwrap().push(line.to_string()));
+        let panic_line_number = line!() + 1;
+        let _ = std::panic::catch_unwind(|| panic!("hook probe {}", 42));
+        drop(std::panic::take_hook());
+
+        let expected_location = format!("{}:{panic_line_number}:", file!());
+        let probe = |l: &String| l.contains("hook probe 42") && l.contains(&expected_location);
+        let sink = SINK.lock().unwrap().clone();
+        let previous = PREVIOUS.lock().unwrap().clone();
+        assert!(sink.iter().any(probe), "sink: {sink:?}");
+        assert!(previous.iter().any(probe), "previous: {previous:?}");
     }
 
     #[test]
