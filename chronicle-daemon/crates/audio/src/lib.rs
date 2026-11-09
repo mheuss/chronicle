@@ -38,6 +38,10 @@ pub enum AudioError {
     #[error("encoding error: {0}")]
     Encoding(String),
 
+    /// The encoding channel is closed, so the encoding thread has exited.
+    #[error("encoding channel closed: {0}")]
+    EncodingChannelClosed(String),
+
     /// File I/O failure.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),

@@ -229,7 +229,7 @@ impl AudioPipeline {
     pub fn flush_system_segment(&self) -> Result<()> {
         if let Some(tx) = &self.flush_tx {
             tx.send(AudioMessage::FlushSystem).map_err(|e| {
-                AudioError::ScreenCaptureKit(format!("failed to flush system segment: {e}"))
+                AudioError::EncodingChannelClosed(format!("failed to flush system segment: {e}"))
             })?;
         }
         Ok(())
