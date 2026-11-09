@@ -226,6 +226,7 @@ pub fn concat_segment_text<'a>(segments: impl IntoIterator<Item = &'a str>) -> S
 }
 
 const DECODE_RATE: usize = 16_000;
+/// The rate `chronicle-audio` encodes at. `encode_rate_matches_the_audio_crate` pins it.
 const ENCODE_RATE: usize = 48_000;
 /// Max samples libopus can return for one packet at 16 kHz mono (120 ms).
 const MAX_SAMPLES_PER_PACKET: usize = 1_920;
@@ -1226,6 +1227,11 @@ mod tests {
             assert!(info.sha1.chars().all(|c| c.is_ascii_hexdigit()));
             assert!(info.size_bytes > 100_000_000, "all variants exceed 100 MB");
         }
+    }
+
+    #[test]
+    fn encode_rate_matches_the_audio_crate() {
+        assert_eq!(ENCODE_RATE as u32, chronicle_audio::SAMPLE_RATE);
     }
 
     #[test]

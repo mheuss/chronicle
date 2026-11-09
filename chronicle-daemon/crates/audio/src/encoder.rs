@@ -8,7 +8,7 @@ use std::path::Path;
 
 use ogg::writing::{PacketWriteEndInfo, PacketWriter};
 
-use crate::{AudioError, Result};
+use crate::{AudioError, Result, SAMPLE_RATE};
 
 /// 20ms frame at 48kHz.
 const FRAME_SIZE: usize = 960;
@@ -29,9 +29,6 @@ pub struct OggOpusEncoder {
     bitrate: u32,
     application: opus::Application,
 }
-
-/// Fixed sample rate: 48kHz is Opus's native rate.
-const SAMPLE_RATE: u32 = 48_000;
 
 impl OggOpusEncoder {
     /// Create a new encoder with the given channel count, bitrate, and application mode.
