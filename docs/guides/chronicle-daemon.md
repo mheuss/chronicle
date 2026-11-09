@@ -335,6 +335,22 @@ cd chronicle-daemon && cargo test --workspace -- --ignored
 
 Grant Screen Recording and Microphone permissions to your terminal app first.
 
+The Vision OCR tests in `chronicle-ocr` and `pipeline.rs` are `#[ignore]`d too.
+They need no permissions, but Vision fails on GitHub's hosted runners, so they
+only run with `--ignored`.
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every pull request and every push to `main`.
+It uses GitHub's `xcode-27` macOS runner. The `rust` job runs
+`cargo fmt --all --check`, then clippy and `cargo test --workspace`, both with
+`--locked`. The `swift` job runs `swift build` and `swift test` with
+`--only-use-versions-from-resolved-file`.
+
+The `#[ignore]`d tests do not run in CI. Before you merge a PR, run them
+locally with `cargo test --workspace -- --ignored`, as shown above. CHR-175
+tracks running them on a self-hosted runner instead.
+
 ### Linting
 
 ```bash
