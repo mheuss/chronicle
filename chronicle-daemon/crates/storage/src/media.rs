@@ -112,7 +112,12 @@ impl MediaManager {
         Ok(())
     }
 
-    /// Delete a file, returning bytes freed. Returns Ok(0) if the file is already gone.
+    /// Delete a file, returning bytes freed.
+    ///
+    /// `Ok(0)` is ambiguous. It comes back when the file was already gone, and
+    /// also when this call deleted a zero-byte file. Summing the result is
+    /// safe. To tell a missing file from a present one, check
+    /// `std::fs::metadata` for `ErrorKind::NotFound` instead.
     pub fn delete_file(&self, path: &Path) -> Result<u64> {
         // Validate before any I/O to avoid leaking metadata for paths outside
         // the storage root. If validation fails because the file (and its
