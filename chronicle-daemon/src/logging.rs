@@ -46,7 +46,28 @@ fn init_backend(backend: Backend, rust_log: Option<&str>, default_filter: &str) 
                 filter,
                 inner: oslog::OsLogger::new(OSLOG_SUBSYSTEM),
             }));
+            install_panic_hook(|line| log::error!(target: FATAL_TARGET, "{line}"));
         }
+    }
+}
+
+/// Passes each panic to `sink`, then runs the previous hook. launchd discards
+/// stderr, so on the oslog backend this is the only record of a panic.
+fn install_panic_hook(sink: impl Fn(&str) + Send + Sync + 'static) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        sink(&panic_line(info));
+        previous(info);
+    }));
+}
+
+fn panic_line(info: &std::panic::PanicHookInfo<'_>) -> String {
+    let thread = std::thread::current();
+    let name = thread.name().unwrap_or("<unnamed>");
+    let message = info.payload_as_str().unwrap_or("Box<dyn Any>");
+    match info.location() {
+        Some(location) => format!("panic on thread '{name}' at {location}: {message}"),
+        None => format!("panic on thread '{name}': {message}"),
     }
 }
 
@@ -151,6 +172,22 @@ mod tests {
         assert_eq!(
             *logger.inner.0.lock().unwrap(),
             vec!["chronicle_daemon".to_string()]
+        );
+    }
+
+    #[test]
+    fn panic_hook_passes_message_and_location_to_the_sink() {
+        static LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        install_panic_hook(|line| LINES.lock().unwrap().push(line.to_string()));
+        let panic_line_number = line!() + 1;
+        let _ = std::panic::catch_unwind(|| panic!("hook probe {}", 42));
+        let expected_location = format!("{}:{panic_line_number}:", file!());
+        let lines = LINES.lock().unwrap();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("hook probe 42") && l.contains(&expected_location)),
+            "{lines:?}"
         );
     }
 
