@@ -66,7 +66,7 @@ flowchart TD
    time.
 6. `storage.status()` — primes the storage status snapshot so the first
    `Status` request doesn't see zeros. If the read fails, the snapshot keeps
-   zero counters until the next refresh. It also walks the media directory. A
+   zero counters until a refresh succeeds. It also walks the media directory. A
    task refreshes the snapshot every 30 seconds after that.
 7. `IpcServer::start()` — starts the Unix-socket status server. The sleep and
    wake observer is spawned earlier in `run()`, before it.
