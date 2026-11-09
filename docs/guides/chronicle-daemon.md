@@ -53,8 +53,8 @@ flowchart TD
    `RUST_LOG` is unset. It logs to stderr through env_logger, or to unified
    logging when `CHRONICLE_LOG_BACKEND=oslog`. On the unified-logging backend
    it also installs a panic hook that logs each panic's thread, location and
-   message at `error` before the default hook runs, because launchd discards
-   stderr.
+   message as a Fault before the default hook runs, because launchd discards
+   stderr. `RUST_LOG` does not filter that line.
 2. `instance_lock::acquire()` — takes an exclusive lock on `chronicle.lock` in
    the data directory, before the Tokio runtime exists. Exits with status 0 and
    "another chronicle-daemon is already running" if another daemon holds it.
