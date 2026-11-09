@@ -54,8 +54,8 @@ fn init_backend(backend: Backend, rust_log: Option<&str>, default_filter: &str) 
     }
 }
 
-/// Passes each panic to `sink`, then runs the previous hook. launchd discards
-/// stderr, so on the oslog backend the sink's line is the panic's only record.
+/// Passes each panic to `sink`, then runs the previous hook. Under launchd the
+/// sink's line is the panic's only record, because launchd discards stderr.
 fn install_panic_hook(sink: impl Fn(&str) + Send + Sync + 'static) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
