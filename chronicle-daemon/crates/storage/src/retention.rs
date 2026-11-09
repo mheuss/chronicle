@@ -269,8 +269,10 @@ fn sweep_media_orphans(
     media_mgr: &MediaManager,
 ) -> Result<u64> {
     // Walk BEFORE reading the tracked set, never after. Both media writers go
-    // file-then-row — screenshots at pipeline.rs:76 then :121, audio at :391 then
-    // :395 — so "file on disk, row not yet committed" is a real transient state,
+    // file-then-row — screenshots in `process_frame`, which encodes the file
+    // before calling `insert_and_enqueue`, and audio in `process_audio_segment`,
+    // which moves the file into place before inserting its row — so "file on
+    // disk, row not yet committed" is a real transient state,
     // and a file is deleted here iff it is in the walk list AND absent from the
     // set.
     //
@@ -314,8 +316,8 @@ fn sweep_media_orphans(
     // 5000 ms, so a contended insert can block for seconds.
     //
     // Two caveats on what the mtime actually measures. Audio is encoded in a
-    // staging directory and `rename`d into place (the `audio-staging` dir in
-    // main.rs, media.rs:107), and rename preserves mtime — so for audio this is
+    // staging directory (`audio-staging`) and `rename`d into place by
+    // `MediaManager::move_file`, and rename preserves mtime — so for audio this is
     // the staging-encode time, milliseconds before the file appeared at the
     // swept path, not the moment it landed there. And `SystemTime::now()` is
     // wall-clock: a backward step only spares files, but a forward step (an NTP
@@ -736,8 +738,8 @@ mod tests {
     /// Insert a screenshots row pointing at `path`'s canonical form.
     ///
     /// Storing the CANONICAL path mirrors `MediaManager::allocate_path`, and it
-    /// is load-bearing: `walk_files` joins from the base_dir as passed
-    /// (`media.rs:176`), not the canonical one, so walked paths keep the
+    /// is load-bearing: `MediaManager::walk_files` joins from the base_dir as
+    /// passed, not the canonical one, so walked paths keep the
     /// unresolved form while the DB holds the resolved one. The sweep
     /// canonicalizes each walked file to bridge that. Storing the unresolved
     /// path here would make the sweep treat every live file as an orphan and
