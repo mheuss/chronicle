@@ -335,9 +335,10 @@ cd chronicle-daemon && cargo test --workspace -- --ignored
 
 Grant Screen Recording and Microphone permissions to your terminal app first.
 
-The Vision OCR tests in `chronicle-ocr` and `pipeline.rs` are `#[ignore]`d too.
-They need no permissions, but Vision fails on GitHub's hosted runners, so they
-only run with `--ignored`.
+Most of the Vision OCR tests in `chronicle-ocr` and `pipeline.rs` are
+`#[ignore]`d too. They need no permissions, but Vision fails on GitHub's hosted
+runners, so they only run with `--ignored`. `extract_text_never_panics` still
+runs in CI. There it only covers Vision's error path.
 
 ### Continuous integration
 
