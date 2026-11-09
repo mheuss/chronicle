@@ -65,7 +65,8 @@ flowchart TD
    instance lock from step 2 keeps a second daemon from sweeping at the same
    time.
 6. `storage.status()` — primes the storage status snapshot so the first
-   `Status` request doesn't see zeros. It also walks the media directory. A
+   `Status` request doesn't see zeros. If the read fails, the snapshot keeps
+   zero counters until the next refresh. It also walks the media directory. A
    task refreshes the snapshot every 30 seconds after that.
 7. `IpcServer::start()` — starts the Unix-socket status server. The sleep and
    wake observer is spawned earlier in `run()`, before it.
@@ -75,12 +76,18 @@ flowchart TD
 9. `CaptureSupervisor::reconcile()` — starts the capture runtime, unless
    capture is paused in settings. The runtime is `CaptureEngine` plus
    `capture_store_loop` (Task A) and `ocr_loop` (Task B), started and stopped
-   as one unit. A failed start at boot is retried.
-10. Spawns the background work: the audio bridge thread and `audio_store_loop`
-    (Task C), the drop reporter, the whisper model boot, `transcribe_loop`, the
-    transcription backfill, the storage status refresher, and the retention
-    cleanup loop.
-11. Runs the event loop until the shutdown signal (`SIGINT` from Ctrl-C or
+   as one unit. A failed start is retried up to five times
+   (`StartRetry::MAX_ATTEMPTS`), on a 5 to 30 second schedule. Before the
+   first successful start, a failed start that may have left streams running
+   exits the daemon with status 3.
+10. Starts the audio bridge thread and spawns the drop reporter.
+11. `provisioning::boot()` — loads the configured whisper model. This step is
+    awaited, so a slow model load delays everything after it, including
+    `audio_store_loop` and the event loop.
+12. Spawns the rest of the background work: `transcribe_loop`, the
+    transcription backfill, `audio_store_loop` (Task C), the storage status
+    refresher, and the retention cleanup loop.
+13. Runs the event loop until the shutdown signal (`SIGINT` from Ctrl-C or
     `SIGTERM`). It serves mic toggles, pause and resume, and sleep and wake.
 
 ### Channel Topology
