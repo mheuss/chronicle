@@ -48,7 +48,7 @@ chronicle-ui/              Swift package
 - Apple Silicon (for efficient local transcription)
 - Screen Recording permission
 - Microphone permission
-- Rust 1.89+ toolchain (to build the daemon)
+- Rust 1.98.0. rustup installs it from `rust-toolchain.toml` on the first build.
 - A Developer ID Application certificate to build `Chronicle.app`. It needs a
   paid Apple Developer Program membership.
 

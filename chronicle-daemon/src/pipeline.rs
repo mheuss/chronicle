@@ -731,6 +731,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "needs Vision text recognition, which fails on hosted runners with VisionError(__objc2.missingError error 0); run manually"]
     async fn ocr_loop_stores_extracted_text() {
         let (storage, _dir) = temp_storage().await;
         let image_path = sample_text_image();
@@ -753,6 +754,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "needs Vision text recognition; passes vacuously on hosted runners, where Vision returns VisionError(__objc2.missingError error 0); run manually"]
     async fn ocr_loop_skips_empty_text() {
         let (storage, _dir) = temp_storage().await;
         let image_path = blank_image();
@@ -774,6 +776,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "needs Vision text recognition, which fails on hosted runners with VisionError(__objc2.missingError error 0); run manually"]
     async fn ocr_loop_continues_on_missing_image() {
         let (storage, _dir) = temp_storage().await;
         let missing_path = PathBuf::from("/nonexistent/image.png");
