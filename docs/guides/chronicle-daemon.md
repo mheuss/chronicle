@@ -62,16 +62,36 @@ flowchart TD
    Microphone (informational). Exits with an actionable error if Screen
    Recording is denied.
 4. `Storage::open()` — opens/migrates SQLite database
-5. `IpcServer::start()` — starts the Unix-socket status server
-6. `AudioPipeline::create()` — prepares the audio handler, dispatch queue, and
+5. `storage.sweep_orphans()` — the startup orphan sweep. It walks the media
+   directory and deletes files that have no database row. It runs before
+   capture starts, so this process writes no media while it walks, and the
+   instance lock from step 2 keeps a second daemon from sweeping at the same
+   time.
+6. `storage.status()` — primes the storage status snapshot so the first
+   `Status` request doesn't see zeros. If the read fails, the snapshot keeps
+   zero counters until a refresh succeeds. It also walks the media directory. A
+   task refreshes the snapshot every 30 seconds after that.
+7. `IpcServer::start()` — starts the Unix-socket status server. The sleep and
+   wake observer is spawned earlier in `run()`, before it.
+8. `AudioPipeline::create()` — prepares the audio handler, dispatch queue, and
    encoding thread used by ScreenCaptureKit audio callbacks, and builds the
    microphone tap (installed eagerly; capture starts only on mic-on)
-7. `CaptureEngine::start()` — enumerates displays, starts one SCStream per
-   display, registers the audio handler on the primary display, and returns a
-   frame receiver channel
-8. Spawn `capture_store_loop` (Task A) and `ocr_loop` (Task B)
-9. Spawn bridge thread and `audio_store_loop` (Task C)
-10. Block on the shutdown signal (`SIGINT` from Ctrl-C or `SIGTERM`)
+9. `CaptureSupervisor::reconcile()` — starts the capture runtime, unless
+   capture is paused in settings. The runtime is `CaptureEngine` plus
+   `capture_store_loop` (Task A) and `ocr_loop` (Task B), started and stopped
+   as one unit. A failed start is retried up to five times
+   (`StartRetry::MAX_ATTEMPTS`), on a 5 to 30 second schedule. Before the
+   first successful start, a failed start that may have left streams running
+   exits the daemon with status 3.
+10. Starts the audio bridge thread and spawns the drop reporter.
+11. `provisioning::boot()` — loads the configured whisper model. This step is
+    awaited, so a slow model load delays everything after it, including
+    `audio_store_loop` and the event loop.
+12. Spawns the rest of the background work: `transcribe_loop`, the
+    transcription backfill, `audio_store_loop` (Task C), the storage status
+    refresher, and the retention cleanup loop.
+13. Runs the event loop until the shutdown signal (`SIGINT` from Ctrl-C or
+    `SIGTERM`). It serves mic toggles, pause and resume, and sleep and wake.
 
 ### Channel Topology
 
