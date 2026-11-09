@@ -228,8 +228,8 @@ impl AudioPipeline {
     /// closed, which is a genuine failure. `Ok` no-op after `stop()`.
     pub fn flush_system_segment(&self) -> Result<()> {
         if let Some(tx) = &self.flush_tx {
-            tx.send(AudioMessage::FlushSystem).map_err(|e| {
-                AudioError::ScreenCaptureKit(format!("failed to flush system segment: {e}"))
+            tx.send(AudioMessage::FlushSystem).map_err(|_| {
+                AudioError::EncodingChannelClosed("failed to flush system segment".into())
             })?;
         }
         Ok(())
@@ -261,7 +261,7 @@ impl AudioPipeline {
         if let Some(thread) = self.encoding_thread.take() {
             thread
                 .join()
-                .map_err(|_| AudioError::ScreenCaptureKit("encoding thread panicked".into()))?;
+                .map_err(|_| AudioError::Encoding("encoding thread panicked".into()))?;
         }
 
         Ok(())
