@@ -293,8 +293,9 @@ tells you which device is selected.
 
 The daemon binary depends on every crate above, `chronicle-transcription`
 included: `provisioning.rs` loads and calls it, and `transcription-metal` is a
-default feature. At runtime the crates are independent of each other with one
-exception — `chronicle-capture` depends on `chronicle-audio`. Test builds add
+default feature. At runtime the crates are independent of each other with two
+exceptions: `chronicle-capture` depends on `chronicle-audio`, and
+`chronicle-storage` depends on `chronicle-ipc`. Test builds add
 two more edges. `chronicle-transcription` takes `chronicle-audio` as a
 dev-dependency for `OggOpusEncoder`, and `chronicle-storage` for `data_root`, so
 `cargo test -p chronicle-transcription` builds both.
@@ -358,7 +359,7 @@ cd chronicle-daemon && cargo test --workspace -- --ignored
 
 Grant Screen Recording and Microphone permissions to your terminal app first.
 The real-model transcription tests also need `CHRONICLE_DATA_DIR` set to an
-absolute path whose `models/` holds a whisper model. macOS refuses a terminal
+absolute path whose `models/` holds `ggml-base.bin`. macOS refuses a terminal
 process inside the App Group container, so the default root does not work here.
 
 Most of the Vision OCR tests in `chronicle-ocr` and `pipeline.rs` are
