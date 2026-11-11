@@ -2,6 +2,7 @@
 # Fetch a whisper.cpp ggml model into Chronicle's data dir.
 # Usage: scripts/fetch-whisper-model.sh [base|small|medium]
 # Default: base
+# Honors CHRONICLE_DATA_DIR like the daemon. It must be an absolute path.
 #
 # NOTE: developer/CI tool. The daemon downloads models itself (CHR-71);
 # the app never calls this script. Pinned URL/SHA1 values are duplicated
@@ -13,7 +14,16 @@
 set -euo pipefail
 
 VARIANT="${1:-base}"
-BASE_DIR="${HOME}/Library/Application Support/Chronicle"
+APP_GROUP_ID="7TJEE2YF4G.dev.heuss.chronicle"
+if [[ -n "${CHRONICLE_DATA_DIR:-}" ]]; then
+  if [[ "$CHRONICLE_DATA_DIR" != /* ]]; then
+    echo "CHRONICLE_DATA_DIR must be an absolute path, got \"$CHRONICLE_DATA_DIR\"" >&2
+    exit 2
+  fi
+  BASE_DIR="$CHRONICLE_DATA_DIR"
+else
+  BASE_DIR="${HOME}/Library/Group Containers/${APP_GROUP_ID}"
+fi
 MODELS_DIR="${BASE_DIR}/models"
 
 # Pinned per-variant URL + SHA1. SHA1 matches the upstream
