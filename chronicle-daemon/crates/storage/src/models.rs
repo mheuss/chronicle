@@ -39,17 +39,21 @@ pub struct StorageConfig {
     pub pool_size: usize,
 }
 
-impl Default for StorageConfig {
-    fn default() -> Self {
+impl StorageConfig {
+    /// Resolves `base_dir` with [`data_root`] from `HOME` and `CHRONICLE_DATA_DIR`.
+    pub fn from_env() -> Result<Self, DataRootError> {
         // Using HOME is intentional. Chronicle is macOS-only and HOME is always
         // set by the system. This avoids pulling in a `dirs` crate dependency
         // just for one path lookup.
-        let home = std::env::var("HOME").expect("HOME environment variable must be set");
-        let base_dir = PathBuf::from(home).join("Library/Application Support/Chronicle");
-        Self {
+        let home = std::env::var_os("HOME").expect("HOME environment variable must be set");
+        let base_dir = data_root(
+            Path::new(&home),
+            std::env::var_os("CHRONICLE_DATA_DIR").as_deref(),
+        )?;
+        Ok(Self {
             base_dir,
             pool_size: 4,
-        }
+        })
     }
 }
 
@@ -295,14 +299,6 @@ mod tests {
             err.to_string(),
             "CHRONICLE_DATA_DIR must be an absolute path, got \"data\""
         );
-    }
-
-    #[test]
-    fn storage_config_default_points_to_app_support() {
-        let config = StorageConfig::default();
-        let path_str = config.base_dir.to_string_lossy();
-        assert!(path_str.contains("Library/Application Support/Chronicle"));
-        assert_eq!(config.pool_size, 4);
     }
 
     #[test]

@@ -363,7 +363,7 @@ fn exit_code_for(result: Result<()>) -> u8 {
 }
 
 fn run_main() -> Result<()> {
-    let storage_config = StorageConfig::default();
+    let storage_config = StorageConfig::from_env()?;
     let lock = match startup(instance_lock::acquire(&storage_config.base_dir))? {
         Startup::Run(lock) => lock,
         Startup::AlreadyRunning(path) => {
