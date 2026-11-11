@@ -114,3 +114,20 @@ fn relative_override_fails_before_the_lock() {
         "daemon fell back to the default root: {stderr}"
     );
 }
+
+#[test]
+fn oversized_socket_path_fails_before_preflight() {
+    let home = tempfile::tempdir().unwrap();
+    let data = home.path().join("a".repeat(120));
+    let (code, stderr) = run_daemon(home.path(), Some(data.as_os_str()), "warn,chronicle=info");
+    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("103-byte limit"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("Microphone permission"),
+        "preflight ran before the socket check: {stderr}"
+    );
+    assert!(
+        !data.join("chronicle.db").exists(),
+        "storage opened before the socket check: {stderr}"
+    );
+}

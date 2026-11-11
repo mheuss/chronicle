@@ -331,6 +331,22 @@ enum Startup {
     AlreadyRunning(std::path::PathBuf),
 }
 
+/// Darwin's `sockaddr_un.sun_path` holds 104 bytes, including the trailing NUL.
+const MAX_SOCKET_PATH_BYTES: usize = 103;
+
+/// `chronicle.sock` under `base_dir`. `UnixListener::bind` rejects a longer
+/// path without naming the path or the limit, so this error names both.
+fn checked_socket_path(base_dir: &std::path::Path) -> Result<std::path::PathBuf> {
+    let path = base_dir.join("chronicle.sock");
+    let len = path.as_os_str().len();
+    anyhow::ensure!(
+        len <= MAX_SOCKET_PATH_BYTES,
+        "socket path {} is {len} bytes, over the {MAX_SOCKET_PATH_BYTES}-byte limit",
+        path.display()
+    );
+    Ok(path)
+}
+
 /// `AlreadyRunning` is a clean exit. Under launchd's
 /// `KeepAlive{SuccessfulExit=false}` a non-zero exit would respawn the agent
 /// every `ThrottleInterval` while another daemon holds the lock.
@@ -386,13 +402,14 @@ fn run_main() -> Result<()> {
             return Ok(());
         }
     };
+    let socket_path = checked_socket_path(&storage_config.base_dir)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    instance_lock::run_holding(lock, runtime, run(storage_config))
+    instance_lock::run_holding(lock, runtime, run(storage_config, socket_path))
 }
 
-async fn run(storage_config: StorageConfig) -> Result<()> {
+async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> Result<()> {
     // --- Permission preflight ---
     let _mic_status = permissions::preflight()?;
 
@@ -457,7 +474,6 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
 
     // --- IPC server ---
     let cancel = CancellationToken::new();
-    let socket_path = storage.base_dir().join("chronicle.sock");
     // Control channel: the IPC handler forwards mic toggles to the event loop
     // below; the shared atom carries the latest result back for `Status`.
     let (mic_tx, mut mic_rx) = tokio::sync::mpsc::channel::<ipc_handler::MicCommand>(8);
@@ -1235,6 +1251,32 @@ async fn run(storage_config: StorageConfig) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    fn base_for_socket_len(total: usize) -> std::path::PathBuf {
+        let name_len = "/chronicle.sock".len();
+        let base = std::path::PathBuf::from(format!("/{}", "a".repeat(total - 1 - name_len)));
+        assert_eq!(base.join("chronicle.sock").as_os_str().len(), total);
+        base
+    }
+
+    #[test]
+    fn socket_path_of_103_bytes_is_accepted() {
+        let base = base_for_socket_len(103);
+        assert_eq!(
+            checked_socket_path(&base).unwrap(),
+            base.join("chronicle.sock")
+        );
+    }
+
+    #[test]
+    fn socket_path_of_104_bytes_names_the_path_and_the_limit() {
+        let base = base_for_socket_len(104);
+        let err = checked_socket_path(&base).unwrap_err().to_string();
+        assert!(
+            err.contains(&base.join("chronicle.sock").display().to_string()),
+            "{err}"
+        );
+        assert!(err.contains("103-byte limit"), "{err}");
+    }
 
     #[test]
     fn startup_maps_a_held_lock_to_a_clean_exit() {
