@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 /// Runs the daemon with `CHRONICLE_DATA_DIR` set to `data_dir`, or removed so
 /// a developer's exported override cannot leak in. Returns the exit code and
-/// stderr, and kills the daemon if it is still running after 10 s.
+/// stderr, or kills the daemon and fails the test if it is still running after
+/// 10 s.
 fn run_daemon(home: &Path, data_dir: Option<&OsStr>, rust_log: &str) -> (Option<i32>, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_chronicle-daemon"));
     command
@@ -107,5 +108,9 @@ fn relative_override_fails_before_the_lock() {
     assert!(
         !home.path().join("relative-data").exists(),
         "daemon created the relative directory: {stderr}"
+    );
+    assert!(
+        !home.path().join("Library").exists(),
+        "daemon fell back to the default root: {stderr}"
     );
 }
