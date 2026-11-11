@@ -139,7 +139,8 @@ launchctl kickstart -k gui/$(id -u)/dev.heuss.chronicle.daemon
 
 ## Running
 
-Start the daemon in one terminal:
+A dev run needs `CHRONICLE_DATA_DIR` exported in both terminals. See Data
+location below for why. Start the daemon in one terminal:
 
 ```sh
 cd chronicle-daemon
@@ -170,12 +171,34 @@ you want a larger, more accurate model instead.
 
 No Terminal step — the app downloads and verifies the model itself.
 
+### Data location
+
+Chronicle keeps its database, screenshots, audio, models, settings and IPC
+socket in `~/Library/Group Containers/7TJEE2YF4G.dev.heuss.chronicle`.
+
+For development, `CHRONICLE_DATA_DIR` moves that directory. It must be an
+absolute path. Set it for both the daemon and the UI, or for neither. A
+relative value stops the daemon at startup, and the UI cannot connect. The
+installed login agent never sees the variable, so it always uses the group
+container.
+
+macOS refuses a daemon started with `cargo run` in the group container, so set
+the variable for every dev run. Quit any running Chronicle before `open`,
+because `open` passes the variable only to a new process.
+
+```sh
+export CHRONICLE_DATA_DIR="$HOME/chronicle-dev"
+(cd chronicle-daemon && cargo run --release)
+# In a second terminal, with the same export:
+open dist/Chronicle.app
+```
+
 ### Stopping
 
 To stop the daemon cleanly, send `SIGTERM` (`Ctrl-C` in the terminal where it
-runs). Pause state persists in `~/Library/Application Support/Chronicle/settings`
-across restarts — if you paused capture before quitting, the daemon will boot
-paused and the UI will show a banner offering to resume.
+runs). Pause state persists in `settings` under the data root (see Data
+location) across restarts — if you paused capture before quitting, the daemon
+will boot paused and the UI will show a banner offering to resume.
 
 ## License
 
