@@ -122,9 +122,10 @@ still logs to stderr. The unified log omits the microphone's name and UID.
 
 ### Developing with the agent installed
 
-A dev daemon runs with `CHRONICLE_DATA_DIR` set (see Data location), so it
-takes its own instance lock and starts even while the agent runs. Both would
-then capture. To run the daemon by hand:
+A dev daemon runs with `CHRONICLE_DATA_DIR` set. See Data location for why.
+It takes its own instance lock, so it starts even while the agent runs, and
+both would then capture. So switch the agent off first. To run the daemon by
+hand:
 
 1. Switch off "Capture in the background" in Settings. That stops the agent
    and unregisters it.
@@ -132,7 +133,8 @@ then capture. To run the daemon by hand:
    exported. Stop it when done.
 3. Switch the toggle back on. That registers and starts the agent again.
 
-If the agent is registered but stopped, start it again without toggling:
+To restart the agent without toggling, for example after you grant Screen
+Recording, run:
 
 ```sh
 launchctl kickstart -k gui/$(id -u)/dev.heuss.chronicle.daemon
@@ -144,6 +146,7 @@ A dev run needs `CHRONICLE_DATA_DIR` exported in both terminals. See Data
 location below for why. Start the daemon in one terminal:
 
 ```sh
+export CHRONICLE_DATA_DIR="$HOME/chronicle-dev"
 cd chronicle-daemon
 cargo run --release
 ```
@@ -152,6 +155,7 @@ Wait for the `IPC server listening` log line, then in a second terminal from
 the repo root launch the UI:
 
 ```sh
+export CHRONICLE_DATA_DIR="$HOME/chronicle-dev"
 open dist/Chronicle.app
 ```
 
@@ -175,12 +179,13 @@ No Terminal step — the app downloads and verifies the model itself.
 ### Data location
 
 Chronicle keeps its database, screenshots, audio, models, settings and IPC
-socket in `~/Library/Group Containers/7TJEE2YF4G.dev.heuss.chronicle`.
+socket in `~/Library/Group Containers/7TJEE2YF4G.dev.heuss.chronicle`. This is
+the data root.
 
 For development, `CHRONICLE_DATA_DIR` moves that directory. It must be an
-absolute path. Set it for both the daemon and the UI, or for neither. A
-relative value stops the daemon at startup, and the UI cannot connect. The
-installed login agent never sees the variable, so it always uses the group
+absolute path. Set it for both dev processes. A relative value stops the daemon
+at startup, and the UI cannot connect. An app opened from Finder or at login
+never has the variable, and neither does the login agent, so both use the group
 container.
 
 macOS refuses a daemon started with `cargo run` in the group container, so set

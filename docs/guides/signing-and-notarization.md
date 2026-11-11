@@ -116,9 +116,11 @@ that fails after packaging also leaves the pending DMG beside it.
 ## First launch
 
 A daemon you start directly in Terminal uses Terminal's grants. That covers both
-Screen Recording and the microphone. That is the usual way to run it today.
-Start it in a plain Terminal window, not inside tmux. Under tmux the mic records
-silence.
+Screen Recording and the microphone. Start it in a plain Terminal window, not
+inside tmux. Under tmux the mic records silence. It needs `CHRONICLE_DATA_DIR`
+set, because macOS refuses a Terminal process in the App Group container. Its
+data then lands in that directory, not in the installed app's container. See
+Data location in the README.
 
 Under launchd, no Terminal stands behind the daemon. On macOS 27, macOS then
 checks the grants of `Chronicle.app`, not the daemon. The daemon lives inside
@@ -139,8 +141,9 @@ the grant. The signature names the identifier and team instead of the code hash.
    `chronicle-daemon` itself had no effect.
 3. The microphone can't be granted under launchd yet. Nothing in Chronicle asks
    macOS for mic access. The Microphone list has no + button. The startup log
-   shows `Microphone permission: NotDetermined`. The mic records silence. To
-   record the mic, start the daemon from Terminal.
+   shows `Microphone permission: NotDetermined`. The mic records silence. A
+   daemon started from Terminal can record the mic, but it writes to its own
+   `CHRONICLE_DATA_DIR`. The installed app doesn't see that data.
 
 ## Troubleshooting
 

@@ -212,9 +212,13 @@ You will see the line in a normal run — the daemon defaults to
 `warn,chronicle=info`, so no `RUST_LOG` is needed:
 
 ```bash
+export CHRONICLE_DATA_DIR="$HOME/chronicle-dev"
 cd chronicle-daemon
 cargo run --bin chronicle-daemon
 ```
+
+The variable is required here. macOS refuses a daemon started from Terminal in
+the App Group container. See Data location in the README.
 
 The command does not exit on its own — the shell waits on `cargo`, so Ctrl-C
 once you have the line.
@@ -240,9 +244,10 @@ Four things to know before you trust what you read:
   newcomer that finds the lock held exits with "another chronicle-daemon is
   already running". It exits *before* it opens the database or reaches the tap
   install. You get no line at all, not an error about the microphone. The
-  running daemon is usually the login agent. Follow "Developing with the agent
-  installed" in the README to stop it. (The lock is per data directory: a
-  different data directory has its own lock and its own daemon.)
+  running daemon is another dev daemon on the same `CHRONICLE_DATA_DIR`. The
+  login agent uses the group container, so it has its own lock and does not
+  block a dev daemon. (The lock is per data directory: a different data
+  directory has its own lock and its own daemon.)
 - **The system log hides the device.** Under the agent, log lines go to the
   unified log with the microphone's name and UID replaced by `redacted`. Run
   the daemon by hand to see them.
