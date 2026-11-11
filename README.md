@@ -122,16 +122,17 @@ still logs to stderr. The unified log omits the microphone's name and UID.
 
 ### Developing with the agent installed
 
-The agent holds the daemon's instance lock. A manual daemon exits straight
-away while the agent runs. To run the daemon by hand:
+A dev daemon runs with `CHRONICLE_DATA_DIR` set (see Data location), so it
+takes its own instance lock and starts even while the agent runs. Both would
+then capture. To run the daemon by hand:
 
 1. Switch off "Capture in the background" in Settings. That stops the agent
    and unregisters it.
-2. Run the daemon with `cargo run` as under Running. Stop it when done.
+2. Run the daemon with `cargo run` as under Running, with `CHRONICLE_DATA_DIR`
+   exported. Stop it when done.
 3. Switch the toggle back on. That registers and starts the agent again.
 
-If the agent's own copy exited because a manual daemon held the lock, it stays
-registered but stopped until the next login. Start it again without toggling:
+If the agent is registered but stopped, start it again without toggling:
 
 ```sh
 launchctl kickstart -k gui/$(id -u)/dev.heuss.chronicle.daemon
