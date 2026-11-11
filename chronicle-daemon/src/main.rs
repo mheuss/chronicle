@@ -334,8 +334,8 @@ enum Startup {
 /// Darwin's `sockaddr_un.sun_path` holds 104 bytes, including the trailing NUL.
 const MAX_SOCKET_PATH_BYTES: usize = 103;
 
-/// `chronicle.sock` under `base_dir`. `UnixListener::bind` rejects a longer
-/// path without naming the path or the limit, so this error names both.
+/// `chronicle.sock` under `base_dir`. A longer path would fail only at `bind`,
+/// after the preflight and storage open, and without naming the limit.
 fn checked_socket_path(base_dir: &std::path::Path) -> Result<std::path::PathBuf> {
     let path = base_dir.join("chronicle.sock");
     let len = path.as_os_str().len();
