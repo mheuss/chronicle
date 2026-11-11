@@ -1020,11 +1020,13 @@ mod tests {
     #[track_caller]
     fn test_base_dir(variant: ModelVariant) -> PathBuf {
         let home = std::env::var_os("HOME").expect("HOME environment variable must be set");
-        let base = chronicle_storage::data_root(
+        let base = match chronicle_storage::data_root(
             std::path::Path::new(&home),
             std::env::var_os("CHRONICLE_DATA_DIR").as_deref(),
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
+        ) {
+            Ok(base) => base,
+            Err(e) => panic!("{e}"),
+        };
         // A missing model is a failure, not a skip. Reporting `ok` without
         // running whisper is how the detect_language bug went unnoticed.
         assert!(
