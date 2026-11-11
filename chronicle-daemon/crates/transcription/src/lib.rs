@@ -1014,23 +1014,22 @@ mod tests {
         pcm
     }
 
-    /// Chronicle *base* dir — the one holding `models/` — overridable for a
-    /// non-default data dir. Shared by the tests that need a real model, so
-    /// they cannot drift apart on where they look.
+    /// Chronicle *base* dir — the one holding `models/` — resolved the way the
+    /// daemon resolves it. Shared by the tests that need a real model, so they
+    /// cannot drift apart on where they look.
     #[track_caller]
     fn test_base_dir(variant: ModelVariant) -> PathBuf {
-        let base = std::env::var("CHRONICLE_TEST_BASE_DIR").unwrap_or_else(|_| {
-            format!(
-                "{}/Library/Application Support/Chronicle",
-                std::env::var("HOME").expect("HOME environment variable must be set")
-            )
-        });
-        let base = PathBuf::from(base);
+        let home = std::env::var_os("HOME").expect("HOME environment variable must be set");
+        let base = chronicle_storage::data_root(
+            std::path::Path::new(&home),
+            std::env::var_os("CHRONICLE_DATA_DIR").as_deref(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         // A missing model is a failure, not a skip. Reporting `ok` without
         // running whisper is how the detect_language bug went unnoticed.
         assert!(
             model_present(&base, variant),
-            "no `{variant}` model at {} — provision one or set CHRONICLE_TEST_BASE_DIR",
+            "no `{variant}` model at {} — provision one or set CHRONICLE_DATA_DIR",
             base.display()
         );
         base

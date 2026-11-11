@@ -20,6 +20,8 @@ metal = ["whisper-rs/metal"]
 cpu = []
 
 [dev-dependencies]
+# data_root, so the real-model tests and the example find models where the daemon puts them.
+chronicle-storage = { path = "../storage" }
 tempfile = "3"
 chronicle-audio = { path = "../audio" }
 # WAV reader for examples/transcribe_wav.rs. Examples see dev-dependencies.
