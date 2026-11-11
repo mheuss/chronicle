@@ -1,6 +1,34 @@
-use std::path::PathBuf;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 // --- Configuration ---
+
+/// The App Group container ID shared by the daemon and the UI.
+pub const APP_GROUP_ID: &str = "7TJEE2YF4G.dev.heuss.chronicle";
+
+/// Why [`data_root`] could not resolve a directory.
+#[derive(Debug, thiserror::Error)]
+pub enum DataRootError {
+    #[error("CHRONICLE_DATA_DIR must be an absolute path, got \"{}\"", .0.display())]
+    RelativeOverride(PathBuf),
+}
+
+/// Chronicle's data root: `override_dir` when it is set and not empty, else the
+/// App Group container under `home`. A relative override is an error, because
+/// each process would resolve it against its own working directory.
+pub fn data_root(home: &Path, override_dir: Option<&OsStr>) -> Result<PathBuf, DataRootError> {
+    match override_dir {
+        Some(dir) if !dir.is_empty() => {
+            let dir = PathBuf::from(dir);
+            if dir.is_absolute() {
+                Ok(dir)
+            } else {
+                Err(DataRootError::RelativeOverride(dir))
+            }
+        }
+        _ => Ok(home.join("Library/Group Containers").join(APP_GROUP_ID)),
+    }
+}
 
 /// Configuration for opening a [`Storage`](crate::Storage) instance.
 #[derive(Debug)]
@@ -230,6 +258,44 @@ pub struct StorageStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const HOME: &str = "/Users/someone";
+    const GROUP_ROOT: &str =
+        "/Users/someone/Library/Group Containers/7TJEE2YF4G.dev.heuss.chronicle";
+
+    #[test]
+    fn data_root_is_the_group_container_without_an_override() {
+        assert_eq!(
+            data_root(Path::new(HOME), None).unwrap(),
+            PathBuf::from(GROUP_ROOT)
+        );
+    }
+
+    #[test]
+    fn data_root_ignores_an_empty_override() {
+        assert_eq!(
+            data_root(Path::new(HOME), Some(OsStr::new(""))).unwrap(),
+            PathBuf::from(GROUP_ROOT)
+        );
+    }
+
+    #[test]
+    fn data_root_uses_an_absolute_override() {
+        assert_eq!(
+            data_root(Path::new(HOME), Some(OsStr::new("/tmp/chronicle-dev"))).unwrap(),
+            PathBuf::from("/tmp/chronicle-dev")
+        );
+    }
+
+    #[test]
+    fn data_root_rejects_a_relative_override() {
+        let err = data_root(Path::new(HOME), Some(OsStr::new("data"))).unwrap_err();
+        assert!(matches!(&err, DataRootError::RelativeOverride(dir) if dir == Path::new("data")));
+        assert_eq!(
+            err.to_string(),
+            "CHRONICLE_DATA_DIR must be an absolute path, got \"data\""
+        );
+    }
 
     #[test]
     fn storage_config_default_points_to_app_support() {

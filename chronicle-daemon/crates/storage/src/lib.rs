@@ -25,9 +25,9 @@ pub(crate) mod search;
 
 pub use error::{Result, StorageError};
 pub use models::{
-    AudioSegment, AudioSegmentMetadata, CleanupOutcome, CleanupStats, PendingTranscription,
-    Screenshot, ScreenshotMetadata, SearchFilter, SearchResult, SearchSource, StorageConfig,
-    StorageStatus,
+    APP_GROUP_ID, AudioSegment, AudioSegmentMetadata, CleanupOutcome, CleanupStats, DataRootError,
+    PendingTranscription, Screenshot, ScreenshotMetadata, SearchFilter, SearchResult, SearchSource,
+    StorageConfig, StorageStatus, data_root,
 };
 /// Largest accepted `retention_days`. Exposed so a caller can validate or
 /// render the limit without hardcoding the number or scraping an error string —
