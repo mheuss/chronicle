@@ -20,7 +20,8 @@ use anyhow::Result;
 use arc_swap::ArcSwap;
 use chronicle_audio::{AudioConfig, AudioPipeline};
 use chronicle_ipc::{CancellationToken, IpcServer};
-use chronicle_storage::{Storage, StorageConfig};
+use chronicle_storage::{APP_GROUP_ID, Storage, StorageConfig};
+use objc2_foundation::{NSFileManager, NSString};
 
 use crate::capture_supervisor::{CaptureSupervisor, ReconcileOutcome, StartRetry};
 
@@ -362,8 +363,19 @@ fn exit_code_for(result: Result<()>) -> u8 {
     }
 }
 
+/// Only this call creates the app group container. A `mkdir` of its path fails
+/// with EPERM, even with the entitlement. The URL is unused because it ignores
+/// `HOME`, and the root comes from `data_root`. Without the entitlement the
+/// call creates nothing.
+fn create_group_container() {
+    let group = NSString::from_str(APP_GROUP_ID);
+    let _ =
+        NSFileManager::defaultManager().containerURLForSecurityApplicationGroupIdentifier(&group);
+}
+
 fn run_main() -> Result<()> {
     let storage_config = StorageConfig::from_env()?;
+    create_group_container();
     let lock = match startup(instance_lock::acquire(&storage_config.base_dir))? {
         Startup::Run(lock) => lock,
         Startup::AlreadyRunning(path) => {
