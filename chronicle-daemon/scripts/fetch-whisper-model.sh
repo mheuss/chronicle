@@ -24,6 +24,10 @@ if [[ -n "${CHRONICLE_DATA_DIR:-}" ]]; then
   fi
   BASE_DIR="$CHRONICLE_DATA_DIR"
 else
+  if [[ "${HOME:-}" != /* ]]; then
+    echo "HOME must be an absolute path to find the app group container, got \"${HOME:-}\"" >&2
+    exit 2
+  fi
   BASE_DIR="${HOME}/Library/Group Containers/${APP_GROUP_ID}"
 fi
 MODELS_DIR="${BASE_DIR}/models"
