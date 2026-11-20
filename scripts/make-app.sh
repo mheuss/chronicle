@@ -58,6 +58,16 @@ if [ -z "$APP_GROUP_ID" ] || [ "$(cut -d '|' -f 2 <<<"$GROUP_COPIES" | sort -u |
 fi
 TEAM_ID="${APP_GROUP_ID%%.*}"
 
+# The socket name has a copy on each side, with the same silent failure.
+DAEMON_SOCKET="$(sed -nE 's/^const SOCKET_NAME: &str = "([^"]+)";$/\1/p' chronicle-daemon/src/main.rs)"
+UI_SOCKET="$(sed -nE 's/^ +static let socketName = "([^"]+)"$/\1/p' chronicle-ui/Sources/ChronicleUI/DataRoot.swift)"
+if [ -z "$DAEMON_SOCKET" ] || [ "$DAEMON_SOCKET" != "$UI_SOCKET" ]; then
+    echo "The socket name is missing or differs between its copies:" >&2
+    echo "chronicle-daemon/src/main.rs: $DAEMON_SOCKET" >&2
+    echo "chronicle-ui/Sources/ChronicleUI/DataRoot.swift: $UI_SOCKET" >&2
+    exit 1
+fi
+
 resolve_identity() {
     local matches
     matches="$(security find-identity -v -p codesigning | grep '"Developer ID Application: ' | awk '!seen[$2]++' || true)"
