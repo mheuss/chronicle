@@ -5,7 +5,7 @@ import os
 /// Communicates with chronicle-daemon over a Unix domain socket.
 ///
 /// Protocol: newline-delimited JSON request/response.
-/// Socket path: `chronicle.sock` in the directory `DataRoot.resolve` returns.
+/// Socket path: `DataRoot.socketName` in the directory `DataRoot.resolve` returns.
 @MainActor
 @Observable
 final class DaemonConnection {
@@ -31,7 +31,7 @@ final class DaemonConnection {
         let resolved = DataRoot.resolve(
             environment: ProcessInfo.processInfo.environment,
             containerURL: { FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0) }
-        ).map { $0.appendingPathComponent("chronicle.sock").path }
+        ).map { $0.appendingPathComponent(DataRoot.socketName).path }
         if case .failure(let error) = resolved {
             logger.error("\(error.localizedDescription, privacy: .public)")
         }

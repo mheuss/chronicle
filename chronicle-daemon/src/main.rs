@@ -334,10 +334,12 @@ enum Startup {
 /// Darwin's `sockaddr_un.sun_path` holds 104 bytes, including the trailing NUL.
 const MAX_SOCKET_PATH_BYTES: usize = 103;
 
-/// `chronicle.sock` under `base_dir`. A longer path would fail only at `bind`,
+const SOCKET_NAME: &str = "ipc.sock";
+
+/// [`SOCKET_NAME`] under `base_dir`. A longer path would fail only at `bind`,
 /// after the preflight and storage open, and without naming the limit.
 fn checked_socket_path(base_dir: &std::path::Path) -> Result<std::path::PathBuf> {
-    let path = base_dir.join("chronicle.sock");
+    let path = base_dir.join(SOCKET_NAME);
     let len = path.as_os_str().len();
     anyhow::ensure!(
         len <= MAX_SOCKET_PATH_BYTES,
@@ -1252,19 +1254,16 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
 #[cfg(test)]
 mod tests {
     fn base_for_socket_len(total: usize) -> std::path::PathBuf {
-        let name_len = "/chronicle.sock".len();
+        let name_len = 1 + SOCKET_NAME.len();
         let base = std::path::PathBuf::from(format!("/{}", "a".repeat(total - 1 - name_len)));
-        assert_eq!(base.join("chronicle.sock").as_os_str().len(), total);
+        assert_eq!(base.join(SOCKET_NAME).as_os_str().len(), total);
         base
     }
 
     #[test]
     fn socket_path_of_103_bytes_is_accepted() {
         let base = base_for_socket_len(103);
-        assert_eq!(
-            checked_socket_path(&base).unwrap(),
-            base.join("chronicle.sock")
-        );
+        assert_eq!(checked_socket_path(&base).unwrap(), base.join(SOCKET_NAME));
     }
 
     #[test]
@@ -1272,7 +1271,7 @@ mod tests {
         let base = base_for_socket_len(104);
         let err = checked_socket_path(&base).unwrap_err().to_string();
         assert!(
-            err.contains(&base.join("chronicle.sock").display().to_string()),
+            err.contains(&base.join(SOCKET_NAME).display().to_string()),
             "{err}"
         );
         assert!(err.contains("is 104 bytes"), "{err}");

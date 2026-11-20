@@ -1,8 +1,9 @@
 import Foundation
 
-/// Finds Chronicle's data root, the directory that holds `chronicle.sock`.
+/// Finds Chronicle's data root, the directory that holds the daemon's socket.
 enum DataRoot {
-    static let appGroupID = "7TJEE2YF4G.dev.heuss.chronicle"
+    static let appGroupID = "7TJEE2YF4G.chronicle"
+    static let socketName = "ipc.sock"
 
     static func resolve(
         environment: [String: String],

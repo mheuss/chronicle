@@ -5,11 +5,11 @@ import Testing
 @Suite("Data root")
 struct DataRootTests {
     private static let container = URL(
-        fileURLWithPath: "/Users/someone/Library/Group Containers/7TJEE2YF4G.dev.heuss.chronicle"
+        fileURLWithPath: "/Users/someone/Library/Group Containers/7TJEE2YF4G.chronicle"
     )
 
     private static func containerURL(_ id: String) -> URL? {
-        id == "7TJEE2YF4G.dev.heuss.chronicle" ? container : nil
+        id == "7TJEE2YF4G.chronicle" ? container : nil
     }
 
     @Test func absoluteOverrideWins() {

@@ -4,7 +4,7 @@
 <dict>
     <key>com.apple.security.application-groups</key>
     <array>
-        <string>7TJEE2YF4G.dev.heuss.chronicle</string>
+        <string>7TJEE2YF4G.chronicle</string>
     </array>
 </dict>
 </plist>

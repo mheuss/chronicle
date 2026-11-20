@@ -12,7 +12,7 @@ handles retention-based cleanup.
 The database file lives at `<base_dir>/chronicle.db`. Media files live under
 `<base_dir>/screenshots/` and `<base_dir>/audio/`. On macOS the default base
 directory is the App Group container
-`~/Library/Group Containers/7TJEE2YF4G.dev.heuss.chronicle`.
+`~/Library/Group Containers/7TJEE2YF4G.chronicle`.
 `StorageConfig::from_env()` resolves it with `data_root`. An absolute
 `CHRONICLE_DATA_DIR` overrides it.
 

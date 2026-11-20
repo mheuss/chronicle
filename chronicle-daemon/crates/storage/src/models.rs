@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 // --- Configuration ---
 
 /// The App Group container ID shared by the daemon and the UI.
-pub const APP_GROUP_ID: &str = "7TJEE2YF4G.dev.heuss.chronicle";
+pub const APP_GROUP_ID: &str = "7TJEE2YF4G.chronicle";
 
 /// Why [`data_root`] could not resolve a directory.
 #[derive(Debug, thiserror::Error)]
@@ -267,8 +267,7 @@ mod tests {
     use super::*;
 
     const HOME: &str = "/Users/someone";
-    const GROUP_ROOT: &str =
-        "/Users/someone/Library/Group Containers/7TJEE2YF4G.dev.heuss.chronicle";
+    const GROUP_ROOT: &str = "/Users/someone/Library/Group Containers/7TJEE2YF4G.chronicle";
 
     #[test]
     fn data_root_is_the_group_container_without_an_override() {

@@ -64,7 +64,7 @@ flowchart TD
 4. `instance_lock::acquire()` — takes an exclusive lock on `chronicle.lock` in
    the data directory, before the Tokio runtime exists. Exits with status 0 and
    "another chronicle-daemon is already running" if another daemon holds it.
-5. `checked_socket_path()` — fails startup when `chronicle.sock` under the data
+5. `checked_socket_path()` — fails startup when `ipc.sock` under the data
    root would be longer than the 103 bytes a Unix socket address holds.
 6. `permissions::preflight()` — checks Screen Recording (hard gate) and
    Microphone (informational). Exits with an actionable error if Screen

@@ -16,7 +16,7 @@
 set -euo pipefail
 
 VARIANT="${1:-base}"
-APP_GROUP_ID="7TJEE2YF4G.dev.heuss.chronicle"
+APP_GROUP_ID="7TJEE2YF4G.chronicle"
 if [[ -n "${CHRONICLE_DATA_DIR:-}" ]]; then
   if [[ "$CHRONICLE_DATA_DIR" != /* ]]; then
     echo "CHRONICLE_DATA_DIR must be an absolute path, got \"$CHRONICLE_DATA_DIR\"" >&2
