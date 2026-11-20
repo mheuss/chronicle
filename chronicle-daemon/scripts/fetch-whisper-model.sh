@@ -57,7 +57,9 @@ DEST="${MODELS_DIR}/ggml-${VARIANT}.bin"
 trap 'rm -f "$DEST.tmp"' EXIT
 
 if ! mkdir -p "$MODELS_DIR"; then
-  echo "Could not create $MODELS_DIR. From a terminal, set CHRONICLE_DATA_DIR to an absolute path." >&2
+  if [[ -z "${CHRONICLE_DATA_DIR:-}" ]]; then
+    echo "Could not create $MODELS_DIR. From a terminal, set CHRONICLE_DATA_DIR to an absolute path." >&2
+  fi
   exit 1
 fi
 
