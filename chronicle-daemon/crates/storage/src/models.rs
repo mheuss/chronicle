@@ -15,10 +15,10 @@ pub enum DataRootError {
     RelativeHome(PathBuf),
 }
 
-/// Chronicle's data root: `override_dir` (`CHRONICLE_DATA_DIR`) when it is set
-/// and not empty, else the App Group container under `home`. A relative
-/// override or home is an error, because each process would resolve it against
-/// its own working directory.
+/// Chronicle's data root: `override_dir` when it is set and not empty, else the
+/// App Group container under `home`. The override comes from `CHRONICLE_DATA_DIR`.
+/// A relative override or home is an error. Each process would resolve it
+/// against its own working directory.
 pub fn data_root(home: &Path, override_dir: Option<&OsStr>) -> Result<PathBuf, DataRootError> {
     match override_dir {
         Some(dir) if !dir.is_empty() => {

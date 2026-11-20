@@ -180,8 +180,8 @@ No Terminal step — the app downloads and verifies the model itself.
 Chronicle keeps its database, screenshots, audio, models, settings and IPC
 socket in `~/Library/Group Containers/7TJEE2YF4G.chronicle`. This is the data
 root. The socket path must fit in 103 bytes, so your home folder name can be at
-most 41 bytes. Beyond that the installed app fails at every start, with an error
-that names the path.
+most 41 bytes. Beyond that the daemon fails at every start and logs an error that
+names the path.
 
 For development, `CHRONICLE_DATA_DIR` moves that directory. It must be an
 absolute path. Set it for both dev processes. A relative value stops the daemon

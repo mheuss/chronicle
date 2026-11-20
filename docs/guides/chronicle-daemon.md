@@ -57,7 +57,8 @@ flowchart TD
    stderr. `RUST_LOG` does not filter that line.
 2. `StorageConfig::from_env()` — resolves the data root: `CHRONICLE_DATA_DIR`
    when it is set, otherwise the app group container under `HOME`. A relative
-   override stops the daemon here, before anything is created.
+   override stops the daemon here, before anything is created. So does an
+   empty or relative `HOME` when there is no override.
 3. `create_group_container()` — asks macOS to create the app group container.
    Only this call can create it, and the login agent may start before the UI
    has ever run. The daemon ignores the returned URL.
@@ -72,7 +73,7 @@ flowchart TD
 7. `Storage::open()` — opens/migrates SQLite database
 8. `storage.sweep_orphans()` — the startup orphan sweep. It walks the media
    directory and deletes files that have no database row. It runs before
-   capture starts, so this process writes no media while it walks, and the
+   capture starts, so this process writes no media while it walks. The
    instance lock from step 4 keeps a second daemon from sweeping at the same
    time.
 9. `storage.status()` — primes the storage status snapshot so the first
