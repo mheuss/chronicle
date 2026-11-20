@@ -56,7 +56,10 @@ esac
 DEST="${MODELS_DIR}/ggml-${VARIANT}.bin"
 trap 'rm -f "$DEST.tmp"' EXIT
 
-mkdir -p "$MODELS_DIR"
+if ! mkdir -p "$MODELS_DIR"; then
+  echo "Could not create $MODELS_DIR. From a terminal, set CHRONICLE_DATA_DIR to an absolute path." >&2
+  exit 1
+fi
 
 if [[ -f "$DEST" ]]; then
   ACTUAL="$(shasum -a 1 "$DEST" | awk '{print $1}')"

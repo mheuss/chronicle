@@ -129,7 +129,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
     if !model_present(&base_dir, args.variant) {
         return Err(format!(
-            "no {} model at {}; run chronicle-daemon/scripts/fetch-whisper-model.sh {} or pass --base-dir. From a terminal, set CHRONICLE_DATA_DIR to an absolute path for both, because macOS refuses terminal processes in the app group container",
+            "no {} model at {}; run chronicle-daemon/scripts/fetch-whisper-model.sh {} or pass --base-dir. From a terminal, macOS blocks the app group container. Set CHRONICLE_DATA_DIR to an absolute path for this example and for the fetch script",
             args.variant,
             model_path(&base_dir, args.variant).display(),
             args.variant
