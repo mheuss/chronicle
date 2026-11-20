@@ -1,53 +1,7 @@
+mod common;
+
 use std::ffi::OsStr;
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
-
-/// Runs the daemon with `CHRONICLE_DATA_DIR` set to `data_dir`. When `data_dir`
-/// is `None` the variable is removed, so a developer's exported override cannot
-/// leak in. Returns the exit code and stderr. Kills the daemon and fails the
-/// test if it is still running after 10 s.
-fn run_daemon(home: &Path, data_dir: Option<&OsStr>, rust_log: &str) -> (Option<i32>, String) {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_chronicle-daemon"));
-    command
-        .current_dir(home)
-        .env("HOME", home)
-        .env("RUST_LOG", rust_log)
-        .env_remove("CHRONICLE_LOG_BACKEND")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    match data_dir {
-        Some(dir) => command.env("CHRONICLE_DATA_DIR", dir),
-        None => command.env_remove("CHRONICLE_DATA_DIR"),
-    };
-    let mut child = command.spawn().unwrap();
-
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if Instant::now() > deadline {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            let mut stderr = String::new();
-            let _ = child.stderr.take().unwrap().read_to_string(&mut stderr);
-            panic!("daemon did not exit within 10 s; stderr: {stderr}");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
-
-    let mut stderr = String::new();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut stderr)
-        .unwrap();
-    (status.code(), stderr)
-}
+use std::path::PathBuf;
 
 /// Runs the daemon with a regular file where its data directory should be, so
 /// taking the instance lock fails. Returns the blocked path, exit code and stderr.
@@ -56,7 +10,8 @@ fn run_with_blocked_data_dir(rust_log: &str) -> (PathBuf, Option<i32>, String) {
     let base = chronicle_storage::data_root(home.path(), None).unwrap();
     std::fs::create_dir_all(base.parent().unwrap()).unwrap();
     std::fs::write(&base, b"").unwrap();
-    let (code, stderr) = run_daemon(home.path(), None, rust_log);
+    let (status, stderr) = common::run_daemon(home.path(), None, rust_log);
+    let code = status.code();
     (base, code, stderr)
 }
 
@@ -94,11 +49,12 @@ fn fatal_error_reaches_stderr_when_the_filter_drops_it() {
 #[test]
 fn relative_override_fails_before_the_lock() {
     let home = tempfile::tempdir().unwrap();
-    let (code, stderr) = run_daemon(
+    let (status, stderr) = common::run_daemon(
         home.path(),
         Some(OsStr::new("relative-data")),
         "warn,chronicle=info",
     );
+    let code = status.code();
     assert_eq!(code, Some(1), "stderr: {stderr}");
     assert!(
         stderr.contains("CHRONICLE_DATA_DIR must be an absolute path, got \"relative-data\""),
@@ -119,7 +75,9 @@ fn relative_override_fails_before_the_lock() {
 fn oversized_socket_path_fails_before_preflight() {
     let home = tempfile::tempdir().unwrap();
     let data = home.path().join("a".repeat(120));
-    let (code, stderr) = run_daemon(home.path(), Some(data.as_os_str()), "warn,chronicle=info");
+    let (status, stderr) =
+        common::run_daemon(home.path(), Some(data.as_os_str()), "warn,chronicle=info");
+    let code = status.code();
     assert_eq!(code, Some(1), "stderr: {stderr}");
     assert!(stderr.contains("103-byte limit"), "stderr: {stderr}");
     assert!(

@@ -1275,6 +1275,7 @@ mod tests {
             err.contains(&base.join("chronicle.sock").display().to_string()),
             "{err}"
         );
+        assert!(err.contains("is 104 bytes"), "{err}");
         assert!(err.contains("103-byte limit"), "{err}");
     }
 
