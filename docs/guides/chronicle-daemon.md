@@ -55,42 +55,50 @@ flowchart TD
    it also installs a panic hook that logs each panic's thread, location and
    message as a Fault before the default hook runs, because launchd discards
    stderr. `RUST_LOG` does not filter that line.
-2. `instance_lock::acquire()` — takes an exclusive lock on `chronicle.lock` in
+2. `StorageConfig::from_env()` — resolves the data root: `CHRONICLE_DATA_DIR`
+   when it is set, otherwise the app group container under `HOME`. A relative
+   override stops the daemon here, before anything is created.
+3. `create_group_container()` — asks macOS to create the app group container.
+   Only this call can create it, and the login agent may start before the UI
+   has ever run. The daemon ignores the returned URL.
+4. `instance_lock::acquire()` — takes an exclusive lock on `chronicle.lock` in
    the data directory, before the Tokio runtime exists. Exits with status 0 and
    "another chronicle-daemon is already running" if another daemon holds it.
-3. `permissions::preflight()` — checks Screen Recording (hard gate) and
+5. `checked_socket_path()` — fails startup when `chronicle.sock` under the data
+   root would be longer than the 103 bytes a Unix socket address holds.
+6. `permissions::preflight()` — checks Screen Recording (hard gate) and
    Microphone (informational). Exits with an actionable error if Screen
    Recording is denied.
-4. `Storage::open()` — opens/migrates SQLite database
-5. `storage.sweep_orphans()` — the startup orphan sweep. It walks the media
+7. `Storage::open()` — opens/migrates SQLite database
+8. `storage.sweep_orphans()` — the startup orphan sweep. It walks the media
    directory and deletes files that have no database row. It runs before
    capture starts, so this process writes no media while it walks, and the
-   instance lock from step 2 keeps a second daemon from sweeping at the same
+   instance lock from step 4 keeps a second daemon from sweeping at the same
    time.
-6. `storage.status()` — primes the storage status snapshot so the first
+9. `storage.status()` — primes the storage status snapshot so the first
    `Status` request doesn't see zeros. If the read fails, the snapshot keeps
    zero counters until a refresh succeeds. It also walks the media directory. A
    task refreshes the snapshot every 30 seconds after that.
-7. `IpcServer::start()` — starts the Unix-socket status server. The sleep and
+10. `IpcServer::start()` — starts the Unix-socket status server. The sleep and
    wake observer is spawned earlier in `run()`, before it.
-8. `AudioPipeline::create()` — prepares the audio handler, dispatch queue, and
+11. `AudioPipeline::create()` — prepares the audio handler, dispatch queue, and
    encoding thread used by ScreenCaptureKit audio callbacks, and builds the
    microphone tap (installed eagerly; capture starts only on mic-on)
-9. `CaptureSupervisor::reconcile()` — starts the capture runtime, unless
+12. `CaptureSupervisor::reconcile()` — starts the capture runtime, unless
    capture is paused in settings. The runtime is `CaptureEngine` plus
    `capture_store_loop` (Task A) and `ocr_loop` (Task B), started and stopped
    as one unit. A failed start is retried up to five times
    (`StartRetry::MAX_ATTEMPTS`), on a 5 to 30 second schedule. Before the
    first successful start, a failed start that may have left streams running
    exits the daemon with status 3.
-10. Starts the audio bridge thread and spawns the drop reporter.
-11. `provisioning::boot()` — loads the configured whisper model. This step is
+13. Starts the audio bridge thread and spawns the drop reporter.
+14. `provisioning::boot()` — loads the configured whisper model. This step is
     awaited, so a slow model load delays everything after it, including
     `audio_store_loop` and the event loop.
-12. Spawns the rest of the background work: `transcribe_loop`, the
+15. Spawns the rest of the background work: `transcribe_loop`, the
     transcription backfill, `audio_store_loop` (Task C), the storage status
     refresher, and the retention cleanup loop.
-13. Runs the event loop until the shutdown signal (`SIGINT` from Ctrl-C or
+16. Runs the event loop until the shutdown signal (`SIGINT` from Ctrl-C or
     `SIGTERM`). It serves mic toggles, pause and resume, and sleep and wake.
 
 ### Channel Topology
@@ -240,14 +248,14 @@ still prints to stderr. Lead with a level for everything else, as in
 Four things to know before you trust what you read:
 
 - **A second daemon on the same data directory will not start.** The daemon
-  locks `chronicle.lock` in its data directory as soon as logging starts. A
+  locks `chronicle.lock` in its data directory before it opens the database. A
   newcomer that finds the lock held exits with "another chronicle-daemon is
   already running". It exits *before* it opens the database or reaches the tap
   install. You get no line at all, not an error about the microphone. The
   running daemon is another dev daemon on the same `CHRONICLE_DATA_DIR`. The
   login agent uses the group container, so it has its own lock and does not
-  block a dev daemon. (The lock is per data directory: a different data
-  directory has its own lock and its own daemon.)
+  block a dev daemon. The lock is per data directory, so a different data
+  directory has its own lock and its own daemon.
 - **The system log hides the device.** Under the agent, log lines go to the
   unified log with the microphone's name and UID replaced by `redacted`. Run
   the daemon by hand to see them.
