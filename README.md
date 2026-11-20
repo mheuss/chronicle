@@ -123,9 +123,8 @@ still logs to stderr. The unified log omits the microphone's name and UID.
 ### Developing with the agent installed
 
 A dev daemon runs with `CHRONICLE_DATA_DIR` set. See Data location for why.
-It takes its own instance lock, so it starts even while the agent runs, and
-both would then capture. So switch the agent off first. To run the daemon by
-hand:
+It takes its own instance lock, so it starts even while the agent runs. Both
+would then capture. Switch the agent off first. To run the daemon by hand:
 
 1. Switch off "Capture in the background" in Settings. That stops the agent
    and unregisters it.
@@ -133,8 +132,8 @@ hand:
    exported. Stop it when done.
 3. Switch the toggle back on. That registers and starts the agent again.
 
-To restart the agent without toggling, for example after you grant Screen
-Recording, run:
+This restarts the agent without toggling it. You need it after you grant
+Screen Recording, for example:
 
 ```sh
 launchctl kickstart -k gui/$(id -u)/dev.heuss.chronicle.daemon
@@ -185,7 +184,7 @@ the data root.
 For development, `CHRONICLE_DATA_DIR` moves that directory. It must be an
 absolute path. Set it for both dev processes. A relative value stops the daemon
 at startup, and the UI cannot connect. An app opened from Finder or at login
-never has the variable, and neither does the login agent, so both use the group
+never has the variable. Neither does the login agent. Both use the group
 container.
 
 macOS refuses a daemon started with `cargo run` in the group container, so set
@@ -202,8 +201,8 @@ open dist/Chronicle.app
 ### Stopping
 
 To stop the daemon cleanly, send `SIGTERM` (`Ctrl-C` in the terminal where it
-runs). Pause state persists in `settings` under the data root (see Data
-location) across restarts — if you paused capture before quitting, the daemon
+runs). Pause state persists across restarts in `settings` under the data root. Data
+location says where that is. If you paused capture before quitting, the daemon
 will boot paused and the UI will show a banner offering to resume.
 
 ## License

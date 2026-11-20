@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Runs the daemon with `CHRONICLE_DATA_DIR` set to `data_dir`, or removed so
-/// a developer's exported override cannot leak in. Returns the exit code and
-/// stderr, or kills the daemon and fails the test if it is still running after
-/// 10 s.
+/// Runs the daemon with `CHRONICLE_DATA_DIR` set to `data_dir`. When `data_dir`
+/// is `None` the variable is removed, so a developer's exported override cannot
+/// leak in. Returns the exit code and stderr. Kills the daemon and fails the
+/// test if it is still running after 10 s.
 fn run_daemon(home: &Path, data_dir: Option<&OsStr>, rust_log: &str) -> (Option<i32>, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_chronicle-daemon"));
     command

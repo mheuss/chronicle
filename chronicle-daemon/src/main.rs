@@ -380,9 +380,9 @@ fn exit_code_for(result: Result<()>) -> u8 {
 }
 
 /// Only this call creates the app group container. A `mkdir` of its path fails
-/// with EPERM, even with the entitlement. The URL is unused because it ignores
-/// `HOME`, and the root comes from `data_root`. Without the entitlement the
-/// call creates nothing.
+/// with EPERM, even with the entitlement. The returned URL is unused. It
+/// ignores `HOME`, so the root comes from `data_root`. Without the entitlement
+/// the call creates nothing.
 fn create_group_container() {
     let group = NSString::from_str(APP_GROUP_ID);
     let _ =

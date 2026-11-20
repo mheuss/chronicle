@@ -25,7 +25,7 @@ final class DaemonConnection {
 
     nonisolated private static let logger = Logger(subsystem: "dev.heuss.chronicle", category: "ui")
 
-    /// Logged once here when it fails, and thrown on every connect attempt, so
+    /// A failure is logged once here. Every connect attempt then throws it, so
     /// the UI stays in its can't-connect state.
     static let socketPath: Result<String, DataRootError> = {
         let resolved = DataRoot.resolve(
