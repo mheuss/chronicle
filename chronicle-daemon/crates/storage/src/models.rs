@@ -11,11 +11,14 @@ pub const APP_GROUP_ID: &str = "7TJEE2YF4G.dev.heuss.chronicle";
 pub enum DataRootError {
     #[error("CHRONICLE_DATA_DIR must be an absolute path, got \"{}\"", .0.display())]
     RelativeOverride(PathBuf),
+    #[error("HOME must be an absolute path to find the app group container, got \"{}\"", .0.display())]
+    RelativeHome(PathBuf),
 }
 
-/// Chronicle's data root: `override_dir` when it is set and not empty, else the
-/// App Group container under `home`. A relative override is an error, because
-/// each process would resolve it against its own working directory.
+/// Chronicle's data root: `override_dir` (`CHRONICLE_DATA_DIR`) when it is set
+/// and not empty, else the App Group container under `home`. A relative
+/// override or home is an error, because each process would resolve it against
+/// its own working directory.
 pub fn data_root(home: &Path, override_dir: Option<&OsStr>) -> Result<PathBuf, DataRootError> {
     match override_dir {
         Some(dir) if !dir.is_empty() => {
@@ -26,6 +29,7 @@ pub fn data_root(home: &Path, override_dir: Option<&OsStr>) -> Result<PathBuf, D
                 Err(DataRootError::RelativeOverride(dir))
             }
         }
+        _ if !home.is_absolute() => Err(DataRootError::RelativeHome(home.to_path_buf())),
         _ => Ok(home.join("Library/Group Containers").join(APP_GROUP_ID)),
     }
 }
@@ -42,10 +46,9 @@ pub struct StorageConfig {
 impl StorageConfig {
     /// Resolves `base_dir` with [`data_root`] from `HOME` and `CHRONICLE_DATA_DIR`.
     pub fn from_env() -> Result<Self, DataRootError> {
-        // Using HOME is intentional. Chronicle is macOS-only and HOME is always
-        // set by the system. This avoids pulling in a `dirs` crate dependency
-        // just for one path lookup.
-        let home = std::env::var_os("HOME").expect("HOME environment variable must be set");
+        // HOME instead of a `dirs` dependency: Chronicle is macOS-only. An unset
+        // HOME reads as empty, which `data_root` rejects unless the override is set.
+        let home = std::env::var_os("HOME").unwrap_or_default();
         let base_dir = data_root(
             Path::new(&home),
             std::env::var_os("CHRONICLE_DATA_DIR").as_deref(),
@@ -299,6 +302,16 @@ mod tests {
             err.to_string(),
             "CHRONICLE_DATA_DIR must be an absolute path, got \"data\""
         );
+    }
+
+    #[test]
+    fn data_root_rejects_an_empty_or_relative_home() {
+        for home in ["", "home"] {
+            let err = data_root(Path::new(home), None).unwrap_err();
+            assert!(matches!(&err, DataRootError::RelativeHome(h) if h == Path::new(home)));
+        }
+        let dir = data_root(Path::new(""), Some(OsStr::new("/tmp/chronicle-dev"))).unwrap();
+        assert_eq!(dir, Path::new("/tmp/chronicle-dev"));
     }
 
     #[test]

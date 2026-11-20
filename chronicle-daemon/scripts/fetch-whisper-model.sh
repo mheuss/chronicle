@@ -3,6 +3,8 @@
 # Usage: scripts/fetch-whisper-model.sh [base|small|medium]
 # Default: base
 # Honors CHRONICLE_DATA_DIR like the daemon. It must be an absolute path.
+# From a terminal, set it: macOS refuses terminal processes in the app group
+# container, so the default root fails at mkdir.
 #
 # NOTE: developer/CI tool. The daemon downloads models itself (CHR-71);
 # the app never calls this script. Pinned URL/SHA1 values are duplicated

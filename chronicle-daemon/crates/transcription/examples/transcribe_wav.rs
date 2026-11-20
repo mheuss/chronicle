@@ -71,7 +71,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
 }
 
 fn default_base_dir() -> Result<PathBuf, chronicle_storage::DataRootError> {
-    let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
+    let home = std::env::var_os("HOME").unwrap_or_default();
     chronicle_storage::data_root(
         Path::new(&home),
         std::env::var_os("CHRONICLE_DATA_DIR").as_deref(),
@@ -129,7 +129,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
     if !model_present(&base_dir, args.variant) {
         return Err(format!(
-            "no {} model at {}; run chronicle-daemon/scripts/fetch-whisper-model.sh {} or pass --base-dir",
+            "no {} model at {}; run chronicle-daemon/scripts/fetch-whisper-model.sh {} or pass --base-dir. From a terminal, set CHRONICLE_DATA_DIR to an absolute path for both, because macOS refuses terminal processes in the app group container",
             args.variant,
             model_path(&base_dir, args.variant).display(),
             args.variant
