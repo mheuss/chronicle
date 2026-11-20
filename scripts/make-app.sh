@@ -253,7 +253,10 @@ codesign --verify --strict --deep --verbose=2 "$STAGE"
 
 for code in "$CONTENTS/MacOS/chronicle-daemon" "$STAGE"; do
     name="${code#"$WORK/app/"}"
-    info="$(codesign -dvv "$code" 2>&1)"
+    if ! info="$(codesign -dvv "$code" 2>&1)"; then
+        echo "Could not read the signature of $name: $info" >&2
+        exit 1
+    fi
     if ! grep -q '^Authority=Developer ID Application: ' <<<"$info"; then
         echo "$name is not signed by a Developer ID Application identity" >&2
         exit 1
@@ -263,19 +266,25 @@ for code in "$CONTENTS/MacOS/chronicle-daemon" "$STAGE"; do
         echo "$name is signed by team '$team', but the app group $APP_GROUP_ID needs team $TEAM_ID. Check CHRONICLE_SIGN_IDENTITY." >&2
         exit 1
     fi
-    ents="$(codesign -d --entitlements - --xml "$code" 2>/dev/null)"
+    if ! ents="$(codesign -d --entitlements - --xml "$code" 2>/dev/null)"; then
+        echo "Could not read the entitlements of $name" >&2
+        exit 1
+    fi
     if [ "$CONFIG" != "debug" ] && grep -q 'com.apple.security.get-task-allow' <<<"$ents"; then
         echo "$name carries get-task-allow in a $CONFIG build" >&2
         exit 1
     fi
-    ent_problem="$(APP_GROUP_ID="$APP_GROUP_ID" /usr/bin/python3 -c 'import os, plistlib, sys
+    if ! ent_problem="$(APP_GROUP_ID="$APP_GROUP_ID" /usr/bin/python3 -c 'import os, plistlib, sys
 data = sys.stdin.buffer.read()
 ents = plistlib.loads(data) if data.strip() else {}
 group = os.environ["APP_GROUP_ID"]
 if ents.get("com.apple.security.application-groups") != [group]:
     print("does not carry exactly the app group " + group)
 elif "com.apple.security.app-sandbox" in ents:
-    print("carries com.apple.security.app-sandbox")' <<<"$ents")"
+    print("carries com.apple.security.app-sandbox")' <<<"$ents")"; then
+        echo "Could not parse the entitlements of $name" >&2
+        exit 1
+    fi
     if [ -n "$ent_problem" ]; then
         echo "$name $ent_problem" >&2
         exit 1
