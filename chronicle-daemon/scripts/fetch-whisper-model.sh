@@ -2,6 +2,9 @@
 # Fetch a whisper.cpp ggml model into Chronicle's data dir.
 # Usage: scripts/fetch-whisper-model.sh [base|small|medium]
 # Default: base
+# Honors CHRONICLE_DATA_DIR like the daemon. It must be an absolute path.
+# From a terminal, set it: macOS refuses terminal processes in the app group
+# container, so the default root fails at mkdir.
 #
 # NOTE: developer/CI tool. The daemon downloads models itself (CHR-71);
 # the app never calls this script. Pinned URL/SHA1 values are duplicated
@@ -13,7 +16,20 @@
 set -euo pipefail
 
 VARIANT="${1:-base}"
-BASE_DIR="${HOME}/Library/Application Support/Chronicle"
+APP_GROUP_ID="7TJEE2YF4G.chronicle"
+if [[ -n "${CHRONICLE_DATA_DIR:-}" ]]; then
+  if [[ "$CHRONICLE_DATA_DIR" != /* ]]; then
+    echo "CHRONICLE_DATA_DIR must be an absolute path, got \"$CHRONICLE_DATA_DIR\"" >&2
+    exit 2
+  fi
+  BASE_DIR="$CHRONICLE_DATA_DIR"
+else
+  if [[ "${HOME:-}" != /* ]]; then
+    echo "HOME must be an absolute path to find the app group container, got \"${HOME:-}\"" >&2
+    exit 2
+  fi
+  BASE_DIR="${HOME}/Library/Group Containers/${APP_GROUP_ID}"
+fi
 MODELS_DIR="${BASE_DIR}/models"
 
 # Pinned per-variant URL + SHA1. SHA1 matches the upstream
@@ -44,7 +60,12 @@ esac
 DEST="${MODELS_DIR}/ggml-${VARIANT}.bin"
 trap 'rm -f "$DEST.tmp"' EXIT
 
-mkdir -p "$MODELS_DIR"
+if ! mkdir -p "$MODELS_DIR"; then
+  if [[ -z "${CHRONICLE_DATA_DIR:-}" ]]; then
+    echo "Could not create $MODELS_DIR. From a terminal, set CHRONICLE_DATA_DIR to an absolute path." >&2
+  fi
+  exit 1
+fi
 
 if [[ -f "$DEST" ]]; then
   ACTUAL="$(shasum -a 1 "$DEST" | awk '{print $1}')"

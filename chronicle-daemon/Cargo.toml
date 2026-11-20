@@ -37,11 +37,12 @@ oslog = "0.2"
 # DEFAULT_LOG_FILTER mean the same thing on both backends.
 env_filter = "1"
 anyhow = "1"
-# objc2 + NSString for the AVCaptureDevice permission check in permissions.rs.
+# objc2 + NSString for the AVCaptureDevice permission check in permissions.rs,
+# and NSFileManager + NSURL for the app group container call in main.rs.
 # NSWorkspace / CFRunLoop / block2 were dropped when the power observer
 # switched from NSWorkspace to raw IOKit FFI (power.rs).
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSFileManager", "NSURL"] }
 thiserror = "2"
 arc-swap = "1"
 async-trait = "0.1"

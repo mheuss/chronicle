@@ -60,7 +60,7 @@
 
 - SEAM-stage-enqueue — capture — a producer holds an `Arc<dyn OcrSink>` and enqueues through a bounded channel whose full case is a typed result rather than a block or a panic; this domain decides the trait and the outcome vocabulary, the producer decides what it sends — owner: pipeline — `chronicle-daemon/src/pipeline/sinks.rs` — `OcrSink`
 - SEAM-ocr-extraction — OCR — a blocking synchronous call taking a path and returning text, invoked from this domain's async loop through `spawn_blocking`; OCR decides the signature and the error vocabulary, this domain decides the scheduling — owner: OCR — `chronicle-daemon/src/pipeline.rs` — `ocr_loop`
-- SEAM-power-event — power — power names the transition and this domain decides what it means: a two-variant `PowerEvent` delivered fire-and-forget, since `try_send` at `power.rs:141` logs at warn and discards its error, so an event is dropped rather than queued when the bounded channel at `main.rs:382` is full — owner: power — `chronicle-daemon/src/main.rs` — `power_rx`
+- SEAM-power-event — power — power names the transition and this domain decides what it means. A two-variant `PowerEvent` is delivered fire-and-forget. `try_send` at `power.rs:141` logs at warn and discards its error. So an event is dropped, not queued, when the bounded `power_tx` channel in `main.rs` is full — owner: power — `chronicle-daemon/src/main.rs` — `power_rx`
 
 ## How The Existing Documents Saw This
 
@@ -70,8 +70,8 @@
 | `docs/use-cases/pipeline.md:18, 89, 134` | Locates shutdown at `main.rs:run`, per-item log throttling at `pipeline.rs`, and channel bridging at `pipeline.rs:bridge_audio_segments` | accurate — these three are this domain |
 | `docs/use-cases/pipeline.md:155, 187, 218, 241, 274, 298` | Locates six more solutions at `capture_runtime.rs`, `crates/capture/src/handler.rs` twice, `capture_supervisor.rs`, `power.rs`, and `provisioning.rs` | stale as a grouping — all six are owned by `capture`, `power` and `transcription`. The patterns are real; the catalogue grouped them by shape rather than by owner |
 | `docs/use-cases/background-work.md:20` | Locates "Budgeted Start-Retry via Detached Nudges" at `main.rs:note_reconcile_outcome` plus `capture_supervisor.rs:StartRetry` | accurate, and evidence for CHR-58 — one behaviour split across this domain's file and `capture`'s |
-| `docs/guides/chronicle-daemon.md:50-124` | Documents the Startup Sequence, Channel Topology and Shutdown as properties of the binary | accurate — and the closest existing description of why `main.rs` is one file |
-| `docs/guides/chronicle-daemon.md:231` | Gives an "Adding a new pipeline stage" procedure | accurate |
+| `docs/guides/chronicle-daemon.md`, "Startup Sequence" to "Shutdown" | Documents the Startup Sequence, Channel Topology and Shutdown as properties of the binary | accurate — and the closest existing description of why `main.rs` is one file |
+| `docs/guides/chronicle-daemon.md`, "Adding a new pipeline stage" | Gives an "Adding a new pipeline stage" procedure | accurate |
 
 `main.rs` holds two helpers that are other domains' logic rather than
 composition. One is `note_reconcile_outcome` (`:232`), half of a

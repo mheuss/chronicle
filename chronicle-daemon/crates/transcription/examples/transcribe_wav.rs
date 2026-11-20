@@ -6,12 +6,12 @@
 //! ```
 //!
 //! `--base-dir` is the Chronicle data directory holding `models/`. Defaults to
-//! `$CHRONICLE_TEST_BASE_DIR`, then `~/Library/Application Support/Chronicle`,
-//! the same rule the crate's ignored real-model tests use. The input must be
+//! `$CHRONICLE_DATA_DIR`, then the App Group container, the same rule the
+//! daemon and the crate's ignored real-model tests use. The input must be
 //! one channel, 16000 Hz, 32-bit float. Chronicle's only other decode path is
 //! Ogg/Opus, which is why this exists.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use chronicle_transcription::{
@@ -70,12 +70,12 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     })
 }
 
-fn default_base_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("CHRONICLE_TEST_BASE_DIR") {
-        return PathBuf::from(dir);
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join("Library/Application Support/Chronicle")
+fn default_base_dir() -> Result<PathBuf, chronicle_storage::DataRootError> {
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    chronicle_storage::data_root(
+        Path::new(&home),
+        std::env::var_os("CHRONICLE_DATA_DIR").as_deref(),
+    )
 }
 
 fn main() -> ExitCode {
@@ -97,7 +97,10 @@ fn main() -> ExitCode {
 }
 
 fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    let base_dir = args.base_dir.clone().unwrap_or_else(default_base_dir);
+    let base_dir = match args.base_dir.clone() {
+        Some(dir) => dir,
+        None => default_base_dir()?,
+    };
 
     let mut reader = hound::WavReader::open(&args.wav)?;
     let spec = reader.spec();
@@ -126,7 +129,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
     if !model_present(&base_dir, args.variant) {
         return Err(format!(
-            "no {} model at {}; run chronicle-daemon/scripts/fetch-whisper-model.sh {} or pass --base-dir",
+            "no {} model at {}; run chronicle-daemon/scripts/fetch-whisper-model.sh {} or pass --base-dir. From a terminal, macOS blocks the app group container. Set CHRONICLE_DATA_DIR to an absolute path for this example and for the fetch script",
             args.variant,
             model_path(&base_dir, args.variant).display(),
             args.variant

@@ -38,6 +38,36 @@ fi
 
 GUIDE="docs/guides/signing-and-notarization.md"
 
+# The app group ID is defined in five files. If one differs, the UI looks for
+# the socket in the wrong place and nothing reports it, so compare them first.
+app_group_id_copies() {
+    local key=':com.apple.security.application-groups:0'
+    printf '%s|%s\n' \
+        packaging/ui.entitlements "$(/usr/libexec/PlistBuddy -c "Print $key" packaging/ui.entitlements 2>/dev/null || true)" \
+        packaging/daemon.entitlements "$(/usr/libexec/PlistBuddy -c "Print $key" packaging/daemon.entitlements 2>/dev/null || true)" \
+        chronicle-daemon/crates/storage/src/models.rs "$(sed -nE 's/^pub const APP_GROUP_ID: &str = "([^"]+)";$/\1/p' chronicle-daemon/crates/storage/src/models.rs)" \
+        chronicle-ui/Sources/ChronicleUI/DataRoot.swift "$(sed -nE 's/^ +static let appGroupID = "([^"]+)"$/\1/p' chronicle-ui/Sources/ChronicleUI/DataRoot.swift)" \
+        chronicle-daemon/scripts/fetch-whisper-model.sh "$(sed -nE 's/^APP_GROUP_ID="([^"]+)"$/\1/p' chronicle-daemon/scripts/fetch-whisper-model.sh)"
+}
+GROUP_COPIES="$(app_group_id_copies)"
+APP_GROUP_ID="$(head -n 1 <<<"$GROUP_COPIES" | cut -d '|' -f 2)"
+if [ -z "$APP_GROUP_ID" ] || [ "$(cut -d '|' -f 2 <<<"$GROUP_COPIES" | sort -u | wc -l | tr -d ' ')" != 1 ]; then
+    echo "The app group ID is missing or differs between its copies:" >&2
+    sed 's/|/: /' <<<"$GROUP_COPIES" >&2
+    exit 1
+fi
+TEAM_ID="${APP_GROUP_ID%%.*}"
+
+# The socket name has a copy on each side, with the same silent failure.
+DAEMON_SOCKET="$(sed -nE 's/^const SOCKET_NAME: &str = "([^"]+)";$/\1/p' chronicle-daemon/src/main.rs)"
+UI_SOCKET="$(sed -nE 's/^ +static let socketName = "([^"]+)"$/\1/p' chronicle-ui/Sources/ChronicleUI/DataRoot.swift)"
+if [ -z "$DAEMON_SOCKET" ] || [ "$DAEMON_SOCKET" != "$UI_SOCKET" ]; then
+    echo "The socket name is missing or differs between its copies:" >&2
+    echo "chronicle-daemon/src/main.rs: $DAEMON_SOCKET" >&2
+    echo "chronicle-ui/Sources/ChronicleUI/DataRoot.swift: $UI_SOCKET" >&2
+    exit 1
+fi
+
 resolve_identity() {
     local matches
     matches="$(security find-identity -v -p codesigning | grep '"Developer ID Application: ' | awk '!seen[$2]++' || true)"
@@ -232,17 +262,42 @@ sign --entitlements "$UI_ENT" "$STAGE"
 codesign --verify --strict --deep --verbose=2 "$STAGE"
 
 for code in "$CONTENTS/MacOS/chronicle-daemon" "$STAGE"; do
-    info="$(codesign -dvv "$code" 2>&1)"
-    if ! grep -q '^Authority=Developer ID Application: ' <<<"$info"; then
-        echo "${code#"$WORK/app/"} is not signed by a Developer ID Application identity" >&2
+    name="${code#"$WORK/app/"}"
+    if ! info="$(codesign -dvv "$code" 2>&1)"; then
+        echo "Could not read the signature of $name: $info" >&2
         exit 1
     fi
-    if [ "$CONFIG" != "debug" ]; then
-        ents="$(codesign -d --entitlements - --xml "$code" 2>/dev/null)"
-        if grep -q 'com.apple.security.get-task-allow' <<<"$ents"; then
-            echo "${code#"$WORK/app/"} carries get-task-allow in a $CONFIG build" >&2
-            exit 1
-        fi
+    if ! grep -q '^Authority=Developer ID Application: ' <<<"$info"; then
+        echo "$name is not signed by a Developer ID Application identity" >&2
+        exit 1
+    fi
+    team="$(sed -n 's/^TeamIdentifier=//p' <<<"$info")"
+    if [ "$team" != "$TEAM_ID" ]; then
+        echo "$name is signed by team '$team', but the app group $APP_GROUP_ID needs team $TEAM_ID. Check CHRONICLE_SIGN_IDENTITY." >&2
+        exit 1
+    fi
+    if ! ents="$(codesign -d --entitlements - --xml "$code" 2>/dev/null)"; then
+        echo "Could not read the entitlements of $name" >&2
+        exit 1
+    fi
+    if [ "$CONFIG" != "debug" ] && grep -q 'com.apple.security.get-task-allow' <<<"$ents"; then
+        echo "$name carries get-task-allow in a $CONFIG build" >&2
+        exit 1
+    fi
+    if ! ent_problem="$(APP_GROUP_ID="$APP_GROUP_ID" /usr/bin/python3 -c 'import os, plistlib, sys
+data = sys.stdin.buffer.read()
+ents = plistlib.loads(data) if data.strip() else {}
+group = os.environ["APP_GROUP_ID"]
+if ents.get("com.apple.security.application-groups") != [group]:
+    print("does not carry exactly the app group " + group)
+elif "com.apple.security.app-sandbox" in ents:
+    print("carries com.apple.security.app-sandbox")' <<<"$ents")"; then
+        echo "Could not parse the entitlements of $name" >&2
+        exit 1
+    fi
+    if [ -n "$ent_problem" ]; then
+        echo "$name $ent_problem" >&2
+        exit 1
     fi
 done
 

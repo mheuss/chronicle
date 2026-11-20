@@ -1,10 +1,11 @@
 import Foundation
 import Observation
+import os
 
 /// Communicates with chronicle-daemon over a Unix domain socket.
 ///
 /// Protocol: newline-delimited JSON request/response.
-/// Socket path: ~/Library/Application Support/Chronicle/chronicle.sock
+/// Socket path: `DataRoot.socketName` in the directory `DataRoot.resolve` returns.
 @MainActor
 @Observable
 final class DaemonConnection {
@@ -22,15 +23,19 @@ final class DaemonConnection {
 
     // MARK: - Socket Path
 
-    static let socketPath: String = {
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first!
-        return appSupport
-            .appendingPathComponent("Chronicle")
-            .appendingPathComponent("chronicle.sock")
-            .path
+    nonisolated private static let logger = Logger(subsystem: "dev.heuss.chronicle", category: "ui")
+
+    /// A failure is logged once here. Every connect attempt then throws it, so
+    /// the UI stays in its can't-connect state.
+    static let socketPath: Result<String, DataRootError> = {
+        let resolved = DataRoot.resolve(
+            environment: ProcessInfo.processInfo.environment,
+            containerURL: { FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0) }
+        ).map { $0.appendingPathComponent(DataRoot.socketName).path }
+        if case .failure(let error) = resolved {
+            logger.error("\(error.localizedDescription, privacy: .public)")
+        }
+        return resolved
     }()
 
     // MARK: - Constants
@@ -47,7 +52,7 @@ final class DaemonConnection {
     /// Establishes a connection and returns a connected descriptor.
     ///
     /// Injected because the production path resolves `Self.socketPath`, a
-    /// static pointing at the real socket — without this seam the reconnect
+    /// static that resolves the real socket — without this seam the reconnect
     /// and teardown requirements cannot be tested.
     private let connectionFactory: @MainActor @Sendable () async throws -> Int32
 
@@ -371,7 +376,7 @@ final class DaemonConnection {
 
     /// Connects to the daemon's socket and returns the connected descriptor.
     private static func connectToDaemonSocket() async throws -> Int32 {
-        let path = Self.socketPath
+        let path = try Self.socketPath.get()
         let fd: Int32 = try await withCheckedThrowingContinuation { cont in
             DispatchQueue.global().async {
                 let fd = socket(AF_UNIX, SOCK_STREAM, 0)

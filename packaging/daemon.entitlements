@@ -4,5 +4,9 @@
 <dict>
     <key>com.apple.security.device.audio-input</key>
     <true/>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>7TJEE2YF4G.chronicle</string>
+    </array>
 </dict>
 </plist>
