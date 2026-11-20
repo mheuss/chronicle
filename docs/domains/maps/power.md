@@ -29,7 +29,7 @@
 
 ## Seams
 
-- SEAM-power-event — pipeline — power names the transition and pipeline decides what it means: a two-variant `PowerEvent` delivered fire-and-forget, since `try_send` at `power.rs:141` logs at warn and discards its error, so an event is dropped rather than queued when the bounded channel at `main.rs:382` is full — owner: power — `chronicle-daemon/src/power.rs` — `PowerEvent`
+- SEAM-power-event — pipeline — power names the transition and pipeline decides what it means: a two-variant `PowerEvent` delivered fire-and-forget, since `try_send` at `power.rs:141` logs at warn and discards its error, so an event is dropped rather than queued when the bounded `power_tx` channel in `main.rs` is full — owner: power — `chronicle-daemon/src/power.rs` — `PowerEvent`
 
 ## How The Existing Documents Saw This
 

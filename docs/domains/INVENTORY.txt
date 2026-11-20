@@ -58,6 +58,7 @@ chronicle-ui/Sources/ChronicleUI/CaptureHealth.swift
 chronicle-ui/Sources/ChronicleUI/ChronicleApp.swift
 chronicle-ui/Sources/ChronicleUI/ConnectionSession.swift
 chronicle-ui/Sources/ChronicleUI/DaemonConnection.swift
+chronicle-ui/Sources/ChronicleUI/DataRoot.swift
 chronicle-ui/Sources/ChronicleUI/Info.plist
 chronicle-ui/Sources/ChronicleUI/MenuBarIcon.swift
 chronicle-ui/Sources/ChronicleUI/ResultRow.swift

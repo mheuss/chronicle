@@ -60,7 +60,7 @@
 
 - SEAM-stage-enqueue — capture — a producer holds an `Arc<dyn OcrSink>` and enqueues through a bounded channel whose full case is a typed result rather than a block or a panic; this domain decides the trait and the outcome vocabulary, the producer decides what it sends — owner: pipeline — `chronicle-daemon/src/pipeline/sinks.rs` — `OcrSink`
 - SEAM-ocr-extraction — OCR — a blocking synchronous call taking a path and returning text, invoked from this domain's async loop through `spawn_blocking`; OCR decides the signature and the error vocabulary, this domain decides the scheduling — owner: OCR — `chronicle-daemon/src/pipeline.rs` — `ocr_loop`
-- SEAM-power-event — power — power names the transition and this domain decides what it means: a two-variant `PowerEvent` delivered fire-and-forget, since `try_send` at `power.rs:141` logs at warn and discards its error, so an event is dropped rather than queued when the bounded channel at `main.rs:382` is full — owner: power — `chronicle-daemon/src/main.rs` — `power_rx`
+- SEAM-power-event — power — power names the transition and this domain decides what it means: a two-variant `PowerEvent` delivered fire-and-forget, since `try_send` at `power.rs:141` logs at warn and discards its error, so an event is dropped rather than queued when the bounded `power_tx` channel in `main.rs` is full — owner: power — `chronicle-daemon/src/main.rs` — `power_rx`
 
 ## How The Existing Documents Saw This
 

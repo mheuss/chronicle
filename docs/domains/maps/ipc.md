@@ -2,7 +2,7 @@
 
 **Status:** Decided 2026-09-18, revised 2026-09-21, revised 2026-10-05
 **Owns:** The daemon–UI wire — the request and response vocabulary, the value types carried on it, the socket transport at both ends, the dispatch that turns a request into a response and gathers what it reports, and the rules that keep the two sides talking across a version gap.
-**Code:** `chronicle-daemon/crates/ipc/src/lib.rs`, `chronicle-daemon/crates/ipc/src/retention.rs`, `chronicle-daemon/crates/ipc/src/server.rs`, `chronicle-daemon/src/ipc_handler.rs`, `chronicle-daemon/src/media_presence.rs`, `chronicle-ui/Sources/ChronicleUI/DaemonConnection.swift`, `chronicle-ui/Sources/ChronicleUI/ConnectionSession.swift`
+**Code:** `chronicle-daemon/crates/ipc/src/lib.rs`, `chronicle-daemon/crates/ipc/src/retention.rs`, `chronicle-daemon/crates/ipc/src/server.rs`, `chronicle-daemon/src/ipc_handler.rs`, `chronicle-daemon/src/media_presence.rs`, `chronicle-ui/Sources/ChronicleUI/DaemonConnection.swift`, `chronicle-ui/Sources/ChronicleUI/ConnectionSession.swift`, `chronicle-ui/Sources/ChronicleUI/DataRoot.swift`
 
 ## Boundary
 
@@ -34,6 +34,7 @@
 - chronicle-daemon/src/media_presence.rs
 - chronicle-ui/Sources/ChronicleUI/ConnectionSession.swift
 - chronicle-ui/Sources/ChronicleUI/DaemonConnection.swift
+- chronicle-ui/Sources/ChronicleUI/DataRoot.swift
 
 ## Depends On
 
