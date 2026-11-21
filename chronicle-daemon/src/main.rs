@@ -1372,7 +1372,7 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
         // wait above can add up to 5s. The unbounded steps between them
         // (`ipc_server.shutdown`, `supervisor.shutdown`, the bridge join, the
         // audio-store await, the backfill join) are the ones with no ceiling
-        // on a clean shutdown; a poisoned one is cut off by the poison-exit
+        // on a clean shutdown; a poisoned or exit-4 one is cut off by the exit
         // watchdog. Neither is this one.
         // The three graces differ in what expiry does. The provision wait
         // aborts its task, though not a `spawn_blocking` load already running.
