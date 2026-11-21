@@ -81,7 +81,7 @@ final class MicController {
                 // After Don't Allow the intent stays off (design §2.3 step 1).
                 guard granted else { return }
                 guard permission.status == .authorized else {
-                    setMark(.rejected, micState: nil)
+                    setMark(.rejected, micState: await readMicState())
                     return
                 }
             }
@@ -156,10 +156,9 @@ final class MicController {
         return status.data.audio?.micState
     }
 
-    /// Poll until the mic state matches, for at most `pollLimit` intervals of
-    /// wall time, counting the time spent waiting for each status reply. The
-    /// last read starts at the deadline and gets one interval. Returns whether
-    /// it matched, and the last state read.
+    /// Poll until the mic state matches, for at most `pollLimit + 1` intervals
+    /// of wall time, counting the time spent waiting for each status reply.
+    /// Returns whether it matched, and the last state read.
     private func poll(until want: MicState) async -> (Bool, MicState?) {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: pollInterval * pollLimit)
@@ -199,7 +198,7 @@ final class MicController {
         }
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: limit)
-        let tick = pollInterval / 10
+        let tick = Duration.milliseconds(10)
         while true {
             if let result = slot.result { return result }
             let left = clock.now.duration(to: deadline)

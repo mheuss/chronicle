@@ -241,7 +241,7 @@ struct MicControllerTests {
         let daemon = FakeMicDaemon()
         daemon.statuses = [statusWithMic(.on)]
         daemon.holdSet = true
-        let mic = controller(daemon, reads: ["denied"])
+        let mic = controller(daemon, reads: ["denied"], pollLimit: 500)
         // A held off-toggle occupies the queue. A re-check is triggered, then
         // the user toggles again before the re-check runs.
         let first = Task { await mic.setEnabled(false) }
@@ -260,7 +260,7 @@ struct MicControllerTests {
         let daemon = FakeMicDaemon()
         daemon.statuses = [statusWithMic(.off)]
         daemon.holdSet = true
-        let mic = controller(daemon)
+        let mic = controller(daemon, pollLimit: 500)
         let toggle = Task { await mic.setEnabled(false) }
         #expect(await eventually { !daemon.log.isEmpty })
         let a = Task { await mic.recheck() }
@@ -355,7 +355,7 @@ struct MicControllerTests {
         let daemon = FakeMicDaemon()
         daemon.statuses = [statusWithMic(.off)]
         daemon.holdSet = true
-        let mic = controller(daemon)
+        let mic = controller(daemon, pollLimit: 500)
         #expect(!mic.isBusy)
         let toggle = Task { await mic.setEnabled(false) }
         #expect(await eventually { !daemon.log.isEmpty })
@@ -369,7 +369,7 @@ struct MicControllerTests {
         let daemon = FakeMicDaemon()
         daemon.statuses = [statusWithMic(.on)]
         daemon.holdSet = true
-        let mic = controller(daemon, reads: ["denied"])
+        let mic = controller(daemon, reads: ["denied"], pollLimit: 500)
         let running = Task { await mic.recheck() }
         #expect(await eventually { daemon.log.contains("set(false)") })
         // The first re-check is past its start, so this one must not merge.
@@ -384,7 +384,16 @@ struct MicControllerTests {
         let daemon = FakeMicDaemon()
         let mic = controller(daemon, reads: ["not_determined", "not_determined"], granted: true)
         await mic.setEnabled(true)
-        #expect(daemon.log.isEmpty)
+        #expect(daemon.log == ["status"])
+        #expect(mic.mark == .rejected)
+    }
+
+    @Test func rejectedAfterAllowSurvivesARecheckThatFindsNoChange() async {
+        let daemon = FakeMicDaemon()
+        daemon.statuses = [statusWithMic(.off)]
+        let mic = controller(daemon, reads: ["not_determined", "not_determined", "not_determined"], granted: true)
+        await mic.setEnabled(true)
+        await mic.recheck()
         #expect(mic.mark == .rejected)
     }
 
@@ -421,7 +430,7 @@ struct MicControllerTests {
         daemon.statuses = [statusWithMic(.on)]
         daemon.release()
         await mic.recheck()
-        #expect(await eventually { daemon.log.last == "status" })
+        #expect(daemon.log == ["set(true)", "status"])
         #expect(mic.mark == .none)
     }
 }

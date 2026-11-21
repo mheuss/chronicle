@@ -37,8 +37,9 @@ struct MicRowState: Equatable {
         }
         switch permission {
         case .unavailable:
-            // The daemon reports `on` only after its own fresh read, so a
-            // failed UI read must not hide a live mic.
+            // A failed UI read must not hide a live mic. The daemon's `on` is
+            // as fresh as its last start or re-check, so a revoke since then
+            // can still show as on here.
             return disabled(
                 "Chronicle couldn't check microphone access. Close and reopen Settings to check again.",
                 isOn: micState == .on)
