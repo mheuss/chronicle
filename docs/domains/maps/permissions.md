@@ -38,7 +38,7 @@
 
 ## Seams
 
-- SEAM-permission-wire — IPC — permissions owns the grant vocabulary and IPC owns what the UI is told; no grant state crosses the wire as itself, and the only trace of one is `permission_denied`, the reply to a microphone start the gate refused on a `PermissionRead` other than `Authorized`, after which Status reports `off` — owner: permissions — `chronicle-daemon/src/permissions.rs` — `PermissionRead`
+- SEAM-permission-wire — IPC — permissions owns the grant vocabulary and IPC owns what the UI is told. No grant state crosses the wire as itself. The only trace of one is `permission_denied`. It is the reply to a microphone start the gate refused on a `PermissionRead` other than `Authorized`. Status then reports `off`. — owner: permissions — `chronicle-daemon/src/permissions.rs` — `PermissionRead`
 
 ## How The Existing Documents Saw This
 
