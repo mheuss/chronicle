@@ -9,8 +9,8 @@
 //!
 //! [`set_microphone_enabled`]: AudioPipeline::set_microphone_enabled
 
-use std::sync::Arc;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 
 use dispatch2::DispatchQueue;
@@ -32,6 +32,12 @@ pub enum MicToggleOutcome {
     Failed { reason: String },
 }
 
+/// Builds a microphone path from an encoding-channel sender and the shared
+/// drop counters. Production uses `MicrophoneCapture::new`.
+type MicFactory = Box<
+    dyn Fn(mpsc::SyncSender<AudioMessage>, Arc<AudioDropCounters>) -> Result<MicrophoneCapture>,
+>;
+
 /// Audio encoding pipeline.
 ///
 /// Owns the ObjC handler, dispatch queue, microphone capture path, and
@@ -40,8 +46,8 @@ pub enum MicToggleOutcome {
 /// The encoding thread converts raw PCM into Opus segments and sends them
 /// over a channel.
 ///
-/// The encoding channel has three senders — the ObjC handler (system audio),
-/// the [`MicrophoneCapture`] tap, and `flush_tx`. Calling `stop()` drops all
+/// The encoding channel has up to three senders — the ObjC handler (system
+/// audio), the [`MicrophoneCapture`] tap while one is built, and `flush_tx`. Calling `stop()` drops all
 /// three, which closes the channel and lets the encoding thread flush and
 /// exit. The borrow checker prevents `stop()` from being called while an
 /// `AudioHandlerToken` is outstanding.
@@ -49,9 +55,12 @@ pub struct AudioPipeline {
     handler: Option<Retained<AudioOutputHandler>>,
     queue: Retained<DispatchQueue>,
     encoding_thread: Option<JoinHandle<()>>,
-    /// Dedicated microphone capture path. `None` if AVAudioEngine setup failed
-    /// at `create` — the microphone is a soft feature.
-    microphone: Option<MicrophoneCapture>,
+    /// Dedicated microphone capture path. Empty until the first enable builds
+    /// it, and emptied again by [`drop_microphone`](Self::drop_microphone).
+    /// Building it reads the input node, which raises the TCC prompt once the
+    /// UI carries the audio-input entitlement (design §1.1).
+    microphone: Mutex<Option<MicrophoneCapture>>,
+    mic_factory: MicFactory,
     /// A clone of the encoding-channel sender, kept so a disable can send
     /// `AudioMessage::FlushMic`. `None` after `stop()`.
     flush_tx: Option<mpsc::SyncSender<AudioMessage>>,
@@ -104,6 +113,13 @@ impl AudioPipeline {
     /// borrow-based `AudioHandlerToken` via `token()` and passes it to
     /// `chronicle-capture::CaptureEngine::start` for SCStream registration.
     pub fn create(config: AudioConfig) -> Result<(Self, mpsc::Receiver<CompletedSegment>)> {
+        Self::create_with_mic_factory(config, Box::new(MicrophoneCapture::new))
+    }
+
+    fn create_with_mic_factory(
+        config: AudioConfig,
+        mic_factory: MicFactory,
+    ) -> Result<(Self, mpsc::Receiver<CompletedSegment>)> {
         let (segment_tx, segment_rx) = mpsc::channel::<CompletedSegment>();
         let (buffer_tx, buffer_rx) = mpsc::sync_channel::<AudioMessage>(64);
 
@@ -111,23 +127,9 @@ impl AudioPipeline {
 
         let drop_counters = Arc::new(AudioDropCounters::default());
 
-        // The encoding channel now has three senders: the ObjC handler, the
-        // microphone tap, and `flush_tx`. Clone for the first two; keep the
-        // original as `flush_tx`.
+        // Clone one sender for the handler and keep the original as
+        // `flush_tx`. The microphone tap gets its clone when it is built.
         let handler = AudioOutputHandler::new(buffer_tx.clone(), Arc::clone(&drop_counters));
-
-        // Build the microphone path eagerly. AVAudioEngine setup is plain-
-        // thread-safe and does not touch the microphone, so a `&self` toggle
-        // needs no interior mutability. A setup failure is soft: store `None`
-        // and the mic stays unavailable.
-        let microphone = match MicrophoneCapture::new(buffer_tx.clone(), Arc::clone(&drop_counters))
-        {
-            Ok(mic) => Some(mic),
-            Err(e) => {
-                log::warn!("microphone capture unavailable: {e}");
-                None
-            }
-        };
 
         // DispatchQueue::new returns dispatch2::Queue, .into() converts to
         // Retained<DispatchQueue> for objc2 interop.
@@ -138,7 +140,8 @@ impl AudioPipeline {
             handler: Some(handler),
             queue,
             encoding_thread: Some(encoding_thread),
-            microphone,
+            microphone: Mutex::new(None),
+            mic_factory,
             flush_tx: Some(buffer_tx),
             drop_counters,
         };
@@ -166,16 +169,14 @@ impl AudioPipeline {
     /// Every operation here is `&self` — `MicrophoneCapture`'s methods and
     /// `SyncSender::try_send` both take `&self`. See design §2.3.
     pub fn set_microphone_enabled(&self, enabled: bool) -> MicToggleOutcome {
-        let Some(mic) = self.microphone.as_ref() else {
-            // No mic path (AVAudioEngine setup failed). The microphone is not
-            // capturing, so a disable is a satisfied no-op; only an enable fails.
-            return if enabled {
-                MicToggleOutcome::Failed {
-                    reason: "microphone path unavailable".into(),
-                }
-            } else {
-                MicToggleOutcome::Disabled
-            };
+        let mut slot = self.mic_slot();
+        if enabled && let Err(reason) = self.fill_mic_slot(&mut slot) {
+            return MicToggleOutcome::Failed { reason };
+        }
+        let Some(mic) = slot.as_ref() else {
+            // Never built, so the microphone is not capturing: a disable is a
+            // satisfied no-op.
+            return MicToggleOutcome::Disabled;
         };
         // Idempotent — single fact: the engine is running or it is not.
         if enabled && mic.is_running() {
@@ -217,6 +218,40 @@ impl AudioPipeline {
         }
     }
 
+    /// Stop the microphone if it runs, then drop its engine, so the next
+    /// enable builds a new one (design §1.1). Returns the stop's outcome.
+    pub fn drop_microphone(&self) -> MicToggleOutcome {
+        let outcome = self.set_microphone_enabled(false);
+        *self.mic_slot() = None;
+        outcome
+    }
+
+    fn mic_slot(&self) -> MutexGuard<'_, Option<MicrophoneCapture>> {
+        self.microphone
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Build the microphone path into `slot` if it is empty. Fails after
+    /// `stop()`, when no encoding-channel sender is left to hand it.
+    fn fill_mic_slot(
+        &self,
+        slot: &mut Option<MicrophoneCapture>,
+    ) -> std::result::Result<(), String> {
+        if slot.is_some() {
+            return Ok(());
+        }
+        let tx = self
+            .flush_tx
+            .as_ref()
+            .ok_or_else(|| "audio pipeline is stopped".to_string())?
+            .clone();
+        let mic =
+            (self.mic_factory)(tx, Arc::clone(&self.drop_counters)).map_err(|e| e.to_string())?;
+        *slot = Some(mic);
+        Ok(())
+    }
+
     /// Finalize the system accumulator's partial segment now. Sent when capture
     /// stops (system sleep or IPC pause; display sleep is CHR-57) so a
     /// later restart does not
@@ -248,13 +283,17 @@ impl AudioPipeline {
     pub fn stop(&mut self) -> Result<()> {
         // Stop the microphone engine so the OS microphone is released
         // synchronously. Best-effort — a stop error must not block shutdown.
-        if let Some(mic) = &self.microphone {
+        let slot = self
+            .microphone
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(mic) = slot.as_ref() {
             let _ = mic.stop();
         }
 
         // Drop every encoding-channel sender so the encoding thread can exit.
         // If any sender survived, `recv()` would never return `Err`.
-        self.microphone = None;
+        *slot = None;
         self.flush_tx = None;
         self.handler = None;
 
@@ -359,6 +398,7 @@ fn run_encoding_loop(
 mod tests {
     use super::*;
     use crate::handler::AudioBuffer;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn drop_counters_handle_shares_one_allocation() {
@@ -391,17 +431,20 @@ mod tests {
         // MicrophoneCapture compiles and counts where nothing reads — which
         // would silently lose exactly the mic drop burst CHR-53 reports.
         //
-        // Conditional, because `create` treats a mic setup failure as soft and
-        // stores `None`: on a host with no input device, `AVAudioConverter::
-        // initFromFormat_toFormat` (microphone.rs:252-259) returns nil against
-        // a zero-channel native format and `new` returns `Err`. Asserting
-        // unconditionally would fail such a host for behaving as designed.
+        // Build the microphone the way the first enable would. Conditional,
+        // because a build failure is soft and leaves the slot empty: on a host
+        // with no input device, `AVAudioConverter::initFromFormat_toFormat`
+        // (microphone.rs:252-259) returns nil against a zero-channel native
+        // format and `new` returns `Err`. Asserting unconditionally would fail
+        // such a host for behaving as designed.
         //
         // Skipping the assertion there costs nothing: no `Err` means no
         // `MicrophoneCapture`, so no tap block was constructed and there is no
         // wrong-capture bug for the skip to hide. The count below is what keeps
         // this honest on every host that DOES have a device.
-        if let Some(mic) = pipeline.microphone.as_ref() {
+        let mut slot = pipeline.mic_slot();
+        let _ = pipeline.fill_mic_slot(&mut slot);
+        if let Some(mic) = slot.as_ref() {
             assert!(
                 Arc::ptr_eq(&counters, mic.counters()),
                 "mic tap must share the pipeline's counters, not its own"
@@ -424,7 +467,7 @@ mod tests {
         // Do not replace this with a bare `5` and do not move it behind
         // `#[ignore]`: both were tried, and both stop it catching the mutation
         // it exists for on the machines that actually run the suite.
-        let expected = 3 + 2 * usize::from(pipeline.microphone.is_some());
+        let expected = 3 + 2 * usize::from(slot.is_some());
         assert_eq!(
             Arc::strong_count(&counters),
             expected,
@@ -432,6 +475,7 @@ mod tests {
              something (most likely the tap block) was handed a different \
              allocation"
         );
+        drop(slot);
     }
 
     #[test]
@@ -739,45 +783,78 @@ mod tests {
         assert!(pipeline.token(48_000, 1).is_none());
     }
 
-    /// Build a pipeline whose `microphone` field is `None` — the soft-failure
-    /// state a pipeline lands in when `AVAudioEngine` setup fails at `create`.
-    ///
-    /// Goes through the real `create` so `queue`, `encoding_thread`, and
-    /// `flush_tx` are all correctly initialized, then overrides only the one
-    /// field these tests need to control. A struct literal would have to
-    /// hand-build the queue and encoding thread, duplicating `create`.
-    fn pipeline_without_mic() -> AudioPipeline {
+    /// A pipeline whose microphone factory always fails and counts its calls.
+    /// Stands in for a host where `AVAudioEngine` setup fails, without
+    /// needing audio hardware.
+    fn pipeline_with_failing_mic() -> (AudioPipeline, Arc<AtomicUsize>) {
         let dir = tempfile::tempdir().unwrap();
         let config = AudioConfig {
             segment_duration_secs: 30,
             bitrate: 64_000,
             output_dir: dir.path().to_path_buf(),
         };
-        let (mut pipeline, _segment_rx) = AudioPipeline::create(config).unwrap();
-        pipeline.microphone = None;
-        pipeline
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        let factory: MicFactory = Box::new(move |_, _| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            Err(AudioError::Microphone("no input device".into()))
+        });
+        let (pipeline, _rx) = AudioPipeline::create_with_mic_factory(config, factory).unwrap();
+        (pipeline, calls)
     }
 
     #[test]
-    fn set_mic_enabled_returns_failed_when_no_mic_path() {
-        let mut pipeline = pipeline_without_mic();
-        match pipeline.set_microphone_enabled(true) {
-            MicToggleOutcome::Failed { .. } => {}
-            other => panic!("expected Failed with no mic path, got {other:?}"),
-        }
-        pipeline.stop().expect("pipeline should stop cleanly");
+    fn create_does_not_build_the_microphone() {
+        let (mut pipeline, calls) = pipeline_with_failing_mic();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(pipeline.mic_slot().is_none());
+        pipeline.stop().unwrap();
     }
 
     #[test]
-    fn set_mic_enabled_disabled_when_no_mic_path() {
-        // With no mic engine the microphone is not capturing, so a disable is
-        // a satisfied no-op.
-        let mut pipeline = pipeline_without_mic();
+    fn disable_never_builds_the_microphone() {
+        let (mut pipeline, calls) = pipeline_with_failing_mic();
         assert_eq!(
             pipeline.set_microphone_enabled(false),
             MicToggleOutcome::Disabled
         );
-        pipeline.stop().expect("pipeline should stop cleanly");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        pipeline.stop().unwrap();
+    }
+
+    #[test]
+    fn failed_build_returns_failed_and_is_retried() {
+        let (mut pipeline, calls) = pipeline_with_failing_mic();
+        assert!(matches!(
+            pipeline.set_microphone_enabled(true),
+            MicToggleOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            pipeline.set_microphone_enabled(true),
+            MicToggleOutcome::Failed { .. }
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(pipeline.mic_slot().is_none());
+        pipeline.stop().unwrap();
+    }
+
+    #[test]
+    fn drop_microphone_on_an_empty_slot_is_disabled() {
+        let (mut pipeline, calls) = pipeline_with_failing_mic();
+        assert_eq!(pipeline.drop_microphone(), MicToggleOutcome::Disabled);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        pipeline.stop().unwrap();
+    }
+
+    #[test]
+    fn enable_after_stop_fails_without_building() {
+        let (mut pipeline, calls) = pipeline_with_failing_mic();
+        pipeline.stop().unwrap();
+        assert!(matches!(
+            pipeline.set_microphone_enabled(true),
+            MicToggleOutcome::Failed { .. }
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -819,19 +896,17 @@ mod tests {
             output_dir: dir.path().to_path_buf(),
         };
         let (mut pipeline, _segment_rx) = AudioPipeline::create(config).unwrap();
-        let mic = pipeline
-            .microphone
-            .as_ref()
-            .expect("microphone path should be available on a real Mac");
-
-        assert!(!mic.is_running(), "mic should not run before enable");
+        assert!(
+            pipeline.mic_slot().is_none(),
+            "create must not build the mic"
+        );
 
         assert_eq!(
             pipeline.set_microphone_enabled(true),
             MicToggleOutcome::Enabled
         );
         assert!(
-            pipeline.microphone.as_ref().unwrap().is_running(),
+            pipeline.mic_slot().as_ref().unwrap().is_running(),
             "mic should run after enable"
         );
 
@@ -840,16 +915,19 @@ mod tests {
             pipeline.set_microphone_enabled(true),
             MicToggleOutcome::Enabled
         );
-        assert!(pipeline.microphone.as_ref().unwrap().is_running());
+        assert!(pipeline.mic_slot().as_ref().unwrap().is_running());
 
         assert_eq!(
             pipeline.set_microphone_enabled(false),
             MicToggleOutcome::Disabled
         );
         assert!(
-            !pipeline.microphone.as_ref().unwrap().is_running(),
+            !pipeline.mic_slot().as_ref().unwrap().is_running(),
             "mic should not run after disable"
         );
+
+        assert_eq!(pipeline.drop_microphone(), MicToggleOutcome::Disabled);
+        assert!(pipeline.mic_slot().is_none(), "drop must empty the slot");
 
         pipeline.stop().unwrap();
     }

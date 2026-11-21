@@ -105,8 +105,8 @@ fn common_format_name(format: AVAudioCommonFormat) -> String {
 /// Microphone capture driven by an `AVAudioEngine` input-node tap.
 ///
 /// Construction installs the tap and prepares the engine but does not start
-/// it — no microphone access and no TCC prompt happen until [`start`]. The
-/// tap normalizes each buffer to mono/48 kHz/f32 and forwards it over the
+/// it, so no audio is captured until [`start`]. Construction does read the
+/// input node, which TCC checks. The tap normalizes each buffer to mono/48 kHz/f32 and forwards it over the
 /// encoding channel as [`AudioMessage::Buffer`].
 ///
 /// Dropping `MicrophoneCapture` releases the `AVAudioEngine`, which tears the
@@ -142,7 +142,9 @@ impl MicrophoneCapture {
     /// Production capture: builds the engine, installs the input-node tap and
     /// `prepare()`s it. The tap forwards mono 48 kHz buffers on `buffer_tx`.
     ///
-    /// Does **not** start capture — no microphone access, no TCC prompt. Any
+    /// Does **not** start capture. It does read the input node, which raises
+    /// the TCC prompt when permission is undetermined and the app carries the
+    /// audio-input entitlement, so callers build it only after a grant. Any
     /// AVFoundation setup failure returns [`AudioError`] rather than panicking
     /// so callers can treat a microphone-setup failure as soft.
     ///
@@ -159,7 +161,8 @@ impl MicrophoneCapture {
             let engine = unsafe { AVAudioEngine::new() };
 
             // SAFETY: inputNode is the engine's singleton input node. Reading
-            // it before start does not yet engage the microphone hardware.
+            // it before start does not engage the microphone hardware, but it
+            // is the call TCC checks.
             let input = unsafe { engine.inputNode() };
 
             // The device's native input format. Hardware-dependent — may be
@@ -627,7 +630,7 @@ mod tests {
     /// Run a synthetic 44.1 kHz mono buffer through `convert_to_mono_samples`
     /// with a real `AVAudioConverter`. Building an `AVAudioPCMBuffer` and an
     /// `AVAudioConverter` touches no hardware and triggers no TCC prompt —
-    /// only starting an `AVAudioEngine` does — so this is a regular test.
+    /// only an `AVAudioEngine`'s input node does — so this is a regular test.
     #[cfg(target_os = "macos")]
     #[test]
     fn convert_resamples_44100_to_48000() {
