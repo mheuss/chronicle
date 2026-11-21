@@ -1152,3 +1152,13 @@ what was true during the walk, not of the tree today.
 
   This is the third review round in a row where most findings were in the gate
   rather than the map.
+
+- **[2026-11-21] `SEAM-permission-wire` re-described: grant states now cross
+  the wire.** CHR-97 adds a `permissions` block to Status. Each read is a
+  `chronicle_ipc::PermissionState`, mapped from `PermissionRead` only by
+  `ipc_handler::wire_permission`. CHR-96 adds `permission_denied` as a capture
+  state while the Screen Recording gate keeps capture off. The 2026-09-21
+  entry's "No grant state crosses the wire as itself" is no longer true. The
+  seam now names both crossings and keeps the microphone reply. Owner stays
+  `permissions`, and the symbol columns are unchanged. `power.md`'s outside
+  bullet now cites `mark_system_asleep`, since `set_system_asleep` was deleted.

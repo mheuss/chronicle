@@ -2,7 +2,7 @@
 
 **Status:** Decided 2026-09-16, revised 2026-09-18, revised 2026-11-21
 **Owns:** Turning connected displays into encoded frames, and deciding when that should be happening.
-**Code:** `chronicle-daemon/crates/capture/src/`, plus `src/capture_runtime.rs`, `src/capture_supervisor.rs` and `src/mic_gate.rs`
+**Code:** `chronicle-daemon/crates/capture/src/`, plus `src/capture_runtime.rs`, `src/capture_supervisor.rs`, `src/mic_gate.rs` and `src/permission_gate.rs`
 
 ## Boundary
 
@@ -13,6 +13,7 @@
 - inside: deciding whether capture should be running, and retrying a failed start — `chronicle-daemon/src/capture_supervisor.rs` — `CaptureSupervisor`
 - inside: deciding whether a microphone start may go ahead on a fresh permission read — `chronicle-daemon/src/mic_gate.rs` — `apply_mic_intent`
 - inside: clearing the saved intent when a start is refused for a missing grant — `chronicle-daemon/src/mic_gate.rs` — `apply_mic_intent`
+- inside: deciding the Screen Recording gate from each read — `chronicle-daemon/src/permission_gate.rs` — `SrGate`
 - outside: what happens to a frame after it leaves the channel — `chronicle-daemon/src/pipeline/sinks.rs` — `AppMetadata`
 - outside: reporting engine state over the wire — `chronicle-daemon/src/ipc_handler.rs` — `EngineState`
 - outside: the audio pipeline the supervisor reconciles alongside capture — `chronicle-daemon/crates/audio/src/lib.rs` — `AudioPipeline`
@@ -34,6 +35,7 @@
 - chronicle-daemon/src/capture_runtime.rs
 - chronicle-daemon/src/capture_supervisor.rs
 - chronicle-daemon/src/mic_gate.rs
+- chronicle-daemon/src/permission_gate.rs
 
 ## Depends On
 

@@ -133,7 +133,7 @@ the grant. The signature names the identifier and team instead of the code hash.
 
 1. Open System Settings > Privacy & Security > Screen & System Audio Recording.
    Remove any old `chronicle-daemon` or `Chronicle` entry with the − button.
-2. The daemon checks Screen Recording at startup and exits when it's missing.
+2. Without Screen Recording the daemon runs with capture off.
    It doesn't show a prompt. So add the app by hand: click +, press
    Cmd-Shift-G, paste the full path to the repo's `dist/Chronicle.app`, and
    click Open. Turn the new entry on. An entry for `chronicle-daemon` itself

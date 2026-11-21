@@ -90,10 +90,12 @@ macOS Control Center won't register a menu bar icon for a loose executable.
    login. A copy opened from anywhere else does not register itself. Its
    Settings toggle still reads on. Switch it off and back on to register
    that copy.
-2. Grant Screen Recording: System Settings → Privacy & Security → Screen &
-   System Audio Recording. Click +, choose Chronicle.app in Applications,
-   and choose Later when macOS offers to quit it. Until you do, the daemon
-   exits at startup. launchd retries it every 30 s.
+2. Grant Screen Recording. Chronicle shows a dialog when it's missing. Click
+   Open System Settings, then turn on Chronicle under Privacy & Security →
+   Screen & System Audio Recording. If Chronicle isn't in the list, click +,
+   then choose Chronicle. Capture starts a few seconds later. Chronicle keeps
+   running without the permission. Search still works for anything already
+   saved.
 3. When capture starts, macOS asks whether "dev.heuss.chronicle.daemon" may
    bypass the private window picker. That is Chronicle's capture process.
    Click Allow.

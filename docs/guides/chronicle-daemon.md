@@ -67,9 +67,10 @@ flowchart TD
    "another chronicle-daemon is already running" if another daemon holds it.
 5. `checked_socket_path()` — fails startup when `ipc.sock` under the data
    root would be longer than the 103 bytes a Unix socket address holds.
-6. `permissions::preflight()` — checks Screen Recording (hard gate) and
-   Microphone (informational). Exits with an actionable error if Screen
-   Recording is denied.
+6. `permissions::preflight()` — reads Screen Recording and Microphone and
+   logs both. A missing Screen Recording grant sets the supervisor's
+   `sr_denied` gate. The daemon keeps running and serves search. Capture
+   starts once a helper read says the grant is there (CHR-96).
 7. `Storage::open()` — opens/migrates SQLite database
 8. `storage.sweep_orphans()` — the startup orphan sweep. It walks the media
    directory and deletes files that have no database row. It runs before
@@ -169,8 +170,12 @@ critical path. OCR already runs behind the main ingestion loop, and any future
 transcription work should follow the same pattern.
 
 **Permission preflight:** Screen Recording is required for all ScreenCaptureKit
-functionality (both screen capture and audio). Microphone is optional — mic
-capture is off by default and toggled from the UI.
+functionality (both screen capture and audio). Without it the daemon runs with
+capture off. `PermissionMonitor` re-reads both permissions through the
+`--permission-status` helper (ADR-022). It reads every 2 s while Screen
+Recording is missing or unconfirmed. It reads every 5 s while it is granted.
+It does not read while the Mac is asleep or capture is paused. Microphone is
+optional. Mic capture is off by default and is toggled from the UI.
 
 ## Diagnosing a Microphone
 
@@ -296,8 +301,8 @@ tells you which device is selected.
 ### Adding a new permission check
 
 1. Add a status enum and FFI call in `permissions.rs`
-2. Call it from `preflight()` — decide hard gate vs informational
-3. Log the status at the appropriate level (info for ok, error for denied)
+2. Add a `--permission-status` arm for it, so decisions after boot use a fresh read (ADR-022)
+3. Decide whether it gates capture. A gate belongs in `CaptureSupervisor`, never in an exit from `preflight()`
 
 ### Adding a new crate to the workspace
 

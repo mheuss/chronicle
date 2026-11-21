@@ -44,6 +44,8 @@ chronicle-daemon/src/logging.rs
 chronicle-daemon/src/main.rs
 chronicle-daemon/src/media_presence.rs
 chronicle-daemon/src/mic_gate.rs
+chronicle-daemon/src/permission_gate.rs
+chronicle-daemon/src/permission_monitor.rs
 chronicle-daemon/src/permissions.rs
 chronicle-daemon/src/pipeline.rs
 chronicle-daemon/src/pipeline/backfill.rs
