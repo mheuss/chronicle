@@ -3,11 +3,18 @@ import AppKit
 
 @main
 struct ChronicleApp: App {
-    @State private var connection = DaemonConnection()
+    @State private var connection: DaemonConnection
+    @State private var mic: MicController
     @State private var startupAlert = StartupAlertState()
     @State private var transcriptionAlert = TranscriptionAlertState()
     @State private var searchFilter = SearchFilterState()
     @State private var background = BackgroundService()
+
+    init() {
+        let connection = DaemonConnection()
+        _connection = State(initialValue: connection)
+        _mic = State(initialValue: MicController(daemon: connection))
+    }
 
     var body: some Scene {
         MenuBarExtra {
@@ -25,6 +32,7 @@ struct ChronicleApp: App {
                 .onReceive(NotificationCenter.default.publisher(
                     for: NSApplication.didBecomeActiveNotification)) { _ in
                     Task { await background.reconcileOnLaunch() }
+                    Task { await mic.recheck() }
                 }
         }
         .menuBarExtraStyle(.window)
@@ -33,6 +41,7 @@ struct ChronicleApp: App {
             SettingsView()
                 .environment(connection)
                 .environment(background)
+                .environment(mic)
                 // Settings is a provision entry point too, so it needs to be
                 // able to spend a stale dismissal — see
                 // `TranscriptionAlertState.provisionRequested()`.

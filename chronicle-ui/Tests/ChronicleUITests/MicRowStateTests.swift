@@ -25,7 +25,7 @@ struct MicRowStateTests {
 
     @Test func unavailable() {
         #expect(row(.unavailable, statusWithMic(.on))
-            == disabled("Chronicle couldn't check microphone access. It will try again."))
+            == disabled("Chronicle couldn't check microphone access. Close and reopen Settings to check again."))
     }
 
     @Test func denied() {

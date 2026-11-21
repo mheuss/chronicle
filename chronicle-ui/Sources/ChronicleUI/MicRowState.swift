@@ -37,7 +37,7 @@ struct MicRowState: Equatable {
         }
         switch permission {
         case .unavailable:
-            return disabled("Chronicle couldn't check microphone access. It will try again.")
+            return disabled("Chronicle couldn't check microphone access. Close and reopen Settings to check again.")
         case .denied:
             return disabled(
                 "Chronicle doesn't have microphone access. Turn it on in System Settings → Privacy & Security → Microphone.",

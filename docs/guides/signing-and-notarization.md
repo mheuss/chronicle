@@ -138,11 +138,13 @@ the grant. The signature names the identifier and team instead of the code hash.
    Cmd-Shift-G, paste the full path to the repo's `dist/Chronicle.app`, and
    click Open. Turn the new entry on. On macOS 27, an entry for
    `chronicle-daemon` itself had no effect.
-3. The microphone can't be granted under launchd yet. Nothing in Chronicle asks
-   macOS for mic access. The Microphone list has no + button. The startup log
-   shows `Microphone permission: NotDetermined`. The mic records silence. A
-   daemon started from Terminal can record the mic, but it writes to its own
-   `CHRONICLE_DATA_DIR`. The installed app doesn't see that data.
+3. For the microphone, open Chronicle's Settings and turn on "Record the
+   microphone". The first time, macOS asks for mic access. The grant goes to
+   `Chronicle.app`, because the app carries the audio-input entitlement, and the
+   daemon under launchd uses it. If you click Don't Allow, the toggle stays off.
+   The row then offers a button that opens Privacy & Security > Microphone. The
+   Microphone list has no + button, so this prompt is the only way to add
+   Chronicle.
 
 ## Troubleshooting
 
