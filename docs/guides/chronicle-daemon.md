@@ -229,8 +229,8 @@ cargo run --bin chronicle-daemon
 The variable is required here. macOS refuses a daemon started from Terminal in
 the App Group container. See Data location in the README.
 
-The `cargo run` command does not exit on its own — the shell waits on `cargo`,
-so Ctrl-C once you have the line.
+The `cargo run` command does not exit on its own. The shell waits on `cargo`.
+Press Ctrl-C once you have the line.
 
 The bundled UI can't reach this daemon's socket, so turn the mic on from a
 second shell:
@@ -327,7 +327,7 @@ dev-dependency for `OggOpusEncoder`. It takes `chronicle-storage` as one for
 
 The Swift UI (`chronicle-ui`) communicates with the daemon over a Unix socket.
 It does not depend on the daemon as a library. It talks to it over the IPC
-protocol, and it runs the bundled daemon binary as
+protocol. It also runs the bundled daemon binary as
 `chronicle-daemon --permission-status microphone` for a fresh permission read.
 
 ## Building
