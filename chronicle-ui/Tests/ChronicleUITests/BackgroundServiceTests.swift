@@ -76,6 +76,27 @@ final class BackgroundServiceTests {
                           fingerprint: fingerprint, isInApplicationsFolder: inApplications)
     }
 
+    @Test func enablingCallsTheHookAndRecordsTheStart() async {
+        let agent = FakeLoginService("agent", log: log)
+        let app = FakeLoginService("app", log: log)
+        let service = make(agent: agent, mainApp: app)
+        var hooks = 0
+        service.onEnabled = { hooks += 1 }
+        await service.setEnabled(false)
+        #expect(service.enabledSince == nil)
+        #expect(hooks == 0, "turning it off calls no hook")
+        await service.setEnabled(true)
+        #expect(hooks == 1)
+        #expect(service.enabledSince != nil)
+    }
+
+    @Test func launchWithBackgroundOnStartsTheWindow() {
+        let service = make(agent: FakeLoginService("agent", log: log),
+                           mainApp: FakeLoginService("app", log: log))
+        #expect(service.isEnabled)
+        #expect(service.enabledSince != nil)
+    }
+
     @Test func launchRegistersEachUnregisteredService() async {
         let agent = FakeLoginService("agent", log: log)
         let app = FakeLoginService("app", log: log)

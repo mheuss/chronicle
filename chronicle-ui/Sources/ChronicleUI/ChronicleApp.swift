@@ -26,6 +26,7 @@ struct ChronicleApp: App {
         } label: {
             MenuBarIcon(connection: connection)
                 .task {
+                    background.onEnabled = { connection.reconnectNow() }
                     connection.connect()
                     await background.reconcileOnLaunch()
                 }

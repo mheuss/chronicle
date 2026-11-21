@@ -79,3 +79,14 @@ enum CaptureAvailability: Equatable, Hashable, CaseIterable {
         }
     }
 }
+
+extension DaemonConnection {
+    /// The availability for this connection and the background setting.
+    func availability(background: BackgroundService, now: Date = .now) -> CaptureAvailability {
+        CaptureAvailability.classify(
+            connection: state, status: currentStatus,
+            backgroundEnabled: background.isEnabled,
+            startingSince: background.enabledSince,
+            replyOverdue: replyOverdue, now: now)
+    }
+}

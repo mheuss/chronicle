@@ -33,6 +33,13 @@ final class BackgroundService {
     private(set) var lastError: String?
     private(set) var isBusy = false
     private(set) var isEnabled: Bool
+    /// When background capture was last turned on, or app launch if it was
+    /// already on. Starts the 60 s "starting" window while the daemon is not
+    /// connected (design §6.1).
+    private(set) var enabledSince: Date?
+    /// Called after an enable finishes. `ChronicleApp` points it at
+    /// `DaemonConnection.reconnectNow` (design §6.4).
+    @ObservationIgnored var onEnabled: (@MainActor () -> Void)?
 
     init(agent: LoginService? = nil,
          mainApp: LoginService? = nil,
@@ -47,6 +54,7 @@ final class BackgroundService {
         self.isInApplicationsFolder = isInApplicationsFolder ?? Self.bundleIsInApplicationsFolder()
         self.agentStatus = agent.status
         self.isEnabled = defaults.object(forKey: Self.enabledKey) as? Bool ?? true
+        self.enabledSince = isEnabled ? Date() : nil
     }
 
     func reconcileOnLaunch() async {
@@ -57,6 +65,8 @@ final class BackgroundService {
         isEnabled = on
         defaults.set(on, forKey: Self.enabledKey)
         await enqueue(allowOutsideApplications: true)
+        enabledSince = on ? Date() : nil
+        if on { onEnabled?() }
     }
 
     func refreshStatus() {
