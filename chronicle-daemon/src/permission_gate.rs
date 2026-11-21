@@ -1,5 +1,5 @@
 //! Pure decisions for the permission monitor's reads (design §3, §4).
-//! The event loop calls these. Nothing here touches the supervisor, the
+//! Written for the event loop's permission arms. Nothing here touches the supervisor, the
 //! audio pipeline or the settings file.
 
 use std::future::Future;
@@ -385,7 +385,8 @@ mod tests {
 
     /// CHR-95's gate result for one call when every audio pipeline call
     /// succeeds: the atom it stores and whether it keeps the saved intent.
-    /// A failed start or drop stores Error instead, which this model omits.
+    /// A failed start, or a failed drop on a plain stop, stores Error instead,
+    /// which this model omits.
     fn gate_result(read: PermissionRead, intent: bool, running: bool) -> (MicState, bool) {
         let missing = matches!(read, Denied | Restricted | NotDetermined);
         let atom = if read == Authorized && intent && running {

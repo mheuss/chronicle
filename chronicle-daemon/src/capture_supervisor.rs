@@ -72,7 +72,7 @@ pub struct Gates {
     pub system_asleep: bool,
     pub sr_denied: bool,
     pub sr_stale: bool,
-    /// Adds 1 on every entry to Idle (design §1.2).
+    /// The supervisor's idle epoch (design §1.2).
     pub idle_epoch: u64,
 }
 
