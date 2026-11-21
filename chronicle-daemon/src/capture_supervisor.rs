@@ -1,11 +1,10 @@
-//! Owns the capture runtime and reconciles it against two independent
-//! stop reasons: user pause and system sleep.
+//! Owns the capture runtime and reconciles it against four stop reasons:
+//! user pause, system sleep, a missing Screen Recording grant, and a stale
+//! Screen Recording read.
 //!
 //! Display sleep is intentionally not a separate flag — see CHR-57 for the
-//! Apple-Silicon-specific investigation. The supervisor's two-flag design
-//! cleanly accommodates re-adding display sleep later (the existing
-//! `set_system_asleep` pattern generalizes to a `set_display_asleep` setter
-//! with no other architectural change).
+//! Apple-Silicon-specific investigation. Re-adding it later is one more flag
+//! and a `set_display_asleep` setter on the `set_system_asleep` pattern.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -134,7 +133,7 @@ pub struct CaptureSupervisor<'a, M: AppMetadataProvider + 'static + ?Sized> {
     /// Set on every pause or sleep. Cleared only by an Authorized read.
     /// A resume or wake therefore never starts on a read taken before the idle period.
     sr_stale: bool,
-    /// IPC-visible mirror of `sr_denied`, read by `Status`.
+    /// IPC-visible mirror of `sr_denied`.
     sr_denied_mirror: Arc<AtomicBool>,
     /// Adds 1 on every entry to Idle, so a read taken before it can be told apart.
     idle_epoch: u64,
@@ -207,7 +206,7 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         self
     }
 
-    /// Set the boot Screen Recording read and the mirror `Status` reads.
+    /// Set the boot Screen Recording read and the IPC-visible mirror.
     pub fn with_screen_recording_gate(mut self, denied: bool, mirror: Arc<AtomicBool>) -> Self {
         mirror.store(denied, Ordering::Release);
         self.sr_denied = denied;
