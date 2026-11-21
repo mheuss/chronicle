@@ -27,6 +27,8 @@ final class MicController {
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var tail: Task<Void, Never>?
     @ObservationIgnored private var recheckQueued = false
+    @ObservationIgnored private var markedMicState: MicState?
+    @ObservationIgnored private var markedPermission: MicPermission?
 
     init(daemon: MicDaemonClient,
          permission: MicrophonePermission = MicrophonePermission(),
@@ -56,6 +58,7 @@ final class MicController {
         }
     }
 
+    /// Operations must not call this, or they wait on themselves.
     private func enqueue(_ operation: @escaping @MainActor () async -> Void) async {
         let previous = tail
         let task = Task { @MainActor in
@@ -80,15 +83,13 @@ final class MicController {
             }
             guard permission.status == .authorized else { return }
         }
-        await send(on)
+        if let outcome = await send(on) { setMark(outcome) }
     }
 
     private func runRecheck(triggeredAt: Int) async {
-        let before = daemon.lastStatus?.data.audio?.micState
-        let permissionBefore = permission.status
         await permission.refresh()
         let micState = (try? await daemon.requestStatus())?.data.audio?.micState
-        if micState != before || permission.status != permissionBefore { mark = .none }
+        clearStaleMark(micState: micState)
         // A user toggle after the trigger wins over this re-check.
         guard generation == triggeredAt else { return }
         // Only a permission event turns the mic off. An unavailable read is
@@ -97,38 +98,59 @@ final class MicController {
         // The saved intent can be on while the mic is off, during a pause,
         // so a revoke clears it whatever the mic state is.
         let revoked: Set<MicPermission> = [.denied, .restricted, .notDetermined]
+        // Its send sets no mark: the user did not ask for this change.
         if let status = permission.status, revoked.contains(status) {
-            await send(false)
+            _ = await send(false)
         }
     }
 
-    private func send(_ on: Bool) async {
+    private func setMark(_ outcome: MicOperationMark) {
+        mark = outcome
+        markedMicState = daemon.lastStatus?.data.audio?.micState
+        markedPermission = permission.status
+    }
+
+    /// The mark describes the last toggle. It goes stale once the mic state
+    /// or the permission read differs from when it was set. A failed status
+    /// read is no news, so it keeps the mark.
+    private func clearStaleMark(micState: MicState?) {
+        guard mark != .none else { return }
+        let stateMoved = micState != nil && micState != markedMicState
+        let permissionMoved = markedPermission != nil && permission.status != markedPermission
+        if stateMoved || permissionMoved { mark = .none }
+    }
+
+    /// Returns the mark the outcome earns, or `nil` when it earns none.
+    private func send(_ on: Bool) async -> MicOperationMark? {
+        var outcome: MicOperationMark?
         do {
             let reply = try await daemon.setMicEnabled(on)
             if reply.pending == true {
-                await poll(until: on ? .on : .off)
-                return
+                return await poll(until: on ? .on : .off) ? nil : .unconfirmed
             }
-            if !reply.ok { mark = .rejected }
+            if !reply.ok { outcome = .rejected }
         } catch {
             Self.logger.error("set_mic_enabled failed: \(error.localizedDescription, privacy: .public)")
-            mark = .rejected
+            outcome = .rejected
         }
         _ = try? await daemon.requestStatus()
+        return outcome
     }
 
     /// Poll until the mic state matches, for at most `pollLimit` intervals of
     /// wall time, counting the time spent waiting for each status reply.
-    private func poll(until want: MicState) async {
+    private func poll(until want: MicState) async -> Bool {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: pollInterval * pollLimit)
         while clock.now < deadline {
             if let status = try? await daemon.requestStatus(),
                status.data.audio?.micState == want {
-                return
+                return true
             }
-            try? await Task.sleep(for: pollInterval)
+            let left = clock.now.duration(to: deadline)
+            guard left > .zero else { break }
+            try? await Task.sleep(for: min(pollInterval, left))
         }
-        mark = .unconfirmed
+        return false
     }
 }

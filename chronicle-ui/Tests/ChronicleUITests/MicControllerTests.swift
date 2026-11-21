@@ -10,6 +10,7 @@ final class FakeMicDaemon: MicDaemonClient {
     var statuses: [StatusResponse] = []
     var setError: Error?
     var statusDelay: Duration = .zero
+    var failStatus = false
     var holdSet = false
     private var gate: CheckedContinuation<Void, Never>?
 
@@ -24,6 +25,7 @@ final class FakeMicDaemon: MicDaemonClient {
 
     func requestStatus() async throws -> StatusResponse {
         log.append("status")
+        if failStatus { throw IPCError.notConnected }
         if statusDelay > .zero { try? await Task.sleep(for: statusDelay) }
         if !statuses.isEmpty { lastStatus = statuses.count > 1 ? statuses.removeFirst() : statuses[0] }
         guard let lastStatus else { throw IPCError.notConnected }
@@ -40,12 +42,24 @@ actor CallCounter {
 
 @MainActor
 private func controller(_ daemon: FakeMicDaemon, reads: [String?] = ["authorized"],
-                        granted: Bool = true, requests: CallCounter = CallCounter()) -> MicController {
+                        granted: Bool = true, requests: CallCounter = CallCounter(),
+                        pollLimit: Int = 5) -> MicController {
     let script = HelperReads(reads)
     let mic = MicrophonePermission(
         readHelper: { await script.next() },
         requestAccess: { await requests.bump(); return granted })
-    return MicController(daemon: daemon, permission: mic, pollInterval: .milliseconds(20), pollLimit: 5)
+    return MicController(daemon: daemon, permission: mic, pollInterval: .milliseconds(20), pollLimit: pollLimit)
+}
+
+/// Yields until `condition` holds, a bounded number of times, so a regression
+/// fails the test instead of spinning forever.
+@MainActor
+private func eventually(_ condition: () -> Bool) async -> Bool {
+    for _ in 0..<10_000 {
+        if condition() { return true }
+        await Task.yield()
+    }
+    return condition()
 }
 
 @MainActor
@@ -125,7 +139,7 @@ struct MicControllerTests {
         let daemon = FakeMicDaemon()
         daemon.replies = [SetMicEnabledResponse(type: "set_mic_enabled", ok: false, state: .off, pending: true)]
         daemon.statuses = [statusWithMic(.off), statusWithMic(.on)]
-        let mic = controller(daemon)
+        let mic = controller(daemon, pollLimit: 50)
         await mic.setEnabled(true)
         #expect(mic.mark == .none)
         #expect(daemon.log == ["set(true)", "status", "status"])
@@ -135,7 +149,7 @@ struct MicControllerTests {
         let daemon = FakeMicDaemon()
         daemon.replies = [SetMicEnabledResponse(type: "set_mic_enabled", ok: false, state: .off, pending: true)]
         daemon.statuses = [statusWithMic(.off)]
-        let mic = controller(daemon)
+        let mic = controller(daemon, pollLimit: 10)
         await mic.setEnabled(true)
         #expect(mic.mark == .unconfirmed)
         #expect(daemon.log.first == "set(true)")
@@ -223,7 +237,7 @@ struct MicControllerTests {
         // A held off-toggle occupies the queue. A re-check is triggered, then
         // the user toggles again before the re-check runs.
         let first = Task { await mic.setEnabled(false) }
-        while daemon.log.isEmpty { await Task.yield() }
+        #expect(await eventually { !daemon.log.isEmpty })
         let check = Task { await mic.recheck() }
         for _ in 0..<5 { await Task.yield() }
         let second = Task { await mic.setEnabled(false) }
@@ -240,7 +254,7 @@ struct MicControllerTests {
         daemon.holdSet = true
         let mic = controller(daemon)
         let toggle = Task { await mic.setEnabled(false) }
-        while daemon.log.isEmpty { await Task.yield() }
+        #expect(await eventually { !daemon.log.isEmpty })
         let a = Task { await mic.recheck() }
         let b = Task { await mic.recheck() }
         for _ in 0..<5 { await Task.yield() }
@@ -248,5 +262,86 @@ struct MicControllerTests {
         await toggle.value; await a.value; await b.value
         // One status from the toggle, one from the single coalesced re-check.
         #expect(daemon.log.filter { $0 == "status" }.count == 2)
+    }
+
+    @Test func pendingReplyToTurningOffPollsForOff() async {
+        let daemon = FakeMicDaemon()
+        daemon.replies = [SetMicEnabledResponse(type: "set_mic_enabled", ok: false, state: .on, pending: true)]
+        daemon.statuses = [statusWithMic(.on), statusWithMic(.off)]
+        let mic = controller(daemon, pollLimit: 50)
+        await mic.setEnabled(false)
+        #expect(mic.mark == .none)
+        #expect(daemon.log == ["set(false)", "status", "status"])
+    }
+
+    @Test func recheckSendFailureLeavesNoMark() async {
+        // A fresh install re-checks with permission not determined. The daemon
+        // refuses set_mic_enabled until its mic is ready. The user never
+        // touched the toggle, so the row must not say a change failed.
+        let daemon = FakeMicDaemon()
+        daemon.statuses = [statusWithMic(.off)]
+        daemon.replies = [SetMicEnabledResponse(type: "set_mic_enabled", ok: false, state: .error, pending: false)]
+        let mic = controller(daemon, reads: ["not_determined"])
+        await mic.recheck()
+        #expect(daemon.log.contains("set(false)"))
+        #expect(mic.mark == .none)
+        daemon.setError = IPCError.notConnected
+        await mic.recheck()
+        #expect(mic.mark == .none)
+    }
+
+    @Test func unconfirmedMarkClearsOnceTheStateArrives() async {
+        let daemon = FakeMicDaemon()
+        daemon.replies = [SetMicEnabledResponse(type: "set_mic_enabled", ok: false, state: .off, pending: true)]
+        daemon.statuses = [statusWithMic(.off)]
+        let mic = controller(daemon)
+        await mic.setEnabled(true)
+        #expect(mic.mark == .unconfirmed)
+        // The heartbeat sees the mic come on before the next re-check runs.
+        daemon.statuses = [statusWithMic(.on)]
+        _ = try? await daemon.requestStatus()
+        await mic.recheck()
+        #expect(mic.mark == .none)
+    }
+
+    @Test func failedStatusReadDoesNotClearTheMark() async {
+        let daemon = FakeMicDaemon()
+        daemon.statuses = [statusWithMic(.off)]
+        daemon.replies = [SetMicEnabledResponse(type: "set_mic_enabled", ok: false, state: .error, pending: false)]
+        let mic = controller(daemon)
+        await mic.setEnabled(true)
+        #expect(mic.mark == .rejected)
+        daemon.failStatus = true
+        await mic.recheck()
+        #expect(mic.mark == .rejected)
+    }
+
+    @Test func isBusyCoversARunningOperation() async {
+        let daemon = FakeMicDaemon()
+        daemon.statuses = [statusWithMic(.off)]
+        daemon.holdSet = true
+        let mic = controller(daemon)
+        #expect(!mic.isBusy)
+        let toggle = Task { await mic.setEnabled(false) }
+        #expect(await eventually { !daemon.log.isEmpty })
+        #expect(mic.isBusy)
+        daemon.release()
+        await toggle.value
+        #expect(!mic.isBusy)
+    }
+
+    @Test func recheckTriggeredWhileOneRunsQueuesAnother() async {
+        let daemon = FakeMicDaemon()
+        daemon.statuses = [statusWithMic(.on)]
+        daemon.holdSet = true
+        let mic = controller(daemon, reads: ["denied"])
+        let running = Task { await mic.recheck() }
+        #expect(await eventually { daemon.log.contains("set(false)") })
+        // The first re-check is past its start, so this one must not merge.
+        let next = Task { await mic.recheck() }
+        for _ in 0..<5 { await Task.yield() }
+        daemon.release()
+        await running.value; await next.value
+        #expect(daemon.log.filter { $0 == "set(false)" }.count == 2)
     }
 }
