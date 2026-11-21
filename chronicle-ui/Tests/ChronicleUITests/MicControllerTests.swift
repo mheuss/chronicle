@@ -397,6 +397,50 @@ struct MicControllerTests {
         #expect(mic.mark == .rejected)
     }
 
+    @Test func rejectedAfterAllowWithAFailedBaselineReadSurvivesAnUnchangedRecheck() async {
+        let daemon = FakeMicDaemon()
+        daemon.failStatus = true
+        let mic = controller(daemon, reads: ["not_determined"], granted: true)
+        await mic.setEnabled(true)
+        #expect(mic.mark == .rejected)
+        daemon.failStatus = false
+        daemon.statuses = [statusWithMic(.off)]
+        await mic.recheck()
+        #expect(mic.mark == .rejected)
+        // The adopted baseline still lets a later move clear the mark.
+        daemon.statuses = [statusWithMic(.on)]
+        await mic.recheck()
+        #expect(mic.mark == .none)
+    }
+
+    @Test func rejectedAfterAllowWithAStalledBaselineReadSurvivesAnUnchangedRecheck() async {
+        let daemon = FakeMicDaemon()
+        daemon.holdStatus = true
+        let mic = controller(daemon, reads: ["not_determined"], granted: true)
+        // A re-check's read stalls and stays outstanding past its budget.
+        await mic.recheck()
+        await mic.setEnabled(true)
+        #expect(mic.mark == .rejected)
+        daemon.statuses = [statusWithMic(.off)]
+        daemon.releaseStatus()
+        for _ in 0..<50 { await Task.yield() }
+        await mic.recheck()
+        #expect(mic.mark == .rejected)
+    }
+
+    @Test func rejectedReplyWithAFailedFollowUpReadSurvivesAnUnchangedRecheck() async {
+        let daemon = FakeMicDaemon()
+        daemon.replies = [SetMicEnabledResponse(type: "set_mic_enabled", ok: false, state: .error, pending: false)]
+        daemon.failStatus = true
+        let mic = controller(daemon)
+        await mic.setEnabled(true)
+        #expect(mic.mark == .rejected)
+        daemon.failStatus = false
+        daemon.statuses = [statusWithMic(.off)]
+        await mic.recheck()
+        #expect(mic.mark == .rejected)
+    }
+
     @Test func aStatusReadThatNeverReturnsEndsThePollUnconfirmed() async {
         let daemon = FakeMicDaemon()
         daemon.replies = [SetMicEnabledResponse(type: "set_mic_enabled", ok: false, state: .off, pending: true)]
