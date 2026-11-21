@@ -80,8 +80,8 @@ pub(crate) fn apply_mic_intent(
 /// Re-apply the gate to the saved intent, then store the `Status` value. It
 /// writes the intent only to clear it on a missing grant, and it does that
 /// whether or not the engine runs. With `capture_running` false it never
-/// starts the engine. `CaptureSupervisor::start` and Session A's permission
-/// tick call this from the event loop (design §1.2).
+/// starts the engine. Callers must be on the event loop task, as
+/// `CaptureSupervisor::start` is (design §1.2).
 pub(crate) fn reapply_mic_gate(
     audio: &impl MicControl,
     base_dir: &Path,
