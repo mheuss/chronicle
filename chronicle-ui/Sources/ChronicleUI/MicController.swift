@@ -4,7 +4,6 @@ import os
 /// The daemon calls the microphone controller makes, so tests can use a fake.
 @MainActor
 protocol MicDaemonClient: AnyObject {
-    var lastStatus: StatusResponse? { get }
     func setMicEnabled(_ enabled: Bool) async throws -> SetMicEnabledResponse
     func requestStatus() async throws -> StatusResponse
 }
@@ -29,6 +28,7 @@ final class MicController {
     @ObservationIgnored private var recheckQueued = false
     @ObservationIgnored private var markedMicState: MicState?
     @ObservationIgnored private var markedPermission: MicPermission?
+    @ObservationIgnored private var callOutstanding = false
 
     init(daemon: MicDaemonClient,
          permission: MicrophonePermission = MicrophonePermission(),
@@ -80,6 +80,10 @@ final class MicController {
                 await permission.refresh()
                 // After Don't Allow the intent stays off (design §2.3 step 1).
                 guard granted else { return }
+                guard permission.status == .authorized else {
+                    setMark(.rejected, micState: nil)
+                    return
+                }
             }
             guard permission.status == .authorized else { return }
         }
@@ -89,7 +93,7 @@ final class MicController {
 
     private func runRecheck(triggeredAt: Int) async {
         await permission.refresh()
-        let micState = (try? await daemon.requestStatus())?.data.audio?.micState
+        let micState = await readMicState()
         clearStaleMark(micState: micState)
         // A user toggle after the trigger wins over this re-check.
         guard generation == triggeredAt else { return }
@@ -105,8 +109,8 @@ final class MicController {
         }
     }
 
-    /// `micState` is the state this operation itself last read. The shared
-    /// `lastStatus` is not used: the heartbeat can update it after that read.
+    /// `micState` is the state this operation itself last read, not the
+    /// connection's cached status, which the heartbeat can update after it.
     private func setMark(_ outcome: MicOperationMark, micState: MicState?) {
         mark = outcome
         markedMicState = micState
@@ -128,37 +132,79 @@ final class MicController {
     /// the mic state this send last read.
     private func send(_ on: Bool) async -> (MicOperationMark?, MicState?) {
         var outcome: MicOperationMark?
-        do {
-            let reply = try await daemon.setMicEnabled(on)
+        switch await bounded(pollInterval * pollLimit, { try await self.daemon.setMicEnabled(on) }) {
+        case .value(let reply):
             if reply.pending == true {
                 let (matched, seen) = await poll(until: on ? .on : .off)
                 return (matched ? nil : .unconfirmed, seen)
             }
             if !reply.ok { outcome = .rejected }
-        } catch {
+        case .failed(let error):
             Self.logger.error("set_mic_enabled failed: \(error.localizedDescription, privacy: .public)")
             outcome = .rejected
+        case .timedOut:
+            outcome = .unconfirmed
         }
-        let seen = (try? await daemon.requestStatus())?.data.audio?.micState
-        return (outcome, seen)
+        return (outcome, await readMicState())
+    }
+
+    private func readMicState(within limit: Duration? = nil) async -> MicState? {
+        let read = await bounded(limit ?? pollInterval * pollLimit, { try await self.daemon.requestStatus() })
+        guard case .value(let status) = read else {
+            return nil
+        }
+        return status.data.audio?.micState
     }
 
     /// Poll until the mic state matches, for at most `pollLimit` intervals of
     /// wall time, counting the time spent waiting for each status reply. The
-    /// last read lands at the deadline. Returns whether it matched, and the
-    /// last state read.
+    /// last read starts at the deadline and gets one interval. Returns whether
+    /// it matched, and the last state read.
     private func poll(until want: MicState) async -> (Bool, MicState?) {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: pollInterval * pollLimit)
         var seen: MicState?
         while true {
-            if let state = (try? await daemon.requestStatus())?.data.audio?.micState {
+            let left = clock.now.duration(to: deadline)
+            if let state = await readMicState(within: max(left, pollInterval)) {
                 seen = state
                 if state == want { return (true, seen) }
             }
+            guard clock.now < deadline else { return (false, seen) }
+            try? await Task.sleep(for: min(pollInterval, clock.now.duration(to: deadline)))
+        }
+    }
+
+    private enum Bounded<T> {
+        case value(T), failed(any Error), timedOut
+    }
+
+    @MainActor private final class Slot<T> {
+        var result: Bounded<T>?
+    }
+
+    /// Waits at most `limit` for a daemon call, without racing a continuation.
+    /// The call runs in its own task and writes its own slot, which only this
+    /// wait reads, so a reply after the limit is dropped. While an earlier call
+    /// is still out, this one times out at once, so a stalled daemon holds at
+    /// most one task.
+    private func bounded<T>(_ limit: Duration,
+                            _ call: @escaping @MainActor () async throws -> T) async -> Bounded<T> {
+        guard !callOutstanding else { return .timedOut }
+        callOutstanding = true
+        let slot = Slot<T>()
+        Task { @MainActor in
+            do { slot.result = .value(try await call()) } catch { slot.result = .failed(error) }
+            self.callOutstanding = false
+        }
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: limit)
+        let tick = pollInterval / 10
+        while true {
+            if let result = slot.result { return result }
             let left = clock.now.duration(to: deadline)
-            guard left > .zero else { return (false, seen) }
-            try? await Task.sleep(for: min(pollInterval, left))
+            guard left > .zero else { return .timedOut }
+            try? await Task.sleep(for: min(tick, left))
         }
     }
 }

@@ -15,7 +15,9 @@ final class FakeMicDaemon: MicDaemonClient {
     /// connection's heartbeat can land between a read and the next step.
     var heartbeat: StatusResponse?
     var holdSet = false
+    var holdStatus = false
     private var gate: CheckedContinuation<Void, Never>?
+    private var statusGate: CheckedContinuation<Void, Never>?
 
     func setMicEnabled(_ enabled: Bool) async throws -> SetMicEnabledResponse {
         log.append("set(\(enabled))")
@@ -28,6 +30,7 @@ final class FakeMicDaemon: MicDaemonClient {
 
     func requestStatus() async throws -> StatusResponse {
         log.append("status")
+        if holdStatus && statusGate == nil { await withCheckedContinuation { statusGate = $0 } }
         if failStatus { throw IPCError.notConnected }
         if statusDelay > .zero { try? await Task.sleep(for: statusDelay) }
         if !statuses.isEmpty { lastStatus = statuses.count > 1 ? statuses.removeFirst() : statuses[0] }
@@ -37,6 +40,7 @@ final class FakeMicDaemon: MicDaemonClient {
     }
 
     func release() { gate?.resume(); gate = nil; holdSet = false }
+    func releaseStatus() { statusGate?.resume(); statusGate = nil; holdStatus = false }
 }
 
 actor CallCounter {
@@ -374,5 +378,50 @@ struct MicControllerTests {
         daemon.release()
         await running.value; await next.value
         #expect(daemon.log.filter { $0 == "set(false)" }.count == 2)
+    }
+
+    @Test func allowThenAFreshReadThatIsNotAuthorizedMarksRejected() async {
+        let daemon = FakeMicDaemon()
+        let mic = controller(daemon, reads: ["not_determined", "not_determined"], granted: true)
+        await mic.setEnabled(true)
+        #expect(daemon.log.isEmpty)
+        #expect(mic.mark == .rejected)
+    }
+
+    @Test func aStatusReadThatNeverReturnsEndsThePollUnconfirmed() async {
+        let daemon = FakeMicDaemon()
+        daemon.replies = [SetMicEnabledResponse(type: "set_mic_enabled", ok: false, state: .off, pending: true)]
+        daemon.holdStatus = true
+        let mic = controller(daemon)
+        await mic.setEnabled(true)
+        #expect(mic.mark == .unconfirmed)
+        #expect(!mic.isBusy)
+        // Single-flight: the stalled read is the only one sent.
+        #expect(daemon.log == ["set(true)", "status"])
+        await mic.recheck()
+        #expect(daemon.log == ["set(true)", "status"])
+        daemon.statuses = [statusWithMic(.on)]
+        daemon.releaseStatus()
+        // Let the late reply land and free the single slot.
+        for _ in 0..<50 { await Task.yield() }
+        await mic.recheck()
+        #expect(daemon.log == ["set(true)", "status", "status"])
+        #expect(mic.mark == .none)
+    }
+
+    @Test func aSetThatNeverReturnsEndsUnconfirmedAndTheNextStatusSettlesIt() async {
+        let daemon = FakeMicDaemon()
+        daemon.holdSet = true
+        let mic = controller(daemon)
+        await mic.setEnabled(true)
+        #expect(mic.mark == .unconfirmed)
+        #expect(!mic.isBusy)
+        #expect(daemon.log == ["set(true)"])
+        // The late set lands after the deadline; its reply is dropped.
+        daemon.statuses = [statusWithMic(.on)]
+        daemon.release()
+        await mic.recheck()
+        #expect(await eventually { daemon.log.last == "status" })
+        #expect(mic.mark == .none)
     }
 }

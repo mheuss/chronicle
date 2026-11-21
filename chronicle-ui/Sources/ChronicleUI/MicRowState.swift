@@ -24,8 +24,8 @@ struct MicRowState: Equatable {
 
     static func from(permission: MicPermission?, status: StatusResponse?,
                      connected: Bool, mark: MicOperationMark) -> MicRowState {
-        func disabled(_ caption: String, button: Bool = false) -> MicRowState {
-            MicRowState(isOn: false, isEnabled: false, caption: caption, showsSettingsButton: button)
+        func disabled(_ caption: String, button: Bool = false, isOn: Bool = false) -> MicRowState {
+            MicRowState(isOn: isOn, isEnabled: false, caption: caption, showsSettingsButton: button)
         }
         func enabled(_ isOn: Bool, _ caption: String?) -> MicRowState {
             MicRowState(isOn: isOn, isEnabled: true, caption: caption, showsSettingsButton: false)
@@ -37,7 +37,11 @@ struct MicRowState: Equatable {
         }
         switch permission {
         case .unavailable:
-            return disabled("Chronicle couldn't check microphone access. Close and reopen Settings to check again.")
+            // The daemon reports `on` only after its own fresh read, so a
+            // failed UI read must not hide a live mic.
+            return disabled(
+                "Chronicle couldn't check microphone access. Close and reopen Settings to check again.",
+                isOn: micState == .on)
         case .denied:
             return disabled(
                 "Chronicle doesn't have microphone access. Turn it on in System Settings → Privacy & Security → Microphone.",

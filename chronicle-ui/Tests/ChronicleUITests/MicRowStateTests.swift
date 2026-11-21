@@ -23,9 +23,12 @@ struct MicRowStateTests {
         #expect(row(.authorized, statusWithCapture(state: "running", paused: false)) == checking)
     }
 
-    @Test func unavailable() {
+    @Test func unavailableShowsTheDaemonsMicStateDisabled() {
+        let caption = "Chronicle couldn't check microphone access. Close and reopen Settings to check again."
         #expect(row(.unavailable, statusWithMic(.on))
-            == disabled("Chronicle couldn't check microphone access. Close and reopen Settings to check again."))
+            == MicRowState(isOn: true, isEnabled: false, caption: caption, showsSettingsButton: false))
+        #expect(row(.unavailable, statusWithMic(.off)) == disabled(caption))
+        #expect(row(.unavailable, statusWithMic(.error)) == disabled(caption))
     }
 
     @Test func denied() {
@@ -97,8 +100,8 @@ struct MicRowStateTests {
         #expect(row(.authorized, statusWithMic(.error), mark: .rejected) == rejected)
     }
 
-    @Test func onlyAuthorizedPlusOnRendersOn() {
-        for permission in [MicPermission.denied, .restricted, .notDetermined, .unavailable] {
+    @Test func aMissingGrantNeverRendersOn() {
+        for permission in [MicPermission.denied, .restricted, .notDetermined] {
             #expect(!row(permission, statusWithMic(.on)).isOn)
         }
     }
