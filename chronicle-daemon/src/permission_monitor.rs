@@ -53,8 +53,8 @@ pub(crate) fn unix_ms() -> i64 {
 }
 
 /// Each tick reads Screen Recording and sends it, then reads the mic and
-/// sends it. Ticks start one interval apart, measured from the last tick.
-/// Sends are awaited. No read is dropped (design AD13).
+/// sends it. Ticks start at least one interval apart, measured from the last
+/// tick's start. Every read taken is sent and awaited, in order (design AD13).
 pub(crate) async fn run(
     reader: Reader,
     mut mode_rx: watch::Receiver<MonitorState>,
