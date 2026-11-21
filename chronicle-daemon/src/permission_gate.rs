@@ -162,7 +162,7 @@ impl PostGrant {
     }
 
     /// Returns the exit code the daemon must exit with, if any.
-    pub(crate) fn observe(&mut self, outcome: &ReconcileOutcome) -> Option<i32> {
+    pub(crate) fn observe(&mut self, outcome: &ReconcileOutcome) -> Option<u8> {
         if !self.pending {
             return None;
         }
@@ -181,7 +181,7 @@ impl PostGrant {
 }
 
 /// Exit code 4: restart for fresh permissions (design §4).
-pub(crate) const EXIT_RESTART_FOR_PERMISSIONS: i32 = 4;
+pub(crate) const EXIT_RESTART_FOR_PERMISSIONS: u8 = 4;
 
 /// True when a gate change counts as a grant and arms `PostGrant`: the gate
 /// was denied and the read cleared it. A read that only clears `sr_stale`

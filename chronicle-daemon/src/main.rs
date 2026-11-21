@@ -397,43 +397,20 @@ fn boot_permissions_snapshot(
     }
 }
 
-/// Daemon exit codes:
+/// The process exit status for `run_main`'s result.
 ///
 /// | Code | Meaning |
 /// |---|---|
 /// | 0 | Clean shutdown, or another daemon holds the lock |
-/// | 1 | Startup error |
-/// | 3 | Capture start or stop left streams possibly running |
-/// | 4 | Restart for fresh permissions (design §4) |
+/// | 1 | Startup or runtime error |
+/// | 3 | Capture start or stop left streams possibly running (`process::exit`) |
+/// | 4 | Restart for fresh permissions, after the full shutdown (design §4) |
 ///
 /// The `--permission-status` helper has its own codes, 0 to 2, documented on
 /// `permissions::run_status_command`.
-///
-/// The first capture start after a Screen Recording grant failed. Exit
-/// non-zero so launchd starts a fresh process, which reads the grant at boot.
-fn exit_for_fresh_permissions(code: i32) -> ! {
-    logging::fatal(
-        "capture start after a Screen Recording grant failed; exiting with code 4 for a fresh process",
-    );
-    std::process::exit(code);
-}
-
-/// Every reconcile outcome in the event loop passes through here before
-/// `route_reconcile_outcome` (design §4). `exit` is injectable for the test.
-fn handle_post_grant(
-    post_grant: &mut permission_gate::PostGrant,
-    outcome: &ReconcileOutcome,
-    exit: impl FnOnce(i32),
-) {
-    if let Some(code) = post_grant.observe(outcome) {
-        exit(code);
-    }
-}
-
-/// The process exit status for `run_main`'s result.
-fn exit_code_for(result: Result<()>) -> u8 {
+fn exit_code_for(result: Result<u8>) -> u8 {
     match result {
-        Ok(()) => 0,
+        Ok(code) => code,
         Err(e) => {
             logging::fatal(&format!("chronicle-daemon failed: {e:#}"));
             1
@@ -451,7 +428,7 @@ fn create_group_container() {
         NSFileManager::defaultManager().containerURLForSecurityApplicationGroupIdentifier(&group);
 }
 
-fn run_main() -> Result<()> {
+fn run_main() -> Result<u8> {
     let storage_config = StorageConfig::from_env()?;
     create_group_container();
     let lock = match startup(instance_lock::acquire(&storage_config.base_dir))? {
@@ -461,7 +438,7 @@ fn run_main() -> Result<()> {
                 "another chronicle-daemon is already running on {}; exiting",
                 path.display()
             );
-            return Ok(());
+            return Ok(0);
         }
     };
     let socket_path = checked_socket_path(&storage_config.base_dir)?;
@@ -471,7 +448,7 @@ fn run_main() -> Result<()> {
     instance_lock::run_holding(lock, runtime, run(storage_config, socket_path))
 }
 
-async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> Result<()> {
+async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> Result<u8> {
     // --- Permission preflight ---
     let boot = permissions::preflight();
     // Seeded from the boot read, so a `Status` served before the supervisor
@@ -940,6 +917,9 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     // technically still unfinished. Harmless: by then the superseded task has
     // already sent its event and has nothing left but to return.)
     let mut loop_poisoned = false;
+    // Set when the first start after a grant fails (design §4). The daemon
+    // then shuts down in full and exits with this code.
+    let mut loop_exit: Option<u8> = None;
     let mut provision_task: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         tokio::select! {
@@ -963,7 +943,11 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                         post_grant.granted();
                     }
                     let outcome = supervisor.set_sr_denied(denied, &audio_pipeline).await;
-                    handle_post_grant(&mut post_grant, &outcome, |c| exit_for_fresh_permissions(c));
+                    if let Some(code) = post_grant.observe(&outcome) {
+                        log::error!("capture start after a Screen Recording grant failed; shutting down for a fresh process");
+                        loop_exit = Some(code);
+                        break;
+                    }
                     let disposition = route_reconcile_outcome(
                         &outcome,
                         &mut boot_incident,
@@ -1051,7 +1035,12 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                     supervisor.reconcile(&audio_pipeline),
                 )
                 .await;
-                handle_post_grant(&mut post_grant, &outcome, |c| exit_for_fresh_permissions(c));
+                if let Some(code) = post_grant.observe(&outcome) {
+                    let _ = cmd.reply.send(paused);
+                    log::error!("capture start after a Screen Recording grant failed; shutting down for a fresh process");
+                    loop_exit = Some(code);
+                    break;
+                }
                 let disposition = route_reconcile_outcome(
                     &outcome,
                     &mut boot_incident,
@@ -1112,7 +1101,11 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                     supervisor.reconcile(&audio_pipeline),
                 )
                 .await;
-                handle_post_grant(&mut post_grant, &outcome, |c| exit_for_fresh_permissions(c));
+                if let Some(code) = post_grant.observe(&outcome) {
+                    log::error!("capture start after a Screen Recording grant failed; shutting down for a fresh process");
+                    loop_exit = Some(code);
+                    break;
+                }
                 let disposition = route_reconcile_outcome(
                     &outcome,
                     &mut boot_incident,
@@ -1135,7 +1128,11 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                 if outcome == ReconcileOutcome::Started {
                     log::info!("capture recovered on retry");
                 }
-                handle_post_grant(&mut post_grant, &outcome, |c| exit_for_fresh_permissions(c));
+                if let Some(code) = post_grant.observe(&outcome) {
+                    log::error!("capture start after a Screen Recording grant failed; shutting down for a fresh process");
+                    loop_exit = Some(code);
+                    break;
+                }
                 let disposition = route_reconcile_outcome(
                     &outcome,
                     &mut boot_incident,
@@ -1424,10 +1421,22 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
         logging::fatal("daemon exiting with code 3 (engine poisoned)");
         std::process::exit(3);
     }
+    after_drain(loop_exit, shutdown_failed)
+}
+
+/// What `run` returns once the shutdown drain is done. A restart for fresh
+/// permissions wins over a task failure, which is already in the log.
+fn after_drain(loop_exit: Option<u8>, shutdown_failed: bool) -> Result<u8> {
+    if let Some(code) = loop_exit {
+        logging::fatal(&format!(
+            "capture start after a Screen Recording grant failed; exiting with code {code} for a fresh process"
+        ));
+        return Ok(code);
+    }
     if shutdown_failed {
         anyhow::bail!("shutdown completed with task failures (see log)");
     }
-    Ok(())
+    Ok(0)
 }
 
 #[cfg(test)]
@@ -1460,29 +1469,28 @@ mod tests {
 
     #[test]
     fn forced_post_grant_start_failure_reaches_exit_with_4() {
+        let failed = ReconcileOutcome::StartFailed {
+            partial_teardown: false,
+        };
         let mut post_grant = crate::permission_gate::PostGrant::default();
-        let mut exited = None;
-        handle_post_grant(
-            &mut post_grant,
-            &ReconcileOutcome::StartFailed {
-                partial_teardown: false,
-            },
-            |c| exited = Some(c),
-        );
-        assert_eq!(exited, None, "no grant pending");
+        assert_eq!(post_grant.observe(&failed), None, "no grant pending");
         post_grant.granted();
-        handle_post_grant(&mut post_grant, &ReconcileOutcome::NoChange, |c| {
-            exited = Some(c)
-        });
-        assert_eq!(exited, None);
-        handle_post_grant(
-            &mut post_grant,
-            &ReconcileOutcome::StartFailed {
-                partial_teardown: false,
-            },
-            |c| exited = Some(c),
+        assert_eq!(post_grant.observe(&ReconcileOutcome::NoChange), None);
+        let loop_exit = post_grant.observe(&failed);
+        assert_eq!(loop_exit, Some(4));
+        // The code `run` returns after the drain is the process exit status.
+        assert_eq!(exit_code_for(after_drain(loop_exit, false)), 4);
+    }
+
+    #[test]
+    fn after_drain_codes() {
+        assert_eq!(exit_code_for(after_drain(None, false)), 0);
+        assert_eq!(exit_code_for(after_drain(None, true)), 1);
+        assert_eq!(
+            exit_code_for(after_drain(Some(4), true)),
+            4,
+            "a restart for permissions wins over a shutdown task failure"
         );
-        assert_eq!(exited, Some(4));
     }
 
     #[test]
@@ -1517,7 +1525,7 @@ mod tests {
 
     #[test]
     fn exit_code_for_maps_ok_and_err() {
-        assert_eq!(exit_code_for(Ok(())), 0);
+        assert_eq!(exit_code_for(Ok(0)), 0);
         assert_eq!(exit_code_for(Err(anyhow::anyhow!("boom"))), 1);
     }
 
