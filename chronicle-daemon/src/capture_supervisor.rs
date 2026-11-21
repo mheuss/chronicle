@@ -119,8 +119,8 @@ impl StartRetry {
     }
 }
 
-/// Drives the capture runtime against two independent stop reasons: user
-/// pause and system sleep.
+/// Drives the capture runtime against four stop reasons: user pause, system
+/// sleep, a missing Screen Recording grant, and a stale Screen Recording read.
 ///
 /// `AudioPipeline` is deliberately NOT a field. `reconcile()` borrows it as
 /// `&'a AudioPipeline` so the borrow checker enforces ADR-009: the audio
@@ -129,6 +129,15 @@ impl StartRetry {
 pub struct CaptureSupervisor<'a, M: AppMetadataProvider + 'static + ?Sized> {
     user_paused: bool,
     system_asleep: bool,
+    /// Screen Recording is not authorized, per the last helper read (design §1.2).
+    sr_denied: bool,
+    /// Set on every pause or sleep. Cleared only by an Authorized read.
+    /// A resume or wake therefore never starts on a read taken before the idle period.
+    sr_stale: bool,
+    /// IPC-visible mirror of `sr_denied`, read by `Status`.
+    sr_denied_mirror: Arc<AtomicBool>,
+    /// Adds 1 on every entry to Idle, so a read taken before it can be told apart.
+    idle_epoch: u64,
     runtime: Option<CaptureRuntime<'a, M>>,
     storage: Arc<Storage>,
     metadata: Arc<M>,
@@ -172,6 +181,11 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         Self {
             user_paused,
             system_asleep: false,
+            sr_denied: false,
+            // A boot with capture paused starts stale.
+            sr_stale: user_paused,
+            sr_denied_mirror: Arc::new(AtomicBool::new(false)),
+            idle_epoch: 0,
             runtime: None,
             storage,
             metadata,
@@ -190,6 +204,14 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     /// the stop waits on its downstream tasks.
     pub fn with_on_stop_poisoned(mut self, hook: fn()) -> Self {
         self.on_stop_poisoned = hook;
+        self
+    }
+
+    /// Set the boot Screen Recording read and the mirror `Status` reads.
+    pub fn with_screen_recording_gate(mut self, denied: bool, mirror: Arc<AtomicBool>) -> Self {
+        mirror.store(denied, Ordering::Release);
+        self.sr_denied = denied;
+        self.sr_denied_mirror = mirror;
         self
     }
 
@@ -217,9 +239,20 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         }
     }
 
-    /// True when neither stop flag is set.
+    /// True when no stop flag is set.
     pub fn should_run(&self) -> bool {
-        !self.user_paused && !self.system_asleep
+        !self.user_paused && !self.system_asleep && !self.sr_denied && !self.sr_stale
+    }
+
+    /// A copy of the four stop flags.
+    pub fn gates(&self) -> Gates {
+        Gates {
+            user_paused: self.user_paused,
+            system_asleep: self.system_asleep,
+            sr_denied: self.sr_denied,
+            sr_stale: self.sr_stale,
+            idle_epoch: self.idle_epoch,
+        }
     }
 
     /// True when a capture runtime exists.
@@ -243,9 +276,11 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     pub async fn reconcile(&mut self, audio: &'a AudioPipeline) -> ReconcileOutcome {
         let action = decide(self.should_run(), self.runtime.is_some());
         log::info!(
-            "reconcile: user_paused={} system_asleep={} -> {:?}",
+            "reconcile: user_paused={} system_asleep={} sr_denied={} sr_stale={} -> {:?}",
             self.user_paused,
             self.system_asleep,
+            self.sr_denied,
+            self.sr_stale,
             action,
         );
         match action {
@@ -308,6 +343,19 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         }
     }
 
+    /// Set `user_paused`, persist it, and mark the read stale on a pause.
+    /// Doesn't reconcile. The caller can publish the new state first.
+    pub fn mark_user_paused(&mut self, paused: bool) {
+        self.user_paused = paused;
+        if paused {
+            self.sr_stale = true;
+            self.idle_epoch += 1;
+        }
+        self.capture_paused.store(paused, Ordering::Release);
+        settings::write_capture_paused(&self.base_dir, paused);
+        log::info!("set_user_paused: paused={paused}");
+    }
+
     /// Flip `user_paused`, persist it, and reconcile. This is the only setter
     /// that writes to disk — the sleep setters are transient. The persistence
     /// path writes a single boolean (`capture_paused`), nothing more.
@@ -319,11 +367,18 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         paused: bool,
         audio: &'a AudioPipeline,
     ) -> ReconcileOutcome {
-        self.user_paused = paused;
-        self.capture_paused.store(paused, Ordering::Release);
-        settings::write_capture_paused(&self.base_dir, paused);
-        log::info!("set_user_paused: paused={paused}");
+        self.mark_user_paused(paused);
         self.reconcile(audio).await
+    }
+
+    /// Set `system_asleep` and mark the read stale on a sleep. Transient.
+    pub fn mark_system_asleep(&mut self, asleep: bool) {
+        self.system_asleep = asleep;
+        if asleep {
+            self.sr_stale = true;
+            self.idle_epoch += 1;
+        }
+        log::info!("set_system_asleep: asleep={asleep}");
     }
 
     /// Flip `system_asleep` and reconcile. Transient — never persisted.
@@ -332,9 +387,14 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         asleep: bool,
         audio: &'a AudioPipeline,
     ) -> ReconcileOutcome {
-        self.system_asleep = asleep;
-        log::info!("set_system_asleep: asleep={asleep}");
+        self.mark_system_asleep(asleep);
         self.reconcile(audio).await
+    }
+
+    /// Clear `system_asleep`. Transient.
+    pub fn mark_system_awake(&mut self) {
+        self.system_asleep = false;
+        log::info!("set_system_awake: cleared system_asleep");
     }
 
     /// Clear `system_asleep` and reconcile. Transient — never persisted.
@@ -342,8 +402,24 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     /// Returns the reconcile outcome so the event loop can arm a retry when
     /// the wake's Start fails (CHR-136).
     pub async fn set_system_awake(&mut self, audio: &'a AudioPipeline) -> ReconcileOutcome {
-        self.system_asleep = false;
-        log::info!("set_system_awake: cleared system_asleep");
+        self.mark_system_awake();
+        self.reconcile(audio).await
+    }
+
+    /// Set or clear the Screen Recording gate and reconcile. Transient, never
+    /// persisted. Clearing it also clears `sr_stale`, because only an
+    /// Authorized read clears the gate (design §3 Step 1).
+    pub async fn set_sr_denied(
+        &mut self,
+        denied: bool,
+        audio: &'a AudioPipeline,
+    ) -> ReconcileOutcome {
+        self.sr_denied = denied;
+        if !denied {
+            self.sr_stale = false;
+        }
+        self.sr_denied_mirror.store(denied, Ordering::Release);
+        log::info!("set_sr_denied: denied={denied}");
         self.reconcile(audio).await
     }
 
@@ -625,6 +701,204 @@ mod tests {
             probe_holder,
             mic_state_atom,
         )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gated_reconcile_starts_nothing() {
+        let (dir, audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+        let mirror = Arc::new(AtomicBool::new(false));
+        let mut supervisor = CaptureSupervisor::new(
+            false,
+            storage,
+            metadata,
+            counters,
+            1024,
+            probe_holder,
+            capture_paused,
+            mic_atom,
+            dir.path().to_path_buf(),
+            Arc::new(chronicle_capture::CaptureDropCounters::default()),
+        )
+        .with_screen_recording_gate(true, Arc::clone(&mirror));
+
+        assert!(
+            mirror.load(Ordering::Acquire),
+            "the mirror starts at the boot read"
+        );
+        assert!(!supervisor.should_run());
+        assert_eq!(
+            supervisor.reconcile(&audio).await,
+            ReconcileOutcome::NoChange
+        );
+        assert!(supervisor.runtime.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resume_and_wake_wait_for_a_fresh_read() {
+        let (dir, audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+        let mut supervisor = CaptureSupervisor::new(
+            false,
+            storage,
+            metadata,
+            counters,
+            1024,
+            probe_holder,
+            capture_paused,
+            mic_atom,
+            dir.path().to_path_buf(),
+            Arc::new(chronicle_capture::CaptureDropCounters::default()),
+        )
+        .with_screen_recording_gate(false, Arc::new(AtomicBool::new(false)));
+
+        assert_eq!(
+            supervisor.set_user_paused(true, &audio).await,
+            ReconcileOutcome::NoChange
+        );
+        assert!(supervisor.gates().sr_stale, "a pause marks the read stale");
+        assert_eq!(
+            supervisor.gates().idle_epoch,
+            1,
+            "a pause starts a new epoch"
+        );
+        assert_eq!(
+            supervisor.set_user_paused(false, &audio).await,
+            ReconcileOutcome::NoChange
+        );
+        assert!(supervisor.runtime.is_none(), "no start before a fresh read");
+
+        assert_eq!(
+            supervisor.set_system_asleep(true, &audio).await,
+            ReconcileOutcome::NoChange
+        );
+        assert!(supervisor.gates().sr_stale);
+        assert_eq!(
+            supervisor.gates().idle_epoch,
+            2,
+            "a sleep starts a new epoch"
+        );
+        assert_eq!(
+            supervisor.set_system_awake(&audio).await,
+            ReconcileOutcome::NoChange
+        );
+        assert!(supervisor.runtime.is_none(), "no start before a fresh read");
+
+        // An Authorized read while asleep clears the stale flag and starts
+        // nothing, because the sleep flag still holds.
+        assert_eq!(
+            supervisor.set_system_asleep(true, &audio).await,
+            ReconcileOutcome::NoChange
+        );
+        assert_eq!(
+            supervisor.set_sr_denied(false, &audio).await,
+            ReconcileOutcome::NoChange
+        );
+        assert_eq!(
+            supervisor.gates(),
+            Gates {
+                system_asleep: true,
+                idle_epoch: 3,
+                ..Gates::default()
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mark_changes_the_gates_without_reconciling() {
+        let (dir, _audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+        let mut supervisor = CaptureSupervisor::new(
+            false,
+            storage,
+            metadata,
+            counters,
+            1024,
+            probe_holder,
+            capture_paused,
+            mic_atom,
+            dir.path().to_path_buf(),
+            Arc::new(chronicle_capture::CaptureDropCounters::default()),
+        );
+        supervisor.mark_system_asleep(true);
+        assert_eq!(
+            supervisor.gates(),
+            Gates {
+                system_asleep: true,
+                sr_stale: true,
+                idle_epoch: 1,
+                ..Gates::default()
+            }
+        );
+        assert!(supervisor.runtime.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn boot_paused_starts_stale() {
+        let (dir, audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+        let mut supervisor = CaptureSupervisor::new(
+            true,
+            storage,
+            metadata,
+            counters,
+            1024,
+            probe_holder,
+            capture_paused,
+            mic_atom,
+            dir.path().to_path_buf(),
+            Arc::new(chronicle_capture::CaptureDropCounters::default()),
+        )
+        .with_screen_recording_gate(false, Arc::new(AtomicBool::new(false)));
+
+        assert!(
+            supervisor.gates().sr_stale,
+            "a paused boot is an entry to Idle"
+        );
+        assert_eq!(
+            supervisor.set_user_paused(false, &audio).await,
+            ReconcileOutcome::NoChange
+        );
+        assert!(supervisor.runtime.is_none(), "no start before a fresh read");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clearing_the_gate_clears_stale_and_the_mirror() {
+        let (dir, audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+        let mirror = Arc::new(AtomicBool::new(false));
+        let mut supervisor = CaptureSupervisor::new(
+            true,
+            storage,
+            metadata,
+            counters,
+            1024,
+            probe_holder,
+            capture_paused,
+            mic_atom,
+            dir.path().to_path_buf(),
+            Arc::new(chronicle_capture::CaptureDropCounters::default()),
+        )
+        .with_screen_recording_gate(true, Arc::clone(&mirror));
+        // user_paused stays true, so neither call below reaches ScreenCaptureKit.
+        assert_eq!(
+            supervisor.set_user_paused(true, &audio).await,
+            ReconcileOutcome::NoChange
+        );
+
+        assert_eq!(
+            supervisor.set_sr_denied(false, &audio).await,
+            ReconcileOutcome::NoChange
+        );
+        let g = supervisor.gates();
+        assert!(!g.sr_denied && !g.sr_stale);
+        assert!(!mirror.load(Ordering::Acquire));
+
+        assert_eq!(
+            supervisor.set_sr_denied(true, &audio).await,
+            ReconcileOutcome::NoChange
+        );
+        assert!(mirror.load(Ordering::Acquire));
     }
 
     #[tokio::test(flavor = "multi_thread")]
