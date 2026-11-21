@@ -180,9 +180,18 @@ struct DaemonConnectionReconnectTests {
         let pair = try SocketPairHelper.make()
         let conn = DaemonConnection(testingSocketFD: pair.clientFD, staleAfter: .milliseconds(300))
         let serverFD = pair.serverFD
+        // A Status first, so a stale snapshot exists for a command reply to
+        // wrongly bring back.
+        let first = blockingServer {
+            respondToOneRequest(on: serverFD, with: #"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"v"}}"#)
+        }
+        _ = try await conn.requestStatus()
+        _ = await first.value
+        #expect(conn.currentStatus != nil)
         await waitUntil(ticks: 100) { conn.replyOverdue }
         #expect(conn.replyOverdue)
-        // A command reply first: any reply clears overdue.
+        #expect(conn.currentStatus == nil)
+        // A command reply next: any reply clears overdue.
         let mic = blockingServer {
             respondToOneRequest(on: serverFD, with: #"{"type":"set_mic_enabled","ok":true,"state":"on"}"#)
         }
