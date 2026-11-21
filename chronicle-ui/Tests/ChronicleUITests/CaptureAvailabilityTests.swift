@@ -34,6 +34,14 @@ struct CaptureAvailabilityTests {
         #expect(classify(.connected, statusWithCapture(state: "running", paused: false)) == .capturing)
         #expect(classify(.connected, statusDenied(screenRecording: .denied)) == .needsScreenRecording)
         #expect(classify(.connected, statusDenied(screenRecording: .unavailable)) == .permissionUnverified)
+        // Only `unavailable` is unverified. Every other read, including one
+        // this UI doesn't know, still needs Screen Recording.
+        for state in [PermissionState.unknown, .notDetermined, .restricted, .authorized] {
+            #expect(classify(.connected, statusDenied(screenRecording: state)) == .needsScreenRecording,
+                    "\(state)")
+        }
+        #expect(classify(.connected, statusWithCapture(state: "permission_denied", paused: false))
+                == .needsScreenRecording, "no permissions block")
         #expect(classify(.connected, statusWithoutCapture()) == .notCapturing)
         #expect(classify(.connected, statusWithCapture(state: "permission_denied", paused: true)) == .paused)
     }

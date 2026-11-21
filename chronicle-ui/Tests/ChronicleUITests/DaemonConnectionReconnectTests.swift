@@ -136,19 +136,19 @@ struct DaemonConnectionReconnectTests {
     @Test("a slow command reply under the bound keeps the replies from going overdue")
     func aSlowCommandReplyUnderTheBoundIsNotOverdue() async throws {
         let pair = try SocketPairHelper.make()
-        let conn = DaemonConnection(testingSocketFD: pair.clientFD, staleAfter: .seconds(1))
+        let conn = DaemonConnection(testingSocketFD: pair.clientFD, staleAfter: .seconds(2))
         let serverFD = pair.serverFD
-        // The reply takes 0.7 s, like a command the daemon holds until its
-        // recv_timeout. It lands inside the 1 s bound.
+        // The reply takes 1.4 s, like a command the daemon holds until its
+        // recv_timeout. It lands inside the 2 s bound.
         let daemon = blockingServer {
             guard readLineSync(from: serverFD) != nil else { return }
-            Thread.sleep(forTimeInterval: 0.7)
+            Thread.sleep(forTimeInterval: 1.4)
             writeAll(#"{"type":"set_mic_enabled","ok":false,"state":"off","pending":true}"# + "\n", to: serverFD)
         }
         _ = try await conn.setMicEnabled(true)
         _ = await daemon.value
-        // 1.3 s after connect: past the first bound, inside the one the reply restarted.
-        try await Task.sleep(for: .milliseconds(600))
+        // 2.6 s after connect: past the first bound, inside the one the reply restarted.
+        try await Task.sleep(for: .milliseconds(1_200))
         #expect(!conn.replyOverdue, "a reply of any kind restarts the bound")
         conn.disconnect()
         Darwin.close(serverFD)
@@ -172,6 +172,32 @@ struct DaemonConnectionReconnectTests {
         #expect(conn.state == .connected, "overdue is not a disconnect")
         conn.disconnect()
         #expect(!conn.replyOverdue, "a closed connection is not overdue")
+        Darwin.close(serverFD)
+    }
+
+    @Test("a reply after the bound clears overdue, and a Status makes it current again")
+    func aReplyAfterTheBoundRecovers() async throws {
+        let pair = try SocketPairHelper.make()
+        let conn = DaemonConnection(testingSocketFD: pair.clientFD, staleAfter: .milliseconds(300))
+        let serverFD = pair.serverFD
+        await waitUntil(ticks: 100) { conn.replyOverdue }
+        #expect(conn.replyOverdue)
+        // A command reply first: any reply clears overdue.
+        let mic = blockingServer {
+            respondToOneRequest(on: serverFD, with: #"{"type":"set_mic_enabled","ok":true,"state":"on"}"#)
+        }
+        _ = try await conn.setMicEnabled(true)
+        _ = await mic.value
+        #expect(!conn.replyOverdue, "a command reply clears overdue")
+        #expect(conn.currentStatus == nil, "only a Status makes the status current")
+        let status = blockingServer {
+            respondToOneRequest(on: serverFD, with: #"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"v"}}"#)
+        }
+        _ = try await conn.requestStatus()
+        _ = await status.value
+        #expect(!conn.replyOverdue)
+        #expect(conn.currentStatus != nil)
+        conn.disconnect()
         Darwin.close(serverFD)
     }
 

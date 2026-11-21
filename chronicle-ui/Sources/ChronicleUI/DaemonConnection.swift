@@ -537,7 +537,9 @@ final class DaemonConnection {
         replyOverdue = false
         let wait = staleAfter
         overdueTask = Task { [weak self] in
-            try? await Task.sleep(for: wait)
+            // Suspending: time the Mac spends asleep doesn't count, so the
+            // heartbeat answers first on wake.
+            try? await Task.sleep(for: wait, tolerance: nil, clock: .suspending)
             guard !Task.isCancelled, let self else { return }
             self.replyOverdue = true
             self.statusIsCurrent = false
