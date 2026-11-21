@@ -87,7 +87,6 @@ final class MicController {
                 }
             }
             guard permission.status == .authorized else { return }
-            pendingOff = false
         }
         let (outcome, seen) = await send(on)
         if let outcome { setMark(outcome, micState: seen) }

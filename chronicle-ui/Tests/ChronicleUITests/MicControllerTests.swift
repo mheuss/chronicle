@@ -470,17 +470,18 @@ struct MicControllerTests {
         #expect(daemon.log == ["status", "set(false)"])
     }
 
-    @Test func anOnToggleCancelsAHeldOff() async {
+    @Test func aRefusedOnToggleKeepsAHeldOff() async {
         let daemon = FakeMicDaemon()
         daemon.holdStatus = true
         let mic = controller(daemon)
         await mic.recheck()
         await mic.setEnabled(false)
         await mic.setEnabled(true)
-        daemon.statuses = [statusWithMic(.on)]
+        #expect(mic.mark == .unconfirmed)
+        daemon.statuses = [statusWithMic(.off)]
         daemon.releaseStatus()
-        for _ in 0..<50 { await Task.yield() }
-        #expect(daemon.log == ["status"])
+        #expect(await eventually { daemon.log.contains("set(false)") })
+        #expect(daemon.log == ["status", "set(false)"])
     }
 
     @Test func anOnToggleThatSendsNothingKeepsAHeldOff() async {
