@@ -197,8 +197,8 @@ pub struct StatusData {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptureStats {
-    /// Engine state: "running" | "stopping" | "idle" | "poisoned" | "paused" | "unknown".
-    /// "paused" is reported when capture is intentionally stopped via PauseCapture.
+    /// Engine state: "running" | "stopping" | "idle" | "poisoned" | "paused" |
+    /// "permission_denied" | "unknown". "paused" wins over "permission_denied".
     pub state: String,
     pub active_displays: usize,
     /// Total frames delivered by SCK (from CaptureEngine::status()).
