@@ -68,8 +68,8 @@ pub(crate) async fn run(
     // When the last tick started. None after Idle. Leaving Idle then reads at once.
     let mut last_tick: Option<tokio::time::Instant> = None;
     let mut last_epoch = mode_rx.borrow().epoch;
-    let mut screen_log = ReadLog::default();
-    let mut mic_log = ReadLog::default();
+    let mut screen_log = ReadLog::new(PermissionName::ScreenRecording);
+    let mut mic_log = ReadLog::new(PermissionName::Microphone);
     loop {
         let state = *mode_rx.borrow_and_update();
         // A new epoch means an Idle period began. It may have ended before
@@ -116,7 +116,7 @@ pub(crate) async fn run(
         }
         last_tick = Some(tokio::time::Instant::now());
         let screen = reader(PermissionName::ScreenRecording).await;
-        screen_log.note(PermissionName::ScreenRecording, screen);
+        screen_log.note(screen);
         let sent = screen_tx
             .send(TimedRead {
                 read: screen,
@@ -133,7 +133,7 @@ pub(crate) async fn run(
         let state = *mode_rx.borrow();
         if state.mode.interval().is_some() {
             let mic = reader(PermissionName::Microphone).await;
-            mic_log.note(PermissionName::Microphone, mic);
+            mic_log.note(mic);
             let sent = mic_tx
                 .send(TimedRead {
                     read: mic,
@@ -151,14 +151,19 @@ pub(crate) async fn run(
 
 /// Logs every read at debug, and at info only when it differs from the last
 /// read of the same permission (design R10, N2b).
-#[derive(Default)]
 struct ReadLog {
+    name: PermissionName,
     last: Option<PermissionRead>,
 }
 
 impl ReadLog {
+    fn new(name: PermissionName) -> Self {
+        Self { name, last: None }
+    }
+
     /// Returns true when the read went to the info log.
-    fn note(&mut self, name: PermissionName, read: PermissionRead) -> bool {
+    fn note(&mut self, read: PermissionRead) -> bool {
+        let name = self.name;
         log::debug!("permission read: {name:?} -> {read:?}");
         let changed = self.last != Some(read);
         self.last = Some(read);
@@ -182,8 +187,7 @@ mod tests {
 
     #[test]
     fn identical_reads_log_once_at_info() {
-        let mut log = ReadLog::default();
-        let name = PermissionName::ScreenRecording;
+        let mut log = ReadLog::new(PermissionName::ScreenRecording);
         let infos = [
             PermissionRead::Denied,
             PermissionRead::Denied,
@@ -192,7 +196,7 @@ mod tests {
             PermissionRead::Authorized,
         ]
         .into_iter()
-        .filter(|&read| log.note(name, read))
+        .filter(|&read| log.note(read))
         .count();
         assert_eq!(infos, 2, "the first read and the one change");
     }
