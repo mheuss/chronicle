@@ -5,6 +5,7 @@ struct SettingsView: View {
     @Environment(DaemonConnection.self) private var connection
     @Environment(TranscriptionAlertState.self) private var transcriptionAlert
     @Environment(BackgroundService.self) private var background
+    @Environment(ScreenRecordingPromptController.self) private var prompt
     @Environment(MicController.self) private var mic
     @State private var isPauseInFlight: Bool = false
     /// The variant the picker is showing. Tracks the daemon's `variant` unless
@@ -159,6 +160,10 @@ struct SettingsView: View {
         HStack(spacing: 6) {
             Image(systemName: availability.badgeSymbol).foregroundStyle(availability.tint.color)
             Text(CaptureAvailabilityCopy.settingsText(availability))
+            if availability == .needsScreenRecording {
+                Button(CaptureAvailabilityCopy.fixButton) { prompt.present() }
+                    .accessibilityLabel(CaptureAvailabilityCopy.fixButtonAccessibilityLabel)
+            }
         }
     }
 

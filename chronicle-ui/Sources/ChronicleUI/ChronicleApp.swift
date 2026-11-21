@@ -9,6 +9,7 @@ struct ChronicleApp: App {
     @State private var transcriptionAlert = TranscriptionAlertState()
     @State private var searchFilter = SearchFilterState()
     @State private var background = BackgroundService()
+    @State private var prompt = ScreenRecordingPromptController()
 
     init() {
         let connection = DaemonConnection()
@@ -24,10 +25,16 @@ struct ChronicleApp: App {
                 .environment(transcriptionAlert)
                 .environment(searchFilter)
                 .environment(background)
+                .environment(prompt)
         } label: {
             MenuBarIcon(connection: connection, background: background)
                 .task {
                     background.onAgentRegistered = { [connection] in connection.reconnectNow() }
+                    connection.onStatus = { [connection, background, prompt] _ in
+                        prompt.observe(.init(
+                            availability: connection.availability(background: background),
+                            screenRecording: connection.currentStatus?.data.permissions?.screenRecording))
+                    }
                     connection.connect()
                     await background.reconcileOnLaunch()
                 }
@@ -43,6 +50,7 @@ struct ChronicleApp: App {
             SettingsView()
                 .environment(connection)
                 .environment(background)
+                .environment(prompt)
                 .environment(mic)
                 // Settings is a provision entry point too, so it needs to be
                 // able to spend a stale dismissal — see

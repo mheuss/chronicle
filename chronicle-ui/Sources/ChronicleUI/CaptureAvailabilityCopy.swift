@@ -36,6 +36,8 @@ enum CaptureAvailabilityCopy {
     static let popoverBackgroundOff = "Background capture is off. Turn it on in Settings to search."
 
     static let fixButton = "Fix…"
+    /// What VoiceOver says for the Fix… button, which reads alone out of context.
+    static let fixButtonAccessibilityLabel = "Fix Screen Recording"
     static let popoverRow = "Screen Recording is off. Fix…"
     static let dialogTitle = "Chronicle needs Screen Recording"
     static let dialogBody = """
