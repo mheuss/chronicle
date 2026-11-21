@@ -125,6 +125,8 @@ struct DaemonConnectionReconnectTests {
         let winner = conn.sessionForTesting
         #expect(winner != nil)
         await gate.open()  // Release the cancelled first attempt.
+        await waitUntil { log.count == 2 }
+        #expect(log.count == 2, "the cancelled attempt ran")
         try await Task.sleep(for: .milliseconds(200))
         #expect(conn.state == .connected)
         #expect(conn.sessionForTesting === winner, "the cancelled attempt touched the new session")

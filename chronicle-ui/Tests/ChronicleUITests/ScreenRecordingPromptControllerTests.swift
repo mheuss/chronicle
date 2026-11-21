@@ -65,6 +65,16 @@ struct ScreenRecordingPromptControllerTests {
         #expect(calls.count == 2, "the next press after it closes shows again")
     }
 
+    @Test func aButtonPressLeavesTheLatchArmed() {
+        let calls = Calls()
+        let prompt = ScreenRecordingPromptController(
+            presenter: { calls.count += 1 },
+            schedule: { $0() })
+        prompt.present()
+        prompt.observe(.init(availability: .needsScreenRecording, screenRecording: .denied))
+        #expect(calls.count == 2, "the first status after a press still shows the dialog")
+    }
+
     @Test func theLatchDecidesWhenToShow() {
         let calls = Calls()
         let held = HeldBlocks()

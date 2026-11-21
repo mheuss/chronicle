@@ -122,7 +122,7 @@ struct SettingsView: View {
         MicRowState.from(
             permission: mic.permission.status,
             status: connection.currentStatus,
-            connected: connection.state == .connected,
+            connected: connection.state == .connected && !connection.replyOverdue,
             mark: mic.mark)
     }
 

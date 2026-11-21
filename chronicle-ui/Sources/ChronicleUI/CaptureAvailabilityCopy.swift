@@ -26,7 +26,7 @@ enum CaptureAvailabilityCopy {
         case .permissionUnverified: "Chronicle can't check Screen Recording"
         case .paused: "Chronicle capture paused"
         case .capturing: "Chronicle capture active"
-        case .notCapturing: "Chronicle capture not running"
+        case .notCapturing: "Chronicle capture stopped"
         }
     }
 

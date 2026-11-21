@@ -32,6 +32,9 @@ struct CodableTests {
         let status = try decodeStatus(json)
         #expect(status.data.permissions?.screenRecording == .unknown)
         #expect(status.data.permissions?.microphone == .authorized)
+        let permissions = try #require(status.data.permissions)
+        #expect(permissions.screenRecordingCheckedAtMs == nil)
+        #expect(permissions.microphoneCheckedAtMs == nil)
     }
 
     @Test("StatusResponse decodes from Rust wire format")
