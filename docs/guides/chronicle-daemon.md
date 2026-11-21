@@ -261,8 +261,10 @@ Four things to know before you trust what you read:
   unified log with the microphone's name and UID replaced by `redacted`. Run
   the daemon by hand to see them.
 - **Restart between devices.** `MicrophoneCapture` and its converter are built
-  when the mic is first turned on, so changing the default input while the mic
-  is on leaves the converter built for the previous device.
+  when the mic is turned on. Turning the mic off drops them, but pausing capture
+  keeps them. Changing the default input while the mic is on leaves the
+  converter built for the previous device. So does changing it while capture is
+  paused with the mic on.
 - **The line appears before capture starts.** The tap is installed when the mic
   is turned on, just before the engine starts. Seeing this line shows the engine
   was built, not that audio was recorded.
