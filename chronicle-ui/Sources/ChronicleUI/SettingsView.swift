@@ -66,10 +66,11 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             row("Status") { statusBadge }
             row("Transcription") { transcriptionBadge }
-            // Only with a block to drive them. A daemon too old to send one
-            // gets the "Requires daemon update" wording in the row above, and
-            // an empty picker beneath it would just be noise (design §4.3).
-            if let transcription = connection.lastStatus?.data.transcription {
+            // Only with a current Status's block to drive them, the same gate as
+            // the row above. A current Status with no block, from a daemon too
+            // old to send one, gets the "Requires daemon update" wording there,
+            // and an empty picker beneath it would just be noise (design §4.3).
+            if let transcription = connection.currentStatus?.data.transcription {
                 row("Model") { modelPicker(transcription) }
                 row("Downloaded") { Text(Self.downloadedSummary(transcription.models)) }
             }
