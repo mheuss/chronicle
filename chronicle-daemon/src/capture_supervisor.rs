@@ -238,12 +238,10 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         }
     }
 
-    /// True when no stop flag is set.
     pub fn should_run(&self) -> bool {
         !self.user_paused && !self.system_asleep && !self.sr_denied && !self.sr_stale
     }
 
-    /// A copy of the four stop flags.
     pub fn gates(&self) -> Gates {
         Gates {
             user_paused: self.user_paused,
@@ -342,11 +340,8 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         }
     }
 
-    /// Set `user_paused`, persist it, and mark the read stale on a pause.
-    /// Doesn't reconcile. The caller can publish the new state first. This is
-    /// the only setter that writes to disk — the sleep setters are transient.
-    /// The persistence path writes a single boolean (`capture_paused`),
-    /// nothing more.
+    /// Doesn't reconcile, so the caller can publish the new state first.
+    /// The only setter that writes to disk. The sleep setters are transient.
     pub fn mark_user_paused(&mut self, paused: bool) {
         self.user_paused = paused;
         if paused {
@@ -368,7 +363,6 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         log::info!("mark_system_asleep: asleep={asleep}");
     }
 
-    /// Clear `system_asleep`. Transient.
     pub fn mark_system_awake(&mut self) {
         self.system_asleep = false;
         log::info!("mark_system_awake: cleared system_asleep");

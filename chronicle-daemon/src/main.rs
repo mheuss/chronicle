@@ -900,11 +900,11 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     // always-equal flag.
     mic_ready.store(true, Ordering::Release);
     capture_ready.store(true, Ordering::Release);
+    // Adds 1 after each successful mic command (design §3, AD20).
+    let mut mic_generation: u64 = 0;
     // Permission monitor (design §2). Started after the readiness flags are set.
     // The first read then lands on a loop that drains it. The two arms below are the
     // only code that acts on its reads (N5).
-    // Adds 1 after each successful mic command (design §3, AD20).
-    let mut mic_generation: u64 = 0;
     let (mode_tx, mode_rx) = tokio::sync::watch::channel(permission_gate::state_for(
         supervisor.gates(),
         mic_generation,

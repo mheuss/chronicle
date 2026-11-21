@@ -1,6 +1,5 @@
 //! Pure decisions for the permission monitor's reads (design §3, §4).
-//! Written for the event loop's permission arms. Nothing here touches the supervisor, the
-//! audio pipeline or the settings file.
+//! Nothing here touches the supervisor, the audio pipeline or the settings file.
 
 use std::future::Future;
 use std::time::Duration;

@@ -1168,9 +1168,9 @@ what was true during the walk, not of the tree today.
   capture and the mic may run on a read, as `mic_gate.rs` does. The monitor
   takes its pace from capture's `Gates` and feeds only capture's gate. A first
   placement put the monitor under permissions. Its import of
-  `permission_gate::MonitorState` then made permissions depend on capture
-  while capture depends on permissions, a cycle no map recorded. No check
-  covers import edges, so the Depends On sections of capture, permissions and
-  IPC were checked by hand against the `use` lines of every file this branch
+  `permission_gate::MonitorState` then made permissions depend on capture.
+  Capture already depended on permissions. That was a cycle no map recorded.
+  No check covers import edges. The Depends On sections of capture,
+  permissions and IPC were checked by hand against the `use` lines of every file this branch
   added or changed. That also found IPC's new `PermissionRead` import in
   `ipc_handler.rs` for `wire_permission`.

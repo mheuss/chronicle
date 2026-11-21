@@ -12,7 +12,6 @@ final class ScreenRecordingPromptController {
     @ObservationIgnored private let presenter: @MainActor () -> Void
     @ObservationIgnored private let schedule: Scheduler
 
-    /// What the latch watches.
     struct Input {
         let availability: CaptureAvailability
         /// The current Status's read, or nil without one.
@@ -35,17 +34,13 @@ final class ScreenRecordingPromptController {
         schedule(presenter)
     }
 
-    /// Show the dialog from a button press.
     func present() {
         schedule(presenter)
     }
 
-    /// The alert is modal. Run from a main-queue job, such as a Task on the
-    /// main actor, it holds the main queue until it closes, and every other
-    /// main-actor job waits: the heartbeat, the reply watchdog, the agent's
-    /// re-register. A run-loop block is not a main-queue job, so the modal
-    /// loop keeps draining the main queue. The common modes include the modal
-    /// panel mode.
+    /// The alert is modal. From a Task it would hold the main queue and stall
+    /// the heartbeat and reply watchdog. A run-loop block keeps the queue
+    /// draining. The common modes include the modal panel mode.
     private static func onRunLoop(_ block: @escaping @MainActor () -> Void) {
         RunLoop.main.perform(inModes: [.common]) {
             MainActor.assumeIsolated { block() }

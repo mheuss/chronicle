@@ -103,7 +103,7 @@ flowchart TD
 16. Runs the event loop until the shutdown signal (`SIGINT` from Ctrl-C or
     `SIGTERM`). It serves mic toggles, pause and resume, and sleep and wake.
     It also stops when the first capture start after a Screen Recording grant
-    fails. The daemon then runs the full teardown and exits with status 4, so
+    fails. The daemon then runs the full teardown and exits with status 4.
     launchd starts a fresh process that reads the grant at boot (CHR-96).
 
 ### Channel Topology
@@ -307,7 +307,7 @@ tells you which device is selected.
 ### Adding a new permission check
 
 1. Add a status enum and FFI call in `permissions.rs`
-2. Add a `--permission-status` arm for it, so decisions after boot use a fresh read (ADR-022)
+2. Add a `--permission-status` arm for it. Decisions after boot then use a fresh read (ADR-022)
 3. Decide whether it gates capture. A gate belongs in `CaptureSupervisor`, never in an exit from `preflight()`
 
 ### Adding a new crate to the workspace
