@@ -365,6 +365,14 @@ fn startup(
 }
 
 fn main() -> std::process::ExitCode {
+    // The permission helper (design §1.3) exits before logging, IPC or capture.
+    if let Some(code) = permissions::run_status_command(
+        std::env::args().skip(1),
+        &mut std::io::stdout(),
+        permissions::check_microphone,
+    ) {
+        return std::process::ExitCode::from(code);
+    }
     logging::init(DEFAULT_LOG_FILTER);
     log::info!("chronicle-daemon starting");
     std::process::ExitCode::from(exit_code_for(run_main()))
