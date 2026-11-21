@@ -140,8 +140,8 @@ the grant. The signature names the identifier and team instead of the code hash.
    `chronicle-daemon` itself had no effect.
 3. For the microphone, open Chronicle's Settings and turn on "Record the
    microphone". The first time, macOS asks for mic access. The grant goes to
-   `Chronicle.app`, because the app carries the audio-input entitlement, and the
-   daemon under launchd uses it. If you click Don't Allow, the toggle stays off.
+   `Chronicle.app` because the app carries the audio-input entitlement. The
+   daemon under launchd uses that grant. If you click Don't Allow, the toggle stays off.
    The row then offers a button that opens Privacy & Security > Microphone. The
    Microphone list has no + button, so this prompt is the only way to add
    Chronicle.
