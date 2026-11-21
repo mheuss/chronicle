@@ -32,6 +32,18 @@ final class DaemonConnection {
     /// Called with every Status this connection receives (design §7.1).
     @ObservationIgnored var onStatus: (@MainActor (StatusResponse) -> Void)?
 
+    /// No reply on the current connection for this long means the daemon has
+    /// stopped answering. The longest a healthy daemon holds a reply is a
+    /// command's 20 s `recv_timeout`, so this leaves 10 s of margin. Requests
+    /// are serial, so a heartbeat queued behind that command waits too.
+    static let defaultStaleAfter: Duration = .seconds(30)
+    let staleAfter: Duration
+
+    /// True once the current connection has gone `staleAfter` without a reply
+    /// of any kind. It also makes `currentStatus` nil. Any reply clears it.
+    private(set) var replyOverdue = false
+    private var overdueTask: Task<Void, Never>?
+
     // MARK: - Socket Path
 
     nonisolated private static let logger = Logger(subsystem: "dev.heuss.chronicle", category: "ui")
@@ -85,16 +97,19 @@ final class DaemonConnection {
     init() {
         self.connectionFactory = { try await Self.connectToDaemonSocket() }
         self.heartbeatInterval = Self.defaultHeartbeatInterval
+        self.staleAfter = Self.defaultStaleAfter
     }
 
     /// Builds a connection whose descriptors come from `connectionFactory`
     /// instead of the real socket path.
     internal init(
         connectionFactory: @escaping @MainActor @Sendable () async throws -> Int32,
-        heartbeatInterval: Duration = DaemonConnection.defaultHeartbeatInterval
+        heartbeatInterval: Duration = DaemonConnection.defaultHeartbeatInterval,
+        staleAfter: Duration = DaemonConnection.defaultStaleAfter
     ) {
         self.connectionFactory = connectionFactory
         self.heartbeatInterval = heartbeatInterval
+        self.staleAfter = staleAfter
     }
 
     /// **Test-only.** Not for production use. Wires `DaemonConnection` to a
@@ -109,7 +124,7 @@ final class DaemonConnection {
     /// throws `IPCError.socketCreationFailed` on failure.
     ///
     /// This connection never reconnects, so its factory is never called.
-    internal init(testingSocketFD fd: Int32) {
+    internal init(testingSocketFD fd: Int32, staleAfter: Duration = DaemonConnection.defaultStaleAfter) {
         var noSigPipe: Int32 = 1
         let result = setsockopt(
             fd,
@@ -121,10 +136,12 @@ final class DaemonConnection {
         precondition(result == 0, "SO_NOSIGPIPE failed in testing init: errno=\(errno)")
         self.connectionFactory = { preconditionFailure("testing connections do not reconnect") }
         self.heartbeatInterval = Self.defaultHeartbeatInterval
+        self.staleAfter = staleAfter
         let session = ConnectionSession(fd: fd, maxResponseSize: Self.maxResponseSize)
         session.start()
         self.session = session
         self.state = .connected
+        watchForReplies()
     }
 
     // MARK: - Lifecycle
@@ -150,6 +167,7 @@ final class DaemonConnection {
                     statusIsCurrent = false
                     session = newSession
                     state = .connected
+                    watchForReplies()
                     delay = .seconds(1)
                     await raceHeartbeatAgainstSession(newSession)
                 } catch is CancellationError {
@@ -385,6 +403,7 @@ final class DaemonConnection {
             }
             line.append("\n")
             let responseLine = try await mySession.send(line)
+            if self.session === mySession { self.watchForReplies() }
             let responseData = Data(responseLine.utf8)
             do {
                 return try self.decoder.decode(Res.self, from: responseData)
@@ -505,7 +524,24 @@ final class DaemonConnection {
         session?.close()
         session = nil
         statusIsCurrent = false
+        overdueTask?.cancel()
+        overdueTask = nil
+        replyOverdue = false
         requestQueue = nil
+    }
+
+    /// Restart the `staleAfter` wait. Runs on a new connection and after
+    /// every reply on it.
+    private func watchForReplies() {
+        overdueTask?.cancel()
+        replyOverdue = false
+        let wait = staleAfter
+        overdueTask = Task { [weak self] in
+            try? await Task.sleep(for: wait)
+            guard !Task.isCancelled, let self else { return }
+            self.replyOverdue = true
+            self.statusIsCurrent = false
+        }
     }
 }
 

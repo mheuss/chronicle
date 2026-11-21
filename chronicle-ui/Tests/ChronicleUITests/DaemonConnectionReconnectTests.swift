@@ -133,6 +133,48 @@ struct DaemonConnectionReconnectTests {
         log.closeServers()
     }
 
+    @Test("a slow command reply under the bound keeps the replies from going overdue")
+    func aSlowCommandReplyUnderTheBoundIsNotOverdue() async throws {
+        let pair = try SocketPairHelper.make()
+        let conn = DaemonConnection(testingSocketFD: pair.clientFD, staleAfter: .seconds(1))
+        let serverFD = pair.serverFD
+        // The reply takes 0.7 s, like a command the daemon holds until its
+        // recv_timeout. It lands inside the 1 s bound.
+        let daemon = blockingServer {
+            guard readLineSync(from: serverFD) != nil else { return }
+            Thread.sleep(forTimeInterval: 0.7)
+            writeAll(#"{"type":"set_mic_enabled","ok":false,"state":"off","pending":true}"# + "\n", to: serverFD)
+        }
+        _ = try await conn.setMicEnabled(true)
+        _ = await daemon.value
+        // 1.3 s after connect: past the first bound, inside the one the reply restarted.
+        try await Task.sleep(for: .milliseconds(600))
+        #expect(!conn.replyOverdue, "a reply of any kind restarts the bound")
+        conn.disconnect()
+        Darwin.close(serverFD)
+    }
+
+    @Test("no reply for the bound marks the replies overdue and the status stale")
+    func noReplyForTheBoundIsOverdue() async throws {
+        let pair = try SocketPairHelper.make()
+        let conn = DaemonConnection(testingSocketFD: pair.clientFD, staleAfter: .milliseconds(300))
+        let serverFD = pair.serverFD
+        let daemon = blockingServer {
+            respondToOneRequest(on: serverFD, with: #"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"v"}}"#)
+        }
+        _ = try await conn.requestStatus()
+        _ = await daemon.value
+        #expect(conn.currentStatus != nil)
+        #expect(!conn.replyOverdue)
+        await waitUntil(ticks: 100) { conn.replyOverdue }
+        #expect(conn.replyOverdue)
+        #expect(conn.currentStatus == nil, "an overdue connection's status is not current")
+        #expect(conn.state == .connected, "overdue is not a disconnect")
+        conn.disconnect()
+        #expect(!conn.replyOverdue, "a closed connection is not overdue")
+        Darwin.close(serverFD)
+    }
+
     @Test("status is not current until this connection's first reply")
     func statusIsCurrentOnlyAfterThisConnectionsReply() async throws {
         let pair = try SocketPairHelper.make()
