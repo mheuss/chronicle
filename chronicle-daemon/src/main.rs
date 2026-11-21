@@ -5,6 +5,7 @@ mod instance_lock;
 mod ipc_handler;
 mod logging;
 mod media_presence;
+mod mic_gate;
 mod permissions;
 mod pipeline;
 mod power;
@@ -163,7 +164,7 @@ async fn join_cleanup_task(
 ///
 /// **Called from the event loop, and once more from the shutdown drain after
 /// that loop has exited** — never concurrently, which is the correctness
-/// requirement here rather than a style choice. All three settings writers
+/// requirement here rather than a style choice. All four settings writers
 /// share one fixed temp path (`settings.tmp`) — see the single-writer note at
 /// the mic arm below — so strict serialization is the only thing making that
 /// safe. Two truly concurrent callers would surface a lost race as
@@ -815,23 +816,23 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     // --- Event loop: serve mic toggles until a shutdown signal arrives ---
     // Toggles are handled inline, one per iteration.
     //
-    // **The single-writer note.** All three settings writers run from this
+    // **The single-writer note.** All four settings writers run from this
     // loop — `write_mic_setting` here, `write_capture_paused` via
-    // `set_user_paused` in the capture arm, and `write_whisper_model` via
-    // `handle_provision_event`. They share one fixed temp path
-    // (`settings.tmp`), so one-at-a-time processing is the only thing keeping
-    // that safe: concurrently, a lost race surfaces as `AlreadyExists`, and
-    // the loser's cleanup can delete the winner's temp file and break its
-    // rename.
+    // `set_user_paused` in the capture arm, `write_whisper_model` via
+    // `handle_provision_event`, and `write_mic_setting(false)` inside the mic
+    // gate (`mic_gate::apply_mic_intent`), which this arm, the supervisor's
+    // `start()`, and `mic_gate::reapply_mic_gate` all reach. They share one
+    // fixed temp path (`settings.tmp`), so one-at-a-time processing is the
+    // only thing keeping that safe: concurrently, a lost race surfaces as
+    // `AlreadyExists`, and the loser's cleanup can delete the winner's temp
+    // file and break its rename.
     //
-    // The one call outside this loop is `handle_provision_event` in the
-    // shutdown drain below, which runs after the loop has exited and cannot
-    // overlap it. `handle_provision_event`'s doc points here for exactly this
-    // reasoning, so it must keep naming all three writers — and this note
-    // must keep naming that exception.
-    //
-    // (The supervisor's `start()` reads but never writes the mic setting when
-    // restoring it on boot/resume/wake, so it can't race this loop's write.)
+    // Two calls run outside this loop, and neither can overlap it. The boot
+    // `supervisor.reconcile` above runs before the loop starts. Its `start()`
+    // can reach the gate. `handle_provision_event` in the shutdown drain below
+    // runs after the loop has exited. `handle_provision_event`'s doc points
+    // here for this reasoning, so it must keep naming all four writers. This
+    // note must keep naming both exceptions.
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     // Open the readiness gates: from here the loop drains `mic_rx`,
     // `capture_rx` and `model_rx`, so the IPC handler can forward toggles
@@ -861,26 +862,37 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                 break;
             }
             Some(cmd) = mic_rx.recv() => {
-                // Always persist the user's intent so the supervisor's next Start
-                // restores it.
+                // Persist the user's intent first. The gate may then clear it
+                // when the grant is missing (design §1.2).
                 settings::write_mic_setting(storage.base_dir(), cmd.enabled);
-                let state = if supervisor.is_running() {
-                    let outcome = audio_pipeline.set_microphone_enabled(cmd.enabled);
-                    let s = ipc_handler::map_outcome(outcome, permissions::check_microphone());
-                    log::info!("mic toggle: requested enabled={}, result={s:?}", cmd.enabled);
-                    s
+                let outcome = if supervisor.is_running() {
+                    let o = mic_gate::apply_mic_intent(
+                        &audio_pipeline,
+                        storage.base_dir(),
+                        cmd.enabled,
+                        permissions::fresh_microphone_status,
+                    );
+                    log::info!(
+                        "mic toggle: requested enabled={}, result={:?}",
+                        cmd.enabled,
+                        o.reply
+                    );
+                    o
                 } else {
                     // No runtime (pause, sleep, or a failed start): save the
-                    // preference only. `start()` restores it.
+                    // preference only. `start()` applies the gate to it.
                     log::info!(
                         "mic toggle: requested enabled={} while capture not running — \
                          preference saved, device left off",
                         cmd.enabled,
                     );
-                    chronicle_ipc::MicState::Off
+                    mic_gate::GateOutcome {
+                        reply: chronicle_ipc::MicState::Off,
+                        status: chronicle_ipc::MicState::Off,
+                    }
                 };
-                mic_state_atom.store(state as u8, std::sync::atomic::Ordering::Release);
-                let _ = cmd.reply.send(state);
+                mic_state_atom.store(outcome.status as u8, std::sync::atomic::Ordering::Release);
+                let _ = cmd.reply.send(outcome.reply);
             }
             Some(cmd) = capture_rx.recv() => {
                 let (paused, outcome) = match cmd.action {

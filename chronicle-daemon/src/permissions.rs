@@ -2,7 +2,8 @@
 //!
 //! Checks Screen Recording and Microphone authorization status before
 //! starting capture engines. Screen Recording is a hard gate — the
-//! daemon exits if denied. Microphone is informational only.
+//! daemon exits if denied. Microphone never blocks startup: the mic gate
+//! (`mic_gate.rs`) decides each mic start from a fresh helper read.
 
 use objc2_foundation::NSString;
 
@@ -186,12 +187,17 @@ pub(crate) fn fresh_microphone_status() -> PermissionRead {
     }
 }
 
+/// Spawns the helper and returns its stdout, or `None` on any failure.
+/// `run_helper` is the production runner; tests pass a stub.
+pub(crate) type HelperRunner<'a> =
+    dyn Fn(&std::path::Path, &[&str], std::time::Duration) -> Option<String> + 'a;
+
 /// Run the helper through `run` and parse its answer. Any failure is
 /// `Unavailable`.
 pub(crate) fn fresh_status_with(
     exe: &std::path::Path,
     name: &str,
-    run: &dyn Fn(&std::path::Path, &[&str], std::time::Duration) -> Option<String>,
+    run: &HelperRunner<'_>,
 ) -> PermissionRead {
     let Some(out) = run(exe, &[STATUS_FLAG, name], HELPER_TIMEOUT) else {
         log::warn!("permission helper: no answer for {name}");

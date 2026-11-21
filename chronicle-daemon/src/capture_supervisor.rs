@@ -18,6 +18,7 @@ use chronicle_storage::Storage;
 
 use crate::capture_runtime::{CaptureRuntime, CaptureRuntimeError, engine_poisoned};
 use crate::ipc_handler;
+use crate::mic_gate;
 use crate::permissions;
 use crate::pipeline::counters::PipelineCounters;
 use crate::pipeline::sinks::AppMetadataProvider;
@@ -245,15 +246,13 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
 
     /// Build a fresh `CaptureRuntime` and restore the persisted mic state.
     ///
-    /// On success this UNCONDITIONALLY calls `set_microphone_enabled` and
-    /// writes `mic_state_atom`, regardless of whether the persisted mic
-    /// preference is true or false. This is a small delta from today's boot
-    /// (which gates both on `read_mic_setting == true`) and is what makes
-    /// `start()` work for both boot and a flag-driven resume: a pause/sleep
-    /// teardown disables the mic, and any subsequent Start must re-apply the
-    /// user's intent without relying on the caller to remember to do it.
-    /// The cold-boot+mic-off case is observably a no-op (the device starts
-    /// disabled; `MicState::Off` matches the atom's initial value).
+    /// On success this always runs the mic gate on the persisted preference
+    /// and writes `mic_state_atom`, whether the preference is true or false.
+    /// That is what makes `start()` work for both boot and a flag-driven
+    /// resume: a pause/sleep teardown disables the mic, and any later Start
+    /// must re-apply the user's intent without relying on the caller. The gate
+    /// may clear the preference when the grant is missing (design §1.2), so
+    /// `start()` is a settings writer and must run on the event loop task.
     ///
     /// Failures log and return `StartFailed`; this method never exits the
     /// process. `route_reconcile_outcome` decides whether to escalate
@@ -272,14 +271,18 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
                 self.runtime = Some(rt);
                 log::info!("capture runtime started (audio on primary display)");
 
-                // Synchronize the mic to the persisted preference. The pause
-                // teardown disables the mic, so a resume must re-apply the
-                // user's intent unconditionally. The atom mirrors the result
-                // so `Status` reflects reality even when the restore fails.
+                // Apply the gate to the persisted preference. The pause
+                // teardown disables the mic, so a resume re-applies the
+                // user's intent. The atom mirrors the result so `Status`
+                // reflects reality even when the restore is refused.
                 let wanted_mic = settings::read_mic_setting(&self.base_dir);
-                let outcome = audio.set_microphone_enabled(wanted_mic);
-                let state = ipc_handler::map_outcome(outcome, permissions::check_microphone());
-                self.mic_state_atom.store(state as u8, Ordering::Release);
+                let state = mic_gate::reapply_mic_gate(
+                    audio,
+                    &self.base_dir,
+                    permissions::fresh_microphone_status,
+                    true,
+                    &self.mic_state_atom,
+                );
                 log::info!("restored mic to {wanted_mic}, result={state:?}");
 
                 ReconcileOutcome::Started
@@ -391,7 +394,7 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         // ADR-010: SCStream stop alone doesn't release the OS mic indicator;
         // explicit set_microphone_enabled(false) is what releases it.
         let outcome = audio.set_microphone_enabled(false);
-        let state = ipc_handler::map_outcome(outcome, permissions::check_microphone());
+        let state = ipc_handler::map_outcome(outcome);
         self.mic_state_atom.store(state as u8, Ordering::Release);
         log::info!("stop: disabled mic, result={state:?}");
 
