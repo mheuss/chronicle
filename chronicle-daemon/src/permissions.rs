@@ -166,6 +166,79 @@ where
     }
 }
 
+/// Longest wait for one helper read (design N9).
+pub(crate) const HELPER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The microphone permission as a fresh helper process reads it. A running
+/// process's own read goes stale (design §1.3), so every gate input comes
+/// from here.
+pub(crate) fn fresh_microphone_status() -> PermissionRead {
+    match std::env::current_exe() {
+        Ok(exe) => fresh_status_with(&exe, "microphone", &run_helper),
+        Err(e) => {
+            log::warn!("permission helper: current_exe failed: {e}");
+            PermissionRead::Unavailable
+        }
+    }
+}
+
+/// Run the helper through `run` and parse its answer. Any failure is
+/// `Unavailable`.
+pub(crate) fn fresh_status_with(
+    exe: &std::path::Path,
+    name: &str,
+    run: &dyn Fn(&std::path::Path, &[&str], std::time::Duration) -> Option<String>,
+) -> PermissionRead {
+    let Some(out) = run(exe, &[STATUS_FLAG, name], HELPER_TIMEOUT) else {
+        log::warn!("permission helper: no answer for {name}");
+        return PermissionRead::Unavailable;
+    };
+    let read = PermissionRead::from_word(&out);
+    if read == PermissionRead::Unavailable {
+        log::warn!("permission helper: unexpected output for {name}");
+    }
+    read
+}
+
+/// Spawn `exe` with `args` and return its stdout after a zero exit. Returns
+/// `None` on a spawn error, a non-zero exit, or no exit within `timeout`, in
+/// which case the child is killed.
+pub(crate) fn run_helper(
+    exe: &std::path::Path,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Option<String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(exe)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let mut out = String::new();
+                child.stdout.take()?.read_to_string(&mut out).ok()?;
+                return Some(out);
+            }
+            Ok(Some(_)) => return None,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Preflight
 // ---------------------------------------------------------------------------
@@ -194,6 +267,90 @@ pub fn preflight() -> Result<MicrophoneStatus, PermissionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    fn answer(out: Option<&'static str>) -> impl Fn(&Path, &[&str], Duration) -> Option<String> {
+        move |_, _, _| out.map(str::to_string)
+    }
+
+    #[test]
+    fn fresh_status_parses_each_word() {
+        let exe = Path::new("/unused");
+        assert_eq!(
+            fresh_status_with(exe, "microphone", &answer(Some("authorized\n"))),
+            PermissionRead::Authorized
+        );
+        assert_eq!(
+            fresh_status_with(exe, "microphone", &answer(Some("denied\n"))),
+            PermissionRead::Denied
+        );
+        assert_eq!(
+            fresh_status_with(exe, "microphone", &answer(Some("not_determined\n"))),
+            PermissionRead::NotDetermined
+        );
+        assert_eq!(
+            fresh_status_with(exe, "microphone", &answer(Some("restricted\n"))),
+            PermissionRead::Restricted
+        );
+    }
+
+    #[test]
+    fn fresh_status_fails_closed() {
+        let exe = Path::new("/unused");
+        // No answer (spawn error, timeout, non-zero exit) and unknown output
+        // are both Unavailable. Neither falls back to the in-process read.
+        assert_eq!(
+            fresh_status_with(exe, "microphone", &answer(None)),
+            PermissionRead::Unavailable
+        );
+        assert_eq!(
+            fresh_status_with(exe, "microphone", &answer(Some("yes\n"))),
+            PermissionRead::Unavailable
+        );
+    }
+
+    #[test]
+    fn fresh_status_passes_the_flag_and_name() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let run = |_: &Path, args: &[&str], timeout: Duration| {
+            seen.borrow_mut().extend(args.iter().map(|s| s.to_string()));
+            assert_eq!(timeout, HELPER_TIMEOUT);
+            Some("authorized".to_string())
+        };
+        fresh_status_with(Path::new("/unused"), "microphone", &run);
+        assert_eq!(*seen.borrow(), vec!["--permission-status", "microphone"]);
+    }
+
+    #[test]
+    fn run_helper_returns_stdout_on_success() {
+        let out = run_helper(
+            Path::new("/bin/echo"),
+            &["authorized"],
+            Duration::from_secs(1),
+        );
+        assert_eq!(out.as_deref(), Some("authorized\n"));
+    }
+
+    #[test]
+    fn run_helper_returns_none_on_nonzero_exit_or_missing_binary() {
+        assert_eq!(
+            run_helper(Path::new("/usr/bin/false"), &[], Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(
+            run_helper(Path::new("/no/such/helper"), &[], Duration::from_secs(1)),
+            None
+        );
+    }
+
+    #[test]
+    fn run_helper_kills_a_slow_helper_at_the_timeout() {
+        let start = Instant::now();
+        let out = run_helper(Path::new("/bin/sleep"), &["5"], Duration::from_millis(100));
+        assert_eq!(out, None);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
 
     fn run(args: &[&str]) -> (Option<u8>, String) {
         run_with(args, MicrophoneStatus::Authorized)
