@@ -443,6 +443,58 @@ struct MicControllerTests {
         #expect(mic.mark == .rejected)
     }
 
+    @Test func anOffRefusedBehindAStalledReadIsSentWhenItFinishes() async {
+        let daemon = FakeMicDaemon()
+        daemon.holdStatus = true
+        let mic = controller(daemon)
+        await mic.recheck()
+        await mic.setEnabled(false)
+        #expect(daemon.log == ["status"])
+        #expect(mic.mark == .unconfirmed)
+        daemon.statuses = [statusWithMic(.off)]
+        daemon.releaseStatus()
+        #expect(await eventually { daemon.log.contains("set(false)") })
+        #expect(daemon.log == ["status", "set(false)"])
+    }
+
+    @Test func aRevokeOffRefusedBehindAStalledReadIsSentWhenItFinishes() async {
+        let daemon = FakeMicDaemon()
+        daemon.holdStatus = true
+        let mic = controller(daemon, reads: ["denied"])
+        await mic.recheck()
+        #expect(daemon.log == ["status"])
+        daemon.statuses = [statusWithMic(.off)]
+        daemon.releaseStatus()
+        #expect(await eventually { daemon.log.contains("set(false)") })
+        #expect(daemon.log == ["status", "set(false)"])
+    }
+
+    @Test func anOnToggleCancelsAHeldOff() async {
+        let daemon = FakeMicDaemon()
+        daemon.holdStatus = true
+        let mic = controller(daemon)
+        await mic.recheck()
+        await mic.setEnabled(false)
+        await mic.setEnabled(true)
+        daemon.statuses = [statusWithMic(.on)]
+        daemon.releaseStatus()
+        for _ in 0..<50 { await Task.yield() }
+        #expect(daemon.log == ["status"])
+    }
+
+    @Test func anOffRefusedBehindAStalledOnIsSentWhenTheOnFinishes() async {
+        let daemon = FakeMicDaemon()
+        daemon.holdSet = true
+        let mic = controller(daemon)
+        await mic.setEnabled(true)
+        #expect(mic.mark == .unconfirmed)
+        await mic.setEnabled(false)
+        #expect(daemon.log == ["set(true)"])
+        daemon.release()
+        #expect(await eventually { daemon.log.contains("set(false)") })
+        #expect(daemon.log == ["set(true)", "set(false)"])
+    }
+
     @Test func aStatusReadThatNeverReturnsEndsThePollUnconfirmed() async {
         let daemon = FakeMicDaemon()
         daemon.replies = [SetMicEnabledResponse(type: "set_mic_enabled", ok: false, state: .off, pending: true)]

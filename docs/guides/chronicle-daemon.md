@@ -239,6 +239,10 @@ second shell:
 printf '{"type":"set_mic_enabled","enabled":true}\n' | nc -U -w 1 "$HOME/chronicle-dev/ipc.sock"
 ```
 
+This command never asks for mic access. The daemon uses the grant of the
+terminal that launched it, so that terminal must already have access. Without
+it, the log shows `mic gate: refused start` and neither line below.
+
 Watch for one of two lines, not just the first. When `MicrophoneCapture::new`
 fails there is no tap install at all — `ipc_handler.rs` logs
 `microphone toggle failed: {reason}` instead. Waiting only for `tap installed`

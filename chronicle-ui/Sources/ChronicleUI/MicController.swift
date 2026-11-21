@@ -29,6 +29,7 @@ final class MicController {
     @ObservationIgnored private var markedMicState: MicState?
     @ObservationIgnored private var markedPermission: MicPermission?
     @ObservationIgnored private var callOutstanding = false
+    @ObservationIgnored private var pendingOff = false
 
     init(daemon: MicDaemonClient,
          permission: MicrophonePermission = MicrophonePermission(),
@@ -74,6 +75,7 @@ final class MicController {
     private func runToggle(_ on: Bool) async {
         mark = .none
         if on {
+            pendingOff = false
             await permission.refresh()
             if permission.status == .notDetermined {
                 let granted = await permission.request()
@@ -149,8 +151,26 @@ final class MicController {
             outcome = .rejected
         case .timedOut:
             outcome = .unconfirmed
+        case .refused:
+            // An off must not be lost to a stalled call. It goes out when that
+            // call finishes. An on is never replayed.
+            if !on { pendingOff = true }
+            outcome = .unconfirmed
         }
         return (outcome, await readMicState())
+    }
+
+    /// Sends a held off once no call is outstanding, outside the operation
+    /// queue, so it never holds `isBusy`.
+    private func flushPendingOff() {
+        guard pendingOff, !callOutstanding else { return }
+        pendingOff = false
+        callOutstanding = true
+        Task { @MainActor in
+            _ = try? await self.daemon.setMicEnabled(false)
+            self.callOutstanding = false
+            self.flushPendingOff()
+        }
     }
 
     private func readMicState(within limit: Duration? = nil) async -> MicState? {
@@ -180,7 +200,7 @@ final class MicController {
     }
 
     private enum Bounded<T> {
-        case value(T), failed(any Error), timedOut
+        case value(T), failed(any Error), timedOut, refused
     }
 
     @MainActor private final class Slot<T> {
@@ -190,16 +210,17 @@ final class MicController {
     /// Waits at most `limit` for a daemon call, without racing a continuation.
     /// The call runs in its own task and writes its own slot, which only this
     /// wait reads, so a reply after the limit is dropped. While an earlier call
-    /// is still out, this one times out at once, so a stalled daemon holds at
-    /// most one task.
+    /// is still out, this one is refused without sending, so a stalled daemon
+    /// holds at most one task.
     private func bounded<T>(_ limit: Duration,
                             _ call: @escaping @MainActor () async throws -> T) async -> Bounded<T> {
-        guard !callOutstanding else { return .timedOut }
+        guard !callOutstanding else { return .refused }
         callOutstanding = true
         let slot = Slot<T>()
         Task { @MainActor in
             do { slot.result = .value(try await call()) } catch { slot.result = .failed(error) }
             self.callOutstanding = false
+            self.flushPendingOff()
         }
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: limit)
