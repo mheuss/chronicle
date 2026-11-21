@@ -83,19 +83,31 @@ const POISON_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(15
 /// Exit with code 3 after `grace` if the poisoned shutdown has not finished.
 /// A survivor stream can hold an audio sender and block `audio_pipeline.stop()`.
 fn spawn_poison_exit_watchdog(grace: std::time::Duration) {
+    spawn_exit_watchdog(grace, 3);
+}
+
+/// Exit with `code` after `grace` if the shutdown has not finished.
+fn spawn_exit_watchdog(grace: std::time::Duration, code: u8) {
     let spawned = std::thread::Builder::new()
-        .name("poison-exit-watchdog".into())
+        .name("exit-watchdog".into())
         .spawn(move || {
             std::thread::sleep(grace);
             logging::fatal(&format!(
-                "poisoned shutdown did not finish within {}s; exiting with code 3",
+                "shutdown did not finish within {}s; exiting with code {code}",
                 grace.as_secs()
             ));
-            std::process::exit(3);
+            std::process::exit(i32::from(code));
         });
     if let Err(e) = spawned {
-        log::error!("poison-exit watchdog failed to start: {e}");
+        log::error!("exit watchdog failed to start: {e}");
     }
+}
+
+/// The code the post-loop exit watchdog exits with, if one is needed. A
+/// poisoned engine and a failed start after a grant can both leave a stream
+/// running, and either can block the shutdown below.
+fn exit_watchdog_code(loop_poisoned: bool, loop_exit: Option<u8>) -> Option<u8> {
+    if loop_poisoned { Some(3) } else { loop_exit }
 }
 
 /// A [`StopSignal`](chronicle_storage::StopSignal) that is true once `cancel`
@@ -1148,8 +1160,8 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
         }
     }
     monitor_handle.abort();
-    if loop_poisoned {
-        spawn_poison_exit_watchdog(POISON_EXIT_GRACE);
+    if let Some(code) = exit_watchdog_code(loop_poisoned, loop_exit) {
+        spawn_exit_watchdog(POISON_EXIT_GRACE, code);
     }
     // Set when an owned task/thread panic is OBSERVED during shutdown — for
     // the provision join below, the panic itself may have happened much
@@ -1480,6 +1492,15 @@ mod tests {
         assert_eq!(loop_exit, Some(4));
         // The code `run` returns after the drain is the process exit status.
         assert_eq!(exit_code_for(after_drain(loop_exit, false)), 4);
+    }
+
+    #[test]
+    fn a_loop_exit_arms_the_watchdog_with_its_code() {
+        assert_eq!(exit_watchdog_code(false, None), None);
+        assert_eq!(exit_watchdog_code(true, None), Some(3));
+        // A post-grant start can fail with a partial teardown. The graceful
+        // shutdown can then hang on a survivor stream, so it needs the bound.
+        assert_eq!(exit_watchdog_code(false, Some(4)), Some(4));
     }
 
     #[test]
