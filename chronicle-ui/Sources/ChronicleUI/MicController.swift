@@ -115,8 +115,7 @@ final class MicController {
 
     /// The mark describes the last toggle. It goes stale once the mic state
     /// or the permission read differs from when it was set. A failed read of
-    /// either kind is no news, so it keeps the mark (Architectural Decision
-    /// 11).
+    /// either kind is no news, so it keeps the mark (design §2.3 step 7).
     private func clearStaleMark(micState: MicState?) {
         guard mark != .none else { return }
         let stateMoved = micState != nil && micState != markedMicState
