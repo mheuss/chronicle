@@ -8,7 +8,7 @@
 
 - inside: declaring the app's scenes and constructing the objects they share — `chronicle-ui/Sources/ChronicleUI/ChronicleApp.swift` — `ChronicleApp`
 - inside: what the menu bar item shows about capture health — `chronicle-ui/Sources/ChronicleUI/MenuBarIcon.swift` — `MenuBarIcon`
-- inside: the one classifier every capture-state view reads — `chronicle-ui/Sources/ChronicleUI/CaptureAvailability.swift` — `CaptureAvailability`
+- inside: the classifier the menu bar, the Settings badge and the popover read — `chronicle-ui/Sources/ChronicleUI/CaptureAvailability.swift` — `CaptureAvailability`
 - inside: the search surface, its result list, and the banners above it — `chronicle-ui/Sources/ChronicleUI/SearchPopoverView.swift` — `SearchPopoverView`
 - inside: rendering one search hit, including bold runs parsed out of an FTS5 snippet — `chronicle-ui/Sources/ChronicleUI/SnippetAttributedString.swift` — `snippetAttributedString`
 - inside: deciding whether a one-shot alert has already fired, and on which snapshot — `chronicle-ui/Sources/ChronicleUI/TranscriptionAlertState.swift` — `TranscriptionAlertState`
