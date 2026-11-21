@@ -355,8 +355,9 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         log::info!("set_user_paused: paused={paused}");
     }
 
-    /// Flip `user_paused`, persist it, and reconcile. This is the only setter
-    /// that writes to disk — the sleep setters are transient. The persistence
+    /// Flip `user_paused`, persist it, and reconcile. This and
+    /// `mark_user_paused` are the only setters that write to disk — the sleep
+    /// setters are transient. The persistence
     /// path writes a single boolean (`capture_paused`), nothing more.
     ///
     /// Returns the reconcile outcome so the event loop can arm a retry when
@@ -898,6 +899,17 @@ mod tests {
             ReconcileOutcome::NoChange
         );
         assert!(mirror.load(Ordering::Acquire));
+        assert_eq!(
+            supervisor.gates(),
+            Gates {
+                user_paused: true,
+                sr_denied: true,
+                idle_epoch: 1,
+                ..Gates::default()
+            },
+            "a denial sets the gate and leaves sr_stale alone"
+        );
+        assert!(!supervisor.should_run());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -964,10 +976,10 @@ mod tests {
             Arc::new(chronicle_capture::CaptureDropCounters::default()),
         );
         assert!(!settings::read_capture_paused(dir.path()));
-        // Positive coverage of the run predicate: both flags clear must mean
+        // Positive coverage of the run predicate: no stop flag set must mean
         // run. This is the assertion that catches an inverted flag when
         // CHR-57 extends should_run() with display_asleep.
-        assert!(supervisor.should_run(), "both flags clear must mean run");
+        assert!(supervisor.should_run(), "no stop flag set must mean run");
 
         let outcome = supervisor.set_system_asleep(true, &audio).await;
 
