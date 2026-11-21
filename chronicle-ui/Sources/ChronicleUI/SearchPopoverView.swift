@@ -224,8 +224,8 @@ struct SearchPopoverView: View {
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
         case .connecting, .disconnected:
-            // The same words as the Settings badge, so the popover can't
-            // contradict the menu bar icon above it (design AD11).
+            // From the same availability as the menu bar icon above it, so
+            // the two can't disagree (design AD11).
             let a = connection.availability(background: background)
             Label(Self.notConnectedText(a), systemImage: a.badgeSymbol)
                 .foregroundStyle(a.tint.color)
@@ -235,7 +235,9 @@ struct SearchPopoverView: View {
 
     /// What the popover says while the daemon isn't connected.
     nonisolated static func notConnectedText(_ a: CaptureAvailability) -> String {
-        CaptureAvailabilityCopy.settingsText(a)
+        a == .backgroundOff
+            ? CaptureAvailabilityCopy.popoverBackgroundOff
+            : CaptureAvailabilityCopy.settingsText(a)
     }
 
     @ViewBuilder

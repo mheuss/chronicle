@@ -75,9 +75,16 @@ struct CaptureAvailabilityTests {
         #expect(conn.availability(background: background) == .notRunning)
     }
 
-    @Test(arguments: CaptureAvailability.allCases)
+    @Test(arguments: CaptureAvailability.allCases.filter { $0 != .backgroundOff })
     func popoverNotConnectedTextIsTheSettingsText(a: CaptureAvailability) {
         #expect(SearchPopoverView.notConnectedText(a) == CaptureAvailabilityCopy.settingsText(a))
+    }
+
+    @Test func popoverSaysWhatBackgroundOffBlocks() {
+        // Settings' bare "Off" sits in a labeled row. The popover has no label,
+        // and with no daemon it has no search either.
+        #expect(SearchPopoverView.notConnectedText(.backgroundOff)
+            == "Background capture is off. Turn it on in Settings to search.")
     }
 
     @Test func pauseButtonNeedsACurrentStatus() {
