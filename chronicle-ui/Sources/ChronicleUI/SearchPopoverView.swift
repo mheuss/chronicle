@@ -294,7 +294,7 @@ struct SearchPopoverView: View {
     }
 
     private var showPausedBanner: Bool {
-        startupAlert.pausedOnBoot && !startupAlert.dismissed
+        startupAlert.pausedOnBoot && !startupAlert.dismissed && connection.currentStatus != nil
     }
 
     private func runSearch(_ key: SearchKey) async {
@@ -370,9 +370,7 @@ private struct PausedBanner: View {
 /// reason when something failed. What it SAYS lives in
 /// `TranscriptionBannerCopy`, which is testable; this type only renders.
 private struct TranscriptionBanner: View {
-    /// nil only when the daemon is too old to send the block; the banner is
-    /// not shown in that case, so the fallback copy is belt-and-braces.
-    let transcription: TranscriptionStats?
+    let transcription: TranscriptionStats
     /// Set when the daemon REJECTED the last request. `ok: false` changes no
     /// state, so without this the click is a silent no-op.
     let rejection: String?
@@ -435,9 +433,9 @@ private struct TranscriptionBanner: View {
         // divide by zero. That guarantee is about the total only:
         // `downloadBytes` is published from zero and the branch below has to
         // handle it, which is not a contradiction of this line.
-        let state = transcription?.state ?? .missing
-        if state == .downloading, let total = transcription?.downloadTotalBytes, total > 0 {
-            let done = transcription?.downloadBytes ?? 0
+        let state = transcription.state
+        if state == .downloading, let total = transcription.downloadTotalBytes, total > 0 {
+            let done = transcription.downloadBytes ?? 0
             ProgressView(value: Double(done), total: Double(total))
                 .progressViewStyle(.linear)
             // [A11y] Numeric text beside the bar — progress is never conveyed
@@ -445,7 +443,7 @@ private struct TranscriptionBanner: View {
             Text("\(byteLabel(done)) of \(byteLabel(total))")
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
-        } else if state == .downloading, let done = transcription?.downloadBytes, done > 0 {
+        } else if state == .downloading, let done = transcription.downloadBytes, done > 0 {
             // Indeterminate bar, but the byte count is still live — the daemon
             // publishes `download_bytes` throughout and only withholds the
             // TOTAL until Content-Length arrives. Hiding a moving number

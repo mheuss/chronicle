@@ -105,6 +105,8 @@ flowchart TD
     It also stops when the first capture start after a Screen Recording grant
     fails. The daemon then runs the full teardown and exits with status 4.
     launchd starts a fresh process that reads the grant at boot (CHR-96).
+    It also stops if the permission monitor task ends. The daemon then exits
+    with status 3, and launchd starts a fresh process.
 
 ### Channel Topology
 
@@ -128,8 +130,8 @@ segment means data loss.
 
 ### Shutdown
 
-Triggered by `SIGINT` (Ctrl-C) or `SIGTERM`, or by a failed first start after
-a grant (item 16). Each enters the same ordered teardown that cascades through
+Triggered by `SIGINT` (Ctrl-C) or `SIGTERM`, by a failed first start after a
+grant, or by the permission monitor stopping (item 16). Each enters the same ordered teardown that cascades through
 the system. After that failed start, an exit watchdog ends the process with
 status 4 if the teardown takes longer than 15 s:
 

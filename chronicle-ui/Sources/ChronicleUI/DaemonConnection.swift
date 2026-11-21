@@ -258,7 +258,7 @@ final class DaemonConnection {
         if response.ok {
             // The refresh is still best-effort, but its failure is NOT
             // harmless. Both views decide whether to run their 1 Hz
-            // provisioning poll by reading `lastStatus`, so leaving it on the
+            // provisioning poll by reading `currentStatus`, so leaving it on the
             // pre-request state means neither loop starts: no progress bar,
             // and a fast failure invisible until the connection monitor's
             // next 5-second tick. "One second of staleness" was only ever true

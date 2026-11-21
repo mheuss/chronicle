@@ -415,7 +415,7 @@ fn boot_permissions_snapshot(
 /// |---|---|
 /// | 0 | Clean shutdown, or another daemon holds the lock |
 /// | 1 | Startup or runtime error |
-/// | 3 | Capture start or stop left streams possibly running (`process::exit`) |
+/// | 3 | Capture start or stop left streams possibly running, or the permission monitor stopped (`process::exit`) |
 /// | 4 | Restart for fresh permissions, after the full shutdown (design §4) |
 ///
 /// The `--permission-status` helper has its own codes, 0 to 2, documented on
@@ -928,6 +928,7 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     // technically still unfinished. Harmless: by then the superseded task has
     // already sent its event and has nothing left but to return.)
     let mut loop_poisoned = false;
+    let mut monitor_stopped = false;
     // Set when the first start after a grant fails (design §4). The daemon
     // then shuts down in full and exits with this code.
     let mut loop_exit: Option<u8> = None;
@@ -944,11 +945,11 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                 log::info!("SIGTERM received, shutting down");
                 break;
             }
-            // The monitor only returns once the loop has dropped its channels,
-            // so ending here means it panicked or quit, and gates would stop moving.
+            // The monitor returns on cancel or once the loop drops its channels, both
+            // after this loop. Ending here means it panicked, and gates would stop moving.
             res = &mut monitor_handle => {
                 log::error!("permission monitor stopped ({res:?}); shutting down for a fresh process");
-                loop_poisoned = true;
+                monitor_stopped = true;
                 break;
             }
             Some(t) = screen_rx.recv() => {
@@ -1422,6 +1423,10 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     log::info!("chronicle-daemon stopped");
     if poisoned || loop_poisoned {
         logging::fatal("daemon exiting with code 3 (engine poisoned)");
+        std::process::exit(3);
+    }
+    if monitor_stopped {
+        logging::fatal("daemon exiting with code 3 (permission monitor stopped)");
         std::process::exit(3);
     }
     after_drain(loop_exit, shutdown_failed)
