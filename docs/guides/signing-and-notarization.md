@@ -132,8 +132,7 @@ signing were ad-hoc signed. Their grants don't carry over. Later rebuilds keep
 the grant. The signature names the identifier and team instead of the code hash.
 
 1. Open System Settings > Privacy & Security > Screen & System Audio Recording.
-   macOS 14 calls it Screen Recording. Remove any old `chronicle-daemon` or
-   `Chronicle` entry with the − button.
+   Remove any old `chronicle-daemon` or `Chronicle` entry with the − button.
 2. The daemon checks Screen Recording at startup and exits when it's missing.
    It doesn't show a prompt. So add the app by hand: click +, press
    Cmd-Shift-G, paste the full path to the repo's `dist/Chronicle.app`, and

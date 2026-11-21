@@ -44,7 +44,7 @@ chronicle-ui/              Swift package
 
 ## Requirements
 
-- macOS 14+
+- macOS 27+
 - Apple Silicon (for efficient local transcription)
 - Screen Recording permission
 - Microphone permission
