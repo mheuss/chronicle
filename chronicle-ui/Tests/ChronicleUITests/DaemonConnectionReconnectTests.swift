@@ -53,6 +53,46 @@ final class GateBox {
 @MainActor
 struct DaemonConnectionReconnectTests {
 
+    @MainActor final class Attempts { var count = 0 }
+
+    @Test("reconnectNow skips the backoff wait")
+    func reconnectNowSkipsTheBackoff() async throws {
+        let attempts = Attempts()
+        let conn = DaemonConnection(connectionFactory: {
+            attempts.count += 1
+            throw IPCError.connectionFailed(errno: ECONNREFUSED)
+        })
+        conn.connect()
+        // Let the backoff grow: attempts at 0 s, 1 s, 3 s. The next wait is 4 s.
+        await waitUntil(ticks: 500) { attempts.count >= 3 }
+        let before = attempts.count
+        conn.reconnectNow()
+        await waitUntil(ticks: 50) { attempts.count > before }
+        #expect(attempts.count > before, "a new attempt starts within 0.5 s, not after the 4 s wait")
+        conn.disconnect()
+    }
+
+    @Test("status is not current until this connection's first reply")
+    func statusIsCurrentOnlyAfterThisConnectionsReply() async throws {
+        let pair = try SocketPairHelper.make()
+        let conn = DaemonConnection(testingSocketFD: pair.clientFD)
+        #expect(conn.currentStatus == nil)
+        let seen = Attempts()
+        conn.onStatus = { _ in seen.count += 1 }
+        let serverFD = pair.serverFD
+        let daemon = blockingServer {
+            respondToOneRequest(on: serverFD, with: #"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"v"}}"#)
+        }
+        _ = try await conn.requestStatus()
+        _ = await daemon.value
+        #expect(conn.currentStatus != nil)
+        #expect(seen.count == 1, "onStatus runs once per Status")
+        conn.disconnect()
+        #expect(conn.currentStatus == nil)
+        #expect(conn.lastStatus != nil, "lastStatus keeps the old snapshot")
+        Darwin.close(serverFD)
+    }
+
     @Test("connect uses the injected factory")
     func connectUsesInjectedFactory() async throws {
         let log = FactoryLog()

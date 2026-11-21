@@ -21,6 +21,17 @@ final class DaemonConnection {
     private(set) var state: ConnectionState = .disconnected
     private(set) var lastStatus: StatusResponse?
 
+    /// True once the current connection has received a Status. A new or
+    /// closed connection resets it, so `currentStatus` never returns an old
+    /// connection's snapshot (design §6.1).
+    private(set) var statusIsCurrent = false
+
+    /// `lastStatus`, but only when it came from the current connection.
+    var currentStatus: StatusResponse? { statusIsCurrent ? lastStatus : nil }
+
+    /// Called with every Status this connection receives (design §7.1).
+    @ObservationIgnored var onStatus: (@MainActor (StatusResponse) -> Void)?
+
     // MARK: - Socket Path
 
     nonisolated private static let logger = Logger(subsystem: "dev.heuss.chronicle", category: "ui")
@@ -136,6 +147,7 @@ final class DaemonConnection {
                         break
                     }
                     newSession.start()
+                    statusIsCurrent = false
                     session = newSession
                     state = .connected
                     delay = .seconds(1)
@@ -167,15 +179,30 @@ final class DaemonConnection {
         state = .disconnected
     }
 
+    /// Skip the backoff wait and try now (CHR-177). Does nothing while
+    /// connected.
+    func reconnectNow() {
+        guard state != .connected else { return }
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        connect()
+    }
+
     // MARK: - Requests
 
     /// Send a status request and return the response.
     func requestStatus() async throws -> StatusResponse {
+        let requestSession = session
         let response = try await sendRequest(
             IPCRequest(type: "status"),
             expecting: StatusResponse.self
         )
+        guard let requestSession, requestSession === session else {
+            throw IPCError.notConnected
+        }
         lastStatus = response
+        statusIsCurrent = true
+        onStatus?(response)
         return response
     }
 
@@ -477,6 +504,7 @@ final class DaemonConnection {
     private func closeSocket() {
         session?.close()
         session = nil
+        statusIsCurrent = false
         requestQueue = nil
     }
 }
