@@ -76,7 +76,7 @@ final class BackgroundServiceTests {
                           fingerprint: fingerprint, isInApplicationsFolder: inApplications)
     }
 
-    @Test func enablingCallsTheHookAndRecordsTheStart() async {
+    @Test func enablingCallsTheHookAndOpensTheWindow() async {
         let agent = FakeLoginService("agent", log: log)
         let app = FakeLoginService("app", log: log)
         let service = make(agent: agent, mainApp: app)
@@ -110,6 +110,20 @@ final class BackgroundServiceTests {
         // Already registered with the same fingerprint: nothing to register.
         await service.reconcileOnLaunch()
         #expect(hooks == 1, "a reconcile that registers nothing calls no hook")
+    }
+
+    @Test func anUpgradeReRegistrationCallsTheHook() async {
+        let agent = FakeLoginService("agent", log: log)
+        let app = FakeLoginService("app", log: log)
+        // The first build registers and records its fingerprint.
+        await make(agent: agent, mainApp: app, fingerprint: "fp-1").reconcileOnLaunch()
+        #expect(agent.status == .enabled)
+        // A new build sees a different fingerprint and re-registers the agent.
+        let upgraded = make(agent: agent, mainApp: app, fingerprint: "fp-2")
+        var hooks = 0
+        upgraded.onAgentRegistered = { hooks += 1 }
+        await upgraded.reconcileOnLaunch()
+        #expect(hooks == 1, "re-registering after an upgrade starts a reconnect")
     }
 
     @Test func launchWithBackgroundOnStartsTheWindow() {

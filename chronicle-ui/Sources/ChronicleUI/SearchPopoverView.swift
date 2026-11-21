@@ -6,6 +6,7 @@ struct SearchPopoverView: View {
     @Environment(StartupAlertState.self) private var startupAlert
     @Environment(TranscriptionAlertState.self) private var transcriptionAlert
     @Environment(SearchFilterState.self) private var searchFilter
+    @Environment(BackgroundService.self) private var background
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
 
@@ -222,15 +223,19 @@ struct SearchPopoverView: View {
                 .labelsHidden()
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
-        case .connecting:
-            Label("Connecting to Chronicle daemon…", systemImage: "ellipsis")
-                .foregroundStyle(.secondary)
-                .padding()
-        case .disconnected:
-            Label("Chronicle daemon is not running.", systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.red)
+        case .connecting, .disconnected:
+            // The same words as the Settings badge, so the popover can't
+            // contradict the menu bar icon above it (design AD11).
+            let a = connection.availability(background: background)
+            Label(Self.notConnectedText(a), systemImage: a.badgeSymbol)
+                .foregroundStyle(a.tint.color)
                 .padding()
         }
+    }
+
+    /// What the popover says while the daemon isn't connected.
+    nonisolated static func notConnectedText(_ a: CaptureAvailability) -> String {
+        CaptureAvailabilityCopy.settingsText(a)
     }
 
     @ViewBuilder

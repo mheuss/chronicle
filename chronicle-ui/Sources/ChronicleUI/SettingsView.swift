@@ -108,7 +108,10 @@ struct SettingsView: View {
                 }
                 .controlSize(.large)
                 .keyboardShortcut(.defaultAction)
-                .disabled(isPauseInFlight || connection.state != .connected)
+                .disabled(Self.pauseButtonDisabled(
+                    inFlight: isPauseInFlight,
+                    connected: connection.state == .connected,
+                    hasCurrentStatus: connection.currentStatus != nil))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -117,7 +120,7 @@ struct SettingsView: View {
     private var micRow: MicRowState {
         MicRowState.from(
             permission: mic.permission.status,
-            status: connection.lastStatus,
+            status: connection.currentStatus,
             connected: connection.state == .connected,
             mark: mic.mark)
     }
@@ -447,6 +450,14 @@ struct SettingsView: View {
     }
 
     // MARK: - Capture
+
+    /// With no current Status the button can't know whether capture is paused,
+    /// so it can't say which action it takes.
+    nonisolated static func pauseButtonDisabled(
+        inFlight: Bool, connected: Bool, hasCurrentStatus: Bool
+    ) -> Bool {
+        inFlight || !connected || !hasCurrentStatus
+    }
 
     private var isPaused: Bool {
         availability == .paused

@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import Observation
 @testable import ChronicleUI
 
 @Suite("Capture availability")
@@ -61,9 +62,30 @@ struct CaptureAvailabilityTests {
             throw IPCError.connectionFailed(errno: ECONNREFUSED)
         })
         #expect(conn.state == .disconnected)
-        #expect(conn.availability(background: background) == .starting)
+        final class Flag: @unchecked Sendable { var fired = false }
+        let redraw = Flag()
+        let before = withObservationTracking {
+            conn.availability(background: background)
+        } onChange: {
+            redraw.fired = true
+        }
+        #expect(before == .starting)
         await waitUntil(ticks: 100) { !background.startingWindowOpen }
+        #expect(redraw.fired, "closing the window notifies a view that reads availability")
         #expect(conn.availability(background: background) == .notRunning)
+    }
+
+    @Test(arguments: CaptureAvailability.allCases)
+    func popoverNotConnectedTextIsTheSettingsText(a: CaptureAvailability) {
+        #expect(SearchPopoverView.notConnectedText(a) == CaptureAvailabilityCopy.settingsText(a))
+    }
+
+    @Test func pauseButtonNeedsACurrentStatus() {
+        #expect(SettingsView.pauseButtonDisabled(inFlight: false, connected: true, hasCurrentStatus: false),
+                "with no current Status the button can't know whether capture is paused")
+        #expect(!SettingsView.pauseButtonDisabled(inFlight: false, connected: true, hasCurrentStatus: true))
+        #expect(SettingsView.pauseButtonDisabled(inFlight: true, connected: true, hasCurrentStatus: true))
+        #expect(SettingsView.pauseButtonDisabled(inFlight: false, connected: false, hasCurrentStatus: true))
     }
 
     @Test func notConnectedCaptionIsTheSharedCopy() {

@@ -77,7 +77,8 @@ final class BackgroundService {
         await enqueue(allowOutsideApplications: true)
     }
 
-    /// Open the window now and close it after `startingWindow`, wall time.
+    /// Open the window now and close it after `startingWindow`, on the
+    /// continuous clock, so time the Mac spends asleep counts.
     private func openStartingWindow() {
         startingWindowTask?.cancel()
         startingWindowOpen = true

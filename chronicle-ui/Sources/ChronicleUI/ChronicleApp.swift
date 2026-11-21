@@ -23,6 +23,7 @@ struct ChronicleApp: App {
                 .environment(startupAlert)
                 .environment(transcriptionAlert)
                 .environment(searchFilter)
+                .environment(background)
         } label: {
             MenuBarIcon(connection: connection, background: background)
                 .task {

@@ -160,11 +160,17 @@ export CHRONICLE_DATA_DIR="$HOME/chronicle-dev"
 open dist/Chronicle.app
 ```
 
-An icon should appear in the menu bar. A red `xmark.circle` means the UI cannot
-reach the daemon. A yellow `ellipsis.circle` means it is connecting or waiting
-for the first status. A green `record.circle.fill` means the daemon reports
-capture running. Orange `pause.circle.fill` means capture is paused. Red
-`exclamationmark.circle` means the daemon is up but capture is not running.
+An icon should appear in the menu bar. Each state has its own shape:
+
+- Green `record.circle.fill`: capture is running.
+- Orange `pause.circle.fill`: capture is paused.
+- Orange `power.circle`: background capture is off.
+- Yellow `ellipsis.circle`: Chronicle is starting.
+- Yellow `questionmark.circle`: Chronicle can't check Screen Recording right now.
+- Red `lock.circle`: Chronicle needs Screen Recording.
+- Red `xmark.circle`: Chronicle isn't running.
+- Red `exclamationmark.circle`: the daemon is up but capture is not running.
+
 Left-click the icon to open the search popover, or use `Cmd+,` for Settings.
 
 ### First run

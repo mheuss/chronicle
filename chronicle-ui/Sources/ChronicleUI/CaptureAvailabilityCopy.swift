@@ -1,7 +1,7 @@
 /// Every capture-state string (design §6.2, §7.2), so views need not write
 /// their own. Switches are exhaustive with no `default:`.
 enum CaptureAvailabilityCopy {
-    /// Meant to be shared with the mic row's caption while not connected (BR14).
+    /// Shared with the mic row's caption while not connected (BR14).
     static let notRunning = "Chronicle isn't running."
 
     static func settingsText(_ a: CaptureAvailability) -> String {
