@@ -72,6 +72,67 @@ struct DaemonConnectionReconnectTests {
         conn.disconnect()
     }
 
+    @Test("reconnectNow is a no-op while connected")
+    func reconnectNowIsANoOpWhileConnected() async throws {
+        let log = FactoryLog()
+        let conn = DaemonConnection(connectionFactory: {
+            let fd = try log.make()
+            #expect(setNoSigPipe(fd))
+            let serverFD = log.pairs.last!.serverFD
+            _ = blockingServer {
+                guard readLineSync(from: serverFD) != nil else { return }
+                writeAll(#"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"0.0.1"}}"# + "\n", to: serverFD)
+                _ = readLineSync(from: serverFD)
+            }
+            return fd
+        }, heartbeatInterval: .seconds(30))
+        conn.connect()
+        await waitUntil { conn.currentStatus != nil }
+        #expect(conn.currentStatus != nil)
+        let before = conn.sessionForTesting
+        conn.reconnectNow()
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(log.count == 1, "reconnectNow while connected opened a second connection")
+        #expect(conn.sessionForTesting === before, "reconnectNow while connected replaced the session")
+        conn.disconnect()
+        log.closeServers()
+    }
+
+    @Test("reconnectNow during an attempt leaves the new attempt's session alone")
+    func reconnectNowDuringAnAttemptKeepsTheNewSession() async throws {
+        let log = FactoryLog()
+        let gate = AsyncGate()
+        defer { Task { await gate.open() } }
+        let calls = Attempts()
+        let conn = DaemonConnection(connectionFactory: {
+            calls.count += 1
+            if calls.count == 1 { await gate.wait() }
+            let fd = try log.make()
+            #expect(setNoSigPipe(fd))
+            let serverFD = log.pairs.last!.serverFD
+            _ = blockingServer {
+                guard readLineSync(from: serverFD) != nil else { return }
+                writeAll(#"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"0.0.1"}}"# + "\n", to: serverFD)
+                _ = readLineSync(from: serverFD)
+            }
+            return fd
+        }, heartbeatInterval: .seconds(30))
+        conn.connect()
+        await waitUntil { calls.count == 1 }
+        #expect(conn.state == .connecting)
+        conn.reconnectNow()
+        await waitUntil { conn.currentStatus != nil }
+        let winner = conn.sessionForTesting
+        #expect(winner != nil)
+        await gate.open()  // Release the cancelled first attempt.
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(conn.state == .connected)
+        #expect(conn.sessionForTesting === winner, "the cancelled attempt touched the new session")
+        #expect(conn.currentStatus != nil)
+        conn.disconnect()
+        log.closeServers()
+    }
+
     @Test("status is not current until this connection's first reply")
     func statusIsCurrentOnlyAfterThisConnectionsReply() async throws {
         let pair = try SocketPairHelper.make()

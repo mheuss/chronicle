@@ -180,7 +180,7 @@ final class DaemonConnection {
     }
 
     /// Skip the backoff wait and try now (CHR-177). Does nothing while
-    /// connected.
+    /// connected. After `disconnect()` it starts connecting again.
     func reconnectNow() {
         guard state != .connected else { return }
         reconnectTask?.cancel()
