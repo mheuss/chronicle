@@ -143,7 +143,7 @@ the grant. The signature names the identifier and team instead of the code hash.
    `Chronicle.app` because the app carries the audio-input entitlement. The
    daemon under launchd uses that grant. If you click Don't Allow, the toggle stays off.
    The row then offers a button that opens Privacy & Security > Microphone. The
-   Microphone list has no + button, so this prompt is the only way to add
+   Microphone list has no + button. This prompt is the only way to add
    Chronicle.
 
 ## Troubleshooting

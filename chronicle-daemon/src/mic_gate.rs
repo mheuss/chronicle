@@ -79,20 +79,15 @@ pub(crate) fn apply_mic_intent(
     }
 }
 
-/// Re-apply the gate to the saved intent, then store the `Status` value. It
-/// writes the intent only to clear it on a missing grant, and it does that
-/// whether or not the engine runs. With `capture_running` false it never
-/// starts the engine. Callers must run on the event loop task, or in the boot
-/// `reconcile` before the loop starts, as `CaptureSupervisor::start` does
-/// (design §1.2).
+/// Re-apply the gate to the saved intent, then store the `Status` value. With
+/// `capture_running` false it never starts the engine. Callers must run on the
+/// event loop task, or in the boot `reconcile` before the loop starts (design
+/// §1.2).
 ///
 /// A periodic caller must call this on every read other than `Authorized`,
-/// whatever `mic_state` is. Calling it only while the mic is `on` misses a
-/// revoke that follows an `Unavailable` stop, and a later grant would then
-/// restart the mic without a click. The one exception is an `Unavailable` read
-/// while `mic_state` is `error`: skip it, since it cannot clear intent and
-/// would turn `error` into `off`. A caller that already holds a read passes it
-/// as `|| read`, so the read that decided the call is the one acted on.
+/// except an `Unavailable` read while `mic_state` is `error`, which would turn
+/// `error` into `off`. A caller that already holds a read passes it as
+/// `|| read`.
 pub(crate) fn reapply_mic_gate(
     audio: &impl MicControl,
     base_dir: &Path,

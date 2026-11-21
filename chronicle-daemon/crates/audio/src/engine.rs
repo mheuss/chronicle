@@ -49,18 +49,15 @@ type MicFactory = Box<
 /// The encoding channel has up to three senders — the ObjC handler (system
 /// audio), the [`MicrophoneCapture`] tap while one is built, and `flush_tx`.
 /// Calling `stop()` drops all three, which closes the channel and lets the
-/// encoding thread flush and exit. The borrow checker prevents `stop()` from being called while an
-/// `AudioHandlerToken` is outstanding.
+/// encoding thread flush and exit. The borrow checker prevents `stop()` from
+/// being called while an `AudioHandlerToken` is outstanding.
 pub struct AudioPipeline {
     handler: Option<Retained<AudioOutputHandler>>,
     queue: Retained<DispatchQueue>,
     encoding_thread: Option<JoinHandle<()>>,
-    /// Dedicated microphone capture path. Empty until the first enable builds
-    /// it, and emptied again by [`drop_microphone`](Self::drop_microphone).
-    /// Building it reads the input node, which raises the TCC prompt once the
-    /// UI carries the audio-input entitlement (design §1.1). The pipeline is
-    /// not `Sync`, so the lock is never contended, but no method may lock it
-    /// while it already holds a guard.
+    /// Empty until the first enable builds it, and again after
+    /// [`drop_microphone`](Self::drop_microphone). No method may lock it while
+    /// it already holds a guard.
     microphone: Mutex<Option<MicrophoneCapture>>,
     mic_factory: MicFactory,
     /// A clone of the encoding-channel sender, kept so a disable can send

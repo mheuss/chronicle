@@ -18,7 +18,6 @@ struct MicRowState: Equatable {
     static let settingsURL = URL(
         string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!
 
-    /// Session A's connection-state model (CHR-177) replaces this function.
     static func notConnectedCaption() -> String {
         "Chronicle isn't running."
     }

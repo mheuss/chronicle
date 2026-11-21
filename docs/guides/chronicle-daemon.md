@@ -261,13 +261,13 @@ Four things to know before you trust what you read:
   unified log with the microphone's name and UID replaced by `redacted`. Run
   the daemon by hand to see them.
 - **Restart between devices.** `MicrophoneCapture` and its converter are built
-  when the mic is turned on. Turning the mic off drops them, but pausing capture
+  when the mic is turned on. Turning the mic off drops them. Pausing capture
   keeps them. Changing the default input while the mic is on leaves the
   converter built for the previous device. So does changing it while capture is
   paused with the mic on.
 - **The line appears before capture starts.** The tap is installed when the mic
-  is turned on, just before the engine starts. Seeing this line shows the engine
-  was built, not that audio was recorded.
+  is turned on. This happens just before the engine starts. Seeing this line
+  shows the engine was built. It does not show that audio was recorded.
 
 Cross-check the numbers against **Audio MIDI Setup** (`open -a "Audio MIDI
 Setup"`), which shows each device's format. System Settings → Sound → Input only
