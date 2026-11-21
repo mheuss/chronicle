@@ -121,7 +121,7 @@ final class MicController {
     /// or the permission read differs from when it was set. A failed read of
     /// either kind is no news, so it keeps the mark (design §2.3 step 7).
     /// A rejected mark set without a state read takes the first answered read
-    /// as its baseline. An unconfirmed one is settled by that read.
+    /// as its baseline. An unconfirmed mark is cleared by that read instead.
     private func clearStaleMark(micState: MicState?) {
         guard mark != .none else { return }
         if mark == .rejected, markedMicState == nil, micState != nil {

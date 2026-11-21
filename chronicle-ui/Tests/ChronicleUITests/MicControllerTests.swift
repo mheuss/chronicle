@@ -425,6 +425,8 @@ struct MicControllerTests {
         daemon.releaseStatus()
         for _ in 0..<50 { await Task.yield() }
         await mic.recheck()
+        // The second "status" is the re-check's answered read.
+        #expect(daemon.log == ["status", "status", "set(false)", "status"])
         #expect(mic.mark == .rejected)
     }
 
