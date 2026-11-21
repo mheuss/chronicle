@@ -86,8 +86,10 @@ pub(crate) fn apply_mic_intent(
 /// A periodic caller must call this on every read other than `Authorized`,
 /// whatever `mic_state` is. Calling it only while the mic is `on` misses a
 /// revoke that follows an `Unavailable` stop, and a later grant would then
-/// restart the mic without a click. A caller that already holds a read passes
-/// it as `|| read`, so the read that decided the call is the one acted on.
+/// restart the mic without a click. The one exception is an `Unavailable` read
+/// while `mic_state` is `error`: skip it, since it cannot clear intent and
+/// would turn `error` into `off`. A caller that already holds a read passes it
+/// as `|| read`, so the read that decided the call is the one acted on.
 pub(crate) fn reapply_mic_gate(
     audio: &impl MicControl,
     base_dir: &Path,
