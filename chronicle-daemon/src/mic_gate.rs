@@ -82,6 +82,12 @@ pub(crate) fn apply_mic_intent(
 /// whether or not the engine runs. With `capture_running` false it never
 /// starts the engine. Callers must be on the event loop task, as
 /// `CaptureSupervisor::start` is (design §1.2).
+///
+/// A periodic caller must call this on every read other than `Authorized`,
+/// whatever `mic_state` is. Calling it only while the mic is `on` misses a
+/// revoke that follows an `Unavailable` stop, and a later grant would then
+/// restart the mic without a click. A caller that already holds a read passes
+/// it as `|| read`, so the read that decided the call is the one acted on.
 pub(crate) fn reapply_mic_gate(
     audio: &impl MicControl,
     base_dir: &Path,
@@ -95,10 +101,14 @@ pub(crate) fn reapply_mic_gate(
     } else if !intent {
         apply_mic_intent(audio, base_dir, false, permission)
     } else {
-        // Only an Authorized read starts the engine, so that is the one case
-        // a stopped capture turns into a plain stop.
-        let read = permission();
-        apply_mic_intent(audio, base_dir, read != PermissionRead::Authorized, || read)
+        // Capture is stopped, so an Authorized read becomes a plain stop.
+        // Any other read still goes through the refusal path.
+        match permission() {
+            PermissionRead::Authorized => {
+                apply_mic_intent(audio, base_dir, false, || PermissionRead::Authorized)
+            }
+            read => apply_mic_intent(audio, base_dir, true, || read),
+        }
     };
     mic_state.store(outcome.status as u8, Ordering::Release);
     outcome.status
@@ -198,6 +208,10 @@ mod tests {
         mic.start = MicToggleOutcome::Failed { reason: "x".into() };
         let out = apply_mic_intent(&mic, dir.path(), true, || PermissionRead::Authorized);
         assert_eq!(out, GateOutcome::same(MicState::Error));
+        assert!(
+            settings::read_mic_setting(dir.path()),
+            "a failed start is not a permission event, so intent stays"
+        );
     }
 
     #[test]
@@ -284,10 +298,31 @@ mod tests {
             &atom,
         );
         assert_eq!(s, MicState::Off);
+        assert_eq!(atom.load(Ordering::Acquire), MicState::Off as u8);
         assert_eq!(*mic.calls.borrow(), vec!["drop"]);
         assert!(
             settings::read_mic_setting(dir.path()),
             "a not-running stop keeps intent"
+        );
+    }
+
+    #[test]
+    fn reapply_with_capture_stopped_and_unavailable_keeps_intent() {
+        let dir = intent_on();
+        let mic = FakeMic::new();
+        let atom = AtomicU8::new(MicState::On as u8);
+        let s = reapply_mic_gate(
+            &mic,
+            dir.path(),
+            || PermissionRead::Unavailable,
+            false,
+            &atom,
+        );
+        assert_eq!(s, MicState::Off);
+        assert_eq!(*mic.calls.borrow(), vec!["drop"]);
+        assert!(
+            settings::read_mic_setting(dir.path()),
+            "Unavailable keeps intent"
         );
     }
 
@@ -345,6 +380,8 @@ mod tests {
             &atom,
         );
         assert_eq!(s, MicState::Off);
+        assert_eq!(atom.load(Ordering::Acquire), MicState::Off as u8);
+        assert_eq!(*mic.calls.borrow(), vec!["drop"]);
     }
 
     #[test]
