@@ -47,6 +47,24 @@ struct ScreenRecordingPromptControllerTests {
         #expect(calls.count == 1)
     }
 
+    @Test func aSecondTriggerWhileTheDialogIsOpenShowsNothing() {
+        let calls = Calls()
+        var prompt: ScreenRecordingPromptController!
+        prompt = ScreenRecordingPromptController(
+            presenter: {
+                calls.count += 1
+                guard calls.count == 1 else { return }
+                prompt.present()
+                prompt.observe(.init(availability: .capturing, screenRecording: .authorized))
+                prompt.observe(.init(availability: .needsScreenRecording, screenRecording: .denied))
+            },
+            schedule: { $0() })
+        prompt.present()
+        #expect(calls.count == 1, "triggers inside an open dialog are dropped")
+        prompt.present()
+        #expect(calls.count == 2, "the next press after it closes shows again")
+    }
+
     @Test func theLatchDecidesWhenToShow() {
         let calls = Calls()
         let held = HeldBlocks()

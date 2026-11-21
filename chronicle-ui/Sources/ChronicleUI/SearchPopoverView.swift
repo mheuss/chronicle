@@ -76,9 +76,10 @@ struct SearchPopoverView: View {
                 Divider()
             }
 
-            if transcriptionAlert.shouldShow {
+            if transcriptionAlert.shouldShow,
+               let transcription = connection.currentStatus?.data.transcription {
                 TranscriptionBanner(
-                    transcription: connection.lastStatus?.data.transcription,
+                    transcription: transcription,
                     rejection: provisionRejection,
                     onDismiss: { transcriptionAlert.dismissed = true },
                     onProvision: provisionModel
@@ -128,8 +129,8 @@ struct SearchPopoverView: View {
         .task(id: searchKey) { [searchKey] in
             await runSearch(searchKey)
         }
-        .task(id: connection.lastStatus?.data.capture?.paused) {
-            if let status = connection.lastStatus {
+        .task(id: connection.currentStatus?.data.capture?.paused) {
+            if let status = connection.currentStatus {
                 startupAlert.evaluate(status: status)
             }
         }
@@ -137,8 +138,8 @@ struct SearchPopoverView: View {
         // takes a single Equatable, and Swift tuples aren't Equatable. Keying
         // each alert on its own signal is also the correct behaviour — a
         // transcription change must be observed even when `paused` never moves.
-        .task(id: connection.lastStatus?.data.transcription?.state) {
-            if let status = connection.lastStatus {
+        .task(id: connection.currentStatus?.data.transcription?.state) {
+            if let status = connection.currentStatus {
                 transcriptionAlert.evaluate(status: status)
             }
             // A rejection describes one attempt, not a state, so it goes stale
@@ -157,7 +158,7 @@ struct SearchPopoverView: View {
         // must run once per transition — to the lifetime of a loop that sits
         // sleeping for a second at a time, so a cancellation mid-sleep would
         // take the alert evaluation with it.
-        .task(id: connection.lastStatus?.data.transcription?.state) {
+        .task(id: connection.currentStatus?.data.transcription?.state) {
             while !Task.isCancelled, isProvisioningActive {
                 try? await Task.sleep(for: .seconds(1))
                 if Task.isCancelled { return }
@@ -202,7 +203,7 @@ struct SearchPopoverView: View {
     /// silently classify a future state as "not in flight" — the exact hazard
     /// the exhaustive switches in `TranscriptionBannerCopy` guard against.
     private var isProvisioningActive: Bool {
-        TranscriptionBannerCopy(connection.lastStatus?.data.transcription).showsProgress
+        TranscriptionBannerCopy(connection.currentStatus?.data.transcription).showsProgress
     }
 
     @ViewBuilder

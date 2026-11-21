@@ -30,12 +30,12 @@ struct SettingsView: View {
             provisionRejection = nil
             background.refreshStatus()
             connection.connect()
-            if connection.lastStatus == nil {
+            if connection.currentStatus == nil {
                 _ = try? await connection.requestStatus()
             }
             // `.onChange` does not fire for the value that is already there,
             // and by the time Settings opens the popover has usually populated
-            // `lastStatus` — so the seed has to happen here too.
+            // `currentStatus` — so the seed has to happen here too.
             syncSelection()
             await mic.recheck()
         }
@@ -413,18 +413,18 @@ struct SettingsView: View {
     // MARK: - Transcription actions
 
     private var daemonVariant: String? {
-        connection.lastStatus?.data.transcription?.variant
+        connection.currentStatus?.data.transcription?.variant
     }
 
     /// The signal both the poll and the rejection clear key off: the state is
     /// what changes when the daemon moves, and an unchanged state means neither
     /// has anything to do.
     private var pollKey: TranscriptionState? {
-        connection.lastStatus?.data.transcription?.state
+        connection.currentStatus?.data.transcription?.state
     }
 
     private var isProvisioningActive: Bool {
-        TranscriptionBannerCopy(connection.lastStatus?.data.transcription).showsProgress
+        TranscriptionBannerCopy(connection.currentStatus?.data.transcription).showsProgress
     }
 
     private func syncSelection() {

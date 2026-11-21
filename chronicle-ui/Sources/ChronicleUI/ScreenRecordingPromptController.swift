@@ -11,6 +11,7 @@ final class ScreenRecordingPromptController {
     @ObservationIgnored private var latch = ScreenRecordingPromptLatch()
     @ObservationIgnored private let presenter: @MainActor () -> Void
     @ObservationIgnored private let schedule: Scheduler
+    @ObservationIgnored private var isPresenting = false
 
     struct Input {
         let availability: CaptureAvailability
@@ -31,11 +32,20 @@ final class ScreenRecordingPromptController {
         guard latch.observe(input.availability, screenRecording: input.screenRecording) else {
             return
         }
-        schedule(presenter)
+        schedule { [weak self] in self?.showOnce() }
     }
 
     func present() {
-        schedule(presenter)
+        schedule { [weak self] in self?.showOnce() }
+    }
+
+    /// The modal loop runs run-loop blocks, so a second trigger would
+    /// open a second dialog on top of the first.
+    private func showOnce() {
+        guard !isPresenting else { return }
+        isPresenting = true
+        defer { isPresenting = false }
+        presenter()
     }
 
     /// The alert is modal. From a Task it would hold the main queue and stall

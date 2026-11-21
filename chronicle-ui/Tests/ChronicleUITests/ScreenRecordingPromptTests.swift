@@ -29,8 +29,8 @@ struct ScreenRecordingPromptTests {
     }
 
     @Test func aGrantStillShowingDeniedDoesNotShow() {
-        // Between a grant and capture restarting, the state can still be
-        // permission_denied while the read already says authorized.
+        // During a grant, the read says authorized a moment before the
+        // state leaves permission_denied.
         var latch = ScreenRecordingPromptLatch()
         let duringGrant = latch.observe(.needsScreenRecording, screenRecording: .authorized)
         #expect(!duringGrant)
