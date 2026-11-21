@@ -60,7 +60,9 @@ final class MicrophonePermission {
 
     /// Run the helper and return its stdout after a zero exit. Returns `nil`
     /// on a launch error, a non-zero exit, or no exit within `timeout`, in
-    /// which case the helper is terminated.
+    /// which case the helper is killed. `timeout` bounds the helper's exit
+    /// only, so the helper must start no children of its own and write little
+    /// output.
     nonisolated static func runHelper(
         at url: URL,
         arguments: [String] = ["--permission-status", "microphone"],
@@ -72,6 +74,7 @@ final class MicrophonePermission {
                 process.executableURL = url
                 process.arguments = arguments
                 let output = Pipe()
+                process.standardInput = FileHandle.nullDevice
                 process.standardOutput = output
                 process.standardError = FileHandle.nullDevice
                 let exited = DispatchSemaphore(value: 0)
@@ -83,7 +86,7 @@ final class MicrophonePermission {
                     return
                 }
                 if exited.wait(timeout: .now() + timeout) == .timedOut {
-                    process.terminate()
+                    kill(process.processIdentifier, SIGKILL)
                     continuation.resume(returning: nil)
                     return
                 }
