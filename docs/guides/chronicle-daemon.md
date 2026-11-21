@@ -311,7 +311,9 @@ tells you which device is selected.
 
 1. Add a status enum and FFI call in `permissions.rs`
 2. Add a `--permission-status` arm for it. Decisions after boot then use a fresh read (ADR-022)
-3. Decide whether it gates capture. A gate belongs in `CaptureSupervisor`, never in an exit from `preflight()`
+3. Add a `PermissionName` for it, and have `permission_monitor` read it on each tick
+4. Add its state to `PermissionsStats` in `crates/ipc`, and decode it in the UI's `Permissions`
+5. Decide whether it gates capture. A gate belongs in `CaptureSupervisor`, never in an exit from `preflight()`
 
 ### Adding a new crate to the workspace
 

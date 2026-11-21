@@ -70,6 +70,8 @@ chronicle-ui/Sources/ChronicleUI/MicRowState.swift
 chronicle-ui/Sources/ChronicleUI/MicrophonePermission.swift
 chronicle-ui/Sources/ChronicleUI/ResultRow.swift
 chronicle-ui/Sources/ChronicleUI/RetentionCopy.swift
+chronicle-ui/Sources/ChronicleUI/ScreenRecordingPrompt.swift
+chronicle-ui/Sources/ChronicleUI/ScreenRecordingPromptController.swift
 chronicle-ui/Sources/ChronicleUI/ScreenshotDetailView.swift
 chronicle-ui/Sources/ChronicleUI/SearchFilterState.swift
 chronicle-ui/Sources/ChronicleUI/SearchPopoverView.swift
