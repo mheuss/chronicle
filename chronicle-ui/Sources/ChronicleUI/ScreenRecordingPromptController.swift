@@ -9,8 +9,8 @@ final class ScreenRecordingPromptController {
     @ObservationIgnored private var latch = ScreenRecordingPromptLatch()
     @ObservationIgnored private let presenter: @MainActor () -> Void
 
-    /// What the latch watches. Equatable, so a view can observe changes.
-    struct Input: Equatable {
+    /// What the latch watches.
+    struct Input {
         let availability: CaptureAvailability
         /// The current Status's read, or nil without one.
         let screenRecording: PermissionState?
@@ -22,9 +22,10 @@ final class ScreenRecordingPromptController {
         self.presenter = presenter ?? Self.showAlert
     }
 
-    /// Called from `DaemonConnection.onStatus`, inside the heartbeat's
-    /// request. The dialog is modal, so it shows from its own task and the
-    /// heartbeat carries on.
+    /// Called from `DaemonConnection.onStatus`, inside whichever
+    /// `requestStatus` delivered the Status: the heartbeat, or a pause,
+    /// resume or Settings refresh. The dialog is modal, so it shows from its
+    /// own task and that request returns.
     func observe(_ input: Input) {
         guard latch.observe(input.availability, screenRecording: input.screenRecording) else {
             return

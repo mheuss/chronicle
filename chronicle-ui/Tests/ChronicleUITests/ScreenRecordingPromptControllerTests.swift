@@ -10,8 +10,8 @@ struct ScreenRecordingPromptControllerTests {
         let calls = Calls()
         let prompt = ScreenRecordingPromptController(presenter: { calls.count += 1 })
         prompt.observe(.init(availability: .needsScreenRecording, screenRecording: .denied))
-        // observe runs inside onStatus, which runs inside the heartbeat's
-        // requestStatus. A modal shown here would park the heartbeat.
+        // observe runs inside onStatus, which runs inside a requestStatus,
+        // often the heartbeat's. A modal shown here would park that request.
         #expect(calls.count == 0, "observe returns before the dialog shows")
         await waitUntil { calls.count == 1 }
         #expect(calls.count == 1)

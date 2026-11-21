@@ -30,10 +30,10 @@ struct ChronicleApp: App {
             MenuBarIcon(connection: connection, background: background)
                 .task {
                     background.onAgentRegistered = { [connection] in connection.reconnectNow() }
-                    connection.onStatus = { [connection, background, prompt] _ in
+                    connection.onStatus = { [connection, background, prompt] status in
                         prompt.observe(.init(
                             availability: connection.availability(background: background),
-                            screenRecording: connection.currentStatus?.data.permissions?.screenRecording))
+                            screenRecording: status.data.permissions?.screenRecording))
                     }
                     connection.connect()
                     await background.reconcileOnLaunch()
