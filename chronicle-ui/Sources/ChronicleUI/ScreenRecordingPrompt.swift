@@ -1,14 +1,16 @@
 import Foundation
 
 /// When the Screen Recording dialog shows (design §7.1, AD12). One per app
-/// launch. Re-armed only by an observation that reports the grant.
+/// launch. Re-armed only by a read that reports the grant.
 struct ScreenRecordingPromptLatch {
     private(set) var armed = true
 
-    /// Returns true when the dialog should show now.
+    /// Returns true when the dialog should show now. `screenRecording` is the
+    /// current Status's read, or nil without one. Only `.authorized` is a
+    /// grant. A missing block or an unknown word is not.
     mutating func observe(_ availability: CaptureAvailability,
-                          screenRecordingAuthorized: Bool) -> Bool {
-        if screenRecordingAuthorized {
+                          screenRecording: PermissionState?) -> Bool {
+        if screenRecording == .authorized {
             armed = true
             return false
         }

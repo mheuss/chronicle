@@ -8,43 +8,52 @@ struct ScreenRecordingPromptTests {
     /// Status yet is `starting`.
     @Test func latchShowsOncePerLaunch() {
         var latch = ScreenRecordingPromptLatch()
-        let shown1 = latch.observe(.needsScreenRecording, screenRecordingAuthorized: false)
-        #expect(shown1)
-        let shown2 = latch.observe(.notRunning, screenRecordingAuthorized: false)
-        #expect(!shown2)
-        let shown3 = latch.observe(.starting, screenRecordingAuthorized: false)
-        #expect(!shown3)
-        let shown4 = latch.observe(.needsScreenRecording, screenRecordingAuthorized: false)
-        #expect(!shown4,
-                "a reconnect does not re-arm it")
+        let first = latch.observe(.needsScreenRecording, screenRecording: .denied)
+        #expect(first)
+        let disconnected = latch.observe(.notRunning, screenRecording: nil)
+        #expect(!disconnected)
+        let reconnecting = latch.observe(.starting, screenRecording: nil)
+        #expect(!reconnecting)
+        let afterReconnect = latch.observe(.needsScreenRecording, screenRecording: .denied)
+        #expect(!afterReconnect, "a reconnect does not re-arm it")
     }
 
     @Test func latchReArmsOnAGrant() {
         var latch = ScreenRecordingPromptLatch()
-        let shown5 = latch.observe(.needsScreenRecording, screenRecordingAuthorized: false)
-        #expect(shown5)
-        let shown6 = latch.observe(.capturing, screenRecordingAuthorized: true)
-        #expect(!shown6)
-        let shown7 = latch.observe(.needsScreenRecording, screenRecordingAuthorized: false)
-        #expect(shown7,
-                "a later revoke shows it again")
+        let first = latch.observe(.needsScreenRecording, screenRecording: .denied)
+        #expect(first)
+        let granted = latch.observe(.capturing, screenRecording: .authorized)
+        #expect(!granted)
+        let revoked = latch.observe(.needsScreenRecording, screenRecording: .denied)
+        #expect(revoked, "a later revoke shows it again")
     }
 
     @Test func aGrantStillShowingDeniedDoesNotShow() {
         // Between a grant and capture restarting, the state can still be
         // permission_denied while the read already says authorized.
         var latch = ScreenRecordingPromptLatch()
-        let shown8 = latch.observe(.needsScreenRecording, screenRecordingAuthorized: true)
-        #expect(!shown8)
-        let shown9 = latch.observe(.needsScreenRecording, screenRecordingAuthorized: false)
-        #expect(shown9,
-                "the latch stayed armed")
+        let duringGrant = latch.observe(.needsScreenRecording, screenRecording: .authorized)
+        #expect(!duringGrant)
+        let later = latch.observe(.needsScreenRecording, screenRecording: .denied)
+        #expect(later, "the latch stayed armed")
     }
 
-    @Test func unverifiedNeverShows() {
+    @Test(arguments: CaptureAvailability.allCases.filter { $0 != .needsScreenRecording })
+    func onlyNeedsScreenRecordingShowsItOrDisarmsIt(a: CaptureAvailability) {
         var latch = ScreenRecordingPromptLatch()
-        let shown10 = latch.observe(.permissionUnverified, screenRecordingAuthorized: false)
-        #expect(!shown10)
+        let shown = latch.observe(a, screenRecording: .denied)
+        #expect(!shown)
+        #expect(latch.armed, "\(a) leaves the latch armed")
+    }
+
+    @Test(arguments: [PermissionState?.none, .unknown, .unavailable, .notDetermined, .restricted, .denied])
+    func onlyAnAuthorizedReadReArms(read: PermissionState?) {
+        var latch = ScreenRecordingPromptLatch()
+        let first = latch.observe(.needsScreenRecording, screenRecording: .denied)
+        #expect(first)
+        let notAGrant = latch.observe(.capturing, screenRecording: read)
+        #expect(!notAGrant)
+        #expect(!latch.armed, "\(String(describing: read)) is not a grant")
     }
 
     @Test(arguments: CaptureAvailability.allCases)

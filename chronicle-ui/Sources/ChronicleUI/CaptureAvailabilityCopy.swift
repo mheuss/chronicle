@@ -30,8 +30,9 @@ enum CaptureAvailabilityCopy {
         }
     }
 
-    /// The popover's text with background capture off. Unlike Settings' "Off",
-    /// it has no row label, and there is no daemon to search.
+    /// The popover's text with background capture off. Settings shows "Off" in
+    /// a labeled row. The popover has no row label, and with background off
+    /// there is no daemon to search.
     static let popoverBackgroundOff = "Background capture is off. Turn it on in Settings to search."
 
     static let fixButton = "Fix…"
