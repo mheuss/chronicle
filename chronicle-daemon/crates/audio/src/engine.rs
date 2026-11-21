@@ -47,9 +47,9 @@ type MicFactory = Box<
 /// over a channel.
 ///
 /// The encoding channel has up to three senders — the ObjC handler (system
-/// audio), the [`MicrophoneCapture`] tap while one is built, and `flush_tx`. Calling `stop()` drops all
-/// three, which closes the channel and lets the encoding thread flush and
-/// exit. The borrow checker prevents `stop()` from being called while an
+/// audio), the [`MicrophoneCapture`] tap while one is built, and `flush_tx`.
+/// Calling `stop()` drops all three, which closes the channel and lets the
+/// encoding thread flush and exit. The borrow checker prevents `stop()` from being called while an
 /// `AudioHandlerToken` is outstanding.
 pub struct AudioPipeline {
     handler: Option<Retained<AudioOutputHandler>>,
@@ -58,7 +58,9 @@ pub struct AudioPipeline {
     /// Dedicated microphone capture path. Empty until the first enable builds
     /// it, and emptied again by [`drop_microphone`](Self::drop_microphone).
     /// Building it reads the input node, which raises the TCC prompt once the
-    /// UI carries the audio-input entitlement (design §1.1).
+    /// UI carries the audio-input entitlement (design §1.1). The pipeline is
+    /// not `Sync`, so the lock is never contended, but no method may lock it
+    /// while it already holds a guard.
     microphone: Mutex<Option<MicrophoneCapture>>,
     mic_factory: MicFactory,
     /// A clone of the encoding-channel sender, kept so a disable can send
@@ -166,8 +168,8 @@ impl AudioPipeline {
     /// Toggle microphone capture. Takes `&self` (not `&mut self`): a running
     /// `CaptureEngine` holds an `AudioHandlerToken` that immutably borrows this
     /// pipeline for its whole life, so a `&mut self` method would not compile.
-    /// Every operation here is `&self` — `MicrophoneCapture`'s methods and
-    /// `SyncSender::try_send` both take `&self`. See design §2.3.
+    /// An enable first builds the engine if the slot is empty, which reads the
+    /// input node, the call TCC checks.
     pub fn set_microphone_enabled(&self, enabled: bool) -> MicToggleOutcome {
         let mut slot = self.mic_slot();
         if enabled && let Err(reason) = self.fill_mic_slot(&mut slot) {
@@ -193,37 +195,46 @@ impl AudioPipeline {
                 },
             }
         } else {
-            match mic.stop() {
-                Ok(()) => {
-                    // Finalize the partial mic segment so a later re-enable does
-                    // not produce one segment spanning the off-period.
-                    if let Some(tx) = &self.flush_tx
-                        && let Err(e) = tx.send(AudioMessage::FlushMic)
-                    {
-                        // FlushMic is a control message, not an audio buffer —
-                        // it must not be dropped under backpressure, so this
-                        // blocks for a channel slot rather than `try_send`. A
-                        // send error means the encoding channel is closed,
-                        // which is a genuine failure.
-                        return MicToggleOutcome::Failed {
-                            reason: format!("failed to finalize microphone segment: {e}"),
-                        };
-                    }
-                    MicToggleOutcome::Disabled
-                }
-                Err(e) => MicToggleOutcome::Failed {
-                    reason: e.to_string(),
-                },
-            }
+            self.stop_mic(mic)
         }
     }
 
-    /// Stop the microphone if it runs, then drop its engine, so the next
-    /// enable builds a new one (design §1.1). Returns the stop's outcome.
+    /// Stop the microphone, then drop its engine under the same lock, so the
+    /// next enable builds a new one (design §1.1). Returns the stop's outcome.
     pub fn drop_microphone(&self) -> MicToggleOutcome {
-        let outcome = self.set_microphone_enabled(false);
-        *self.mic_slot() = None;
+        let mut slot = self.mic_slot();
+        let outcome = match slot.as_ref() {
+            Some(mic) => self.stop_mic(mic),
+            None => MicToggleOutcome::Disabled,
+        };
+        *slot = None;
         outcome
+    }
+
+    /// Stop `mic` and finalize its partial segment.
+    fn stop_mic(&self, mic: &MicrophoneCapture) -> MicToggleOutcome {
+        match mic.stop() {
+            Ok(()) => {
+                // Finalize the partial mic segment so a later re-enable does
+                // not produce one segment spanning the off-period.
+                if let Some(tx) = &self.flush_tx
+                    && let Err(e) = tx.send(AudioMessage::FlushMic)
+                {
+                    // FlushMic is a control message, not an audio buffer —
+                    // it must not be dropped under backpressure, so this
+                    // blocks for a channel slot rather than `try_send`. A
+                    // send error means the encoding channel is closed,
+                    // which is a genuine failure.
+                    return MicToggleOutcome::Failed {
+                        reason: format!("failed to finalize microphone segment: {e}"),
+                    };
+                }
+                MicToggleOutcome::Disabled
+            }
+            Err(e) => MicToggleOutcome::Failed {
+                reason: e.to_string(),
+            },
+        }
     }
 
     fn mic_slot(&self) -> MutexGuard<'_, Option<MicrophoneCapture>> {
@@ -435,10 +446,10 @@ mod tests {
         // because a build failure is soft and leaves the slot empty: on a host
         // with no input device, `AVAudioConverter::initFromFormat_toFormat`
         // in `MicrophoneCapture::new` returns nil against a zero-channel
-        // native format and `new` returns `Err`. Asserting unconditionally would fail
-        // such a host for behaving as designed.
+        // native format and `new` returns `Err`. Asserting unconditionally
+        // would fail such a host for behaving as designed.
         //
-        // Skipping the assertion there costs nothing: no `Err` means no
+        // Skipping the assertion there costs nothing: an `Err` means no
         // `MicrophoneCapture`, so no tap block was constructed and there is no
         // wrong-capture bug for the skip to hide. The count below is what keeps
         // this honest on every host that DOES have a device.
@@ -928,6 +939,15 @@ mod tests {
 
         assert_eq!(pipeline.drop_microphone(), MicToggleOutcome::Disabled);
         assert!(pipeline.mic_slot().is_none(), "drop must empty the slot");
+
+        // The next enable builds a new engine and starts it (design AD 1).
+        assert_eq!(
+            pipeline.set_microphone_enabled(true),
+            MicToggleOutcome::Enabled
+        );
+        assert!(pipeline.mic_slot().as_ref().unwrap().is_running());
+        assert_eq!(pipeline.drop_microphone(), MicToggleOutcome::Disabled);
+        assert!(pipeline.mic_slot().is_none());
 
         pipeline.stop().unwrap();
     }

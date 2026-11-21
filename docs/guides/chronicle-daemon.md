@@ -83,8 +83,8 @@ flowchart TD
 10. `IpcServer::start()` — starts the Unix-socket status server. The sleep and
    wake observer is spawned earlier in `run()`, before it.
 11. `AudioPipeline::create()` — prepares the audio handler, dispatch queue, and
-   encoding thread used by ScreenCaptureKit audio callbacks, and builds the
-   microphone tap (installed eagerly; capture starts only on mic-on)
+   encoding thread used by ScreenCaptureKit audio callbacks. The microphone tap
+   is built later, when the mic is first turned on.
 12. `CaptureSupervisor::reconcile()` — starts the capture runtime, unless
    capture is paused in settings. The runtime is `CaptureEngine` plus
    `capture_store_loop` (Task A) and `ocr_loop` (Task B), started and stopped
@@ -217,8 +217,8 @@ not measured, so read those two fields in the line above before assuming this is
 your problem. Quiet audio from a `1 ch` device is a different problem, and this
 is not it.
 
-You will see the line in a normal run — the daemon defaults to
-`warn,chronicle=info`, so no `RUST_LOG` is needed:
+You will see the line in a normal run once the mic is turned on. The daemon
+defaults to `warn,chronicle=info`, so no `RUST_LOG` is needed:
 
 ```bash
 export CHRONICLE_DATA_DIR="$HOME/chronicle-dev"
@@ -233,8 +233,8 @@ The command does not exit on its own — the shell waits on `cargo`, so Ctrl-C
 once you have the line.
 
 Watch for one of two lines, not just the first. When `MicrophoneCapture::new`
-fails there is no tap install at all — `engine.rs` logs
-`microphone capture unavailable: {e}` instead. Waiting only for `tap installed`
+fails there is no tap install at all — `ipc_handler.rs` logs
+`microphone toggle failed: {reason}` instead. Waiting only for `tap installed`
 in that case looks identical to "the log is missing" while the actual
 explanation scrolls past.
 
@@ -261,11 +261,11 @@ Four things to know before you trust what you read:
   unified log with the microphone's name and UID replaced by `redacted`. Run
   the daemon by hand to see them.
 - **Restart between devices.** `MicrophoneCapture` and its converter are built
-  once when the pipeline is created, so changing the default input while the
-  daemon runs leaves the converter built for the previous device.
-- **The line appears with the mic off.** The tap is installed eagerly at
-  startup; capture begins only when the mic is enabled. Seeing this line is not
-  evidence the microphone was live.
+  when the mic is first turned on, so changing the default input while the mic
+  is on leaves the converter built for the previous device.
+- **The line appears before capture starts.** The tap is installed when the mic
+  is turned on, just before the engine starts. Seeing this line shows the engine
+  was built, not that audio was recorded.
 
 Cross-check the numbers against **Audio MIDI Setup** (`open -a "Audio MIDI
 Setup"`), which shows each device's format. System Settings → Sound → Input only

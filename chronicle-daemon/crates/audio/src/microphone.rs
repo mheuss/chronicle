@@ -106,8 +106,9 @@ fn common_format_name(format: AVAudioCommonFormat) -> String {
 ///
 /// Construction installs the tap and prepares the engine but does not start
 /// it, so no audio is captured until [`start`]. Construction does read the
-/// input node, which TCC checks. The tap normalizes each buffer to mono/48 kHz/f32 and forwards it over the
-/// encoding channel as [`AudioMessage::Buffer`].
+/// input node, which TCC checks. The tap normalizes each buffer to
+/// mono/48 kHz/f32 and forwards it over the encoding channel as
+/// [`AudioMessage::Buffer`].
 ///
 /// Dropping `MicrophoneCapture` releases the `AVAudioEngine`, which tears the
 /// input-node tap down with it — there is no explicit `removeTapOnBus`.
@@ -144,7 +145,7 @@ impl MicrophoneCapture {
     ///
     /// Does **not** start capture. It does read the input node, which raises
     /// the TCC prompt when permission is undetermined and the app carries the
-    /// audio-input entitlement, so callers build it only after a grant. Any
+    /// audio-input entitlement, so callers must build it only after a grant. Any
     /// AVFoundation setup failure returns [`AudioError`] rather than panicking
     /// so callers can treat a microphone-setup failure as soft.
     ///
