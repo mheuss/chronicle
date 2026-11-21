@@ -966,6 +966,9 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                 if let Some(denied) = sr_gate.decide(g.sr_denied, g.sr_stale, t.read) {
                     let granted = permission_gate::grant_cleared(g.sr_denied, denied);
                     let outcome = supervisor.set_sr_denied(denied, &audio_pipeline).await;
+                    if permission_gate::start_decides_mic(&outcome) {
+                        mic_generation += 1;
+                    }
                     if let Some(code) = permission_gate::exit_after_grant(granted, &outcome) {
                         log::error!("capture start after a Screen Recording grant failed; shutting down for a fresh process");
                         loop_exit = Some(code);
@@ -1056,6 +1059,10 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                     supervisor.reconcile(&audio_pipeline),
                 )
                 .await;
+                if permission_gate::start_decides_mic(&outcome) {
+                    mic_generation += 1;
+                    permission_gate::publish_state(&mode_tx, supervisor.gates(), mic_generation);
+                }
                 let disposition = route_reconcile_outcome(
                     &outcome,
                     &mut boot_incident,
@@ -1116,6 +1123,10 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                     supervisor.reconcile(&audio_pipeline),
                 )
                 .await;
+                if permission_gate::start_decides_mic(&outcome) {
+                    mic_generation += 1;
+                    permission_gate::publish_state(&mode_tx, supervisor.gates(), mic_generation);
+                }
                 let disposition = route_reconcile_outcome(
                     &outcome,
                     &mut boot_incident,
@@ -1137,6 +1148,10 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                 let outcome = supervisor.reconcile(&audio_pipeline).await;
                 if outcome == ReconcileOutcome::Started {
                     log::info!("capture recovered on retry");
+                }
+                if permission_gate::start_decides_mic(&outcome) {
+                    mic_generation += 1;
+                    permission_gate::publish_state(&mode_tx, supervisor.gates(), mic_generation);
                 }
                 let disposition = route_reconcile_outcome(
                     &outcome,

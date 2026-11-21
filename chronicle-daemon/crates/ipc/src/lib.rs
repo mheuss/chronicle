@@ -189,8 +189,8 @@ pub struct StatusData {
     pub audio: AudioStats,
     pub storage: StorageStats,
     pub transcription: TranscriptionStats,
-    /// Additive (CHR-97). A daemon built before it omits the key, which
-    /// decodes to all-`Unavailable`.
+    /// Additive (CHR-97). A daemon built before it omits the key. Rust
+    /// decodes that to all-`Unavailable`. The Swift UI decodes it to nil.
     #[serde(default)]
     pub permissions: PermissionsStats,
 }
@@ -457,6 +457,8 @@ mod tests {
             (PermissionState::Unavailable, "unavailable"),
         ] {
             assert_eq!(serde_json::to_value(state).unwrap(), word);
+            let back: PermissionState = serde_json::from_value(word.into()).unwrap();
+            assert_eq!(back, state, "{word} decodes");
         }
     }
 
@@ -481,6 +483,11 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&resp).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value["data"]["permissions"]["screen_recording"], "authorized",
+            "the UI reads the block under this key"
+        );
         let back: Response = serde_json::from_str(&json).unwrap();
         assert_eq!(back, resp);
     }

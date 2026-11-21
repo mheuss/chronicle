@@ -750,6 +750,42 @@ mod tests {
         };
         assert_eq!(data.capture.state, "permission_denied");
         assert_eq!(data.permissions, **snapshot.load());
+
+        snapshot.store(Arc::new(chronicle_ipc::PermissionsStats {
+            screen_recording: chronicle_ipc::PermissionState::Authorized,
+            ..**snapshot.load()
+        }));
+        denied.store(false, Ordering::Release);
+        let Response::Status { data, .. } = handler.handle(Request::Status) else {
+            panic!("expected Status");
+        };
+        assert_ne!(
+            data.capture.state, "permission_denied",
+            "reads the shared gate"
+        );
+        assert_eq!(
+            data.permissions.screen_recording,
+            chronicle_ipc::PermissionState::Authorized,
+            "reads the shared snapshot"
+        );
+    }
+
+    #[test]
+    fn helper_words_and_wire_words_match() {
+        use crate::permissions::PermissionRead as R;
+        for read in [
+            R::Authorized,
+            R::Denied,
+            R::NotDetermined,
+            R::Restricted,
+            R::Unavailable,
+        ] {
+            assert_eq!(
+                serde_json::to_value(wire_permission(read)).unwrap(),
+                read.as_word(),
+                "{read:?}"
+            );
+        }
     }
 
     #[test]

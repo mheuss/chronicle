@@ -70,6 +70,7 @@ pub(crate) async fn run(
     let mut last_epoch = mode_rx.borrow().epoch;
     let mut screen_log = ReadLog::new(PermissionName::ScreenRecording);
     let mut mic_log = ReadLog::new(PermissionName::Microphone);
+    let mut idle = false;
     loop {
         let state = *mode_rx.borrow_and_update();
         // A new epoch means an Idle period began. It may have ended before
@@ -79,7 +80,10 @@ pub(crate) async fn run(
             last_tick = None;
         }
         let Some(interval) = state.mode.interval() else {
-            log::info!("permission monitor: idle");
+            if !idle {
+                log::info!("permission monitor: idle");
+                idle = true;
+            }
             last_tick = None;
             tokio::select! {
                 _ = cancel.cancelled() => return,
@@ -91,6 +95,7 @@ pub(crate) async fn run(
                 }
             }
         };
+        idle = false;
 
         // Wait out the current mode's interval from the last tick. A mode
         // change restarts this wait with the new interval (design §2, N1b).

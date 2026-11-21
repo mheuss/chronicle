@@ -75,10 +75,19 @@ pub(crate) fn accept_screen_read(read_epoch: u64, g: Gates) -> bool {
     read_epoch == g.idle_epoch && !g.user_paused && !g.system_asleep
 }
 
-/// The mic arm acts on a read only if no mic command has succeeded since the
-/// read started (design §3, AD20).
+/// The mic arm acts on a read only if no mic command has succeeded, and no
+/// capture start has decided the mic, since the read started (design §3, AD20).
 pub(crate) fn accept_mic_read(read_generation: u64, current_generation: u64) -> bool {
     read_generation == current_generation
+}
+
+/// True when the reconcile ran `start()`, which reads the mic and decides it.
+/// A mic read spawned before that is older than the decision.
+pub(crate) fn start_decides_mic(outcome: &ReconcileOutcome) -> bool {
+    matches!(
+        outcome,
+        ReconcileOutcome::Started | ReconcileOutcome::StartFailed { .. }
+    )
 }
 
 /// Publish the new state before the reconcile runs.
@@ -121,10 +130,12 @@ impl SrGate {
             }
             PermissionRead::Unavailable => {
                 self.unavailable_streak = self.unavailable_streak.saturating_add(1);
-                log::warn!(
-                    "screen recording read unavailable ({}/{UNAVAILABLE_LIMIT})",
-                    self.unavailable_streak
-                );
+                if self.unavailable_streak <= UNAVAILABLE_LIMIT {
+                    log::warn!(
+                        "screen recording read unavailable ({}/{UNAVAILABLE_LIMIT})",
+                        self.unavailable_streak
+                    );
+                }
                 (self.unavailable_streak >= UNAVAILABLE_LIMIT && !denied_now).then_some(true)
             }
         }
@@ -431,6 +442,52 @@ mod tests {
         assert_eq!(
             run_ticks(&[Unavailable, Authorized], MicState::Error, true, true),
             (MicState::Error, true)
+        );
+    }
+
+    #[test]
+    fn a_real_read_restarts_the_unavailable_count() {
+        let mut gate = SrGate::default();
+        assert_eq!(gate.decide(false, false, Unavailable), None);
+        assert_eq!(gate.decide(false, false, Unavailable), None);
+        assert_eq!(gate.decide(false, false, Denied), Some(true));
+        assert_eq!(
+            gate.decide(false, false, Unavailable),
+            None,
+            "count restarted"
+        );
+        assert_eq!(gate.decide(false, false, Unavailable), None);
+        assert_eq!(gate.decide(false, false, Unavailable), Some(true));
+    }
+
+    #[test]
+    fn authorized_clears_a_gate_that_is_denied_and_stale() {
+        let mut gate = SrGate::default();
+        assert_eq!(gate.decide(true, true, Authorized), Some(false));
+    }
+
+    #[test]
+    fn a_start_makes_older_mic_reads_stale() {
+        let failed = ReconcileOutcome::StartFailed {
+            partial_teardown: false,
+        };
+        assert!(start_decides_mic(&ReconcileOutcome::Started));
+        assert!(start_decides_mic(&failed));
+        for outcome in [
+            ReconcileOutcome::Stopped,
+            ReconcileOutcome::NoChange,
+            ReconcileOutcome::StopPoisoned,
+        ] {
+            assert!(!start_decides_mic(&outcome), "{outcome:?} reads no mic");
+        }
+        let spawned_at = 3;
+        let mut generation = spawned_at;
+        if start_decides_mic(&ReconcileOutcome::Started) {
+            generation += 1;
+        }
+        assert!(
+            !accept_mic_read(spawned_at, generation),
+            "a read from before the start is dropped"
         );
     }
 

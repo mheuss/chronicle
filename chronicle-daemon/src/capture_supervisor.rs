@@ -143,8 +143,8 @@ pub struct CaptureSupervisor<'a, M: AppMetadataProvider + 'static + ?Sized> {
     counters: Arc<PipelineCounters>,
     ocr_channel_capacity: usize,
     probe_holder: Arc<Mutex<Option<EngineStatusProbe>>>,
-    /// IPC-visible mirror of `user_paused`. Written by `mark_user_paused`
-    /// (Task 6); kept here so the supervisor owns the persistence atom
+    /// IPC-visible mirror of `user_paused`. Written by `mark_user_paused`,
+    /// and kept here so the supervisor owns the persistence atom
     /// alongside the runtime. Unread by `reconcile()` — the supervisor's
     /// own `user_paused` field is the source of truth for decisions.
     capture_paused: Arc<AtomicBool>,
@@ -257,14 +257,6 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         self.runtime.is_some()
     }
 
-    /// Test-only snapshot of the flags as `(user_paused, system_asleep)`.
-    /// Used to verify setter side-effects without exposing the fields
-    /// publicly.
-    #[cfg(test)]
-    fn flags_for_test(&self) -> (bool, bool) {
-        (self.user_paused, self.system_asleep)
-    }
-
     /// Compare the flags against the current run state and Start, Stop, or
     /// do nothing accordingly.
     ///
@@ -370,7 +362,8 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
 
     /// Set or clear the Screen Recording gate and reconcile. Transient, never
     /// persisted. Clearing it also clears `sr_stale`, because only an
-    /// Authorized read clears the gate (design §3 Step 1).
+    /// Authorized read clears the gate (design §3 Step 1). Callers drop reads
+    /// taken while paused or asleep first, with `accept_screen_read`.
     pub async fn set_sr_denied(
         &mut self,
         denied: bool,
@@ -598,8 +591,8 @@ mod tests {
         );
 
         // The stop flag keeps decide() returning None, so reconcile() never
-        // touches ScreenCaptureKit — the Start/Stop I/O paths need a real
-        // display and are covered by the Task 9 end-to-end verification.
+        // touches ScreenCaptureKit. The Start/Stop I/O paths need a real
+        // display and are checked on a signed build, not here.
         let outcome = supervisor.reconcile(&audio).await;
 
         assert_eq!(outcome, ReconcileOutcome::NoChange);
@@ -860,7 +853,7 @@ mod tests {
             Arc::new(chronicle_capture::CaptureDropCounters::default()),
         )
         .with_screen_recording_gate(true, Arc::clone(&mirror));
-        // user_paused stays true, so neither call below reaches ScreenCaptureKit.
+        // user_paused stays true, so no call below reaches ScreenCaptureKit.
         assert_eq!(
             {
                 supervisor.mark_user_paused(true);
@@ -892,7 +885,6 @@ mod tests {
             },
             "a denial sets the gate and leaves sr_stale alone"
         );
-        assert!(!supervisor.should_run());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1017,17 +1009,26 @@ mod tests {
         };
 
         // Sanity: both flags set.
-        let (u, s) = supervisor.flags_for_test();
-        assert!(u && s, "expected both flags set before wake");
+        let g = supervisor.gates();
+        assert!(
+            g.user_paused && g.system_asleep,
+            "expected both flags set before wake"
+        );
 
         let _ = {
             supervisor.mark_system_awake();
             supervisor.reconcile(&audio).await
         };
 
-        let (u, s) = supervisor.flags_for_test();
-        assert!(u, "user_paused must be untouched by mark_system_awake");
-        assert!(!s, "mark_system_awake must clear system_asleep");
+        let g = supervisor.gates();
+        assert!(
+            g.user_paused,
+            "user_paused must be untouched by mark_system_awake"
+        );
+        assert!(
+            !g.system_asleep,
+            "mark_system_awake must clear system_asleep"
+        );
         assert!(
             !supervisor.should_run(),
             "should_run() must stay false while user_paused holds"

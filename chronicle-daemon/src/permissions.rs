@@ -138,6 +138,9 @@ impl From<ScreenRecordingStatus> for PermissionRead {
 /// The helper's name for the Screen Recording permission.
 pub(crate) const SCREEN_RECORDING: &str = "screen-recording";
 
+/// The helper's name for the microphone permission.
+pub(crate) const MICROPHONE: &str = "microphone";
+
 /// The helper flag. A process spawned with it reads its permission fresh,
 /// and TCC attributes the read to the process that spawned it.
 pub(crate) const STATUS_FLAG: &str = "--permission-status";
@@ -164,7 +167,7 @@ where
         return Some(2);
     };
     let read = match name.as_str() {
-        "microphone" => PermissionRead::from(read_microphone()),
+        MICROPHONE => PermissionRead::from(read_microphone()),
         SCREEN_RECORDING => PermissionRead::from(read_screen_recording()),
         _ => return Some(2),
     };
@@ -182,7 +185,7 @@ pub(crate) const HELPER_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// from here.
 pub(crate) fn fresh_microphone_status() -> PermissionRead {
     match std::env::current_exe() {
-        Ok(exe) => fresh_status_with(&exe, "microphone", &run_helper),
+        Ok(exe) => fresh_status_with(&exe, MICROPHONE, &run_helper),
         Err(e) => {
             log::warn!("permission helper: current_exe failed: {e}");
             PermissionRead::Unavailable
