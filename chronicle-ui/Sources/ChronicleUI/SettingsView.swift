@@ -1,59 +1,6 @@
 import SwiftUI
 import ServiceManagement
 
-/// What the Settings capture badge shows. It has one case per menu bar icon
-/// state, and both classify capture with `CaptureHealth`.
-enum CaptureBadge: String, CaseIterable {
-    case disconnected, connecting, waiting, paused, active, notRunning
-
-    static func from(
-        connectionState: DaemonConnection.ConnectionState,
-        status: StatusResponse?
-    ) -> CaptureBadge {
-        switch connectionState {
-        case .disconnected: return .disconnected
-        case .connecting: return .connecting
-        case .connected:
-            switch CaptureHealth.classify(status) {
-            case .noStatus: return .waiting
-            case .paused: return .paused
-            case .running: return .active
-            case .notRunning: return .notRunning
-            }
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .disconnected: return "xmark.circle.fill"
-        case .connecting, .waiting: return "ellipsis.circle.fill"
-        case .paused: return "pause.circle.fill"
-        case .active: return "record.circle.fill"
-        case .notRunning: return "exclamationmark.circle.fill"
-        }
-    }
-
-    var tint: MenuBarDisplay.Tint {
-        switch self {
-        case .disconnected, .notRunning: return .red
-        case .connecting, .waiting: return .yellow
-        case .paused: return .orange
-        case .active: return .green
-        }
-    }
-
-    var label: String {
-        switch self {
-        case .disconnected: return "Disconnected"
-        case .connecting: return "Connecting"
-        case .waiting: return "Waiting for status"
-        case .paused: return "Paused"
-        case .active: return "Active"
-        case .notRunning: return "Not running"
-        }
-    }
-}
-
 struct SettingsView: View {
     @Environment(DaemonConnection.self) private var connection
     @Environment(TranscriptionAlertState.self) private var transcriptionAlert
@@ -200,14 +147,14 @@ struct SettingsView: View {
         }
     }
 
-    private var captureStatus: CaptureBadge {
-        CaptureBadge.from(connectionState: connection.state, status: connection.lastStatus)
+    private var availability: CaptureAvailability {
+        connection.availability(background: background)
     }
 
     private var statusBadge: some View {
         HStack(spacing: 6) {
-            Image(systemName: captureStatus.symbol).foregroundStyle(captureStatus.tint.color)
-            Text(captureStatus.label)
+            Image(systemName: availability.badgeSymbol).foregroundStyle(availability.tint.color)
+            Text(CaptureAvailabilityCopy.settingsText(availability))
         }
     }
 
@@ -218,12 +165,15 @@ struct SettingsView: View {
         // the icon floats to the middle of the paragraph while the row's
         // "Transcription" label stays on line 1.
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            if let transcription = connection.lastStatus?.data.transcription {
+            if let transcription = connection.currentStatus?.data.transcription {
                 transcriptionBadgeBody(transcription)
             } else {
-                // No block at all = a daemon older than this UI. Say so plainly
-                // rather than implying transcription is broken.
-                Text("Requires daemon update").foregroundStyle(.secondary)
+                // A current Status with no block is a daemon older than this UI.
+                // With no current Status, say what the connection is doing.
+                Text(TranscriptionRowFallback.text(
+                    hasCurrentStatus: connection.currentStatus != nil,
+                    availability: availability))
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -251,7 +201,7 @@ struct SettingsView: View {
             // Same words as the no-block branch above, deliberately. Both are
             // version skew — that one is a daemon too old to send the block,
             // this one a daemon too new to be understood — so they read alike.
-            Text("Requires daemon update").foregroundStyle(.secondary)
+            Text(TranscriptionRowFallback.requiresDaemonUpdate).foregroundStyle(.secondary)
         case .missing:
             Image(systemName: "waveform.slash").foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 6) {
@@ -498,7 +448,7 @@ struct SettingsView: View {
     // MARK: - Capture
 
     private var isPaused: Bool {
-        captureStatus == .paused
+        availability == .paused
     }
 
     private var diskUsageText: String {

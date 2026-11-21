@@ -24,9 +24,9 @@ struct ChronicleApp: App {
                 .environment(transcriptionAlert)
                 .environment(searchFilter)
         } label: {
-            MenuBarIcon(connection: connection)
+            MenuBarIcon(connection: connection, background: background)
                 .task {
-                    background.onEnabled = { [connection] in connection.reconnectNow() }
+                    background.onAgentRegistered = { [connection] in connection.reconnectNow() }
                     connection.connect()
                     await background.reconcileOnLaunch()
                 }

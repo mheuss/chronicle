@@ -44,3 +44,15 @@ enum CaptureAvailabilityCopy {
     static let dialogOpenButton = "Open System Settings"
     static let dialogNotNowButton = "Not Now"
 }
+
+/// The transcription row's text when it has no transcription block to render
+/// (design §6.3).
+enum TranscriptionRowFallback {
+    /// Version skew either way: a daemon too old to send the block, or one too
+    /// new for this UI to understand its state.
+    static let requiresDaemonUpdate = "Requires daemon update"
+
+    static func text(hasCurrentStatus: Bool, availability: CaptureAvailability) -> String {
+        hasCurrentStatus ? requiresDaemonUpdate : CaptureAvailabilityCopy.settingsText(availability)
+    }
+}

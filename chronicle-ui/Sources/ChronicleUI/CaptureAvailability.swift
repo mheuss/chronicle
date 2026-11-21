@@ -6,27 +6,21 @@ enum CaptureAvailability: Equatable, Hashable, CaseIterable {
     case backgroundOff, starting, notRunning, needsScreenRecording, permissionUnverified
     case paused, capturing, notCapturing
 
-    /// How long after launch or the toggle a missing daemon still reads as starting.
-    static let startingWindow: TimeInterval = 60
-
     /// `status` must be `DaemonConnection.currentStatus`: nil until this
-    /// connection's first Status. `replyOverdue` is
+    /// connection's first Status. `startingWindowOpen` is
+    /// `BackgroundService.startingWindowOpen`. `replyOverdue` is
     /// `DaemonConnection.replyOverdue`: a connected daemon that stopped
     /// answering reads as not running.
     static func classify(
         connection: DaemonConnection.ConnectionState,
         status: StatusResponse?,
         backgroundEnabled: Bool,
-        startingSince: Date?,
-        replyOverdue: Bool,
-        now: Date
+        startingWindowOpen: Bool,
+        replyOverdue: Bool
     ) -> CaptureAvailability {
         guard connection == .connected else {
             guard backgroundEnabled else { return .backgroundOff }
-            if let since = startingSince, now.timeIntervalSince(since) < startingWindow {
-                return .starting
-            }
-            return .notRunning
+            return startingWindowOpen ? .starting : .notRunning
         }
         guard let status else { return replyOverdue ? .notRunning : .starting }
         guard let capture = status.data.capture else { return .notCapturing }
@@ -82,11 +76,11 @@ enum CaptureAvailability: Equatable, Hashable, CaseIterable {
 
 extension DaemonConnection {
     /// The availability for this connection and the background setting.
-    func availability(background: BackgroundService, now: Date = .now) -> CaptureAvailability {
+    func availability(background: BackgroundService) -> CaptureAvailability {
         CaptureAvailability.classify(
             connection: state, status: currentStatus,
             backgroundEnabled: background.isEnabled,
-            startingSince: background.enabledSince,
-            replyOverdue: replyOverdue, now: now)
+            startingWindowOpen: background.startingWindowOpen,
+            replyOverdue: replyOverdue)
     }
 }

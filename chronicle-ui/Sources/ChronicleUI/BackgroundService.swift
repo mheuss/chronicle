@@ -33,20 +33,27 @@ final class BackgroundService {
     private(set) var lastError: String?
     private(set) var isBusy = false
     private(set) var isEnabled: Bool
-    /// When background capture was last turned on, or app launch if it was
-    /// already on. Starts the 60 s "starting" window while the daemon is not
-    /// connected (design §6.1).
-    private(set) var enabledSince: Date?
-    /// Called after an enable's reconcile returns, whether or not it
-    /// succeeded. `ChronicleApp` points it at
-    /// `DaemonConnection.reconnectNow` (design §6.4).
-    @ObservationIgnored var onEnabled: (@MainActor () -> Void)?
+    /// True for `startingWindow` after background capture turns on, or after
+    /// launch if it was already on. While it holds, a daemon that isn't
+    /// connected reads as starting (design §6.1). The flip to false is what
+    /// redraws a view once the window ends.
+    private(set) var startingWindowOpen = false
+    /// How long a missing daemon still reads as starting.
+    static let defaultStartingWindow: Duration = .seconds(60)
+    let startingWindow: Duration
+    @ObservationIgnored private var startingWindowTask: Task<Void, Never>?
+    /// Called right after the agent registers, from the toggle or a launch or
+    /// activation reconcile. `ChronicleApp` points it at
+    /// `DaemonConnection.reconnectNow`, so a new daemon is reached without
+    /// waiting out the backoff (design §6.4).
+    @ObservationIgnored var onAgentRegistered: (@MainActor () -> Void)?
 
     init(agent: LoginService? = nil,
          mainApp: LoginService? = nil,
          defaults: UserDefaults = .standard,
          fingerprint: String? = nil,
-         isInApplicationsFolder: Bool? = nil) {
+         isInApplicationsFolder: Bool? = nil,
+         startingWindow: Duration = BackgroundService.defaultStartingWindow) {
         let agent = agent ?? SMAppService.agent(plistName: Self.agentPlist)
         self.agent = agent
         self.mainApp = mainApp ?? SMAppService.mainApp
@@ -55,7 +62,8 @@ final class BackgroundService {
         self.isInApplicationsFolder = isInApplicationsFolder ?? Self.bundleIsInApplicationsFolder()
         self.agentStatus = agent.status
         self.isEnabled = defaults.object(forKey: Self.enabledKey) as? Bool ?? true
-        self.enabledSince = isEnabled ? Date() : nil
+        self.startingWindow = startingWindow
+        if isEnabled { openStartingWindow() }
     }
 
     func reconcileOnLaunch() async {
@@ -64,10 +72,27 @@ final class BackgroundService {
 
     func setEnabled(_ on: Bool) async {
         isEnabled = on
-        enabledSince = on ? Date() : nil
+        if on { openStartingWindow() } else { closeStartingWindow() }
         defaults.set(on, forKey: Self.enabledKey)
         await enqueue(allowOutsideApplications: true)
-        if on { onEnabled?() }
+    }
+
+    /// Open the window now and close it after `startingWindow`, wall time.
+    private func openStartingWindow() {
+        startingWindowTask?.cancel()
+        startingWindowOpen = true
+        let wait = startingWindow
+        startingWindowTask = Task { [weak self] in
+            try? await Task.sleep(for: wait)
+            guard !Task.isCancelled, let self else { return }
+            self.startingWindowOpen = false
+        }
+    }
+
+    private func closeStartingWindow() {
+        startingWindowTask?.cancel()
+        startingWindowTask = nil
+        startingWindowOpen = false
     }
 
     func refreshStatus() {
@@ -111,11 +136,15 @@ final class BackgroundService {
         // A clean Mac has no Background Task Management record for an agent
         // that was never registered, and reports it as notFound.
         case .notRegistered, .notFound:
-            if await attempt({ try self.agent.register() }) { recordFingerprint() }
+            if await attempt({ try self.agent.register() }) {
+                recordFingerprint()
+                onAgentRegistered?()
+            }
         case .enabled where defaults.string(forKey: Self.fingerprintKey) != fingerprint:
             if await attempt({ try await self.agent.unregister() }),
                await attempt({ try self.agent.register() }) {
                 recordFingerprint()
+                onAgentRegistered?()
             }
         default:
             break

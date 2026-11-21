@@ -82,27 +82,41 @@ final class BackgroundServiceTests {
         let service = make(agent: agent, mainApp: app)
         var hooks = 0
         let log = self.log
-        service.onEnabled = {
+        service.onAgentRegistered = {
             hooks += 1
             #expect(log.entries.contains("agent.register"), "the hook runs after the agent registers")
         }
         await service.setEnabled(false)
-        #expect(service.enabledSince == nil)
+        #expect(!service.startingWindowOpen)
         #expect(hooks == 0, "turning it off calls no hook")
         log.entries.removeAll()
         let enabling = Task { await service.setEnabled(true) }
         await Task.yield()
-        #expect(service.enabledSince != nil, "the starting window opens when the toggle turns on")
+        #expect(service.startingWindowOpen, "the starting window opens when the toggle turns on")
         await enabling.value
         #expect(hooks == 1)
-        #expect(service.enabledSince != nil)
+        #expect(service.startingWindowOpen)
+    }
+
+    @Test func aLaunchRegistrationCallsTheHookOnce() async {
+        let agent = FakeLoginService("agent", log: log)
+        let app = FakeLoginService("app", log: log)
+        let service = make(agent: agent, mainApp: app)
+        var hooks = 0
+        service.onAgentRegistered = { hooks += 1 }
+        // The agent is not registered, as after it was removed from Login Items.
+        await service.reconcileOnLaunch()
+        #expect(hooks == 1, "registering the agent starts a reconnect")
+        // Already registered with the same fingerprint: nothing to register.
+        await service.reconcileOnLaunch()
+        #expect(hooks == 1, "a reconcile that registers nothing calls no hook")
     }
 
     @Test func launchWithBackgroundOnStartsTheWindow() {
         let service = make(agent: FakeLoginService("agent", log: log),
                            mainApp: FakeLoginService("app", log: log))
         #expect(service.isEnabled)
-        #expect(service.enabledSince != nil)
+        #expect(service.startingWindowOpen, "a launch with capture on doesn't read as not running")
     }
 
     @Test func launchRegistersEachUnregisteredService() async {

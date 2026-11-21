@@ -4,28 +4,24 @@ import Foundation
 
 @Suite("Capture availability")
 struct CaptureAvailabilityTests {
-    let now = Date(timeIntervalSince1970: 1_000)
-
     func classify(_ c: DaemonConnection.ConnectionState, _ s: StatusResponse?,
-                  background: Bool = true, sinceSecondsAgo: Double? = 5,
+                  background: Bool = true, windowOpen: Bool = true,
                   overdue: Bool = false) -> CaptureAvailability {
         CaptureAvailability.classify(
             connection: c, status: s, backgroundEnabled: background,
-            startingSince: sinceSecondsAgo.map { now.addingTimeInterval(-$0) },
-            replyOverdue: overdue, now: now)
+            startingWindowOpen: windowOpen, replyOverdue: overdue)
     }
 
     @Test func notConnectedStates() {
         #expect(classify(.disconnected, nil, background: false) == .backgroundOff)
-        #expect(classify(.connecting, nil, sinceSecondsAgo: 5) == .starting)
-        #expect(classify(.disconnected, nil, sinceSecondsAgo: 61) == .notRunning)
-        #expect(classify(.disconnected, nil, sinceSecondsAgo: nil) == .notRunning)
+        #expect(classify(.connecting, nil, windowOpen: true) == .starting)
+        #expect(classify(.disconnected, nil, windowOpen: false) == .notRunning)
     }
 
     @Test func connectedWithNoCurrentStatusIsStartingUntilRepliesGoOverdue() {
-        #expect(classify(.connected, nil, sinceSecondsAgo: 600) == .starting)
-        #expect(classify(.connected, nil, sinceSecondsAgo: 600, overdue: true) == .notRunning)
-        #expect(classify(.connected, nil, sinceSecondsAgo: 5, overdue: true) == .notRunning,
+        #expect(classify(.connected, nil, windowOpen: false) == .starting)
+        #expect(classify(.connected, nil, windowOpen: false, overdue: true) == .notRunning)
+        #expect(classify(.connected, nil, windowOpen: true, overdue: true) == .notRunning,
                 "a stalled daemon reads as not running inside the starting window too")
     }
 
@@ -49,6 +45,38 @@ struct CaptureAvailabilityTests {
     @Test(arguments: ["unknown", "idle", "stopping", "poisoned", "frobnicating"])
     func anyOtherStateIsNotCapturing(state: String) {
         #expect(classify(.connected, statusWithCapture(state: state, paused: false)) == .notCapturing)
+    }
+
+    @Test("a disconnected daemon reads as not running once the window ends, with no other change")
+    @MainActor
+    func theWindowEndingRedrawsAsNotRunning() async {
+        let defaults = UserDefaults(suiteName: "dev.heuss.chronicle.tests.CaptureAvailability")!
+        defaults.removePersistentDomain(forName: "dev.heuss.chronicle.tests.CaptureAvailability")
+        let background = BackgroundService(
+            agent: FakeLoginService("agent", log: CallLog()),
+            mainApp: FakeLoginService("app", log: CallLog()),
+            defaults: defaults, fingerprint: "fp", isInApplicationsFolder: true,
+            startingWindow: .milliseconds(200))
+        let conn = DaemonConnection(connectionFactory: {
+            throw IPCError.connectionFailed(errno: ECONNREFUSED)
+        })
+        #expect(conn.state == .disconnected)
+        #expect(conn.availability(background: background) == .starting)
+        await waitUntil(ticks: 100) { !background.startingWindowOpen }
+        #expect(conn.availability(background: background) == .notRunning)
+    }
+
+    @Test func notConnectedCaptionIsTheSharedCopy() {
+        #expect(MicRowState.notConnectedCaption() == CaptureAvailabilityCopy.notRunning)
+    }
+
+    @Test func transcriptionFallbackText() {
+        #expect(TranscriptionRowFallback.text(hasCurrentStatus: true, availability: .capturing)
+            == "Requires daemon update")
+        #expect(TranscriptionRowFallback.text(hasCurrentStatus: false, availability: .starting)
+            == "Starting Chronicle… this can take a few seconds.")
+        #expect(TranscriptionRowFallback.text(hasCurrentStatus: false, availability: .notRunning)
+            == "Chronicle isn't running.")
     }
 
     @Test func settingsTextTable() {

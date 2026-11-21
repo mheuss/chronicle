@@ -18,8 +18,9 @@ struct MicRowState: Equatable {
     static let settingsURL = URL(
         string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!
 
+    /// Shared with the capture rows (design §6.2, BR14).
     static func notConnectedCaption() -> String {
-        "Chronicle isn't running."
+        CaptureAvailabilityCopy.notRunning
     }
 
     static func from(permission: MicPermission?, status: StatusResponse?,
