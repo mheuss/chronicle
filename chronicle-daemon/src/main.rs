@@ -367,7 +367,9 @@ fn startup(
 fn main() -> std::process::ExitCode {
     // The permission helper (design §1.3) exits before logging, IPC or capture.
     if let Some(code) = permissions::run_status_command(
-        std::env::args().skip(1),
+        std::env::args_os()
+            .skip(1)
+            .map(|a| a.to_string_lossy().into_owned()),
         &mut std::io::stdout(),
         permissions::check_microphone,
     ) {

@@ -112,6 +112,17 @@ impl PermissionRead {
             _ => Self::Unavailable,
         }
     }
+
+    /// The helper's output word, the inverse of `from_word`.
+    pub(crate) fn as_word(self) -> &'static str {
+        match self {
+            Self::Authorized => "authorized",
+            Self::Denied => "denied",
+            Self::NotDetermined => "not_determined",
+            Self::Restricted => "restricted",
+            Self::Unavailable => "unavailable",
+        }
+    }
 }
 
 impl From<MicrophoneStatus> for PermissionRead {
@@ -125,25 +136,14 @@ impl From<MicrophoneStatus> for PermissionRead {
     }
 }
 
-impl MicrophoneStatus {
-    /// The helper's output word for this status.
-    pub(crate) fn as_word(self) -> &'static str {
-        match self {
-            Self::Authorized => "authorized",
-            Self::Denied => "denied",
-            Self::NotDetermined => "not_determined",
-            Self::Restricted => "restricted",
-        }
-    }
-}
-
 /// The helper flag. A process spawned with it reads its permission fresh,
 /// and TCC attributes the read to the process that spawned it.
 pub(crate) const STATUS_FLAG: &str = "--permission-status";
 
 /// Handle `--permission-status <name>`. Returns `None` when the flag is
 /// absent, so the daemon starts as usual. Otherwise returns the exit code:
-/// 0 after printing one word, 2 for a missing or unknown name.
+/// 0 after printing one word, 1 when the word could not be written, and 2 for
+/// a missing or unknown name or any extra argument.
 pub(crate) fn run_status_command<I, W>(
     args: I,
     out: &mut W,
@@ -157,12 +157,16 @@ where
     if args.next().as_deref() != Some(STATUS_FLAG) {
         return None;
     }
-    match args.next().as_deref() {
-        Some("microphone") => {
-            let _ = writeln!(out, "{}", read_microphone().as_word());
-            Some(0)
-        }
-        _ => Some(2),
+    let (Some(name), None) = (args.next(), args.next()) else {
+        return Some(2);
+    };
+    let read = match name.as_str() {
+        "microphone" => PermissionRead::from(read_microphone()),
+        _ => return Some(2),
+    };
+    match writeln!(out, "{}", read.as_word()).and_then(|()| out.flush()) {
+        Ok(()) => Some(0),
+        Err(_) => Some(1),
     }
 }
 
@@ -201,8 +205,10 @@ pub(crate) fn fresh_status_with(
 }
 
 /// Spawn `exe` with `args` and return its stdout after a zero exit. Returns
-/// `None` on a spawn error, a non-zero exit, or no exit within `timeout`, in
-/// which case the child is killed.
+/// `None` on a spawn error or a non-zero exit, or when the child has not exited
+/// by `timeout`, after killing and reaping it. Blocks the calling thread.
+/// `timeout` bounds the child's exit only, so `exe` must start no children of
+/// its own and write little output, as `--permission-status` does.
 pub(crate) fn run_helper(
     exe: &std::path::Path,
     args: &[&str],
@@ -399,16 +405,38 @@ mod tests {
     }
 
     #[test]
-    fn words_round_trip_for_every_status() {
-        for status in [
-            MicrophoneStatus::Authorized,
-            MicrophoneStatus::Denied,
-            MicrophoneStatus::NotDetermined,
-            MicrophoneStatus::Restricted,
+    fn words_round_trip_for_every_read() {
+        for read in [
+            PermissionRead::Authorized,
+            PermissionRead::Denied,
+            PermissionRead::NotDetermined,
+            PermissionRead::Restricted,
+            PermissionRead::Unavailable,
         ] {
-            let read = PermissionRead::from_word(status.as_word());
-            assert_eq!(read, PermissionRead::from(status));
+            assert_eq!(PermissionRead::from_word(read.as_word()), read);
         }
+    }
+
+    #[test]
+    fn status_command_rejects_a_trailing_argument() {
+        let got = run(&["--permission-status", "microphone", "extra"]);
+        assert_eq!(got, (Some(2), String::new()));
+    }
+
+    #[test]
+    fn status_command_exits_1_when_the_word_cannot_be_written() {
+        struct Closed;
+        impl std::io::Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let args = ["--permission-status", "microphone"].map(String::from);
+        let code = run_status_command(args, &mut Closed, || MicrophoneStatus::Authorized);
+        assert_eq!(code, Some(1));
     }
 
     #[test]
