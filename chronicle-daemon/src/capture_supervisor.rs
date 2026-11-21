@@ -65,6 +65,17 @@ pub enum ReconcileOutcome {
     StopPoisoned,
 }
 
+/// A copy of the supervisor's four stop flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Gates {
+    pub user_paused: bool,
+    pub system_asleep: bool,
+    pub sr_denied: bool,
+    pub sr_stale: bool,
+    /// Adds 1 on every entry to Idle (design §1.2).
+    pub idle_epoch: u64,
+}
+
 /// Retry budget for failed capture starts at boot, wake, or resume.
 ///
 /// A start that fails at wake+~2 s usually races display re-registration —
