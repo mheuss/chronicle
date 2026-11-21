@@ -373,6 +373,7 @@ fn main() -> std::process::ExitCode {
             .map(|a| a.to_string_lossy().into_owned()),
         &mut std::io::stdout(),
         permissions::check_microphone,
+        permissions::check_screen_recording,
     ) {
         return std::process::ExitCode::from(code);
     }
