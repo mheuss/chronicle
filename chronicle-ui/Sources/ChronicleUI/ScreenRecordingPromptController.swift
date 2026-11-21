@@ -6,8 +6,11 @@ import Observation
 /// never opened (design §7.1).
 @MainActor @Observable
 final class ScreenRecordingPromptController {
+    typealias Scheduler = @MainActor (@escaping @MainActor () -> Void) -> Void
+
     @ObservationIgnored private var latch = ScreenRecordingPromptLatch()
     @ObservationIgnored private let presenter: @MainActor () -> Void
+    @ObservationIgnored private let schedule: Scheduler
 
     /// What the latch watches.
     struct Input {
@@ -16,26 +19,37 @@ final class ScreenRecordingPromptController {
         let screenRecording: PermissionState?
     }
 
-    /// `presenter` shows the dialog. Tests pass a stub. The app uses the
-    /// alert below.
-    init(presenter: (@MainActor () -> Void)? = nil) {
+    /// `presenter` shows the dialog and `schedule` decides when it runs.
+    /// Tests pass stubs. The app uses the alert and the run loop below.
+    init(presenter: (@MainActor () -> Void)? = nil, schedule: Scheduler? = nil) {
         self.presenter = presenter ?? Self.showAlert
+        self.schedule = schedule ?? Self.onRunLoop
     }
 
     /// Called from `DaemonConnection.onStatus`, inside whichever
-    /// `requestStatus` delivered the Status: the heartbeat, or a pause,
-    /// resume or Settings refresh. The dialog is modal, so it shows from its
-    /// own task and that request returns.
+    /// `requestStatus` delivered the Status.
     func observe(_ input: Input) {
         guard latch.observe(input.availability, screenRecording: input.screenRecording) else {
             return
         }
-        Task { @MainActor [presenter] in presenter() }
+        schedule(presenter)
     }
 
-    /// Show the dialog now, from a button press.
+    /// Show the dialog from a button press.
     func present() {
-        presenter()
+        schedule(presenter)
+    }
+
+    /// The alert is modal. Run from a main-queue job, such as a Task on the
+    /// main actor, it holds the main queue until it closes, and every other
+    /// main-actor job waits: the heartbeat, the reply watchdog, the agent's
+    /// re-register. A run-loop block is not a main-queue job, so the modal
+    /// loop keeps draining the main queue. The common modes include the modal
+    /// panel mode.
+    private static func onRunLoop(_ block: @escaping @MainActor () -> Void) {
+        RunLoop.main.perform(inModes: [.common]) {
+            MainActor.assumeIsolated { block() }
+        }
     }
 
     private static func showAlert() {
