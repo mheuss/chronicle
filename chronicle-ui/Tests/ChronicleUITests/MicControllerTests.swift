@@ -11,6 +11,9 @@ final class FakeMicDaemon: MicDaemonClient {
     var setError: Error?
     var statusDelay: Duration = .zero
     var failStatus = false
+    /// Written to `lastStatus` just after each read returns, the way the
+    /// connection's heartbeat can land between a read and the next step.
+    var heartbeat: StatusResponse?
     var holdSet = false
     private var gate: CheckedContinuation<Void, Never>?
 
@@ -28,8 +31,9 @@ final class FakeMicDaemon: MicDaemonClient {
         if failStatus { throw IPCError.notConnected }
         if statusDelay > .zero { try? await Task.sleep(for: statusDelay) }
         if !statuses.isEmpty { lastStatus = statuses.count > 1 ? statuses.removeFirst() : statuses[0] }
-        guard let lastStatus else { throw IPCError.notConnected }
-        return lastStatus
+        guard let read = lastStatus else { throw IPCError.notConnected }
+        if let heartbeat { lastStatus = heartbeat }
+        return read
     }
 
     func release() { gate?.resume(); gate = nil; holdSet = false }
@@ -302,6 +306,33 @@ struct MicControllerTests {
         _ = try? await daemon.requestStatus()
         await mic.recheck()
         #expect(mic.mark == .none)
+    }
+
+    @Test func unconfirmedMarkBaselineIsThePollsOwnRead() async {
+        // The mic comes on just after the poll's last read, and the heartbeat
+        // sees it. The mark must still clear on the next re-check.
+        let daemon = FakeMicDaemon()
+        daemon.replies = [SetMicEnabledResponse(type: "set_mic_enabled", ok: false, state: .off, pending: true)]
+        daemon.statuses = [statusWithMic(.off)]
+        daemon.heartbeat = statusWithMic(.on)
+        let mic = controller(daemon, pollLimit: 2)
+        await mic.setEnabled(true)
+        #expect(mic.mark == .unconfirmed)
+        daemon.heartbeat = nil
+        daemon.statuses = [statusWithMic(.on)]
+        await mic.recheck()
+        #expect(mic.mark == .none)
+    }
+
+    @Test func unavailablePermissionReadDoesNotClearTheMark() async {
+        let daemon = FakeMicDaemon()
+        daemon.statuses = [statusWithMic(.off)]
+        daemon.replies = [SetMicEnabledResponse(type: "set_mic_enabled", ok: false, state: .error, pending: false)]
+        let mic = controller(daemon, reads: ["authorized", nil])
+        await mic.setEnabled(true)
+        #expect(mic.mark == .rejected)
+        await mic.recheck()
+        #expect(mic.mark == .rejected)
     }
 
     @Test func failedStatusReadDoesNotClearTheMark() async {

@@ -83,7 +83,8 @@ final class MicController {
             }
             guard permission.status == .authorized else { return }
         }
-        if let outcome = await send(on) { setMark(outcome) }
+        let (outcome, seen) = await send(on)
+        if let outcome { setMark(outcome, micState: seen) }
     }
 
     private func runRecheck(triggeredAt: Int) async {
@@ -104,53 +105,61 @@ final class MicController {
         }
     }
 
-    private func setMark(_ outcome: MicOperationMark) {
+    /// `micState` is the state this operation itself last read. The shared
+    /// `lastStatus` is not used: the heartbeat can update it after that read.
+    private func setMark(_ outcome: MicOperationMark, micState: MicState?) {
         mark = outcome
-        markedMicState = daemon.lastStatus?.data.audio?.micState
+        markedMicState = micState
         markedPermission = permission.status
     }
 
     /// The mark describes the last toggle. It goes stale once the mic state
-    /// or the permission read differs from when it was set. A failed status
-    /// read is no news, so it keeps the mark.
+    /// or the permission read differs from when it was set. A failed read of
+    /// either kind is no news, so it keeps the mark (Architectural Decision
+    /// 11).
     private func clearStaleMark(micState: MicState?) {
         guard mark != .none else { return }
         let stateMoved = micState != nil && micState != markedMicState
-        let permissionMoved = markedPermission != nil && permission.status != markedPermission
+        let permissionMoved = markedPermission != nil && permission.status != .unavailable
+            && permission.status != markedPermission
         if stateMoved || permissionMoved { mark = .none }
     }
 
-    /// Returns the mark the outcome earns, or `nil` when it earns none.
-    private func send(_ on: Bool) async -> MicOperationMark? {
+    /// Returns the mark the outcome earns, or `nil` when it earns none, and
+    /// the mic state this send last read.
+    private func send(_ on: Bool) async -> (MicOperationMark?, MicState?) {
         var outcome: MicOperationMark?
         do {
             let reply = try await daemon.setMicEnabled(on)
             if reply.pending == true {
-                return await poll(until: on ? .on : .off) ? nil : .unconfirmed
+                let (matched, seen) = await poll(until: on ? .on : .off)
+                return (matched ? nil : .unconfirmed, seen)
             }
             if !reply.ok { outcome = .rejected }
         } catch {
             Self.logger.error("set_mic_enabled failed: \(error.localizedDescription, privacy: .public)")
             outcome = .rejected
         }
-        _ = try? await daemon.requestStatus()
-        return outcome
+        let seen = (try? await daemon.requestStatus())?.data.audio?.micState
+        return (outcome, seen)
     }
 
     /// Poll until the mic state matches, for at most `pollLimit` intervals of
-    /// wall time, counting the time spent waiting for each status reply.
-    private func poll(until want: MicState) async -> Bool {
+    /// wall time, counting the time spent waiting for each status reply. The
+    /// last read lands at the deadline. Returns whether it matched, and the
+    /// last state read.
+    private func poll(until want: MicState) async -> (Bool, MicState?) {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: pollInterval * pollLimit)
-        while clock.now < deadline {
-            if let status = try? await daemon.requestStatus(),
-               status.data.audio?.micState == want {
-                return true
+        var seen: MicState?
+        while true {
+            if let state = (try? await daemon.requestStatus())?.data.audio?.micState {
+                seen = state
+                if state == want { return (true, seen) }
             }
             let left = clock.now.duration(to: deadline)
-            guard left > .zero else { break }
+            guard left > .zero else { return (false, seen) }
             try? await Task.sleep(for: min(pollInterval, left))
         }
-        return false
     }
 }
