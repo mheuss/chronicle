@@ -249,7 +249,7 @@ These will be documented as ADRs in `docs/decisions/` for contributors.
 
 ## Minimum Requirements
 
-- macOS 13+ (for ScreenCaptureKit audio capture)
+- macOS 27+
 - Apple Silicon (for efficient whisper.cpp transcription)
 - Screen Recording permission
 - Microphone permission

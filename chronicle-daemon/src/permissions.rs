@@ -211,8 +211,9 @@ pub(crate) fn fresh_status_with(
 }
 
 /// Spawn `exe` with `args` and return its stdout after a zero exit. Returns
-/// `None` on a spawn error or a non-zero exit, or when the child has not exited
-/// by `timeout`, after killing and reaping it. Blocks the calling thread.
+/// `None` on a spawn error, a non-zero exit, a failed stdout read, a failed
+/// wait, or no exit by `timeout`. The last two kill and reap the child. Blocks
+/// the calling thread.
 /// `timeout` bounds the child's exit only, so `exe` must start no children of
 /// its own and write little output, as `--permission-status` does.
 pub(crate) fn run_helper(

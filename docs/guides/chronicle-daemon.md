@@ -229,6 +229,13 @@ cargo run --bin chronicle-daemon
 The variable is required here. macOS refuses a daemon started from Terminal in
 the App Group container. See Data location in the README.
 
+The bundled UI can't reach this daemon's socket, so turn the mic on from a
+second shell:
+
+```bash
+printf '{"type":"set_mic_enabled","enabled":true}\n' | nc -U -w 1 "$HOME/chronicle-dev/ipc.sock"
+```
+
 The command does not exit on its own — the shell waits on `cargo`, so Ctrl-C
 once you have the line.
 
