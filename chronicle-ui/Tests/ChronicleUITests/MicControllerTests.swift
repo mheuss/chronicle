@@ -425,8 +425,9 @@ struct MicControllerTests {
         daemon.releaseStatus()
         for _ in 0..<50 { await Task.yield() }
         await mic.recheck()
-        // The second "status" is the re-check's answered read.
-        #expect(daemon.log == ["status", "status", "set(false)", "status"])
+        // The first re-check's held revoke off goes out when the stall ends.
+        // The second "status" after it is the re-check's answered read.
+        #expect(daemon.log == ["status", "set(false)", "status", "set(false)", "status"])
         #expect(mic.mark == .rejected)
     }
 
@@ -480,6 +481,19 @@ struct MicControllerTests {
         daemon.releaseStatus()
         for _ in 0..<50 { await Task.yield() }
         #expect(daemon.log == ["status"])
+    }
+
+    @Test func anOnToggleThatSendsNothingKeepsAHeldOff() async {
+        let daemon = FakeMicDaemon()
+        daemon.holdStatus = true
+        let mic = controller(daemon, reads: ["not_determined"], granted: false)
+        await mic.recheck()
+        await mic.setEnabled(true)
+        #expect(daemon.log == ["status"])
+        daemon.statuses = [statusWithMic(.off)]
+        daemon.releaseStatus()
+        #expect(await eventually { daemon.log.contains("set(false)") })
+        #expect(daemon.log == ["status", "set(false)"])
     }
 
     @Test func anOffRefusedBehindAStalledOnIsSentWhenTheOnFinishes() async {

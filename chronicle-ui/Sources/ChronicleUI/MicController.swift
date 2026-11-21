@@ -75,7 +75,6 @@ final class MicController {
     private func runToggle(_ on: Bool) async {
         mark = .none
         if on {
-            pendingOff = false
             await permission.refresh()
             if permission.status == .notDetermined {
                 let granted = await permission.request()
@@ -88,6 +87,7 @@ final class MicController {
                 }
             }
             guard permission.status == .authorized else { return }
+            pendingOff = false
         }
         let (outcome, seen) = await send(on)
         if let outcome { setMark(outcome, micState: seen) }
