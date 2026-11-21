@@ -1,8 +1,8 @@
 # Domain: capture
 
-**Status:** Decided 2026-09-16, revised 2026-09-18
+**Status:** Decided 2026-09-16, revised 2026-09-18, revised 2026-11-21
 **Owns:** Turning connected displays into encoded frames, and deciding when that should be happening.
-**Code:** `chronicle-daemon/crates/capture/src/`, plus `src/capture_runtime.rs` and `src/capture_supervisor.rs`
+**Code:** `chronicle-daemon/crates/capture/src/`, plus `src/capture_runtime.rs`, `src/capture_supervisor.rs` and `src/mic_gate.rs`
 
 ## Boundary
 
@@ -11,6 +11,8 @@
 - inside: the foreground-app metadata attached to a frame — `chronicle-daemon/crates/capture/src/metadata.rs` — `get_frontmost_app`
 - inside: binding an engine's lifetime to its consuming tasks — `chronicle-daemon/src/capture_runtime.rs` — `CaptureRuntime`
 - inside: deciding whether capture should be running, and retrying a failed start — `chronicle-daemon/src/capture_supervisor.rs` — `CaptureSupervisor`
+- inside: deciding whether a microphone start may go ahead on a fresh permission read — `chronicle-daemon/src/mic_gate.rs` — `apply_mic_intent`
+- inside: clearing the saved intent when a start is refused for a missing grant — `chronicle-daemon/src/mic_gate.rs` — `apply_mic_intent`
 - outside: what happens to a frame after it leaves the channel — `chronicle-daemon/src/pipeline/sinks.rs` — `AppMetadata`
 - outside: reporting engine state over the wire — `chronicle-daemon/src/ipc_handler.rs` — `EngineState`
 - outside: the audio pipeline the supervisor reconciles alongside capture — `chronicle-daemon/crates/audio/src/lib.rs` — `AudioPipeline`
@@ -31,6 +33,7 @@
 - chronicle-daemon/crates/capture/src/pixel_buffer.rs
 - chronicle-daemon/src/capture_runtime.rs
 - chronicle-daemon/src/capture_supervisor.rs
+- chronicle-daemon/src/mic_gate.rs
 
 ## Depends On
 
@@ -39,14 +42,17 @@
 - pipeline — `chronicle-daemon/src/capture_runtime.rs` — `OcrSink`
 - pipeline — `chronicle-daemon/src/capture_supervisor.rs` — `PipelineCounters`
 - storage — `chronicle-daemon/src/capture_runtime.rs` — `Storage`
-- permissions — `chronicle-daemon/src/capture_supervisor.rs` — `check_microphone`
+- permissions — `chronicle-daemon/src/capture_supervisor.rs` — `fresh_microphone_status`
+- permissions — `chronicle-daemon/src/mic_gate.rs` — `PermissionRead`
 - IPC — `chronicle-daemon/src/capture_supervisor.rs` — `map_outcome`
+- IPC — `chronicle-daemon/src/mic_gate.rs` — `map_outcome`
 
 ## Depended On By
 
 - pipeline — `chronicle-daemon/src/pipeline/sinks.rs` — `AppMetadata`
 - pipeline — `chronicle-daemon/src/pipeline.rs` — `encode_heif`
 - IPC — `chronicle-daemon/src/ipc_handler.rs` — `EngineState`
+- pipeline — `chronicle-daemon/src/main.rs` — `apply_mic_intent`
 
 ## Seams
 

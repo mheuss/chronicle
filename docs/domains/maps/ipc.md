@@ -43,12 +43,12 @@
 - transcription — `chronicle-daemon/src/ipc_handler.rs` — `TranscriptionStatusCell`
 - capture — `chronicle-daemon/src/ipc_handler.rs` — `EngineState`
 - audio — `chronicle-daemon/src/ipc_handler.rs` — `MicToggleOutcome`
-- permissions — `chronicle-daemon/src/ipc_handler.rs` — `MicrophoneStatus`
 
 ## Depended On By
 
 - pipeline — `chronicle-daemon/src/main.rs` — `IpcServer`
 - capture — `chronicle-daemon/src/capture_supervisor.rs` — `map_outcome`
+- capture — `chronicle-daemon/src/mic_gate.rs` — `map_outcome`
 - storage — `chronicle-daemon/crates/storage/src/lib.rs` — `Retention`
 - background-work — through this crate's re-export of `tokio_util`'s type at `crates/ipc/src/lib.rs:377`, not the wire — `chronicle-daemon/src/retention_task.rs` — `CancellationToken`
 - transcription — `chronicle-daemon/src/provisioning.rs` — `TranscriptionStats`
@@ -56,7 +56,7 @@
 
 ## Seams
 
-- SEAM-permission-wire — permissions — permissions owns the grant vocabulary, IPC owns what the UI is told, and the contract is the mapping between them: `map_outcome` reads `MicrophoneStatus` only on a failed toggle, folding `Denied`, `Restricted` and `NotDetermined` into `PermissionDenied` and `Authorized` into `Error`, so no grant state crosses the wire as itself — owner: permissions — `chronicle-daemon/crates/ipc/src/lib.rs` — `MicState`
+- SEAM-permission-wire — permissions — permissions owns the grant vocabulary and IPC owns what the UI is told. No grant state crosses the wire as itself. The only trace of one is `permission_denied`. It is the reply to a microphone start the gate refused on a `PermissionRead` other than `Authorized`. Status then reports `off`. — owner: permissions — `chronicle-daemon/crates/ipc/src/lib.rs` — `MicState`
 - SEAM-storage-status-wire — storage — `models.rs` declares `StorageStatus` and this domain declares `StorageStats` independently, neither importing the other, and this domain converts between them at `src/ipc_handler.rs`; storage decides what a status can report — owner: storage — `chronicle-daemon/crates/ipc/src/lib.rs` — `StorageStats`
 - SEAM-transcription-wire — transcription — transcription converts its own state into this domain's independently declared `TranscriptionState`, `TranscriptionStats` and `ModelEntry`, and decides which provisioning states exist — owner: transcription — `chronicle-daemon/crates/ipc/src/lib.rs` — `TranscriptionStats`
 - SEAM-daemon-connection-api — UI — the view layer holds one `DaemonConnection`, calls its request methods and reads its published state, and never touches the socket; this domain decides the method surface and the error vocabulary, UI decides what it renders — owner: IPC — `chronicle-ui/Sources/ChronicleUI/DaemonConnection.swift` — `DaemonConnection`

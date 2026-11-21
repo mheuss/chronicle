@@ -58,6 +58,7 @@ struct SettingsView: View {
     @Environment(DaemonConnection.self) private var connection
     @Environment(TranscriptionAlertState.self) private var transcriptionAlert
     @Environment(BackgroundService.self) private var background
+    @Environment(MicController.self) private var mic
     @State private var isPauseInFlight: Bool = false
     /// The variant the picker is showing. Tracks the daemon's `variant` unless
     /// the user is mid-change; a change the daemon refuses is rolled back to
@@ -88,6 +89,7 @@ struct SettingsView: View {
             // and by the time Settings opens the popover has usually populated
             // `lastStatus` — so the seed has to happen here too.
             syncSelection()
+            await mic.recheck()
         }
         // Settings runs its own 1 Hz poll (design §4.1). View-owned, like the
         // popover's: a user who opens Settings without ever opening the popover
@@ -147,6 +149,7 @@ struct SettingsView: View {
                     }
                 }
             }
+            row("Microphone") { microphoneRow }
 
             Divider()
 
@@ -161,6 +164,32 @@ struct SettingsView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var micRow: MicRowState {
+        MicRowState.from(
+            permission: mic.permission.status,
+            status: connection.lastStatus,
+            connected: connection.state == .connected,
+            mark: mic.mark)
+    }
+
+    @ViewBuilder private var microphoneRow: some View {
+        let state = micRow
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle("Record the microphone", isOn: Binding(
+                get: { state.isOn },
+                set: { on in Task { await mic.setEnabled(on) } }))
+                .disabled(!state.isEnabled || mic.isBusy)
+            if let caption = state.caption {
+                Text(caption).font(.caption).foregroundStyle(.secondary)
+            }
+            if state.showsSettingsButton {
+                Button("Open Microphone Settings") {
+                    NSWorkspace.shared.open(MicRowState.settingsURL)
+                }
+            }
+        }
     }
 
     private func row<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {

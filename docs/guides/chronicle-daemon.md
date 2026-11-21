@@ -83,8 +83,8 @@ flowchart TD
 10. `IpcServer::start()` — starts the Unix-socket status server. The sleep and
    wake observer is spawned earlier in `run()`, before it.
 11. `AudioPipeline::create()` — prepares the audio handler, dispatch queue, and
-   encoding thread used by ScreenCaptureKit audio callbacks, and builds the
-   microphone tap (installed eagerly; capture starts only on mic-on)
+   encoding thread used by ScreenCaptureKit audio callbacks. The microphone tap
+   is built later, when the mic is first turned on.
 12. `CaptureSupervisor::reconcile()` — starts the capture runtime, unless
    capture is paused in settings. The runtime is `CaptureEngine` plus
    `capture_store_loop` (Task A) and `ocr_loop` (Task B), started and stopped
@@ -217,8 +217,8 @@ not measured, so read those two fields in the line above before assuming this is
 your problem. Quiet audio from a `1 ch` device is a different problem, and this
 is not it.
 
-You will see the line in a normal run — the daemon defaults to
-`warn,chronicle=info`, so no `RUST_LOG` is needed:
+You will see the line in a normal run once the mic is turned on. The daemon
+defaults to `warn,chronicle=info`, so no `RUST_LOG` is needed:
 
 ```bash
 export CHRONICLE_DATA_DIR="$HOME/chronicle-dev"
@@ -229,12 +229,23 @@ cargo run --bin chronicle-daemon
 The variable is required here. macOS refuses a daemon started from Terminal in
 the App Group container. See Data location in the README.
 
-The command does not exit on its own — the shell waits on `cargo`, so Ctrl-C
-once you have the line.
+The `cargo run` command does not exit on its own. The shell waits on `cargo`.
+Press Ctrl-C once you have the line.
+
+The bundled UI can't reach this daemon's socket, so turn the mic on from a
+second shell:
+
+```bash
+printf '{"type":"set_mic_enabled","enabled":true}\n' | nc -U -w 1 "$HOME/chronicle-dev/ipc.sock"
+```
+
+This command never asks for mic access. The daemon uses the grant of the
+terminal that launched it, so that terminal must already have access. Without
+it, the log shows `mic gate: refused start` and neither line below.
 
 Watch for one of two lines, not just the first. When `MicrophoneCapture::new`
-fails there is no tap install at all — `engine.rs` logs
-`microphone capture unavailable: {e}` instead. Waiting only for `tap installed`
+fails there is no tap install at all — `ipc_handler.rs` logs
+`microphone toggle failed: {reason}` instead. Waiting only for `tap installed`
 in that case looks identical to "the log is missing" while the actual
 explanation scrolls past.
 
@@ -261,11 +272,13 @@ Four things to know before you trust what you read:
   unified log with the microphone's name and UID replaced by `redacted`. Run
   the daemon by hand to see them.
 - **Restart between devices.** `MicrophoneCapture` and its converter are built
-  once when the pipeline is created, so changing the default input while the
-  daemon runs leaves the converter built for the previous device.
-- **The line appears with the mic off.** The tap is installed eagerly at
-  startup; capture begins only when the mic is enabled. Seeing this line is not
-  evidence the microphone was live.
+  when the mic is turned on. Turning the mic off drops them. Pausing capture
+  keeps them. Changing the default input while the mic is on leaves the
+  converter built for the previous device. So does changing it while capture is
+  paused with the mic on.
+- **The line appears before capture starts.** The tap is installed when the mic
+  is turned on. This happens just before the engine starts. Seeing this line
+  shows the engine was built. It does not show that audio was recorded.
 
 Cross-check the numbers against **Audio MIDI Setup** (`open -a "Audio MIDI
 Setup"`), which shows each device's format. System Settings → Sound → Input only
@@ -317,7 +330,9 @@ dev-dependency for `OggOpusEncoder`. It takes `chronicle-storage` as one for
 ### What depends on the daemon
 
 The Swift UI (`chronicle-ui`) communicates with the daemon over a Unix socket.
-It does not depend on the daemon as a library — only on the IPC protocol.
+It does not depend on the daemon as a library. It talks to it over the IPC
+protocol. It also runs the bundled daemon binary as
+`chronicle-daemon --permission-status microphone` for a fresh permission read.
 
 ## Building
 
@@ -333,8 +348,8 @@ The repo-root `.cargo/config.toml` carries four things the binary needs:
   ScreenCaptureKit crashes at launch with "no LC_RPATH's found"
 - `CMAKE_POLICY_VERSION_MINIMUM=3.5`, without which the vendored Opus build in
   `audiopus_sys` fails to configure under CMake 4
-- `MACOSX_DEPLOYMENT_TARGET=14.0`, so the binary and its C and C++ dependencies
-  all target macOS 14
+- `MACOSX_DEPLOYMENT_TARGET=27.0`, so the binary and its C and C++ dependencies
+  all target macOS 27
 - `CMAKE_SYSTEM_NAME=Darwin`, which turns off whisper.cpp's host-CPU tuning so
   the binary runs on every Apple Silicon chip, M1 included
 

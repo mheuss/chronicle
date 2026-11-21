@@ -122,8 +122,8 @@ set, because macOS refuses a Terminal process in the App Group container. Its
 data then lands in that directory, not in the installed app's container. See
 Data location in the README.
 
-Under launchd, no Terminal stands behind the daemon. On macOS 27, macOS then
-checks the grants of `Chronicle.app`, not the daemon. The daemon lives inside
+Under launchd, no Terminal stands behind the daemon. macOS then checks the
+grants of `Chronicle.app`, not the daemon. The daemon lives inside
 that bundle. The app's login agent runs the daemon under launchd, so these
 grants apply to every installed run.
 
@@ -132,18 +132,19 @@ signing were ad-hoc signed. Their grants don't carry over. Later rebuilds keep
 the grant. The signature names the identifier and team instead of the code hash.
 
 1. Open System Settings > Privacy & Security > Screen & System Audio Recording.
-   macOS 14 calls it Screen Recording. Remove any old `chronicle-daemon` or
-   `Chronicle` entry with the − button.
+   Remove any old `chronicle-daemon` or `Chronicle` entry with the − button.
 2. The daemon checks Screen Recording at startup and exits when it's missing.
    It doesn't show a prompt. So add the app by hand: click +, press
    Cmd-Shift-G, paste the full path to the repo's `dist/Chronicle.app`, and
-   click Open. Turn the new entry on. On macOS 27, an entry for
-   `chronicle-daemon` itself had no effect.
-3. The microphone can't be granted under launchd yet. Nothing in Chronicle asks
-   macOS for mic access. The Microphone list has no + button. The startup log
-   shows `Microphone permission: NotDetermined`. The mic records silence. A
-   daemon started from Terminal can record the mic, but it writes to its own
-   `CHRONICLE_DATA_DIR`. The installed app doesn't see that data.
+   click Open. Turn the new entry on. An entry for `chronicle-daemon` itself
+   has no effect.
+3. For the microphone, open Chronicle's Settings and turn on "Record the
+   microphone". The first time, macOS asks for mic access. The grant goes to
+   `Chronicle.app` because the app carries the audio-input entitlement. The
+   daemon under launchd uses that grant. If you click Don't Allow, the toggle stays off.
+   The row then offers a button that opens Privacy & Security > Microphone. The
+   Microphone list has no + button. This prompt is the only way to add
+   Chronicle.
 
 ## Troubleshooting
 

@@ -43,6 +43,7 @@ chronicle-daemon/src/ipc_handler.rs
 chronicle-daemon/src/logging.rs
 chronicle-daemon/src/main.rs
 chronicle-daemon/src/media_presence.rs
+chronicle-daemon/src/mic_gate.rs
 chronicle-daemon/src/permissions.rs
 chronicle-daemon/src/pipeline.rs
 chronicle-daemon/src/pipeline/backfill.rs
@@ -61,6 +62,9 @@ chronicle-ui/Sources/ChronicleUI/DaemonConnection.swift
 chronicle-ui/Sources/ChronicleUI/DataRoot.swift
 chronicle-ui/Sources/ChronicleUI/Info.plist
 chronicle-ui/Sources/ChronicleUI/MenuBarIcon.swift
+chronicle-ui/Sources/ChronicleUI/MicController.swift
+chronicle-ui/Sources/ChronicleUI/MicRowState.swift
+chronicle-ui/Sources/ChronicleUI/MicrophonePermission.swift
 chronicle-ui/Sources/ChronicleUI/ResultRow.swift
 chronicle-ui/Sources/ChronicleUI/RetentionCopy.swift
 chronicle-ui/Sources/ChronicleUI/ScreenshotDetailView.swift

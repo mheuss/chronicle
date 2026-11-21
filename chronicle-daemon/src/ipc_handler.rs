@@ -628,15 +628,10 @@ fn search_hit_from_storage(r: chronicle_storage::SearchResult) -> chronicle_ipc:
     }
 }
 
-/// Map a microphone-toggle outcome to the wire-level mic state. A failed
-/// toggle is classified by the current microphone permission: a missing grant
-/// (including `NotDetermined`) is reported as `permission_denied` so the user
-/// has something actionable; an authorized-but-still-failed toggle is `error`.
-pub(crate) fn map_outcome(
-    outcome: chronicle_audio::MicToggleOutcome,
-    mic_permission: crate::permissions::MicrophoneStatus,
-) -> chronicle_ipc::MicState {
-    use crate::permissions::MicrophoneStatus;
+/// Map a microphone-toggle outcome to the wire-level mic state. A failure is
+/// `error` whatever the permission: `permission_denied` comes only from the
+/// mic gate's refusal (design §1.2).
+pub(crate) fn map_outcome(outcome: chronicle_audio::MicToggleOutcome) -> chronicle_ipc::MicState {
     use chronicle_audio::MicToggleOutcome;
     use chronicle_ipc::MicState;
     match outcome {
@@ -646,12 +641,7 @@ pub(crate) fn map_outcome(
             // CHR-103: log the reason daemon-side; the IPC response carries
             // only MicState, never internal error detail.
             log::warn!("microphone toggle failed: {reason}");
-            match mic_permission {
-                MicrophoneStatus::Denied
-                | MicrophoneStatus::Restricted
-                | MicrophoneStatus::NotDetermined => MicState::PermissionDenied,
-                MicrophoneStatus::Authorized => MicState::Error,
-            }
+            MicState::Error
         }
     }
 }
@@ -659,7 +649,6 @@ pub(crate) fn map_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::permissions::MicrophoneStatus;
     use chronicle_audio::MicToggleOutcome;
     use chronicle_ipc::{MicState, Request, RequestHandler, Response};
     use std::sync::atomic::AtomicUsize;
@@ -693,69 +682,21 @@ mod tests {
 
     #[test]
     fn map_outcome_enabled_returns_on() {
-        assert_eq!(
-            map_outcome(MicToggleOutcome::Enabled, MicrophoneStatus::Authorized),
-            MicState::On
-        );
+        assert_eq!(map_outcome(MicToggleOutcome::Enabled), MicState::On);
     }
 
     #[test]
     fn map_outcome_disabled_returns_off() {
-        assert_eq!(
-            map_outcome(MicToggleOutcome::Disabled, MicrophoneStatus::Authorized),
-            MicState::Off
-        );
+        assert_eq!(map_outcome(MicToggleOutcome::Disabled), MicState::Off);
     }
 
     #[test]
-    fn map_outcome_failed_denied_returns_permission_denied() {
+    fn map_outcome_failed_returns_error() {
         assert_eq!(
-            map_outcome(
-                MicToggleOutcome::Failed {
-                    reason: "denied".to_string()
-                },
-                MicrophoneStatus::Denied
-            ),
-            MicState::PermissionDenied,
-        );
-    }
-
-    #[test]
-    fn map_outcome_failed_restricted_returns_permission_denied() {
-        assert_eq!(
-            map_outcome(
-                MicToggleOutcome::Failed {
-                    reason: "restricted".to_string()
-                },
-                MicrophoneStatus::Restricted
-            ),
-            MicState::PermissionDenied,
-        );
-    }
-
-    #[test]
-    fn map_outcome_failed_not_determined_returns_permission_denied() {
-        assert_eq!(
-            map_outcome(
-                MicToggleOutcome::Failed {
-                    reason: "not determined".to_string()
-                },
-                MicrophoneStatus::NotDetermined
-            ),
-            MicState::PermissionDenied,
-        );
-    }
-
-    #[test]
-    fn map_outcome_failed_authorized_returns_error() {
-        assert_eq!(
-            map_outcome(
-                MicToggleOutcome::Failed {
-                    reason: "pipeline error".to_string()
-                },
-                MicrophoneStatus::Authorized
-            ),
-            MicState::Error,
+            map_outcome(MicToggleOutcome::Failed {
+                reason: "x".to_string()
+            }),
+            MicState::Error
         );
     }
 

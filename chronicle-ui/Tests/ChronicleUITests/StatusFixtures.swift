@@ -14,3 +14,13 @@ func statusWithoutCapture() -> StatusResponse {
         uptimeSecs: 0, version: "t", capture: nil, ocr: nil, audio: nil,
         storage: nil, transcription: nil))
 }
+
+func statusWithMic(_ micState: MicState, paused: Bool = false) -> StatusResponse {
+    StatusResponse(type: "status", ok: true, data: StatusData(
+        uptimeSecs: 0, version: "t",
+        capture: CaptureStats(
+            state: paused ? "paused" : "running", activeDisplays: 1, framesCaptured: 0,
+            framesDropped: 0, framesProcessed: 0, framesFailed: 0, paused: paused),
+        ocr: nil, audio: AudioStats(segmentsPersisted: 0, micState: micState),
+        storage: nil, transcription: nil))
+}

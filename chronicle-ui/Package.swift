@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "ChronicleUI",
     platforms: [
-        .macOS(.v14),
+        .macOS("27.0"),
     ],
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-testing.git", from: "0.12.0"),
