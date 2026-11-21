@@ -1162,3 +1162,15 @@ what was true during the walk, not of the tree today.
   seam now names both crossings and keeps the microphone reply. Owner stays
   `permissions`, and the symbol columns are unchanged. `power.md`'s outside
   bullet now cites `mark_system_asleep`, since `set_system_asleep` was deleted.
+
+- **[2026-11-21] `permission_gate.rs` and `permission_monitor.rs` placed in
+  capture.** Both are new on CHR-96. `permission_gate.rs` decides whether
+  capture and the mic may run on a read, as `mic_gate.rs` does. The monitor
+  takes its pace from capture's `Gates` and feeds only capture's gate. A first
+  placement put the monitor under permissions. Its import of
+  `permission_gate::MonitorState` then made permissions depend on capture
+  while capture depends on permissions, a cycle no map recorded. No check
+  covers import edges, so the Depends On sections of capture, permissions and
+  IPC were checked by hand against the `use` lines of every file this branch
+  added or changed. That also found IPC's new `PermissionRead` import in
+  `ipc_handler.rs` for `wire_permission`.

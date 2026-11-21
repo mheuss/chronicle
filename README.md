@@ -134,8 +134,8 @@ would then capture. Switch the agent off first. To run the daemon by hand:
    exported. Stop it when done.
 3. Switch the toggle back on. That registers and starts the agent again.
 
-This restarts the agent without toggling it. You need it after you grant
-Screen Recording, for example:
+This restarts the agent without toggling it. A Screen Recording grant no
+longer needs it. Capture starts on its own a few seconds after the grant.
 
 ```sh
 launchctl kickstart -k gui/$(id -u)/dev.heuss.chronicle.daemon

@@ -1,6 +1,6 @@
 # Domain: power
 
-**Status:** Decided 2026-09-16, revised 2026-09-21, revised 2026-10-05
+**Status:** Decided 2026-09-16, revised 2026-09-21, revised 2026-10-05, revised 2026-11-21
 **Owns:** Hearing the operating system say the machine is going to sleep or has woken, and saying so in one word.
 **Code:** `chronicle-daemon/src/power.rs`
 

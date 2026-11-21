@@ -1,6 +1,6 @@
 # Domain: IPC
 
-**Status:** Decided 2026-09-18, revised 2026-09-21, revised 2026-10-05
+**Status:** Decided 2026-09-18, revised 2026-09-21, revised 2026-10-05, revised 2026-11-21
 **Owns:** The daemon–UI wire — the request and response vocabulary, the value types carried on it, the socket transport at both ends, the dispatch that turns a request into a response and gathers what it reports, and the rules that keep the two sides talking across a version gap.
 **Code:** `chronicle-daemon/crates/ipc/src/lib.rs`, `chronicle-daemon/crates/ipc/src/retention.rs`, `chronicle-daemon/crates/ipc/src/server.rs`, `chronicle-daemon/src/ipc_handler.rs`, `chronicle-daemon/src/media_presence.rs`, `chronicle-ui/Sources/ChronicleUI/DaemonConnection.swift`, `chronicle-ui/Sources/ChronicleUI/ConnectionSession.swift`, `chronicle-ui/Sources/ChronicleUI/DataRoot.swift`
 
@@ -43,12 +43,15 @@
 - transcription — `chronicle-daemon/src/ipc_handler.rs` — `TranscriptionStatusCell`
 - capture — `chronicle-daemon/src/ipc_handler.rs` — `EngineState`
 - audio — `chronicle-daemon/src/ipc_handler.rs` — `MicToggleOutcome`
+- permissions — `chronicle-daemon/src/ipc_handler.rs` — `PermissionRead`
 
 ## Depended On By
 
 - pipeline — `chronicle-daemon/src/main.rs` — `IpcServer`
 - capture — `chronicle-daemon/src/capture_supervisor.rs` — `map_outcome`
 - capture — `chronicle-daemon/src/mic_gate.rs` — `map_outcome`
+- capture — `chronicle-daemon/src/permission_gate.rs` — `MicState`
+- capture — through this crate's re-export of `tokio_util`'s type at `crates/ipc/src/lib.rs:424`, not the wire — `chronicle-daemon/src/permission_monitor.rs` — `CancellationToken`
 - storage — `chronicle-daemon/crates/storage/src/lib.rs` — `Retention`
 - background-work — through this crate's re-export of `tokio_util`'s type at `crates/ipc/src/lib.rs:424`, not the wire — `chronicle-daemon/src/retention_task.rs` — `CancellationToken`
 - transcription — `chronicle-daemon/src/provisioning.rs` — `TranscriptionStats`
@@ -56,7 +59,7 @@
 
 ## Seams
 
-- SEAM-permission-wire — permissions — permissions owns the grant vocabulary and IPC owns what the UI is told. Grant states cross the wire as `PermissionState`, mapped from `PermissionRead` only by `wire_permission`, in the `permissions` block of Status. Status's capture state reports `permission_denied` while the Screen Recording gate keeps capture off. A microphone start the gate refused still replies `permission_denied`, and Status then reports `off`. — owner: permissions — `chronicle-daemon/crates/ipc/src/lib.rs` — `MicState`
+- SEAM-permission-wire — permissions — permissions owns the grant vocabulary and IPC owns what the UI is told. Grant states cross the wire in Status's `permissions` block as `PermissionState`. Only `wire_permission` maps a `PermissionRead` to one. Status's capture state reports `permission_denied` while `sr_denied` is set, unless capture is paused. A microphone start the gate refused still replies `permission_denied`, and Status then reports `off`. — owner: permissions — `chronicle-daemon/crates/ipc/src/lib.rs` — `MicState`
 - SEAM-storage-status-wire — storage — `models.rs` declares `StorageStatus` and this domain declares `StorageStats` independently, neither importing the other, and this domain converts between them at `src/ipc_handler.rs`; storage decides what a status can report — owner: storage — `chronicle-daemon/crates/ipc/src/lib.rs` — `StorageStats`
 - SEAM-transcription-wire — transcription — transcription converts its own state into this domain's independently declared `TranscriptionState`, `TranscriptionStats` and `ModelEntry`, and decides which provisioning states exist — owner: transcription — `chronicle-daemon/crates/ipc/src/lib.rs` — `TranscriptionStats`
 - SEAM-daemon-connection-api — UI — the view layer holds one `DaemonConnection`, calls its request methods and reads its published state, and never touches the socket; this domain decides the method surface and the error vocabulary, UI decides what it renders — owner: IPC — `chronicle-ui/Sources/ChronicleUI/DaemonConnection.swift` — `DaemonConnection`

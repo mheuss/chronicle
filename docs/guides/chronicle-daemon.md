@@ -68,8 +68,8 @@ flowchart TD
 5. `checked_socket_path()` — fails startup when `ipc.sock` under the data
    root would be longer than the 103 bytes a Unix socket address holds.
 6. `permissions::preflight()` — reads Screen Recording and Microphone and
-   logs both. A missing Screen Recording grant sets the supervisor's
-   `sr_denied` gate. The daemon keeps running and serves search. Capture
+   logs both. `run` seeds the supervisor's `sr_denied` gate from that read.
+   The daemon keeps running and serves search. Capture
    starts once a helper read says the grant is there (CHR-96).
 7. `Storage::open()` — opens/migrates SQLite database
 8. `storage.sweep_orphans()` — the startup orphan sweep. It walks the media
@@ -102,6 +102,9 @@ flowchart TD
     refresher, and the retention cleanup loop.
 16. Runs the event loop until the shutdown signal (`SIGINT` from Ctrl-C or
     `SIGTERM`). It serves mic toggles, pause and resume, and sleep and wake.
+    It also stops when the first capture start after a Screen Recording grant
+    fails. The daemon then runs the full teardown and exits with status 4, so
+    launchd starts a fresh process that reads the grant at boot (CHR-96).
 
 ### Channel Topology
 
@@ -125,8 +128,10 @@ segment means data loss.
 
 ### Shutdown
 
-Triggered by `SIGINT` (Ctrl-C) or `SIGTERM`. Either signal enters the same
-ordered teardown that cascades through the system:
+Triggered by `SIGINT` (Ctrl-C) or `SIGTERM`, or by a failed first start after
+a grant (item 16). Each enters the same ordered teardown that cascades through
+the system. After that failed start, an exit watchdog ends the process with
+status 4 if the teardown takes longer than 15 s:
 
 1. `supervisor.shutdown()` — stops SCStream and joins the store/ocr tasks
 2. `audio_pipeline.stop()` — drops the audio handler and flushes the encoding thread
@@ -171,9 +176,10 @@ transcription work should follow the same pattern.
 
 **Permission preflight:** Screen Recording is required for all ScreenCaptureKit
 functionality (both screen capture and audio). Without it the daemon runs with
-capture off. `PermissionMonitor` re-reads both permissions through the
-`--permission-status` helper (ADR-022). It reads every 2 s while Screen
-Recording is missing or unconfirmed. It reads every 5 s while it is granted.
+capture off. The permission monitor (`permission_monitor.rs`) re-reads both
+permissions through the `--permission-status` helper (ADR-022). It reads
+every 2 s while Screen Recording is missing or unconfirmed. It reads every
+5 s once Screen Recording is granted.
 It does not read while the Mac is asleep or capture is paused. Microphone is
 optional. Mic capture is off by default and is toggled from the UI.
 
