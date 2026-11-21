@@ -80,6 +80,23 @@ struct MicRowStateTests {
             isOn: isOn, isEnabled: true, caption: caption, showsSettingsButton: false))
     }
 
+    // Each input matches two rows, so the earlier row of design §2.2 must win.
+    @Test func firstMatchingRowWins() {
+        let rejected = MicRowState(
+            isOn: false, isEnabled: true, caption: "Couldn't change the microphone. Try again.",
+            showsSettingsButton: false)
+        #expect(row(nil, nil, connected: false) == disabled(MicRowState.notConnectedCaption()))
+        #expect(row(.denied, statusWithMic(.on, paused: true)) == disabled(
+            "Chronicle doesn't have microphone access. Turn it on in System Settings → Privacy & Security → Microphone.",
+            button: true))
+        #expect(row(.authorized, statusWithMic(.unknown, paused: true))
+            == disabled("Capture is paused. Resume capture to change the microphone."))
+        #expect(row(.authorized, statusWithMic(.unknown), mark: .rejected)
+            == disabled("This version of Chronicle can't read the microphone state. Update Chronicle."))
+        #expect(row(.notDetermined, statusWithMic(.off), mark: .rejected) == rejected)
+        #expect(row(.authorized, statusWithMic(.error), mark: .rejected) == rejected)
+    }
+
     @Test func onlyAuthorizedPlusOnRendersOn() {
         for permission in [MicPermission.denied, .restricted, .notDetermined, .unavailable] {
             #expect(!row(permission, statusWithMic(.on)).isOn)
