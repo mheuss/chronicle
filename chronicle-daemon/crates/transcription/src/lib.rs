@@ -158,6 +158,9 @@ fn short_pcm_transcript(len: usize) -> Option<Transcript> {
 }
 
 /// A finished transcription.
+#[cfg(feature = "parakeet")]
+pub mod parakeet;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transcript {
     pub text: String,
