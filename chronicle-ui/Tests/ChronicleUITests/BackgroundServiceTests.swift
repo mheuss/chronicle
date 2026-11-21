@@ -81,11 +81,19 @@ final class BackgroundServiceTests {
         let app = FakeLoginService("app", log: log)
         let service = make(agent: agent, mainApp: app)
         var hooks = 0
-        service.onEnabled = { hooks += 1 }
+        let log = self.log
+        service.onEnabled = {
+            hooks += 1
+            #expect(log.entries.contains("agent.register"), "the hook runs after the agent registers")
+        }
         await service.setEnabled(false)
         #expect(service.enabledSince == nil)
         #expect(hooks == 0, "turning it off calls no hook")
-        await service.setEnabled(true)
+        log.entries.removeAll()
+        let enabling = Task { await service.setEnabled(true) }
+        await Task.yield()
+        #expect(service.enabledSince != nil, "the starting window opens when the toggle turns on")
+        await enabling.value
         #expect(hooks == 1)
         #expect(service.enabledSince != nil)
     }

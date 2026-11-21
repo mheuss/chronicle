@@ -37,7 +37,8 @@ final class BackgroundService {
     /// already on. Starts the 60 s "starting" window while the daemon is not
     /// connected (design §6.1).
     private(set) var enabledSince: Date?
-    /// Called after an enable finishes. `ChronicleApp` points it at
+    /// Called after an enable's reconcile returns, whether or not it
+    /// succeeded. `ChronicleApp` points it at
     /// `DaemonConnection.reconnectNow` (design §6.4).
     @ObservationIgnored var onEnabled: (@MainActor () -> Void)?
 
@@ -63,9 +64,9 @@ final class BackgroundService {
 
     func setEnabled(_ on: Bool) async {
         isEnabled = on
+        enabledSince = on ? Date() : nil
         defaults.set(on, forKey: Self.enabledKey)
         await enqueue(allowOutsideApplications: true)
-        enabledSince = on ? Date() : nil
         if on { onEnabled?() }
     }
 
