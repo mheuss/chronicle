@@ -542,7 +542,8 @@ struct StatusResponse: Decodable, Sendable {
                 ocr: data.ocr,
                 audio: data.audio,
                 storage: data.storage,
-                transcription: stats))
+                transcription: stats,
+                permissions: data.permissions))
     }
 }
 
@@ -556,6 +557,9 @@ struct StatusData: Decodable, Sendable {
     /// Optional so an old daemon (no transcription block) decodes to nil
     /// instead of failing the whole status response (NFR-7).
     let transcription: TranscriptionStats?
+    /// Optional, so a daemon built before CHR-97 decodes to nil. A `var` with
+    /// a default keeps existing memberwise call sites compiling.
+    var permissions: Permissions? = nil
 }
 
 struct CaptureStats: Codable, Sendable {
@@ -576,6 +580,28 @@ struct OcrStats: Codable, Sendable {
 struct AudioStats: Codable, Sendable {
     let segmentsPersisted: UInt64
     let micState: MicState
+}
+
+/// One TCC permission as the daemon last read it (CHR-97, ADR-022).
+enum PermissionState: String, Codable, Sendable {
+    case authorized, denied
+    case notDetermined = "not_determined"
+    case restricted, unavailable
+    /// A state this UI doesn't know yet (newer daemon). Same reasoning as
+    /// `MicState.unknown`.
+    case unknown
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = PermissionState(rawValue: raw) ?? .unknown
+    }
+}
+
+struct Permissions: Codable, Sendable {
+    let screenRecording: PermissionState
+    let screenRecordingCheckedAtMs: Int64?
+    let microphone: PermissionState
+    let microphoneCheckedAtMs: Int64?
 }
 
 struct StorageStats: Decodable, Sendable {

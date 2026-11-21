@@ -173,7 +173,10 @@ struct StatusTranscriptionSpliceTests {
                 ocr: nil, audio: nil, storage: nil,
                 transcription: TranscriptionStats(
                     state: state, variant: "base", loadedVariant: "base", error: nil,
-                    downloadBytes: nil, downloadTotalBytes: nil, models: [])))
+                    downloadBytes: nil, downloadTotalBytes: nil, models: []),
+                permissions: Permissions(
+                    screenRecording: .denied, screenRecordingCheckedAtMs: 7,
+                    microphone: .authorized, microphoneCheckedAtMs: 8)))
     }
 
     @Test("the fresher block lands and the rest of the snapshot is untouched")
@@ -195,6 +198,7 @@ struct StatusTranscriptionSpliceTests {
         #expect(after.data.version == before.data.version)
         #expect(after.data.capture?.framesCaptured == 7)
         #expect(after.data.capture?.paused == false)
+        #expect(after.data.permissions?.screenRecording == .denied)
     }
 
     // The point of the splice: the state the views poll on actually moves.
