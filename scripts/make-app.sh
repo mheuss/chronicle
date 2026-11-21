@@ -291,7 +291,9 @@ group = os.environ["APP_GROUP_ID"]
 if ents.get("com.apple.security.application-groups") != [group]:
     print("does not carry exactly the app group " + group)
 elif "com.apple.security.app-sandbox" in ents:
-    print("carries com.apple.security.app-sandbox")' <<<"$ents")"; then
+    print("carries com.apple.security.app-sandbox")
+elif ents.get("com.apple.security.device.audio-input") is not True:
+    print("does not carry com.apple.security.device.audio-input")' <<<"$ents")"; then
         echo "Could not parse the entitlements of $name" >&2
         exit 1
     fi
