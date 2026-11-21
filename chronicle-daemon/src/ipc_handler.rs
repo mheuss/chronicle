@@ -378,6 +378,7 @@ impl RequestHandler for DaemonHandler {
                             media_absent: c.media_absent,
                         },
                         transcription: self.transcription_status.stats(self.storage.base_dir()),
+                        permissions: chronicle_ipc::PermissionsStats::default(),
                     },
                 }
             }
