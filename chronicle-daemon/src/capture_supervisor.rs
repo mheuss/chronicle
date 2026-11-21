@@ -4,7 +4,7 @@
 //!
 //! Display sleep is intentionally not a separate flag — see CHR-57 for the
 //! Apple-Silicon-specific investigation. Re-adding it later is one more flag
-//! and a `set_display_asleep` setter on the `set_system_asleep` pattern.
+//! and a `mark_display_asleep` setter on the `mark_system_asleep` pattern.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -143,7 +143,7 @@ pub struct CaptureSupervisor<'a, M: AppMetadataProvider + 'static + ?Sized> {
     counters: Arc<PipelineCounters>,
     ocr_channel_capacity: usize,
     probe_holder: Arc<Mutex<Option<EngineStatusProbe>>>,
-    /// IPC-visible mirror of `user_paused`. Written by `set_user_paused`
+    /// IPC-visible mirror of `user_paused`. Written by `mark_user_paused`
     /// (Task 6); kept here so the supervisor owns the persistence atom
     /// alongside the runtime. Unread by `reconcile()` — the supervisor's
     /// own `user_paused` field is the source of truth for decisions.
@@ -343,7 +343,10 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     }
 
     /// Set `user_paused`, persist it, and mark the read stale on a pause.
-    /// Doesn't reconcile. The caller can publish the new state first.
+    /// Doesn't reconcile. The caller can publish the new state first. This is
+    /// the only setter that writes to disk — the sleep setters are transient.
+    /// The persistence path writes a single boolean (`capture_paused`),
+    /// nothing more.
     pub fn mark_user_paused(&mut self, paused: bool) {
         self.user_paused = paused;
         if paused {
@@ -355,13 +358,9 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         log::info!("set_user_paused: paused={paused}");
     }
 
-    /// Flip `user_paused`, persist it, and reconcile. This and
-    /// `mark_user_paused` are the only setters that write to disk — the sleep
-    /// setters are transient. The persistence
-    /// path writes a single boolean (`capture_paused`), nothing more.
-    ///
-    /// Returns the reconcile outcome so the event loop can arm a retry when
-    /// a resume's Start fails (CHR-136).
+    /// `mark_user_paused`, then reconcile. Test-only: the event loop publishes
+    /// the new state between the two.
+    #[cfg(test)]
     pub async fn set_user_paused(
         &mut self,
         paused: bool,
@@ -381,7 +380,8 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         log::info!("set_system_asleep: asleep={asleep}");
     }
 
-    /// Flip `system_asleep` and reconcile. Transient — never persisted.
+    /// `mark_system_asleep`, then reconcile. Test-only, like `set_user_paused`.
+    #[cfg(test)]
     pub async fn set_system_asleep(
         &mut self,
         asleep: bool,
@@ -397,10 +397,8 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         log::info!("set_system_awake: cleared system_asleep");
     }
 
-    /// Clear `system_asleep` and reconcile. Transient — never persisted.
-    ///
-    /// Returns the reconcile outcome so the event loop can arm a retry when
-    /// the wake's Start fails (CHR-136).
+    /// `mark_system_awake`, then reconcile. Test-only, like `set_user_paused`.
+    #[cfg(test)]
     pub async fn set_system_awake(&mut self, audio: &'a AudioPipeline) -> ReconcileOutcome {
         self.mark_system_awake();
         self.reconcile(audio).await

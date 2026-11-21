@@ -384,6 +384,49 @@ fn main() -> std::process::ExitCode {
     std::process::ExitCode::from(exit_code_for(run_main()))
 }
 
+/// The first `Status` permissions block, from the boot reads.
+fn boot_permissions_snapshot(
+    boot: &permissions::BootPermissions,
+    at_ms: i64,
+) -> chronicle_ipc::PermissionsStats {
+    chronicle_ipc::PermissionsStats {
+        screen_recording: ipc_handler::wire_permission(boot.screen.into()),
+        screen_recording_checked_at_ms: Some(at_ms),
+        microphone: ipc_handler::wire_permission(boot.mic),
+        microphone_checked_at_ms: Some(at_ms),
+    }
+}
+
+/// Process exit codes:
+///
+/// | Code | Meaning |
+/// |---|---|
+/// | 0 | Clean shutdown, or another daemon holds the lock |
+/// | 1 | Startup error |
+/// | 3 | Capture stop left streams possibly running |
+/// | 4 | Restart for fresh permissions (design §4) |
+///
+/// The first capture start after a Screen Recording grant failed. Exit
+/// non-zero so launchd starts a fresh process, which reads the grant at boot.
+fn exit_for_fresh_permissions(code: i32) -> ! {
+    logging::fatal(
+        "capture start after a Screen Recording grant failed; exiting with code 4 for a fresh process",
+    );
+    std::process::exit(code);
+}
+
+/// Every reconcile outcome in the event loop passes through here before
+/// `route_reconcile_outcome` (design §4). `exit` is injectable for the test.
+fn handle_post_grant(
+    post_grant: &mut permission_gate::PostGrant,
+    outcome: &ReconcileOutcome,
+    exit: impl FnOnce(i32),
+) {
+    if let Some(code) = post_grant.observe(outcome) {
+        exit(code);
+    }
+}
+
 /// The process exit status for `run_main`'s result.
 fn exit_code_for(result: Result<()>) -> u8 {
     match result {
@@ -427,7 +470,12 @@ fn run_main() -> Result<()> {
 
 async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> Result<()> {
     // --- Permission preflight ---
-    let _mic_status = permissions::preflight()?;
+    let boot = permissions::preflight();
+    let sr_denied_mirror = Arc::new(AtomicBool::new(false));
+    let permissions_snapshot = Arc::new(ArcSwap::from_pointee(boot_permissions_snapshot(
+        &boot,
+        permission_monitor::unix_ms(),
+    )));
 
     // --- Storage ---
     let storage = Arc::new(Storage::open(storage_config).await?);
@@ -571,6 +619,10 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
         Arc::clone(&capture_ready),
         Arc::clone(&transcription_status),
         model_tx,
+    )
+    .with_permissions(
+        Arc::clone(&permissions_snapshot),
+        Arc::clone(&sr_denied_mirror),
     );
     let ipc_server = IpcServer::start(&socket_path, handler, cancel.clone()).await?;
     log::info!("IPC server started");
@@ -619,7 +671,11 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
         storage.base_dir().to_path_buf(),
         Arc::clone(&capture_drops),
     )
-    .with_on_stop_poisoned(|| spawn_poison_exit_watchdog(POISON_EXIT_GRACE));
+    .with_on_stop_poisoned(|| spawn_poison_exit_watchdog(POISON_EXIT_GRACE))
+    .with_screen_recording_gate(
+        boot.screen == permissions::ScreenRecordingStatus::Denied,
+        Arc::clone(&sr_denied_mirror),
+    );
 
     if initial_capture_paused {
         log::info!("Capture is paused (persisted setting); skipping runtime start");
@@ -821,7 +877,7 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     //
     // **The single-writer note.** All four settings writers run from this
     // loop — `write_mic_setting` here, `write_capture_paused` via
-    // `set_user_paused` in the capture arm, `write_whisper_model` via
+    // `mark_user_paused` in the capture arm, `write_whisper_model` via
     // `handle_provision_event`, and `write_mic_setting(false)` inside the mic
     // gate (`mic_gate::apply_mic_intent`), which this arm, the supervisor's
     // `start()`, and `mic_gate::reapply_mic_gate` all reach. They share one
@@ -836,6 +892,10 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     // runs after the loop has exited. `handle_provision_event`'s doc points
     // here for this reasoning, so it must keep naming all four writers. This
     // note must keep naming both exceptions.
+    //
+    // The two permission arms (`screen_rx`, `mic_rx_perm`) follow the same
+    // rule. They are the only callers of `set_sr_denied` and the only
+    // permission-driven callers of `reapply_mic_gate` (design N5).
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     // Open the readiness gates: from here the loop drains `mic_rx`,
     // `capture_rx` and `model_rx`, so the IPC handler can forward toggles
@@ -844,6 +904,27 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     // always-equal flag.
     mic_ready.store(true, Ordering::Release);
     capture_ready.store(true, Ordering::Release);
+    // Permission monitor (design §2). Started after the readiness flags are set.
+    // The first read then lands on a loop that drains it. The two arms below are the
+    // only code that acts on its reads (N5).
+    // Adds 1 after each successful mic command (design §3, AD20).
+    let mut mic_generation: u64 = 0;
+    let (mode_tx, mode_rx) = tokio::sync::watch::channel(permission_gate::state_for(
+        supervisor.gates(),
+        mic_generation,
+    ));
+    let (screen_tx, mut screen_rx) = tokio::sync::mpsc::channel(8);
+    let (mic_perm_tx, mut mic_rx_perm) = tokio::sync::mpsc::channel(8);
+    let monitor_handle = tokio::spawn(permission_monitor::run(
+        permission_monitor::helper_reader(),
+        mode_rx,
+        screen_tx,
+        mic_perm_tx,
+        cancel.clone(),
+        permission_monitor::unix_ms,
+    ));
+    let mut sr_gate = permission_gate::SrGate::default();
+    let mut post_grant = permission_gate::PostGrant::default();
     // The provision currently in flight, if any. At most one is ever doing
     // real work — the provisioner's in-flight CAS guarantees it — so the
     // latest handle is the only one worth holding, and shutdown waits on it
@@ -855,6 +936,7 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     let mut provision_task: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         tokio::select! {
+            biased;
             res = tokio::signal::ctrl_c() => {
                 res?;
                 log::info!("SIGINT received, shutting down");
@@ -863,6 +945,57 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
             _ = sigterm.recv() => {
                 log::info!("SIGTERM received, shutting down");
                 break;
+            }
+            Some(t) = screen_rx.recv() => {
+                let g = supervisor.gates();
+                if !permission_gate::accept_screen_read(t.epoch, g) {
+                    continue;
+                }
+                if let Some(denied) = sr_gate.decide(g.sr_denied, g.sr_stale, t.read) {
+                    if g.sr_denied && !denied {
+                        post_grant.granted();
+                    }
+                    let outcome = supervisor.set_sr_denied(denied, &audio_pipeline).await;
+                    handle_post_grant(&mut post_grant, &outcome, |c| exit_for_fresh_permissions(c));
+                    let disposition = route_reconcile_outcome(
+                        &outcome,
+                        &mut boot_incident,
+                        &mut start_retry,
+                        &retry_tx,
+                    );
+                    if disposition == BootDisposition::Exit {
+                        log::error!("capture engine poisoned; shutting down for a fresh process");
+                        loop_poisoned = true;
+                        break;
+                    }
+                }
+                let mut next = (**permissions_snapshot.load()).clone();
+                next.screen_recording = ipc_handler::wire_permission(t.read);
+                next.screen_recording_checked_at_ms = Some(t.at_ms);
+                permissions_snapshot.store(Arc::new(next));
+                permission_gate::publish_state(&mode_tx, supervisor.gates(), mic_generation);
+            }
+            Some(t) = mic_rx_perm.recv() => {
+                if !permission_gate::accept_mic_read(t.mic_generation, mic_generation) {
+                    continue;
+                }
+                let atom = chronicle_ipc::MicState::from_u8(mic_state_atom.load(Ordering::Acquire));
+                let intent_on = settings::read_mic_setting(storage.base_dir());
+                let capture_running = supervisor.is_running() && !supervisor.gates().sr_denied;
+                if permission_gate::mic_tick_calls_gate(t.read, atom, intent_on, capture_running) {
+                    let state = mic_gate::reapply_mic_gate(
+                        &audio_pipeline,
+                        storage.base_dir(),
+                        || t.read,
+                        capture_running,
+                        &mic_state_atom,
+                    );
+                    log::info!("permission tick: mic read={:?}, result={state:?}", t.read);
+                }
+                let mut next = (**permissions_snapshot.load()).clone();
+                next.microphone = ipc_handler::wire_permission(t.read);
+                next.microphone_checked_at_ms = Some(t.at_ms);
+                permissions_snapshot.store(Arc::new(next));
             }
             Some(cmd) = mic_rx.recv() => {
                 // Persist the user's intent first. The gate may then clear it
@@ -895,17 +1028,23 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                     }
                 };
                 mic_state_atom.store(outcome.status as u8, std::sync::atomic::Ordering::Release);
+                if matches!(outcome.reply, chronicle_ipc::MicState::On | chronicle_ipc::MicState::Off) {
+                    mic_generation += 1;
+                    permission_gate::publish_state(&mode_tx, supervisor.gates(), mic_generation);
+                }
                 let _ = cmd.reply.send(outcome.reply);
             }
             Some(cmd) = capture_rx.recv() => {
-                let (paused, outcome) = match cmd.action {
-                    ipc_handler::CaptureAction::Pause => {
-                        (true, supervisor.set_user_paused(true, &audio_pipeline).await)
-                    }
-                    ipc_handler::CaptureAction::Resume => {
-                        (false, supervisor.set_user_paused(false, &audio_pipeline).await)
-                    }
-                };
+                let paused = matches!(cmd.action, ipc_handler::CaptureAction::Pause);
+                supervisor.mark_user_paused(paused);
+                let outcome = permission_gate::publish_then_reconcile(
+                    &mode_tx,
+                    supervisor.gates(),
+                    mic_generation,
+                    supervisor.reconcile(&audio_pipeline),
+                )
+                .await;
+                handle_post_grant(&mut post_grant, &outcome, |c| exit_for_fresh_permissions(c));
                 let disposition = route_reconcile_outcome(
                     &outcome,
                     &mut boot_incident,
@@ -955,12 +1094,18 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
             }
             Some(evt) = power_rx.recv() => {
                 log::info!("power event: {evt:?}");
-                let outcome = match evt {
-                    power::PowerEvent::SystemSleep =>
-                        supervisor.set_system_asleep(true, &audio_pipeline).await,
-                    power::PowerEvent::SystemWake =>
-                        supervisor.set_system_awake(&audio_pipeline).await,
-                };
+                match evt {
+                    power::PowerEvent::SystemSleep => supervisor.mark_system_asleep(true),
+                    power::PowerEvent::SystemWake => supervisor.mark_system_awake(),
+                }
+                let outcome = permission_gate::publish_then_reconcile(
+                    &mode_tx,
+                    supervisor.gates(),
+                    mic_generation,
+                    supervisor.reconcile(&audio_pipeline),
+                )
+                .await;
+                handle_post_grant(&mut post_grant, &outcome, |c| exit_for_fresh_permissions(c));
                 let disposition = route_reconcile_outcome(
                     &outcome,
                     &mut boot_incident,
@@ -983,6 +1128,7 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                 if outcome == ReconcileOutcome::Started {
                     log::info!("capture recovered on retry");
                 }
+                handle_post_grant(&mut post_grant, &outcome, |c| exit_for_fresh_permissions(c));
                 let disposition = route_reconcile_outcome(
                     &outcome,
                     &mut boot_incident,
@@ -997,6 +1143,7 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
             }
         }
     }
+    monitor_handle.abort();
     if loop_poisoned {
         spawn_poison_exit_watchdog(POISON_EXIT_GRACE);
     }
@@ -1283,6 +1430,52 @@ mod tests {
         let base = std::path::PathBuf::from(format!("/{}", "a".repeat(total - 1 - name_len)));
         assert_eq!(base.join(SOCKET_NAME).as_os_str().len(), total);
         base
+    }
+
+    #[test]
+    fn first_status_takes_both_boot_reads() {
+        let boot = crate::permissions::BootPermissions {
+            screen: crate::permissions::ScreenRecordingStatus::Denied,
+            mic: crate::permissions::PermissionRead::NotDetermined,
+        };
+        let snap = boot_permissions_snapshot(&boot, 42);
+        assert_eq!(
+            snap.screen_recording,
+            chronicle_ipc::PermissionState::Denied
+        );
+        assert_eq!(
+            snap.microphone,
+            chronicle_ipc::PermissionState::NotDetermined
+        );
+        assert_eq!(snap.screen_recording_checked_at_ms, Some(42));
+        assert_eq!(snap.microphone_checked_at_ms, Some(42));
+    }
+
+    #[test]
+    fn forced_post_grant_start_failure_reaches_exit_with_4() {
+        let mut post_grant = crate::permission_gate::PostGrant::default();
+        let mut exited = None;
+        handle_post_grant(
+            &mut post_grant,
+            &ReconcileOutcome::StartFailed {
+                partial_teardown: false,
+            },
+            |c| exited = Some(c),
+        );
+        assert_eq!(exited, None, "no grant pending");
+        post_grant.granted();
+        handle_post_grant(&mut post_grant, &ReconcileOutcome::NoChange, |c| {
+            exited = Some(c)
+        });
+        assert_eq!(exited, None);
+        handle_post_grant(
+            &mut post_grant,
+            &ReconcileOutcome::StartFailed {
+                partial_teardown: false,
+            },
+            |c| exited = Some(c),
+        );
+        assert_eq!(exited, Some(4));
     }
 
     #[test]

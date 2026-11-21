@@ -1,9 +1,9 @@
 //! macOS TCC permission checks for the daemon.
 //!
-//! Checks Screen Recording and Microphone authorization status before
-//! starting capture engines. Screen Recording is a hard gate — the
-//! daemon exits if denied. Microphone never blocks startup: the mic gate
-//! (`mic_gate.rs`) decides each mic start from a fresh helper read.
+//! The boot read sets the initial Screen Recording gate. After boot, every
+//! decision uses a fresh helper read (`--permission-status`, ADR-022).
+//! A running process keeps its first answer. Neither read ever stops the
+//! daemon.
 
 use objc2_foundation::NSString;
 
@@ -32,17 +32,6 @@ pub enum MicrophoneStatus {
     NotDetermined,
     /// System-level restriction (parental controls, MDM).
     Restricted,
-}
-
-/// Errors from the permission preflight check.
-#[derive(Debug, thiserror::Error)]
-pub enum PermissionError {
-    #[error(
-        "screen recording permission not granted — grant access in \
-         System Settings > Privacy & Security > Screen Recording, \
-         then restart chronicle-daemon"
-    )]
-    ScreenRecordingDenied,
 }
 
 // ---------------------------------------------------------------------------
@@ -281,30 +270,56 @@ pub(crate) fn run_helper(
 // Preflight
 // ---------------------------------------------------------------------------
 
-/// Check all required permissions before starting engines.
-///
-/// Returns microphone status for informational use. Returns
-/// `Err(PermissionError::ScreenRecordingDenied)` if screen recording
-/// is not authorized.
-pub fn preflight() -> Result<MicrophoneStatus, PermissionError> {
-    let screen = check_screen_recording();
-    let mic = check_microphone();
+/// What the daemon read at boot (ADR-022). Only `screen` sets a gate.
+/// `mic` is logged and seeds the first `Status`.
+pub struct BootPermissions {
+    /// In-process read. Fresh, because the process has just started.
+    pub screen: ScreenRecordingStatus,
+    /// Helper read, the same source as the mic gate, so the first `Status`
+    /// agrees with it.
+    pub mic: PermissionRead,
+}
 
+/// Read both permissions at boot and log them. Never fails: a missing
+/// Screen Recording grant gates capture instead of stopping the daemon
+/// (design AD1).
+pub fn preflight() -> BootPermissions {
+    preflight_with(check_screen_recording, fresh_microphone_status)
+}
+
+fn preflight_with(
+    read_screen: impl FnOnce() -> ScreenRecordingStatus,
+    read_mic: impl FnOnce() -> PermissionRead,
+) -> BootPermissions {
+    let screen = read_screen();
+    let mic = read_mic();
     log::info!("Microphone permission: {mic:?}");
-
-    if screen == ScreenRecordingStatus::Denied {
-        log::error!("Screen recording permission: {screen:?}");
-        return Err(PermissionError::ScreenRecordingDenied);
+    match screen {
+        ScreenRecordingStatus::Authorized => {
+            log::info!("Screen recording permission: Authorized");
+        }
+        ScreenRecordingStatus::Denied => {
+            log::warn!(
+                "Screen recording permission: Denied — capture stays off until it is granted"
+            );
+        }
     }
-
-    log::info!("Screen recording permission: {screen:?}");
-
-    Ok(mic)
+    BootPermissions { screen, mic }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preflight_takes_the_mic_from_the_fresh_reader() {
+        let boot = preflight_with(
+            || ScreenRecordingStatus::Denied,
+            || PermissionRead::NotDetermined,
+        );
+        assert_eq!(boot.screen, ScreenRecordingStatus::Denied);
+        assert_eq!(boot.mic, PermissionRead::NotDetermined);
+    }
     use std::path::Path;
     use std::time::{Duration, Instant};
 
