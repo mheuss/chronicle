@@ -81,13 +81,11 @@ pub(crate) fn accept_mic_read(read_generation: u64, current_generation: u64) -> 
     read_generation == current_generation
 }
 
-/// True when the reconcile ran `start()`, which reads the mic and decides it.
-/// A mic read spawned before that is older than the decision.
+/// True when the reconcile started capture, which reads the mic and decides
+/// it. A mic read spawned before that is older than the decision. A failed
+/// start returns before it touches the mic.
 pub(crate) fn start_decides_mic(outcome: &ReconcileOutcome) -> bool {
-    matches!(
-        outcome,
-        ReconcileOutcome::Started | ReconcileOutcome::StartFailed { .. }
-    )
+    matches!(outcome, ReconcileOutcome::Started)
 }
 
 /// Publish the new state before the reconcile runs.
@@ -467,28 +465,18 @@ mod tests {
     }
 
     #[test]
-    fn a_start_makes_older_mic_reads_stale() {
-        let failed = ReconcileOutcome::StartFailed {
-            partial_teardown: false,
-        };
+    fn only_a_start_decides_the_mic() {
         assert!(start_decides_mic(&ReconcileOutcome::Started));
-        assert!(start_decides_mic(&failed));
         for outcome in [
+            ReconcileOutcome::StartFailed {
+                partial_teardown: false,
+            },
             ReconcileOutcome::Stopped,
             ReconcileOutcome::NoChange,
             ReconcileOutcome::StopPoisoned,
         ] {
             assert!(!start_decides_mic(&outcome), "{outcome:?} reads no mic");
         }
-        let spawned_at = 3;
-        let mut generation = spawned_at;
-        if start_decides_mic(&ReconcileOutcome::Started) {
-            generation += 1;
-        }
-        assert!(
-            !accept_mic_read(spawned_at, generation),
-            "a read from before the start is dropped"
-        );
     }
 
     #[test]

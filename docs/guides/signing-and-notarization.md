@@ -133,8 +133,9 @@ the grant. The signature names the identifier and team instead of the code hash.
 
 1. Open System Settings > Privacy & Security > Screen & System Audio Recording.
    Remove any old `chronicle-daemon` or `Chronicle` entry with the − button.
-2. Without Screen Recording the daemon runs with capture off.
-   The daemon never asks macOS for Screen Recording. So add the app by hand: click +, press
+2. Without Screen Recording the daemon runs with capture off. The daemon
+   never asks macOS for Screen Recording. Chronicle's dialog can add the app
+   to the list. If it isn't there, add it by hand: click +, press
    Cmd-Shift-G, paste the full path to the repo's `dist/Chronicle.app`, and
    click Open. Turn the new entry on. An entry for `chronicle-daemon` itself
    has no effect.

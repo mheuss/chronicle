@@ -9,7 +9,7 @@
 - inside: querying the TCC state for microphone access — `chronicle-daemon/src/permissions.rs` — `check_microphone`
 - inside: the boot read that sets the initial Screen Recording gate — `chronicle-daemon/src/permissions.rs` — `preflight`
 - inside: the fresh helper read every later decision uses — `chronicle-daemon/src/permissions.rs` — `fresh_screen_recording_status`
-- inside: the microphone grant as the boot read reports it — `chronicle-daemon/src/permissions.rs` — `MicrophoneStatus`
+- inside: the helper child's own AVFoundation answer for the mic, before it becomes a word — `chronicle-daemon/src/permissions.rs` — `MicrophoneStatus`
 - inside: a fresh microphone read in a child process, because a running process's own read goes stale — `chronicle-daemon/src/permissions.rs` — `fresh_microphone_status`
 - inside: the result of that read, where a failed read is `Unavailable` and never authorized — `chronicle-daemon/src/permissions.rs` — `PermissionRead`
 - inside: the `--permission-status` helper mode that prints one grant word — `chronicle-daemon/src/permissions.rs` — `run_status_command`

@@ -93,7 +93,7 @@ macOS Control Center won't register a menu bar icon for a loose executable.
 2. Grant Screen Recording. Chronicle shows a dialog when it's missing. Click
    Open System Settings, then turn on Chronicle under Privacy & Security →
    Screen & System Audio Recording. If Chronicle isn't in the list, click +,
-   then choose Chronicle. If macOS offers to quit and reopen Chronicle, click
+   then choose Chronicle.app in Applications. If macOS offers to quit and reopen Chronicle, click
    Later. Capture starts a few seconds later without a restart. Chronicle keeps
    running without the permission. Search still works for anything already
    saved.

@@ -311,9 +311,10 @@ tells you which device is selected.
 
 1. Add a status enum and FFI call in `permissions.rs`
 2. Add a `--permission-status` arm for it. Decisions after boot then use a fresh read (ADR-022)
-3. Add a `PermissionName` for it, and have `permission_monitor` read it on each tick
+3. Add a `PermissionName` for it and a `helper_reader` arm, and have `permission_monitor` read it on each tick and send it on its own channel
 4. Add its state to `PermissionsStats` in `crates/ipc`, and decode it in the UI's `Permissions`
-5. Decide whether it gates capture. A gate belongs in `CaptureSupervisor`, never in an exit from `preflight()`
+5. Seed it in `boot_permissions_snapshot`, and add an event-loop arm in `main.rs` that stores each read in `permissions_snapshot`
+6. Decide whether it gates capture. A gate belongs in `CaptureSupervisor`, never in an exit from `preflight()`
 
 ### Adding a new crate to the workspace
 
