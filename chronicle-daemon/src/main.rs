@@ -7,6 +7,7 @@ mod logging;
 mod media_presence;
 mod mic_gate;
 mod permission_gate;
+mod permission_monitor;
 mod permissions;
 mod pipeline;
 mod power;
