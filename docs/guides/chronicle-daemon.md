@@ -131,9 +131,10 @@ segment means data loss.
 ### Shutdown
 
 Triggered by `SIGINT` (Ctrl-C) or `SIGTERM`, by a failed first start after a
-grant, or by the permission monitor stopping (item 16). Each enters the same ordered teardown that cascades through
-the system. After that failed start, an exit watchdog ends the process with
-status 4 if the teardown takes longer than 15 s:
+grant, or by the permission monitor stopping (item 16). Each enters the same
+ordered teardown that cascades through the system. After a failed first start
+after a grant, an exit watchdog ends the process with status 4 if the teardown
+takes longer than 15 s:
 
 1. `supervisor.shutdown()` — stops SCStream and joins the store/ocr tasks
 2. `audio_pipeline.stop()` — drops the audio handler and flushes the encoding thread

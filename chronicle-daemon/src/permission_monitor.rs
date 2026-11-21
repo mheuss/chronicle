@@ -68,6 +68,8 @@ pub(crate) async fn run(
     // When the last tick started. None after Idle. Leaving Idle then reads at once.
     let mut last_tick: Option<tokio::time::Instant> = None;
     let mut last_epoch = mode_rx.borrow().epoch;
+    let mut screen_log = ReadLog::default();
+    let mut mic_log = ReadLog::default();
     loop {
         let state = *mode_rx.borrow_and_update();
         // A new epoch means an Idle period began. It may have ended before
@@ -114,7 +116,7 @@ pub(crate) async fn run(
         }
         last_tick = Some(tokio::time::Instant::now());
         let screen = reader(PermissionName::ScreenRecording).await;
-        log::info!("permission read: ScreenRecording -> {screen:?}");
+        screen_log.note(PermissionName::ScreenRecording, screen);
         let sent = screen_tx
             .send(TimedRead {
                 read: screen,
@@ -131,7 +133,7 @@ pub(crate) async fn run(
         let state = *mode_rx.borrow();
         if state.mode.interval().is_some() {
             let mic = reader(PermissionName::Microphone).await;
-            log::info!("permission read: Microphone -> {mic:?}");
+            mic_log.note(PermissionName::Microphone, mic);
             let sent = mic_tx
                 .send(TimedRead {
                     read: mic,
@@ -147,6 +149,26 @@ pub(crate) async fn run(
     }
 }
 
+/// Logs every read at debug, and at info only when it differs from the last
+/// read of the same permission (design R10, N2b).
+#[derive(Default)]
+struct ReadLog {
+    last: Option<PermissionRead>,
+}
+
+impl ReadLog {
+    /// Returns true when the read went to the info log.
+    fn note(&mut self, name: PermissionName, read: PermissionRead) -> bool {
+        log::debug!("permission read: {name:?} -> {read:?}");
+        let changed = self.last != Some(read);
+        self.last = Some(read);
+        if changed {
+            log::info!("permission read: {name:?} -> {read:?}");
+        }
+        changed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +179,23 @@ mod tests {
     use tokio::time::Instant;
 
     type Log = Arc<Mutex<Vec<(PermissionName, Duration)>>>;
+
+    #[test]
+    fn identical_reads_log_once_at_info() {
+        let mut log = ReadLog::default();
+        let name = PermissionName::ScreenRecording;
+        let infos = [
+            PermissionRead::Denied,
+            PermissionRead::Denied,
+            PermissionRead::Denied,
+            PermissionRead::Authorized,
+            PermissionRead::Authorized,
+        ]
+        .into_iter()
+        .filter(|&read| log.note(name, read))
+        .count();
+        assert_eq!(infos, 2, "the first read and the one change");
+    }
 
     fn st(mode: MonitorMode) -> MonitorState {
         MonitorState {

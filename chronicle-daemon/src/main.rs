@@ -105,7 +105,8 @@ fn spawn_exit_watchdog(grace: std::time::Duration, code: u8) {
 
 /// The code the post-loop exit watchdog exits with, if one is needed. A
 /// poisoned engine and a failed start after a grant can both leave a stream
-/// running, and either can block the shutdown below.
+/// running, and either can block the shutdown below. A monitor stop leaves no
+/// stream running, so it arms none.
 fn exit_watchdog_code(loop_poisoned: bool, loop_exit: Option<u8>) -> Option<u8> {
     if loop_poisoned { Some(3) } else { loop_exit }
 }
