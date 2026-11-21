@@ -434,8 +434,8 @@ mod tests {
         // Build the microphone the way the first enable would. Conditional,
         // because a build failure is soft and leaves the slot empty: on a host
         // with no input device, `AVAudioConverter::initFromFormat_toFormat`
-        // (microphone.rs:252-259) returns nil against a zero-channel native
-        // format and `new` returns `Err`. Asserting unconditionally would fail
+        // in `MicrophoneCapture::new` returns nil against a zero-channel
+        // native format and `new` returns `Err`. Asserting unconditionally would fail
         // such a host for behaving as designed.
         //
         // Skipping the assertion there costs nothing: no `Err` means no
