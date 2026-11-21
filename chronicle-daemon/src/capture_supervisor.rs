@@ -355,19 +355,7 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         }
         self.capture_paused.store(paused, Ordering::Release);
         settings::write_capture_paused(&self.base_dir, paused);
-        log::info!("set_user_paused: paused={paused}");
-    }
-
-    /// `mark_user_paused`, then reconcile. Test-only: the event loop publishes
-    /// the new state between the two.
-    #[cfg(test)]
-    pub async fn set_user_paused(
-        &mut self,
-        paused: bool,
-        audio: &'a AudioPipeline,
-    ) -> ReconcileOutcome {
-        self.mark_user_paused(paused);
-        self.reconcile(audio).await
+        log::info!("mark_user_paused: paused={paused}");
     }
 
     /// Set `system_asleep` and mark the read stale on a sleep. Transient.
@@ -377,31 +365,13 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
             self.sr_stale = true;
             self.idle_epoch += 1;
         }
-        log::info!("set_system_asleep: asleep={asleep}");
-    }
-
-    /// `mark_system_asleep`, then reconcile. Test-only, like `set_user_paused`.
-    #[cfg(test)]
-    pub async fn set_system_asleep(
-        &mut self,
-        asleep: bool,
-        audio: &'a AudioPipeline,
-    ) -> ReconcileOutcome {
-        self.mark_system_asleep(asleep);
-        self.reconcile(audio).await
+        log::info!("mark_system_asleep: asleep={asleep}");
     }
 
     /// Clear `system_asleep`. Transient.
     pub fn mark_system_awake(&mut self) {
         self.system_asleep = false;
-        log::info!("set_system_awake: cleared system_asleep");
-    }
-
-    /// `mark_system_awake`, then reconcile. Test-only, like `set_user_paused`.
-    #[cfg(test)]
-    pub async fn set_system_awake(&mut self, audio: &'a AudioPipeline) -> ReconcileOutcome {
-        self.mark_system_awake();
-        self.reconcile(audio).await
+        log::info!("mark_system_awake: cleared system_asleep");
     }
 
     /// Set or clear the Screen Recording gate and reconcile. Transient, never
@@ -751,7 +721,10 @@ mod tests {
         .with_screen_recording_gate(false, Arc::new(AtomicBool::new(false)));
 
         assert_eq!(
-            supervisor.set_user_paused(true, &audio).await,
+            {
+                supervisor.mark_user_paused(true);
+                supervisor.reconcile(&audio).await
+            },
             ReconcileOutcome::NoChange
         );
         assert!(supervisor.gates().sr_stale, "a pause marks the read stale");
@@ -761,13 +734,19 @@ mod tests {
             "a pause starts a new epoch"
         );
         assert_eq!(
-            supervisor.set_user_paused(false, &audio).await,
+            {
+                supervisor.mark_user_paused(false);
+                supervisor.reconcile(&audio).await
+            },
             ReconcileOutcome::NoChange
         );
         assert!(supervisor.runtime.is_none(), "no start before a fresh read");
 
         assert_eq!(
-            supervisor.set_system_asleep(true, &audio).await,
+            {
+                supervisor.mark_system_asleep(true);
+                supervisor.reconcile(&audio).await
+            },
             ReconcileOutcome::NoChange
         );
         assert!(supervisor.gates().sr_stale);
@@ -777,7 +756,10 @@ mod tests {
             "a sleep starts a new epoch"
         );
         assert_eq!(
-            supervisor.set_system_awake(&audio).await,
+            {
+                supervisor.mark_system_awake();
+                supervisor.reconcile(&audio).await
+            },
             ReconcileOutcome::NoChange
         );
         assert!(supervisor.runtime.is_none(), "no start before a fresh read");
@@ -785,7 +767,10 @@ mod tests {
         // An Authorized read while asleep clears the stale flag and starts
         // nothing, because the sleep flag still holds.
         assert_eq!(
-            supervisor.set_system_asleep(true, &audio).await,
+            {
+                supervisor.mark_system_asleep(true);
+                supervisor.reconcile(&audio).await
+            },
             ReconcileOutcome::NoChange
         );
         assert_eq!(
@@ -854,7 +839,10 @@ mod tests {
             "a paused boot is an entry to Idle"
         );
         assert_eq!(
-            supervisor.set_user_paused(false, &audio).await,
+            {
+                supervisor.mark_user_paused(false);
+                supervisor.reconcile(&audio).await
+            },
             ReconcileOutcome::NoChange
         );
         assert!(supervisor.runtime.is_none(), "no start before a fresh read");
@@ -880,7 +868,10 @@ mod tests {
         .with_screen_recording_gate(true, Arc::clone(&mirror));
         // user_paused stays true, so neither call below reaches ScreenCaptureKit.
         assert_eq!(
-            supervisor.set_user_paused(true, &audio).await,
+            {
+                supervisor.mark_user_paused(true);
+                supervisor.reconcile(&audio).await
+            },
             ReconcileOutcome::NoChange
         );
 
@@ -911,7 +902,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn set_user_paused_persists_and_updates_atom() {
+    async fn mark_user_paused_persists_and_updates_atom() {
         let (dir, audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
             supervisor_fixtures().await;
 
@@ -929,24 +920,33 @@ mod tests {
             dir.path().to_path_buf(),
             Arc::new(chronicle_capture::CaptureDropCounters::default()),
         );
-        let _ = supervisor.set_system_asleep(true, &audio).await;
+        let _ = {
+            supervisor.mark_system_asleep(true);
+            supervisor.reconcile(&audio).await
+        };
         // Sanity: persisted paused starts false (missing file => false).
         assert!(!settings::read_capture_paused(dir.path()));
 
-        let _ = supervisor.set_user_paused(true, &audio).await;
+        let _ = {
+            supervisor.mark_user_paused(true);
+            supervisor.reconcile(&audio).await
+        };
         assert!(
             settings::read_capture_paused(dir.path()),
-            "set_user_paused(true) must persist"
+            "mark_user_paused(true) must persist"
         );
         assert!(
             capture_paused.load(Ordering::Acquire),
             "capture_paused atom must mirror user_paused=true"
         );
 
-        let _ = supervisor.set_user_paused(false, &audio).await;
+        let _ = {
+            supervisor.mark_user_paused(false);
+            supervisor.reconcile(&audio).await
+        };
         assert!(
             !settings::read_capture_paused(dir.path()),
-            "set_user_paused(false) must persist"
+            "mark_user_paused(false) must persist"
         );
         assert!(
             !capture_paused.load(Ordering::Acquire),
@@ -955,11 +955,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn set_system_asleep_flips_flag_without_persisting() {
+    async fn mark_system_asleep_flips_flag_without_persisting() {
         let (dir, audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
             supervisor_fixtures().await;
 
-        // user_paused stays false. set_system_asleep keeps decide() at None
+        // user_paused stays false. mark_system_asleep keeps decide() at None
         // because the system_asleep flag is now set.
         let mut supervisor = CaptureSupervisor::new(
             false,
@@ -979,7 +979,10 @@ mod tests {
         // CHR-57 extends should_run() with display_asleep.
         assert!(supervisor.should_run(), "no stop flag set must mean run");
 
-        let outcome = supervisor.set_system_asleep(true, &audio).await;
+        let outcome = {
+            supervisor.mark_system_asleep(true);
+            supervisor.reconcile(&audio).await
+        };
 
         assert_eq!(
             outcome,
@@ -997,7 +1000,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn set_system_awake_clears_system_asleep_only() {
+    async fn mark_system_awake_clears_system_asleep_only() {
         let (dir, audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
             supervisor_fixtures().await;
 
@@ -1014,17 +1017,23 @@ mod tests {
             dir.path().to_path_buf(),
             Arc::new(chronicle_capture::CaptureDropCounters::default()),
         );
-        let _ = supervisor.set_system_asleep(true, &audio).await;
+        let _ = {
+            supervisor.mark_system_asleep(true);
+            supervisor.reconcile(&audio).await
+        };
 
         // Sanity: both flags set.
         let (u, s) = supervisor.flags_for_test();
         assert!(u && s, "expected both flags set before wake");
 
-        let _ = supervisor.set_system_awake(&audio).await;
+        let _ = {
+            supervisor.mark_system_awake();
+            supervisor.reconcile(&audio).await
+        };
 
         let (u, s) = supervisor.flags_for_test();
-        assert!(u, "user_paused must be untouched by set_system_awake");
-        assert!(!s, "set_system_awake must clear system_asleep");
+        assert!(u, "user_paused must be untouched by mark_system_awake");
+        assert!(!s, "mark_system_awake must clear system_asleep");
         assert!(
             !supervisor.should_run(),
             "should_run() must stay false while user_paused holds"

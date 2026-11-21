@@ -397,14 +397,17 @@ fn boot_permissions_snapshot(
     }
 }
 
-/// Process exit codes:
+/// Daemon exit codes:
 ///
 /// | Code | Meaning |
 /// |---|---|
 /// | 0 | Clean shutdown, or another daemon holds the lock |
 /// | 1 | Startup error |
-/// | 3 | Capture stop left streams possibly running |
+/// | 3 | Capture start or stop left streams possibly running |
 /// | 4 | Restart for fresh permissions (design §4) |
+///
+/// The `--permission-status` helper has its own codes, 0 to 2, documented on
+/// `permissions::run_status_command`.
 ///
 /// The first capture start after a Screen Recording grant failed. Exit
 /// non-zero so launchd starts a fresh process, which reads the grant at boot.
