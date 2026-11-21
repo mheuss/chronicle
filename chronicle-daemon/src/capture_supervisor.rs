@@ -252,7 +252,8 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     /// resume: a pause/sleep teardown disables the mic, and any later Start
     /// must re-apply the user's intent without relying on the caller. The gate
     /// may clear the preference when the grant is missing (design §1.2), so
-    /// `start()` is a settings writer and must run on the event loop task.
+    /// `start()` is a settings writer. It must run on the event loop task, or in
+    /// the boot `reconcile` before the loop starts.
     ///
     /// Failures log and return `StartFailed`; this method never exits the
     /// process. `route_reconcile_outcome` decides whether to escalate

@@ -1,7 +1,8 @@
 import Foundation
 
 /// The outcome of the last microphone operation, shown until the next toggle
-/// or a re-check that changes the mic state (design §2.3).
+/// or a re-check that finds the mic state or the permission read changed
+/// (design §2.3).
 enum MicOperationMark: Equatable, Sendable {
     case none, rejected, unconfirmed
 }

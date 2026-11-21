@@ -1,6 +1,8 @@
 //! The microphone permission gate (design §1.2). Every mic start goes through
-//! `apply_mic_intent`. Every caller runs on the event loop task, because the
-//! gate writes settings (see the single-writer note in `main.rs`).
+//! `apply_mic_intent`. The gate writes settings, so its callers must never
+//! overlap the other settings writers. They run on the event loop task, or in
+//! the boot `reconcile` before the loop starts (see the single-writer note in
+//! `main.rs`).
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -80,8 +82,9 @@ pub(crate) fn apply_mic_intent(
 /// Re-apply the gate to the saved intent, then store the `Status` value. It
 /// writes the intent only to clear it on a missing grant, and it does that
 /// whether or not the engine runs. With `capture_running` false it never
-/// starts the engine. Callers must be on the event loop task, as
-/// `CaptureSupervisor::start` is (design §1.2).
+/// starts the engine. Callers must run on the event loop task, or in the boot
+/// `reconcile` before the loop starts, as `CaptureSupervisor::start` does
+/// (design §1.2).
 ///
 /// A periodic caller must call this on every read other than `Authorized`,
 /// whatever `mic_state` is. Calling it only while the mic is `on` misses a

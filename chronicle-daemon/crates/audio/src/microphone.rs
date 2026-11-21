@@ -293,8 +293,8 @@ impl MicrophoneCapture {
 
     /// Start capture. Fast — the engine is already prepared. Microphone on.
     ///
-    /// This is the call that engages the microphone hardware and triggers the
-    /// TCC permission prompt on first use.
+    /// This is the call that engages the microphone hardware. The TCC prompt
+    /// comes earlier, from `new`.
     pub fn start(&self) -> Result<()> {
         autoreleasepool(|_| {
             // SAFETY: the engine was prepared in `new`. startAndReturnError
