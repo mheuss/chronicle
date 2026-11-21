@@ -911,7 +911,7 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     ));
     let (screen_tx, mut screen_rx) = tokio::sync::mpsc::channel(8);
     let (mic_perm_tx, mut mic_rx_perm) = tokio::sync::mpsc::channel(8);
-    let monitor_handle = tokio::spawn(permission_monitor::run(
+    let mut monitor_handle = tokio::spawn(permission_monitor::run(
         permission_monitor::helper_reader(),
         mode_rx,
         screen_tx,
@@ -920,7 +920,6 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
         permission_monitor::unix_ms,
     ));
     let mut sr_gate = permission_gate::SrGate::default();
-    let mut post_grant = permission_gate::PostGrant::default();
     // The provision currently in flight, if any. At most one is ever doing
     // real work — the provisioner's in-flight CAS guarantees it — so the
     // latest handle is the only one worth holding, and shutdown waits on it
@@ -945,17 +944,27 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                 log::info!("SIGTERM received, shutting down");
                 break;
             }
+            // The monitor only returns once the loop has dropped its channels,
+            // so ending here means it panicked or quit, and gates would stop moving.
+            res = &mut monitor_handle => {
+                log::error!("permission monitor stopped ({res:?}); shutting down for a fresh process");
+                loop_poisoned = true;
+                break;
+            }
             Some(t) = screen_rx.recv() => {
                 let g = supervisor.gates();
                 if !permission_gate::accept_screen_read(t.epoch, g) {
                     continue;
                 }
+                // Before the gate moves, so Status never pairs a new gate with the old read.
+                let mut next = (**permissions_snapshot.load()).clone();
+                next.screen_recording = ipc_handler::wire_permission(t.read);
+                next.screen_recording_checked_at_ms = Some(t.at_ms);
+                permissions_snapshot.store(Arc::new(next));
                 if let Some(denied) = sr_gate.decide(g.sr_denied, g.sr_stale, t.read) {
-                    if permission_gate::grant_cleared(g.sr_denied, denied) {
-                        post_grant.granted();
-                    }
+                    let granted = permission_gate::grant_cleared(g.sr_denied, denied);
                     let outcome = supervisor.set_sr_denied(denied, &audio_pipeline).await;
-                    if let Some(code) = post_grant.observe(&outcome) {
+                    if let Some(code) = permission_gate::exit_after_grant(granted, &outcome) {
                         log::error!("capture start after a Screen Recording grant failed; shutting down for a fresh process");
                         loop_exit = Some(code);
                         break;
@@ -972,10 +981,6 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                         break;
                     }
                 }
-                let mut next = (**permissions_snapshot.load()).clone();
-                next.screen_recording = ipc_handler::wire_permission(t.read);
-                next.screen_recording_checked_at_ms = Some(t.at_ms);
-                permissions_snapshot.store(Arc::new(next));
                 permission_gate::publish_state(&mode_tx, supervisor.gates(), mic_generation);
             }
             Some(t) = mic_rx_perm.recv() => {
@@ -993,7 +998,9 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                         capture_running,
                         &mic_state_atom,
                     );
-                    log::info!("permission tick: mic read={:?}, result={state:?}", t.read);
+                    if state != atom {
+                        log::info!("permission tick: mic read={:?}, result={state:?}", t.read);
+                    }
                 }
                 let mut next = (**permissions_snapshot.load()).clone();
                 next.microphone = ipc_handler::wire_permission(t.read);
@@ -1047,12 +1054,6 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                     supervisor.reconcile(&audio_pipeline),
                 )
                 .await;
-                if let Some(code) = post_grant.observe(&outcome) {
-                    let _ = cmd.reply.send(paused);
-                    log::error!("capture start after a Screen Recording grant failed; shutting down for a fresh process");
-                    loop_exit = Some(code);
-                    break;
-                }
                 let disposition = route_reconcile_outcome(
                     &outcome,
                     &mut boot_incident,
@@ -1113,11 +1114,6 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                     supervisor.reconcile(&audio_pipeline),
                 )
                 .await;
-                if let Some(code) = post_grant.observe(&outcome) {
-                    log::error!("capture start after a Screen Recording grant failed; shutting down for a fresh process");
-                    loop_exit = Some(code);
-                    break;
-                }
                 let disposition = route_reconcile_outcome(
                     &outcome,
                     &mut boot_incident,
@@ -1139,11 +1135,6 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                 let outcome = supervisor.reconcile(&audio_pipeline).await;
                 if outcome == ReconcileOutcome::Started {
                     log::info!("capture recovered on retry");
-                }
-                if let Some(code) = post_grant.observe(&outcome) {
-                    log::error!("capture start after a Screen Recording grant failed; shutting down for a fresh process");
-                    loop_exit = Some(code);
-                    break;
                 }
                 let disposition = route_reconcile_outcome(
                     &outcome,
@@ -1484,11 +1475,7 @@ mod tests {
         let failed = ReconcileOutcome::StartFailed {
             partial_teardown: false,
         };
-        let mut post_grant = crate::permission_gate::PostGrant::default();
-        assert_eq!(post_grant.observe(&failed), None, "no grant pending");
-        post_grant.granted();
-        assert_eq!(post_grant.observe(&ReconcileOutcome::NoChange), None);
-        let loop_exit = post_grant.observe(&failed);
+        let loop_exit = crate::permission_gate::exit_after_grant(true, &failed);
         assert_eq!(loop_exit, Some(4));
         // The code `run` returns after the drain is the process exit status.
         assert_eq!(exit_code_for(after_drain(loop_exit, false)), 4);

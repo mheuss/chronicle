@@ -310,6 +310,8 @@ fn preflight_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn preflight_takes_the_mic_from_the_fresh_reader() {
@@ -320,8 +322,6 @@ mod tests {
         assert_eq!(boot.screen, ScreenRecordingStatus::Denied);
         assert_eq!(boot.mic, PermissionRead::NotDetermined);
     }
-    use std::path::Path;
-    use std::time::{Duration, Instant};
 
     fn answer(out: Option<&'static str>) -> impl Fn(&Path, &[&str], Duration) -> Option<String> {
         move |_, _, _| out.map(str::to_string)

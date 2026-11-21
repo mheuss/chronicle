@@ -149,40 +149,17 @@ pub(crate) fn mic_tick_calls_gate(
     }
 }
 
-/// Tracks the first capture start after a grant (design §4).
-#[derive(Debug, Default)]
-pub(crate) struct PostGrant {
-    pending: bool,
-}
-
-impl PostGrant {
-    pub(crate) fn granted(&mut self) {
-        self.pending = true;
-    }
-
-    /// Returns the exit code the daemon must exit with, if any.
-    pub(crate) fn observe(&mut self, outcome: &ReconcileOutcome) -> Option<u8> {
-        if !self.pending {
-            return None;
-        }
-        match outcome {
-            ReconcileOutcome::Started => {
-                self.pending = false;
-                None
-            }
-            ReconcileOutcome::StartFailed { .. } => {
-                self.pending = false;
-                Some(EXIT_RESTART_FOR_PERMISSIONS)
-            }
-            _ => None,
-        }
-    }
+/// The exit code when the start right after a grant fails (design §4). The
+/// screen arm's reconcile is the only start that can follow a grant.
+pub(crate) fn exit_after_grant(granted: bool, outcome: &ReconcileOutcome) -> Option<u8> {
+    (granted && matches!(outcome, ReconcileOutcome::StartFailed { .. }))
+        .then_some(EXIT_RESTART_FOR_PERMISSIONS)
 }
 
 /// Exit code 4: restart for fresh permissions (design §4).
 pub(crate) const EXIT_RESTART_FOR_PERMISSIONS: u8 = 4;
 
-/// True when a gate change counts as a grant and arms `PostGrant`: the gate
+/// True when a gate change counts as a grant: the gate
 /// was denied and the read cleared it. A read that only clears `sr_stale`
 /// is not a grant (design §4, R1).
 pub(crate) fn grant_cleared(denied_now: bool, new_denied: bool) -> bool {
@@ -458,21 +435,6 @@ mod tests {
     }
 
     #[test]
-    fn post_grant_waits_for_an_actual_start() {
-        let mut p = PostGrant::default();
-        p.granted();
-        assert_eq!(p.observe(&ReconcileOutcome::NoChange), None);
-        assert_eq!(p.observe(&ReconcileOutcome::Started), None);
-        // Cleared: a later failure is ordinary.
-        assert_eq!(
-            p.observe(&ReconcileOutcome::StartFailed {
-                partial_teardown: false
-            }),
-            None
-        );
-    }
-
-    #[test]
     fn only_clearing_a_real_denial_is_a_grant() {
         // (denied_now, new_denied) -> granted
         assert!(grant_cleared(true, false), "denied to allowed is a grant");
@@ -485,21 +447,13 @@ mod tests {
     }
 
     #[test]
-    fn post_grant_start_failure_exits() {
-        let mut p = PostGrant::default();
-        assert_eq!(
-            p.observe(&ReconcileOutcome::StartFailed {
-                partial_teardown: false
-            }),
-            None
-        );
-        p.granted();
-        assert_eq!(p.observe(&ReconcileOutcome::NoChange), None);
-        assert_eq!(
-            p.observe(&ReconcileOutcome::StartFailed {
-                partial_teardown: false
-            }),
-            Some(4)
-        );
+    fn only_a_failed_start_after_a_grant_exits() {
+        let failed = ReconcileOutcome::StartFailed {
+            partial_teardown: false,
+        };
+        assert_eq!(exit_after_grant(false, &failed), None, "no grant");
+        assert_eq!(exit_after_grant(true, &ReconcileOutcome::Started), None);
+        assert_eq!(exit_after_grant(true, &ReconcileOutcome::NoChange), None);
+        assert_eq!(exit_after_grant(true, &failed), Some(4));
     }
 }
