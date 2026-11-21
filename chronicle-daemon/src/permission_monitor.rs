@@ -54,7 +54,9 @@ pub(crate) fn unix_ms() -> i64 {
 
 /// Each tick reads Screen Recording and sends it, then reads the mic and
 /// sends it. Ticks start at least one interval apart, measured from the last
-/// tick's start. Every read taken is sent and awaited, in order (design AD13).
+/// tick's start, except that leaving Idle or a new idle epoch reads at once.
+/// Every read taken is sent and awaited, in order (design AD13). `cancel` is
+/// seen only between ticks, not during a read or a send.
 pub(crate) async fn run(
     reader: Reader,
     mut mode_rx: watch::Receiver<MonitorState>,
@@ -65,9 +67,16 @@ pub(crate) async fn run(
 ) {
     // When the last tick started. None after Idle. Leaving Idle then reads at once.
     let mut last_tick: Option<tokio::time::Instant> = None;
+    let mut last_epoch = mode_rx.borrow().epoch;
     loop {
-        let mode = mode_rx.borrow_and_update().mode;
-        let Some(interval) = mode.interval() else {
+        let state = *mode_rx.borrow_and_update();
+        // A new epoch means an Idle period began. It may have ended before
+        // this loop saw it, so treat it as leaving Idle.
+        if state.epoch != last_epoch {
+            last_epoch = state.epoch;
+            last_tick = None;
+        }
+        let Some(interval) = state.mode.interval() else {
             log::info!("permission monitor: idle");
             last_tick = None;
             tokio::select! {
@@ -447,6 +456,91 @@ mod tests {
             "no read is dropped"
         );
         h.cancel.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_full_channel_holds_the_monitor_and_drops_nothing() {
+        let (_mode_tx, mode_rx) = watch::channel(st(MonitorMode::Gated));
+        let (screen_tx, mut screen_rx) = mpsc::channel(1);
+        let (mic_tx, _mic_rx) = mpsc::channel(64);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = Arc::clone(&calls);
+        // Screen reads alternate Authorized, Denied, Authorized, ...
+        let reader: Reader = Arc::new(move |name| {
+            let read = match name {
+                PermissionName::ScreenRecording if c.fetch_add(1, Ordering::SeqCst) % 2 == 1 => {
+                    PermissionRead::Denied
+                }
+                _ => PermissionRead::Authorized,
+            };
+            Box::pin(async move { read })
+        });
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run(reader, mode_rx, screen_tx, mic_tx, cancel, || 0));
+        // Nothing drains the channel, so the second send waits.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the monitor waits on a full channel"
+        );
+        let mut reads = Vec::new();
+        for _ in 0..4 {
+            reads.push(screen_rx.recv().await.unwrap().read);
+        }
+        assert_eq!(
+            reads,
+            vec![
+                PermissionRead::Authorized,
+                PermissionRead::Denied,
+                PermissionRead::Authorized,
+                PermissionRead::Denied
+            ]
+        );
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_new_epoch_reads_at_once() {
+        let (mode_tx, mode_rx) = watch::channel(st(MonitorMode::Gated));
+        let mode_tx = Arc::new(mode_tx);
+        let (screen_tx, _screen_rx) = mpsc::channel(64);
+        let (mic_tx, _mic_rx) = mpsc::channel(64);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (tx, c) = (Arc::clone(&mode_tx), Arc::clone(&calls));
+        // A pause and a resume both land while the first screen read is in
+        // flight, so the loop never sees Idle, only the new epoch.
+        let reader: Reader = Arc::new(move |name| {
+            if name == PermissionName::ScreenRecording && c.fetch_add(1, Ordering::SeqCst) == 0 {
+                tx.send_replace(MonitorState {
+                    mode: MonitorMode::Idle,
+                    epoch: 1,
+                    mic_generation: 0,
+                });
+                tx.send_replace(MonitorState {
+                    mode: MonitorMode::Gated,
+                    epoch: 1,
+                    mic_generation: 0,
+                });
+            }
+            Box::pin(async { PermissionRead::Authorized })
+        });
+        let cancel = CancellationToken::new();
+        tokio::spawn(run(
+            reader,
+            mode_rx,
+            screen_tx,
+            mic_tx,
+            cancel.clone(),
+            || 0,
+        ));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the new epoch reads at once"
+        );
+        cancel.cancel();
     }
 
     #[tokio::test(start_paused = true)]
