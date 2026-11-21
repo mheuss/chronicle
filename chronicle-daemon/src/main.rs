@@ -474,7 +474,11 @@ fn run_main() -> Result<()> {
 async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> Result<()> {
     // --- Permission preflight ---
     let boot = permissions::preflight();
-    let sr_denied_mirror = Arc::new(AtomicBool::new(false));
+    // Seeded from the boot read, so a `Status` served before the supervisor
+    // exists agrees with the snapshot.
+    let sr_denied_mirror = Arc::new(AtomicBool::new(
+        boot.screen == permissions::ScreenRecordingStatus::Denied,
+    ));
     let permissions_snapshot = Arc::new(ArcSwap::from_pointee(boot_permissions_snapshot(
         &boot,
         permission_monitor::unix_ms(),
@@ -955,7 +959,7 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                     continue;
                 }
                 if let Some(denied) = sr_gate.decide(g.sr_denied, g.sr_stale, t.read) {
-                    if g.sr_denied && !denied {
+                    if permission_gate::grant_cleared(g.sr_denied, denied) {
                         post_grant.granted();
                     }
                     let outcome = supervisor.set_sr_denied(denied, &audio_pipeline).await;

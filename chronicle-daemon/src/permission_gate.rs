@@ -183,6 +183,13 @@ impl PostGrant {
 /// Exit code 4: restart for fresh permissions (design §4).
 pub(crate) const EXIT_RESTART_FOR_PERMISSIONS: i32 = 4;
 
+/// True when a gate change counts as a grant and arms `PostGrant`: the gate
+/// was denied and the read cleared it. A read that only clears `sr_stale`
+/// is not a grant (design §4, R1).
+pub(crate) fn grant_cleared(denied_now: bool, new_denied: bool) -> bool {
+    denied_now && !new_denied
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,6 +471,18 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn only_clearing_a_real_denial_is_a_grant() {
+        // (denied_now, new_denied) -> granted
+        assert!(grant_cleared(true, false), "denied to allowed is a grant");
+        assert!(
+            !grant_cleared(false, false),
+            "clearing only sr_stale is not a grant (R1)"
+        );
+        assert!(!grant_cleared(false, true), "a denial is not a grant");
+        assert!(!grant_cleared(true, true), "still denied");
     }
 
     #[test]
