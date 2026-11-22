@@ -12,6 +12,7 @@ final class ScreenRecordingPromptController {
     @ObservationIgnored private let presenter: @MainActor () -> Void
     @ObservationIgnored private let schedule: Scheduler
     @ObservationIgnored private var isPresenting = false
+    @ObservationIgnored private var grantCount = 0
 
     struct Input {
         let availability: CaptureAvailability
@@ -28,11 +29,17 @@ final class ScreenRecordingPromptController {
 
     /// Called from `DaemonConnection.onStatus`, inside whichever
     /// `requestStatus` delivered the Status.
+    /// A grant read before the scheduled block runs cancels that block.
     func observe(_ input: Input) {
+        if input.screenRecording == .authorized { grantCount += 1 }
         guard latch.observe(input.availability, screenRecording: input.screenRecording) else {
             return
         }
-        schedule { [weak self] in self?.showOnce() }
+        let grants = grantCount
+        schedule { [weak self] in
+            guard let self, self.grantCount == grants else { return }
+            self.showOnce()
+        }
     }
 
     func present() {

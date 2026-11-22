@@ -91,7 +91,7 @@ final class BackgroundServiceTests {
         #expect(hooks == 0, "turning it off calls no hook")
         log.entries.removeAll()
         let enabling = Task { await service.setEnabled(true) }
-        await Task.yield()
+        await waitUntil { service.startingWindowOpen }
         #expect(service.startingWindowOpen, "the starting window opens when the toggle turns on")
         await enabling.value
         #expect(hooks == 1)

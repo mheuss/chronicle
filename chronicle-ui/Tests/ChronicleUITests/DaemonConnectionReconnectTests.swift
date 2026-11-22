@@ -38,6 +38,12 @@ final class FactoryLog {
     func closeServers(from index: Int = 0) {
         for pair in pairs.dropFirst(index) { Darwin.close(pair.serverFD) }
     }
+
+    /// For servers that close their own descriptor. Each one sees EOF once
+    /// its client side closes.
+    private var servers: [Task<Void, Never>] = []
+    func track(_ server: Task<Void, Never>) { servers.append(server) }
+    func awaitServers() async { for server in servers { await server.value } }
 }
 
 /// Holds the semaphores gating each spawned test server, so a test can release
@@ -79,11 +85,12 @@ struct DaemonConnectionReconnectTests {
             let fd = try log.make()
             #expect(setNoSigPipe(fd))
             let serverFD = log.pairs.last!.serverFD
-            _ = blockingServer {
+            log.track(blockingServer {
+                defer { Darwin.close(serverFD) }
                 guard readLineSync(from: serverFD) != nil else { return }
                 writeAll(#"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"0.0.1"}}"# + "\n", to: serverFD)
                 _ = readLineSync(from: serverFD)
-            }
+            })
             return fd
         }, heartbeatInterval: .seconds(30))
         conn.connect()
@@ -95,7 +102,7 @@ struct DaemonConnectionReconnectTests {
         #expect(log.count == 1, "reconnectNow while connected opened a second connection")
         #expect(conn.sessionForTesting === before, "reconnectNow while connected replaced the session")
         conn.disconnect()
-        log.closeServers()
+        await log.awaitServers()
     }
 
     @Test("reconnectNow during an attempt leaves the new attempt's session alone")
@@ -110,11 +117,12 @@ struct DaemonConnectionReconnectTests {
             let fd = try log.make()
             #expect(setNoSigPipe(fd))
             let serverFD = log.pairs.last!.serverFD
-            _ = blockingServer {
+            log.track(blockingServer {
+                defer { Darwin.close(serverFD) }
                 guard readLineSync(from: serverFD) != nil else { return }
                 writeAll(#"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"0.0.1"}}"# + "\n", to: serverFD)
                 _ = readLineSync(from: serverFD)
-            }
+            })
             return fd
         }, heartbeatInterval: .seconds(30))
         conn.connect()
@@ -132,7 +140,7 @@ struct DaemonConnectionReconnectTests {
         #expect(conn.sessionForTesting === winner, "the cancelled attempt touched the new session")
         #expect(conn.currentStatus != nil)
         conn.disconnect()
-        log.closeServers()
+        await log.awaitServers()
     }
 
     @Test("a slow command reply under the bound keeps the replies from going overdue")

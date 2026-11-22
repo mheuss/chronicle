@@ -251,6 +251,7 @@ final class DaemonConnection {
             let type: String
             let variant: String
         }
+        let requestSession = session
         let response = try await sendRequest(
             Req(type: "set_whisper_model", variant: variant),
             expecting: SetWhisperModelResponse.self
@@ -278,7 +279,11 @@ final class DaemonConnection {
             // be a step backwards. Bounded to one tick and self-correcting
             // either way, since at the moment this matters the poll is not
             // yet running.
-            if (try? await requestStatus()) == nil, let last = lastStatus {
+            //
+            // A reply from a replaced session must not splice into the new
+            // session's snapshot.
+            if (try? await requestStatus()) == nil, let requestSession,
+               requestSession === session, let last = lastStatus {
                 lastStatus = last.replacingTranscription(response.status)
             }
         }

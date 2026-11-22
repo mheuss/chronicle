@@ -87,4 +87,33 @@ struct ScreenRecordingPromptControllerTests {
         held.runAll()
         #expect(calls.count == 1, "once per launch")
     }
+
+    @Test func aGrantBeforeTheBlockRunsCancelsTheAutomaticDialog() {
+        let calls = Calls()
+        let held = HeldBlocks()
+        let prompt = ScreenRecordingPromptController(
+            presenter: { calls.count += 1 },
+            schedule: { held.blocks.append($0) })
+        prompt.observe(.init(availability: .needsScreenRecording, screenRecording: .denied))
+        prompt.observe(.init(availability: .capturing, screenRecording: .authorized))
+        held.runAll()
+        #expect(calls.count == 0, "the grant landed before the dialog showed")
+        held.blocks.removeAll()
+        prompt.present()
+        held.runAll()
+        #expect(calls.count == 1, "a button press still shows the dialog")
+    }
+
+    @Test func aRevokeAfterACancelledDialogShowsItOnce() {
+        let calls = Calls()
+        let held = HeldBlocks()
+        let prompt = ScreenRecordingPromptController(
+            presenter: { calls.count += 1 },
+            schedule: { held.blocks.append($0) })
+        prompt.observe(.init(availability: .needsScreenRecording, screenRecording: .denied))
+        prompt.observe(.init(availability: .capturing, screenRecording: .authorized))
+        prompt.observe(.init(availability: .needsScreenRecording, screenRecording: .denied))
+        held.runAll()
+        #expect(calls.count == 1, "only the block scheduled after the grant shows")
+    }
 }
