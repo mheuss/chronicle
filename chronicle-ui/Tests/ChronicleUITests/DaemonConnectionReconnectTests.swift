@@ -356,24 +356,19 @@ struct DaemonConnectionReconnectTests {
             // sleep. Closing the peer before this would test a blocked
             // request instead, which is a different path.
             let serverFD = log.pairs.last!.serverFD
-            // Decided here on the MainActor: the closure below is Sendable and
-            // cannot read `log`.
-            let serverOwnsFD = log.count > 1
-            _ = blockingServer {
-                // Pair 0's descriptor stays with the test, which closes it
-                // below to force the EOF. Every later pair is the server's, so
-                // the test never frees a number a parked read still holds.
-                defer { if serverOwnsFD { Darwin.close(serverFD) } }
+            // Each server closes its own descriptor, so the test never frees a
+            // number another thread may still read.
+            log.track(blockingServer {
+                defer { Darwin.close(serverFD) }
                 guard readLineSync(from: serverFD) != nil else { return }
                 writeAll(#"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"0.0.1"}}"# + "\n", to: serverFD)
                 _ = readLineSync(from: serverFD)
-            }
+            })
             return fd
         }, heartbeatInterval: .seconds(30))
         conn.connect()
         // `lastStatus`, not `log.count`: it proves the round trip completed, so
-        // monitorConnection is in its 30s sleep and pair 0's server is past its
-        // read — the close below cannot free a number out from under one.
+        // monitorConnection is in its 30s sleep.
         await waitUntil { conn.lastStatus != nil }
         #expect(conn.lastStatus != nil, "the heartbeat never completed; the wait below proves nothing")
 
@@ -384,13 +379,15 @@ struct DaemonConnectionReconnectTests {
         try await Task.sleep(for: .milliseconds(2500))
         #expect(log.count == 1, "a healthy connection must not reconnect")
 
-        // The monitor is now asleep. Close the peer and require a prompt
-        // reconnect rather than a 30 second one.
-        Darwin.close(log.pairs[0].serverFD)
+        // The monitor is now asleep. Shut the peer down and require a prompt
+        // reconnect rather than a 30 second one. Pair 0's server still owns
+        // the descriptor, so it closes it after its read sees the shutdown.
+        shutdown(log.pairs[0].serverFD, SHUT_RDWR)
         await waitUntil(ticks: 300) { log.count >= 2 }
         #expect(log.count >= 2, "idle EOF did not reconnect: \(log.count) attempts")
 
         conn.disconnect()
+        await log.awaitServers()
     }
 
     @Test("a heartbeat failure on a live socket reconnects")

@@ -313,6 +313,24 @@ final class BackgroundServiceTests {
         #expect(!service.isBusy)
     }
 
+    @Test func theStartingWindowOpensBeforeAQueuedReconcileRuns() async throws {
+        let agent = FakeLoginService("agent", status: .enabled, log: log)
+        agent.holdUnregister = true
+        let app = FakeLoginService("app", status: .notRegistered, log: log)
+        let service = make(agent: agent, mainApp: app)
+        defer { agent.release() }
+        let first = Task { await service.setEnabled(false) }
+        await waitUntil { log.entries.contains("agent.unregister.start") }
+        try #require(log.entries.contains("agent.unregister.start"))
+        let second = Task { await service.setEnabled(true) }
+        await waitUntil { service.startingWindowOpen }
+        #expect(service.startingWindowOpen, "the window opens while the reconcile still waits")
+        #expect(!log.entries.contains("agent.register"))
+        agent.release()
+        await first.value
+        await second.value
+    }
+
     @Test func statusLabelCoversEveryStatus() throws {
         #expect(BackgroundService.statusLabel(.enabled) == ("On", false))
         #expect(BackgroundService.statusLabel(.requiresApproval)

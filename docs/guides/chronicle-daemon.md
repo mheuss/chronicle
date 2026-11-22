@@ -104,9 +104,11 @@ flowchart TD
     `SIGTERM`). It serves mic toggles, pause and resume, and sleep and wake.
     It also stops when the first capture start after a Screen Recording grant
     fails. The daemon then runs the full teardown and exits with status 4.
-    launchd starts a fresh process that reads the grant at boot (CHR-96).
-    It also stops if the permission monitor task ends. The daemon then exits
-    with status 3, and launchd starts a fresh process.
+    Under launchd, a fresh process starts and reads the grant at boot
+    (CHR-96). It also stops if the permission monitor task ends. The daemon
+    then exits with status 3, and launchd starts a fresh process. A daemon
+    started from Terminal does not restart after either exit. Start it again
+    by hand.
 
 ### Channel Topology
 

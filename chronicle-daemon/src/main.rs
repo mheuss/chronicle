@@ -901,7 +901,7 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     // always-equal flag.
     mic_ready.store(true, Ordering::Release);
     capture_ready.store(true, Ordering::Release);
-    // Adds 1 after each successful mic command and each capture start (design §3, AD20).
+    // Adds 1 after each mic command and each capture start (design §3, AD20).
     let mut mic_generation: u64 = 0;
     // Permission monitor (design §2). Started after the readiness flags are set.
     // The first read then lands on a loop that drains it. The two arms below are the
@@ -1043,10 +1043,10 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                     }
                 };
                 mic_state_atom.store(outcome.status as u8, std::sync::atomic::Ordering::Release);
-                if matches!(outcome.reply, chronicle_ipc::MicState::On | chronicle_ipc::MicState::Off) {
-                    mic_generation += 1;
-                    permission_gate::publish_state(&mode_tx, supervisor.gates(), mic_generation);
-                }
+                // Every command has saved its intent, so older reads are stale
+                // whatever the reply.
+                mic_generation += 1;
+                permission_gate::publish_state(&mode_tx, supervisor.gates(), mic_generation);
                 let _ = cmd.reply.send(outcome.reply);
             }
             Some(cmd) = capture_rx.recv() => {
