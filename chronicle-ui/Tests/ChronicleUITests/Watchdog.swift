@@ -98,22 +98,31 @@ final class TestWatchdog: Sendable {
     private let timerQueue = DispatchQueue(label: "chronicle.test-watchdog")
     private let backupQueue = DispatchQueue(label: "chronicle.test-watchdog.backup")
     private let timer: DispatchSourceTimer
+    private let backupTimer: DispatchSourceTimer
 
     private init() {
         timer = DispatchSource.makeTimerSource(queue: timerQueue)
+        backupTimer = DispatchSource.makeTimerSource(queue: backupQueue)
     }
 
     func armOnce() {
-        let setting: WatchdogSetting? = state.withLock { state in
-            guard !state.armed else { return nil }
+        let raw = ProcessInfo.processInfo.environment[WatchdogSetting.variable]
+        let first = state.withLock { state in
+            guard !state.armed else { return false }
             state.armed = true
-            return WatchdogSetting.parse(ProcessInfo.processInfo.environment[WatchdogSetting.variable])
+            return true
         }
-        guard let setting else { return }
+        guard first else { return }
+        let setting = WatchdogSetting.parse(raw)
         if let seconds = setting.armedSeconds {
             timer.schedule(deadline: .now() + .seconds(seconds))
             timer.setEventHandler { [self] in fire(seconds: seconds) }
             timer.resume()
+            // write(2) to a full pipe can block the fire, so a second timer ends
+            // the process 2 s later whether or not the message got out.
+            backupTimer.schedule(deadline: .now() + .seconds(seconds + 2))
+            backupTimer.setEventHandler { _exit(1) }
+            backupTimer.resume()
         }
         // After arming: a write to a full stderr pipe can block.
         if let notice = setting.notice { StandardError.write(notice) }
@@ -136,10 +145,11 @@ final class TestWatchdog: Sendable {
         state.withLock { Array($0.inFlight.values) }
     }
 
-    /// write(2) to a full pipe can block, so a second queue ends the process
-    /// 2 s later whether or not the message got out.
+    func inFlightTokens(labelPrefix: String) -> Set<UInt64> {
+        state.withLock { Set($0.inFlight.filter { $0.value.hasPrefix(labelPrefix) }.keys) }
+    }
+
     private func fire(seconds: Int) {
-        backupQueue.asyncAfter(deadline: .now() + .seconds(2)) { _exit(1) }
         StandardError.write(WatchdogMessage.fired(seconds: seconds, inFlight: inFlight()))
         _exit(1)
     }
@@ -148,6 +158,9 @@ final class TestWatchdog: Sendable {
 /// Arms the process watchdog when the runner plans a tagged test, and records
 /// each test function while it runs so a fire can name it.
 struct WatchdogTrait: SuiteTrait, TestTrait, CustomExecutionTrait {
+    /// Nested suites that both carry the trait give a test two copies of it.
+    @TaskLocal private static var registeredTest: Test.ID?
+
     var isRecursive: Bool { true }
 
     func prepare(for test: Test) async throws {
@@ -159,7 +172,9 @@ struct WatchdogTrait: SuiteTrait, TestTrait, CustomExecutionTrait {
         for test: Test,
         testCase: Test.Case?
     ) async throws {
-        guard !test.isSuite, testCase == nil else { return try await function() }
+        guard !test.isSuite, testCase == nil, Self.registeredTest != test.id else {
+            return try await function()
+        }
         let label = WatchdogMessage.label(
             name: test.displayName ?? test.name,
             fileID: test.sourceLocation.fileID,
@@ -167,7 +182,7 @@ struct WatchdogTrait: SuiteTrait, TestTrait, CustomExecutionTrait {
         )
         let token = TestWatchdog.shared.begin(label)
         defer { TestWatchdog.shared.end(token) }
-        try await function()
+        try await Self.$registeredTest.withValue(test.id) { try await function() }
     }
 }
 

@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 
 @Suite("Watchdog", .watchdog)
@@ -64,15 +65,40 @@ struct WatchdogTests {
 
     // MARK: Registry
 
+    static let seenTokens = Mutex<Set<UInt64>>([])
+
     @Test("a running test is in flight exactly once")
     func aRunningTestIsInFlight() {
         let mine = TestWatchdog.shared.inFlight().filter { $0.hasPrefix("a running test is in flight exactly once (") }
         #expect(mine.count == 1, "\(TestWatchdog.shared.inFlight())")
     }
 
+    @Test("a suite is never in flight")
+    func aSuiteIsNeverInFlight() {
+        #expect(!TestWatchdog.shared.inFlight().contains { $0.hasPrefix("Watchdog (") }, "\(TestWatchdog.shared.inFlight())")
+    }
+
     @Test("a parameterized test is in flight once, not once per case", arguments: [1, 2, 3])
     func aParameterizedTestIsInFlightOnce(_ value: Int) {
-        let mine = TestWatchdog.shared.inFlight().filter { $0.hasPrefix("a parameterized test is in flight once, not once per case (") }
+        let mine = TestWatchdog.shared.inFlightTokens(labelPrefix: "a parameterized test is in flight once, not once per case (")
         #expect(mine.count == 1, "\(TestWatchdog.shared.inFlight())")
+        let seen = Self.seenTokens.withLock { $0.formUnion(mine); return $0.count }
+        #expect(seen == 1, "each case saw a different token")
+    }
+
+    @Test func endRemovesTheEntry() {
+        let token = TestWatchdog.shared.begin("round trip (X/Y.swift:1)")
+        #expect(TestWatchdog.shared.inFlight().contains("round trip (X/Y.swift:1)"))
+        TestWatchdog.shared.end(token)
+        #expect(!TestWatchdog.shared.inFlight().contains("round trip (X/Y.swift:1)"))
+    }
+
+    @Suite(.watchdog)
+    struct Nested {
+        @Test("a test under two watchdog suites is in flight once")
+        func aNestedTestIsInFlightOnce() {
+            let mine = TestWatchdog.shared.inFlight().filter { $0.hasPrefix("a test under two watchdog suites is in flight once (") }
+            #expect(mine.count == 1, "\(TestWatchdog.shared.inFlight())")
+        }
     }
 }
