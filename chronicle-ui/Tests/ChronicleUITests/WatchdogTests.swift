@@ -132,6 +132,59 @@ struct WatchdogTests {
         #expect(during == before)
     }
 
+    // MARK: Scan
+
+    private func scan(_ text: String) -> [String] {
+        WatchdogScan.scan([(name: "F.swift", text: text)]).map(\.description)
+    }
+
+    @Test func aWatchdogSuitePasses() {
+        #expect(scan("@Suite(\"S\", .watchdog)\n@MainActor\nstruct S {\n    @Test func t() {}\n}\n") == [])
+    }
+
+    @Test func aMultiLineSuiteAttributePasses() {
+        #expect(scan("@Suite(\"S\",\n       .watchdog,\n       .enabled(if: f(\"(\")))\nstruct S {\n    @Test func t() {}\n}\n") == [])
+    }
+
+    @Test func aSuiteWithoutTheWatchdogFails() {
+        #expect(scan("@Suite(\"S\", .timeLimit(.minutes(1)))\nstruct S {\n    @Test func t() {}\n}\n")
+            == ["F.swift:3: @Test in S, which has no @Suite(... .watchdog ...)"])
+    }
+
+    @Test func aTypeWithNoSuiteAttributeFails() {
+        #expect(scan("@MainActor\nstruct S {\n    @Test func t() {}\n}\n")
+            == ["F.swift:3: @Test in S, which has no @Suite(... .watchdog ...)"])
+    }
+
+    @Test func aFreeTestBeforeASuiteFails() {
+        #expect(scan("@Test func free() {}\n@Suite(.watchdog)\nstruct S {\n    @Test func t() {}\n}\n")
+            == ["F.swift:1: free @Test function; no suite can carry .watchdog"])
+    }
+
+    @Test func aFreeTestAfterASuiteFails() {
+        #expect(scan("@Suite(.watchdog)\nstruct S {\n    @Test func t() {}\n}\n\n@Test(\"free\") func free() {}\n")
+            == ["F.swift:6: free @Test function; no suite can carry .watchdog"])
+    }
+
+    @Test func aWatchdogOnlyInACommentFails() {
+        #expect(scan("@Suite(\"S\",\n       // .watchdog,\n       .serialized)\nstruct S {\n    @Test func t() {}\n}\n")
+            == ["F.swift:5: @Test in S, which has no @Suite(... .watchdog ...)"])
+    }
+
+    @Test func aWatchdogOnlyInAStringFails() {
+        #expect(scan("@Suite(\"checking .watchdog\")\nstruct S {\n    @Test func t() {}\n}\n")
+            == ["F.swift:3: @Test in S, which has no @Suite(... .watchdog ...)"])
+    }
+
+    @Test func anExtensionOfAWatchdogSuitePasses() {
+        #expect(scan("@Suite(.watchdog)\nstruct S {}\n\nextension S {\n    @Test func t() {}\n}\n") == [])
+    }
+
+    @Test func anExtensionOfAnotherTypeFails() {
+        #expect(scan("struct S {}\n\nextension S {\n    @Test func t() {}\n}\n")
+            == ["F.swift:4: @Test in an extension of S, which is not a watchdog suite"])
+    }
+
     @Suite(.watchdog)
     struct Nested {
         @Test("a test under two watchdog suites is in flight once")
