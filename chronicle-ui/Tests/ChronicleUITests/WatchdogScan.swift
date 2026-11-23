@@ -20,6 +20,8 @@ enum WatchdogScan {
 
     private nonisolated(unsafe) static let watchdogPattern = /\.watchdog(?![A-Za-z0-9_])/
 
+    private nonisolated(unsafe) static let testPattern = /(?:^|\s)@Test(?![A-Za-z0-9_])/
+
     private nonisolated(unsafe) static let declarationPattern =
         /^(?:(?:public|internal|fileprivate|private|final)\s+)*(struct|class|enum|actor|extension)\s+([A-Za-z_][A-Za-z0-9_]*)/
 
@@ -36,48 +38,52 @@ enum WatchdogScan {
             for (index, line) in lines.enumerated() {
                 let lineNumber = index + 1
                 let text = String(line)
+                let code = codeOnly(text)
                 if openParens > 0 {
-                    let code = codeOnly(text)
                     attributes += code
                     openParens += parenDelta(code)
                     continue
                 }
-                if text.hasPrefix("@Test") {
+                let trimmed = code.drop(while: { $0.isWhitespace })
+                let isTestLine = trimmed.hasPrefix("@") && code.firstMatch(of: testPattern) != nil
+                guard !text.isEmpty, text.first?.isWhitespace == false else {
+                    guard isTestLine else { continue }
+                    guard let current else {
+                        failures.append(Failure(file: file.name, line: lineNumber, reason: "@Test outside any type"))
+                        continue
+                    }
+                    if current.isExtension {
+                        extensionTests.append((file.name, lineNumber, current.name))
+                    } else if !current.isWatchdogSuite {
+                        failures.append(Failure(file: file.name, line: lineNumber, reason: "@Test in \(current.name), which has no @Suite(... .watchdog ...)"))
+                    }
+                    continue
+                }
+                if isTestLine {
                     failures.append(Failure(file: file.name, line: lineNumber, reason: "free @Test function; no suite can carry .watchdog"))
                     continue
                 }
-                if text.hasPrefix("@") {
-                    let code = codeOnly(text)
-                    attributes += code
-                    openParens = parenDelta(code)
-                    continue
+                var declaration = Substring(code)
+                if code.hasPrefix("@") {
+                    guard let split = leadingAttributes(code) else {
+                        attributes += code
+                        openParens = parenDelta(code)
+                        continue
+                    }
+                    attributes += split.attributes
+                    guard !split.rest.isEmpty else { continue }
+                    declaration = split.rest
                 }
-                if let match = text.firstMatch(of: declarationPattern) {
+                if let match = declaration.firstMatch(of: declarationPattern) {
                     let isExtension = match.output.1 == "extension"
                     let isWatchdogSuite = suiteArguments(in: attributes)?.firstMatch(of: watchdogPattern) != nil
                     current = Declaration(name: String(match.output.2), isExtension: isExtension, isWatchdogSuite: isWatchdogSuite)
                     if isWatchdogSuite { watchdogSuites.insert(String(match.output.2)) }
-                    attributes = ""
-                    continue
-                }
-                if text.hasPrefix("}") {
+                    if code.contains("{"), braceDelta(code) == 0 { current = nil }
+                } else if code.hasPrefix("}") {
                     current = nil
                 }
-                if !text.isEmpty, text.first?.isWhitespace == false {
-                    attributes = ""
-                }
-                guard text.first?.isWhitespace == true,
-                      text.drop(while: { $0.isWhitespace }).hasPrefix("@Test")
-                else { continue }
-                guard let current else {
-                    failures.append(Failure(file: file.name, line: lineNumber, reason: "@Test outside any type"))
-                    continue
-                }
-                if current.isExtension {
-                    extensionTests.append((file.name, lineNumber, current.name))
-                } else if !current.isWatchdogSuite {
-                    failures.append(Failure(file: file.name, line: lineNumber, reason: "@Test in \(current.name), which has no @Suite(... .watchdog ...)"))
-                }
+                attributes = ""
             }
         }
         for test in extensionTests where !watchdogSuites.contains(test.type) {
@@ -128,6 +134,32 @@ enum WatchdogScan {
             index = attributes.index(after: index)
         }
         return attributes[open.upperBound...]
+    }
+
+    /// Splits off the attributes at the start of a column-0 line, or returns
+    /// nil when one of them is still open at the end of the line.
+    private static func leadingAttributes(_ code: String) -> (attributes: String, rest: Substring)? {
+        var index = code.startIndex
+        while true {
+            while index < code.endIndex, code[index].isWhitespace { index = code.index(after: index) }
+            guard index < code.endIndex, code[index] == "@" else { break }
+            index = code.index(after: index)
+            while index < code.endIndex, code[index].isLetter || code[index].isNumber || code[index] == "_" {
+                index = code.index(after: index)
+            }
+            guard index < code.endIndex, code[index] == "(" else { continue }
+            var depth = 0
+            repeat {
+                if code[index] == "(" { depth += 1 } else if code[index] == ")" { depth -= 1 }
+                index = code.index(after: index)
+            } while depth > 0 && index < code.endIndex
+            if depth > 0 { return nil }
+        }
+        return (String(code[..<index]), code[index...].drop(while: { $0.isWhitespace }))
+    }
+
+    private static func braceDelta(_ code: String) -> Int {
+        code.reduce(0) { $0 + ($1 == "{" ? 1 : $1 == "}" ? -1 : 0) }
     }
 
     private static func parenDelta(_ code: String) -> Int {

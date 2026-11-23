@@ -67,8 +67,7 @@ struct WatchdogTests {
 
     @Test("a running test is in flight exactly once")
     func aRunningTestIsInFlight() {
-        let mine = TestWatchdog.shared.inFlight().filter { $0.hasPrefix("a running test is in flight exactly once (") }
-        #expect(mine.count == 1, "\(TestWatchdog.shared.inFlight())")
+        #expect(Self.count("a running test is in flight exactly once (") == 1, "\(TestWatchdog.shared.inFlight())")
     }
 
     @Test("a suite is never in flight")
@@ -205,6 +204,28 @@ struct WatchdogTests {
             == ["F.swift:2: @Test in S, which has no @Suite(... .watchdog ...)"])
     }
 
+    @Test func aFreeTestAfterAnotherAttributeFails() {
+        #expect(scan("@MainActor @Test func free() async {}\n")
+            == ["F.swift:1: free @Test function; no suite can carry .watchdog"])
+    }
+
+    @Test func aMemberTestAfterAnotherAttributeIsChecked() {
+        #expect(scan("struct S {\n    @MainActor @Test func t() async {}\n}\n")
+            == ["F.swift:2: @Test in S, which has no @Suite(... .watchdog ...)"])
+        #expect(scan("@Suite(.watchdog)\nstruct S {\n    @MainActor @Test func t() async {}\n}\n") == [])
+    }
+
+    @Test func anAttributeOnTheDeclarationLineCounts() {
+        #expect(scan("@Suite(.watchdog) struct S {\n    @Test func t() {}\n}\n") == [])
+        #expect(scan("@Suite(.watchdog) struct A {}\n@MainActor struct B {\n    @Test func t() {}\n}\n")
+            == ["F.swift:3: @Test in B, which has no @Suite(... .watchdog ...)"])
+    }
+
+    @Test func aOneLineSuiteDoesNotLendItsTraitToTheNextScope() {
+        #expect(scan("@Suite(.watchdog) struct A {}\nnonisolated struct B {\n    @Test func t() {}\n}\n")
+            == ["F.swift:3: @Test outside any type"])
+    }
+
     @Test func anExtensionOfAWatchdogSuitePasses() {
         #expect(scan("@Suite(.watchdog)\nstruct S {}\n\nextension S {\n    @Test func t() {}\n}\n") == [])
     }
@@ -231,8 +252,7 @@ struct WatchdogTests {
     struct Nested {
         @Test("a test under two watchdog suites is in flight once")
         func aNestedTestIsInFlightOnce() {
-            let mine = TestWatchdog.shared.inFlight().filter { $0.hasPrefix("a test under two watchdog suites is in flight once (") }
-            #expect(mine.count == 1, "\(TestWatchdog.shared.inFlight())")
+            #expect(WatchdogTests.count("a test under two watchdog suites is in flight once (") == 1, "\(TestWatchdog.shared.inFlight())")
         }
     }
 }
