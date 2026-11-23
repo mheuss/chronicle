@@ -68,8 +68,9 @@ trap 'kill_run; exit 143' TERM
 
 # The build waits on the .build lock that any other swift test in this
 # checkout holds, so it gets a deadline too.
+build_log="$logs/build.log"
 set -m
-swift build --build-tests ${swift_args[@]+"${swift_args[@]}"} </dev/null &
+swift build --build-tests ${swift_args[@]+"${swift_args[@]}"} </dev/null >"$build_log" 2>&1 &
 job=$!
 set +m
 start=$SECONDS
@@ -77,6 +78,9 @@ while kill -0 "$job" 2>/dev/null; do
   if (( SECONDS - start >= build_deadline )); then
     echo "FAIL build: still running after ${build_deadline} s"
     kill_run
+    job=
+    helpers=()
+    show_log "$build_log"
     exit 1
   fi
   sleep 1
@@ -84,7 +88,11 @@ done
 build_status=0
 wait "$job" || build_status=$?
 job=
-if (( build_status != 0 )); then echo "FAIL build: exit $build_status"; exit "$build_status"; fi
+if (( build_status != 0 )); then
+  echo "FAIL build: exit $build_status"
+  show_log "$build_log"
+  exit "$build_status"
+fi
 
 check() {
   local name=$1 log="$logs/$1.log" start status=0 ok=1 helper
@@ -106,6 +114,7 @@ check() {
       for helper in ${helpers[@]+"${helpers[@]}"}; do
         if kill -0 "$helper" 2>/dev/null; then echo "  helper $helper survived KILL"; fi
       done
+      helpers=()
       show_log "$log"
       failed=1
       return
