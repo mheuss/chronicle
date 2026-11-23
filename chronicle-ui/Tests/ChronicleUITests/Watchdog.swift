@@ -7,6 +7,8 @@ import Synchronization
 /// `CHRONICLE_TEST_WATCHDOG_SECONDS` sets it. A whole number of seconds from
 /// 1 to 86 400 replaces the default of 120, and `0` turns the watchdog off.
 /// Any other value is invalid: it keeps the default and carries a warning.
+/// The deadline covers the whole process, every repetition included, so a run
+/// with `--maximum-repetitions` needs a larger value or `0`.
 /// CI's main Test step sets neither this nor `CHRONICLE_TEST_WATCHDOG_SELFTEST`,
 /// because `scripts/check-watchdog.sh` owns both.
 enum WatchdogSetting: Equatable {

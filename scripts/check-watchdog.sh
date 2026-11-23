@@ -14,6 +14,7 @@ cd "$(dirname "$0")/../chronicle-ui"
 
 watchdog_seconds=5
 deadline=60
+build_deadline=600
 swift_args=("$@")
 logs=$(mktemp -d)
 job=
@@ -65,7 +66,25 @@ trap kill_run EXIT
 trap 'kill_run; exit 130' INT
 trap 'kill_run; exit 143' TERM
 
-swift build --build-tests ${swift_args[@]+"${swift_args[@]}"}
+# The build waits on the .build lock that any other swift test in this
+# checkout holds, so it gets a deadline too.
+set -m
+swift build --build-tests ${swift_args[@]+"${swift_args[@]}"} </dev/null &
+job=$!
+set +m
+start=$SECONDS
+while kill -0 "$job" 2>/dev/null; do
+  if (( SECONDS - start >= build_deadline )); then
+    echo "FAIL build: still running after ${build_deadline} s"
+    kill_run
+    exit 1
+  fi
+  sleep 1
+done
+build_status=0
+wait "$job" || build_status=$?
+job=
+if (( build_status != 0 )); then echo "FAIL build: exit $build_status"; exit "$build_status"; fi
 
 check() {
   local name=$1 log="$logs/$1.log" start status=0 ok=1 helper
@@ -117,6 +136,7 @@ check() {
       kill -s KILL -- "-$helper" 2>/dev/null || true
     fi
   done
+  helpers=()
 
   if (( ok )); then
     echo "PASS $name ($(( SECONDS - start )) s)"

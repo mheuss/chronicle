@@ -65,7 +65,8 @@ struct DaemonConnectionGateTests {
         // 0xFF and 0xFE are invalid as standalone UTF-8 leading bytes.
         let serverTask = blockingServer {
             // Before the guard: an early return would otherwise leave the
-            // client with no response and no EOF, which hangs the run.
+            // client with no response and no EOF, which stalls the run until the
+            // watchdog ends it.
             defer { Darwin.close(serverFD) }
             guard readLineSync(from: serverFD) != nil else { return }
             writeAll([0xFF, 0xFE, 0x0A], to: serverFD)
