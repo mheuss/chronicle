@@ -1,7 +1,7 @@
 import Testing
 @testable import ChronicleUI
 
-@Suite("Screen Recording prompt controller")
+@Suite("Screen Recording prompt controller", .watchdog)
 @MainActor
 struct ScreenRecordingPromptControllerTests {
     final class Calls { var count = 0 }

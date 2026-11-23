@@ -55,7 +55,7 @@ struct Boom: Error {}
 // Two `swift test` runs at once share the domain too, and can clear each
 // other's values.
 @MainActor
-@Suite("BackgroundService", .serialized, .timeLimit(.minutes(1)))
+@Suite("BackgroundService", .serialized, .timeLimit(.minutes(1)), .watchdog)
 final class BackgroundServiceTests {
     let log = CallLog()
     let defaults: UserDefaults
@@ -295,8 +295,9 @@ final class BackgroundServiceTests {
         agent.holdUnregister = true
         let app = FakeLoginService("app", status: .notRegistered, log: log)
         let service = make(agent: agent, mainApp: app)
-        // Released on every path: a parked continuation that nobody resumes
-        // hangs the run with no output, and .timeLimit cannot cancel it.
+        // Released on every path: .timeLimit cannot cancel a parked
+        // continuation that nobody resumes, so it stalls the run until the
+        // watchdog ends it.
         defer { agent.release() }
         let first = Task { await service.setEnabled(false) }
         for _ in 0..<1000 where !log.entries.contains("agent.unregister.start") { await Task.yield() }

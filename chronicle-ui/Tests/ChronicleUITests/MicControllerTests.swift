@@ -70,6 +70,7 @@ private func eventually(_ condition: () -> Bool) async -> Bool {
     return condition()
 }
 
+@Suite(.watchdog)
 @MainActor
 struct MicControllerTests {
     @Test func turningOnWhenAuthorizedSendsAndRefreshes() async {

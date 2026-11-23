@@ -11,7 +11,7 @@ import Testing
 /// wrongly typed payload would throw and take `StatusData` with it — the
 /// failure NFR-3 exists to prevent. The unknown-payload case below is the one
 /// that catches a regression back to synthesis.
-@Suite("Retention decoding")
+@Suite("Retention decoding", .watchdog)
 struct RetentionDecodingTests {
     /// Configured like production (`DaemonConnection`), so a future variant
     /// with a two-word payload key cannot pass here and fail in the app.
@@ -143,7 +143,7 @@ struct RetentionDecodingTests {
 /// The copy lives in a value type because a `private struct: View` is
 /// unreachable from tests, and these branches are the user-visible half of
 /// CHR-33 — zero used to render as "0 days" when it means keep forever.
-@Suite("Retention copy")
+@Suite("Retention copy", .watchdog)
 struct RetentionCopyTests {
     @Test("a day count reads as days")
     func daysReadsAsADayCount() {

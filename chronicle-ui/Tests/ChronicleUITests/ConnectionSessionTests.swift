@@ -2,7 +2,7 @@ import Testing
 import Darwin
 @testable import ChronicleUI
 
-@Suite("ConnectionSession lifecycle", .timeLimit(.minutes(1)))
+@Suite("ConnectionSession lifecycle", .timeLimit(.minutes(1)), .watchdog)
 @MainActor
 struct ConnectionSessionLifecycleTests {
 
@@ -140,7 +140,7 @@ struct ConnectionSessionLifecycleTests {
     }
 }
 
-@Suite("ConnectionSession routing", .timeLimit(.minutes(1)))
+@Suite("ConnectionSession routing", .timeLimit(.minutes(1)), .watchdog)
 @MainActor
 struct ConnectionSessionRoutingTests {
 
@@ -346,7 +346,7 @@ struct ConnectionSessionRoutingTests {
     }
 }
 
-@Suite("ConnectionSession writes", .timeLimit(.minutes(1)))
+@Suite("ConnectionSession writes", .timeLimit(.minutes(1)), .watchdog)
 @MainActor
 struct ConnectionSessionWriteTests {
 

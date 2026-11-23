@@ -1,6 +1,7 @@
 import Testing
 @testable import ChronicleUI
 
+@Suite(.watchdog)
 struct MicRowStateTests {
     private func row(_ permission: MicPermission?, _ status: StatusResponse?,
                      connected: Bool = true, mark: MicOperationMark = .none) -> MicRowState {

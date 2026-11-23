@@ -1,7 +1,7 @@
 import Testing
 @testable import ChronicleUI
 
-@Suite("Menu bar display")
+@Suite("Menu bar display", .watchdog)
 struct MenuBarDisplayTests {
     @Test(arguments: CaptureAvailability.allCases)
     func displayComesFromAvailability(a: CaptureAvailability) {

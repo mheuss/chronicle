@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import ChronicleUI
 
-@Suite("Data root")
+@Suite("Data root", .watchdog)
 struct DataRootTests {
     private static let container = URL(
         fileURLWithPath: "/Users/someone/Library/Group Containers/7TJEE2YF4G.chronicle"

@@ -3,7 +3,7 @@ import Foundation
 import Darwin
 @testable import ChronicleUI
 
-@Suite("DaemonConnection IPC gate", .timeLimit(.minutes(1)))
+@Suite("DaemonConnection IPC gate", .timeLimit(.minutes(1)), .watchdog)
 @MainActor
 struct DaemonConnectionGateTests {
 
@@ -39,19 +39,19 @@ struct DaemonConnectionGateTests {
         _ = conn
     }
 
-    @Test("write to closed peer fails cleanly without SIGPIPE crash")
+    @Test("a write that gets EPIPE fails as writeFailed, without a SIGPIPE crash")
     func brokenPipeDoesNotCrash() async throws {
         let pair = try SocketPairHelper.make()
+        defer { Darwin.close(pair.serverFD) }
+        // Every write gets EPIPE, and the reader sees no end of file.
+        try #require(shutdown(pair.clientFD, SHUT_WR) == 0, "shutdown failed: errno \(errno)")
         let conn = DaemonConnection(testingSocketFD: pair.clientFD)
-
-        // Close the peer end so any write returns EPIPE.
-        Darwin.close(pair.serverFD)
 
         do {
             _ = try await conn.requestStatus()
-            Issue.record("Expected throw — peer closed")
-        } catch is IPCError {
-            // expected; the key assertion is "we got here, process is alive"
+            Issue.record("Expected writeFailed(EPIPE)")
+        } catch let error as IPCError {
+            #expect(error == .writeFailed(errno: EPIPE), "got \(error)")
         }
     }
 
@@ -65,7 +65,8 @@ struct DaemonConnectionGateTests {
         // 0xFF and 0xFE are invalid as standalone UTF-8 leading bytes.
         let serverTask = blockingServer {
             // Before the guard: an early return would otherwise leave the
-            // client with no response and no EOF, which hangs the run.
+            // client with no response and no EOF, which stalls the run until the
+            // watchdog ends it.
             defer { Darwin.close(serverFD) }
             guard readLineSync(from: serverFD) != nil else { return }
             writeAll([0xFF, 0xFE, 0x0A], to: serverFD)

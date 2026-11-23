@@ -11,7 +11,7 @@ import Testing
 /// and pinning it exactly would fail somewhere that has nothing to do with
 /// this code. The separators and the "not downloaded" wording ARE ours, so
 /// those are pinned exactly.
-@Suite("Settings formatting")
+@Suite("Settings formatting", .watchdog)
 struct SettingsFormattingTests {
     private func model(_ variant: String, downloaded: Bool, _ size: UInt64) -> ModelEntry {
         ModelEntry(variant: variant, downloaded: downloaded, sizeBytes: size)
@@ -160,7 +160,7 @@ struct SettingsFormattingTests {
 /// follow-up status refresh fails. Both views start their 1 Hz poll by
 /// reading `currentStatus`, so a stale block there means no progress and a
 /// swallowed fast failure until the next 5-second monitor tick.
-@Suite("Status transcription splice")
+@Suite("Status transcription splice", .watchdog)
 struct StatusTranscriptionSpliceTests {
     private func status(_ state: TranscriptionState) -> StatusResponse {
         StatusResponse(
