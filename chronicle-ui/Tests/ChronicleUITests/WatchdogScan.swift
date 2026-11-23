@@ -20,7 +20,7 @@ enum WatchdogScan {
 
     private nonisolated(unsafe) static let watchdogPattern = /\.watchdog(?![A-Za-z0-9_])/
 
-    private nonisolated(unsafe) static let testPattern = /(?:^|\s)@Test(?![A-Za-z0-9_])/
+    private nonisolated(unsafe) static let testPattern = /@(?:Testing\.)?Test(?![A-Za-z0-9_])/
 
     private nonisolated(unsafe) static let declarationPattern =
         /^(?:(?:public|internal|fileprivate|private|final)\s+)*(struct|class|enum|actor|extension)\s+([A-Za-z_][A-Za-z0-9_]*)/
@@ -34,29 +34,33 @@ enum WatchdogScan {
             var attributes = ""
             var openParens = 0
             var current: Declaration?
+            func checkMember(_ lineNumber: Int) {
+                guard let current else {
+                    failures.append(Failure(file: file.name, line: lineNumber, reason: "@Test outside any type"))
+                    return
+                }
+                if current.isExtension {
+                    extensionTests.append((file.name, lineNumber, current.name))
+                } else if !current.isWatchdogSuite {
+                    failures.append(Failure(file: file.name, line: lineNumber, reason: "@Test in \(current.name), which has no @Suite(... .watchdog ...)"))
+                }
+            }
             let lines = file.text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
             for (index, line) in lines.enumerated() {
                 let lineNumber = index + 1
                 let text = String(line)
                 let code = codeOnly(text)
                 if openParens > 0 {
-                    attributes += code
                     openParens += parenDelta(code)
+                    attributes += code
+                    if code.firstMatch(of: testPattern) != nil {
+                        failures.append(Failure(file: file.name, line: lineNumber, reason: "free @Test function; no suite can carry .watchdog"))
+                    }
                     continue
                 }
-                let trimmed = code.drop(while: { $0.isWhitespace })
-                let isTestLine = trimmed.hasPrefix("@") && code.firstMatch(of: testPattern) != nil
+                let isTestLine = code.firstMatch(of: testPattern) != nil
                 guard !text.isEmpty, text.first?.isWhitespace == false else {
-                    guard isTestLine else { continue }
-                    guard let current else {
-                        failures.append(Failure(file: file.name, line: lineNumber, reason: "@Test outside any type"))
-                        continue
-                    }
-                    if current.isExtension {
-                        extensionTests.append((file.name, lineNumber, current.name))
-                    } else if !current.isWatchdogSuite {
-                        failures.append(Failure(file: file.name, line: lineNumber, reason: "@Test in \(current.name), which has no @Suite(... .watchdog ...)"))
-                    }
+                    if isTestLine { checkMember(lineNumber) }
                     continue
                 }
                 if isTestLine {

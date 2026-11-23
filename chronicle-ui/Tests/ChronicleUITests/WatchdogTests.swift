@@ -51,6 +51,7 @@ struct WatchdogTests {
             CHRONICLE TEST WATCHDOG FIRED: the test run passed its 120 s deadline. In flight:
               a() (M/A.swift:1)
               b() (M/B.swift:2)
+            The deadline covers the whole process. For --repeat-until or --maximum-repetitions runs, raise CHRONICLE_TEST_WATCHDOG_SECONDS or set it to 0.
 
             """)
     }
@@ -59,6 +60,7 @@ struct WatchdogTests {
         #expect(WatchdogMessage.fired(seconds: 120, inFlight: []) == """
             CHRONICLE TEST WATCHDOG FIRED: the test run passed its 120 s deadline.
               no test in flight; the hang is outside a test body
+            The deadline covers the whole process. For --repeat-until or --maximum-repetitions runs, raise CHRONICLE_TEST_WATCHDOG_SECONDS or set it to 0.
 
             """)
     }
@@ -224,6 +226,32 @@ struct WatchdogTests {
     @Test func aOneLineSuiteDoesNotLendItsTraitToTheNextScope() {
         #expect(scan("@Suite(.watchdog) struct A {}\nnonisolated struct B {\n    @Test func t() {}\n}\n")
             == ["F.swift:3: @Test outside any type"])
+    }
+
+    @Test func aGluedOrQualifiedTestAttributeIsSeen() {
+        #expect(scan("@MainActor@Test func free() {}\n")
+            == ["F.swift:1: free @Test function; no suite can carry .watchdog"])
+        #expect(scan("struct S {\n    @MainActor@Test func t() {}\n}\n")
+            == ["F.swift:2: @Test in S, which has no @Suite(... .watchdog ...)"])
+        #expect(scan("@Testing.Test func free() {}\n")
+            == ["F.swift:1: free @Test function; no suite can carry .watchdog"])
+        #expect(scan("struct S {\n    @Testing.Test func t() {}\n}\n")
+            == ["F.swift:2: @Test in S, which has no @Suite(... .watchdog ...)"])
+    }
+
+    @Test func aTestAfterAMultiLineAttributeIsSeen() {
+        #expect(scan("@available(macOS 15,\n           *) @Test func free() {}\n")
+            == ["F.swift:2: free @Test function; no suite can carry .watchdog"])
+        #expect(scan("struct S {\n    @available(macOS 15,\n               *) @Test func t() {}\n}\n")
+            == ["F.swift:3: @Test in S, which has no @Suite(... .watchdog ...)"])
+    }
+
+    @Test func aDeclarationWithItsBraceOnTheNextLinePasses() {
+        #expect(scan("@Suite(.watchdog)\nstruct S\n    : Sendable {\n    @Test func t() {}\n}\n") == [])
+    }
+
+    @Test func aTestInsideAOneLineTypeFails() {
+        #expect(!scan("struct S { @Test func t() {} }\n").isEmpty)
     }
 
     @Test func anExtensionOfAWatchdogSuitePasses() {

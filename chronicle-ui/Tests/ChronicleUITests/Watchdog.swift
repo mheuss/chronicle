@@ -8,7 +8,7 @@ import Synchronization
 /// 1 to 86 400 replaces the default of 120, and `0` turns the watchdog off.
 /// Any other value is invalid: it keeps the default and carries a warning.
 /// The deadline covers the whole process, every repetition included, so a run
-/// with `--maximum-repetitions` needs a larger value or `0`.
+/// with `--maximum-repetitions` or `--repeat-until` needs a larger value or `0`.
 /// CI's main Test step sets neither this nor `CHRONICLE_TEST_WATCHDOG_SELFTEST`,
 /// because `scripts/check-watchdog.sh` owns both.
 enum WatchdogSetting: Equatable {
@@ -57,10 +57,12 @@ enum WatchdogMessage {
 
     static func fired(seconds: Int, inFlight: [String]) -> String {
         let head = "CHRONICLE TEST WATCHDOG FIRED: the test run passed its \(seconds) s deadline."
+        let tail = "The deadline covers the whole process. For --repeat-until or --maximum-repetitions"
+            + " runs, raise \(WatchdogSetting.variable) or set it to 0.\n"
         if inFlight.isEmpty {
-            return head + "\n  no test in flight; the hang is outside a test body\n"
+            return head + "\n  no test in flight; the hang is outside a test body\n" + tail
         }
-        return head + " In flight:\n" + inFlight.sorted().map { "  \($0)\n" }.joined()
+        return head + " In flight:\n" + inFlight.sorted().map { "  \($0)\n" }.joined() + tail
     }
 }
 
