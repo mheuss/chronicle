@@ -18,7 +18,23 @@ swift_args=("$@")
 logs=$(mktemp -d)
 job=
 helpers=()
+saw_testing_helper=0
 failed=0
+
+record_children() {
+  [ -n "$job" ] || return 0
+  local child
+  for child in $(pgrep -P "$job" || true); do
+    helpers+=("$child")
+    case "$(ps -o comm= -p "$child" 2>/dev/null)" in
+      *swiftpm-testing-helper) saw_testing_helper=1 ;;
+    esac
+  done
+}
+
+show_log() {
+  sed 's/^/    /' "$1"
+}
 
 signal_run() {
   if [ -n "$job" ]; then kill -s "$1" -- "-$job" 2>/dev/null || true; fi
@@ -39,27 +55,30 @@ run_alive() {
 
 # TERM, up to 3 s of grace, then KILL: cleanup has a deadline too.
 kill_run() {
+  record_children
   signal_run TERM
   local waited=0
   while run_alive && (( waited < 3 )); do sleep 1; waited=$((waited + 1)); done
   signal_run KILL
 }
 trap kill_run EXIT
-trap 'kill_run; exit 130' INT TERM
+trap 'kill_run; exit 130' INT
+trap 'kill_run; exit 143' TERM
 
 swift build --build-tests ${swift_args[@]+"${swift_args[@]}"}
 
 check() {
   local name=$1 log="$logs/$1.log" start status=0 ok=1 helper
   helpers=()
+  saw_testing_helper=0
   set -m
   CHRONICLE_TEST_WATCHDOG_SELFTEST=1 CHRONICLE_TEST_WATCHDOG_SECONDS=$watchdog_seconds \
-    swift test --skip-build --filter "$name" ${swift_args[@]+"${swift_args[@]}"} >"$log" 2>&1 &
+    swift test --skip-build --filter "$name" ${swift_args[@]+"${swift_args[@]}"} </dev/null >"$log" 2>&1 &
   job=$!
   set +m
   start=$SECONDS
   while kill -0 "$job" 2>/dev/null; do
-    for helper in $(pgrep -P "$job" || true); do helpers+=("$helper"); done
+    record_children
     if (( SECONDS - start >= deadline )); then
       echo "FAIL $name: still running after ${deadline} s"
       kill_run
@@ -68,6 +87,7 @@ check() {
       for helper in ${helpers[@]+"${helpers[@]}"}; do
         if kill -0 "$helper" 2>/dev/null; then echo "  helper $helper survived KILL"; fi
       done
+      show_log "$log"
       failed=1
       return
     fi
@@ -78,7 +98,9 @@ check() {
 
   if (( status == 0 )); then echo "  exit status was 0"; ok=0; fi
   if ! grep -qF "CHRONICLE TEST WATCHDOG: N is $watchdog_seconds s" "$log"; then echo "  no override line"; ok=0; fi
-  if ! sed -n '/^CHRONICLE TEST WATCHDOG FIRED:/,$p' "$log" | grep -qF "  $name() ("; then
+  local fired
+  fired=$(sed -n '/^CHRONICLE TEST WATCHDOG FIRED:/,$p' "$log")
+  if [[ "$fired" != *"  $name() ("* ]]; then
     echo "  no FIRED line naming $name"; ok=0
   fi
   if [ "$name" = watchdogFiresWhileTheCooperativePoolIsBlocked ]; then
@@ -88,7 +110,7 @@ check() {
     if (( entered < cpus )); then echo "  only $entered of $cpus pool threads blocked"; ok=0; fi
     if (( entered >= cpus + 2 )); then echo "  all $entered blockers ran, so the pool was never full"; ok=0; fi
   fi
-  if (( ${#helpers[@]} == 0 )); then echo "  no swiftpm-testing-helper seen"; ok=0; fi
+  if (( ! saw_testing_helper )); then echo "  no swiftpm-testing-helper seen"; ok=0; fi
   for helper in ${helpers[@]+"${helpers[@]}"}; do
     if kill -0 "$helper" 2>/dev/null; then
       echo "  helper $helper outlived the run"; ok=0
@@ -99,11 +121,13 @@ check() {
   if (( ok )); then
     echo "PASS $name ($(( SECONDS - start )) s)"
   else
-    echo "FAIL $name; log: $log"
+    echo "FAIL $name; log:"
+    show_log "$log"
     failed=1
   fi
 }
 
 check watchdogFiresOnAParkedContinuation
 check watchdogFiresWhileTheCooperativePoolIsBlocked
+if (( ! failed )); then rm -rf "$logs"; fi
 exit "$failed"
