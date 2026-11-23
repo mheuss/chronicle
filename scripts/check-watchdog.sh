@@ -10,8 +10,8 @@
 #
 # Extra arguments go to swift, for example --only-use-versions-from-resolved-file.
 #
-# The build gets 600 s. On a cold checkout, run swift build first, or rerun
-# after a "FAIL build: still running" line.
+# The build gets 600 s. On a cold checkout, run swift build --build-tests in
+# chronicle-ui first, or rerun after a "FAIL build: still running" line.
 set -euo pipefail
 cd "$(dirname "$0")/../chronicle-ui"
 
@@ -72,6 +72,7 @@ trap 'kill_run; exit 143' TERM
 # The build waits on the .build lock that any other swift test in this
 # checkout holds, so it gets a deadline too.
 build_log="$logs/build.log"
+echo "Building tests (up to ${build_deadline} s)..."
 set -m
 swift build --build-tests ${swift_args[@]+"${swift_args[@]}"} </dev/null >"$build_log" 2>&1 &
 job=$!

@@ -251,7 +251,8 @@ struct WatchdogTests {
     }
 
     @Test func aTestInsideAOneLineTypeFails() {
-        #expect(!scan("struct S { @Test func t() {} }\n").isEmpty)
+        #expect(scan("struct S { @Test func t() {} }\n")
+            == ["F.swift:1: free @Test function; no suite can carry .watchdog"])
     }
 
     @Test func anExtensionOfAWatchdogSuitePasses() {
