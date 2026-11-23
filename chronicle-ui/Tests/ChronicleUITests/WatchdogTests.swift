@@ -142,6 +142,10 @@ struct WatchdogTests {
         #expect(scan("@Suite(\"S\", .watchdog)\n@MainActor\nstruct S {\n    @Test func t() {}\n}\n") == [])
     }
 
+    @Test func aWatchdogAfterNestedParenthesesPasses() {
+        #expect(scan("@Suite(\"S\", .timeLimit(.minutes(1)), .watchdog)\nstruct S {\n    @Test func t() {}\n}\n") == [])
+    }
+
     @Test func aMultiLineSuiteAttributePasses() {
         #expect(scan("@Suite(\"S\",\n       .watchdog,\n       .enabled(if: f(\"(\")))\nstruct S {\n    @Test func t() {}\n}\n") == [])
     }
@@ -208,6 +212,19 @@ struct WatchdogTests {
     @Test func anExtensionOfAnotherTypeFails() {
         #expect(scan("struct S {}\n\nextension S {\n    @Test func t() {}\n}\n")
             == ["F.swift:4: @Test in an extension of S, which is not a watchdog suite"])
+    }
+
+    @Test func everySuiteCarriesTheWatchdog() throws {
+        let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let paths = (FileManager.default.subpaths(atPath: directory.path) ?? [])
+            .filter { $0.hasSuffix(".swift") }
+            .sorted()
+        #expect(paths.contains("WatchdogTests.swift"))
+        let files = try paths.map { path in
+            (name: path, text: try String(contentsOf: directory.appendingPathComponent(path), encoding: .utf8))
+        }
+        let failures = WatchdogScan.scan(files)
+        #expect(failures.isEmpty, "\(failures.map(\.description).joined(separator: "\n"))")
     }
 
     @Suite(.watchdog)

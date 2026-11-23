@@ -3,7 +3,7 @@ import Foundation
 import Observation
 @testable import ChronicleUI
 
-@Suite("Capture availability")
+@Suite("Capture availability", .watchdog)
 struct CaptureAvailabilityTests {
     func classify(_ c: DaemonConnection.ConnectionState, _ s: StatusResponse?,
                   background: Bool = true, windowOpen: Bool = true,

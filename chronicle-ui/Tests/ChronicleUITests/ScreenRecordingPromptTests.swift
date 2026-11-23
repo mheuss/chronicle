@@ -2,7 +2,7 @@ import Testing
 import Foundation
 @testable import ChronicleUI
 
-@Suite("Screen Recording prompt")
+@Suite("Screen Recording prompt", .watchdog)
 struct ScreenRecordingPromptTests {
     /// In this sequence, disconnected is `notRunning`. Connected with no
     /// Status yet is `starting`.

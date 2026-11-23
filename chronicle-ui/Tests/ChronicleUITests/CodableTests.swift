@@ -3,7 +3,7 @@ import Foundation
 import Darwin
 @testable import ChronicleUI
 
-@Suite("IPC Protocol Codable Tests")
+@Suite("IPC Protocol Codable Tests", .watchdog)
 struct CodableTests {
 
     private func decodeStatus(_ json: String) throws -> StatusResponse {

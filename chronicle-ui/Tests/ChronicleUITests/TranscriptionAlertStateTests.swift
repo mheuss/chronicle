@@ -2,7 +2,7 @@ import Testing
 @testable import ChronicleUI
 
 // Swift Testing, matching the suite (codex plan review, important 1).
-@Suite("TranscriptionAlertState latch")
+@Suite("TranscriptionAlertState latch", .watchdog)
 struct TranscriptionAlertStateTests {
     private func status(_ state: TranscriptionState) -> StatusResponse {
         // Minimal literal — only transcription matters to the latch.

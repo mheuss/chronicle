@@ -3,7 +3,7 @@ import Foundation
 import Darwin
 @testable import ChronicleUI
 
-@Suite("DaemonConnection IPC gate", .timeLimit(.minutes(1)))
+@Suite("DaemonConnection IPC gate", .timeLimit(.minutes(1)), .watchdog)
 @MainActor
 struct DaemonConnectionGateTests {
 

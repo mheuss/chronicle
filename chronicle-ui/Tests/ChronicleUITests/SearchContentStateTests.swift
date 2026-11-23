@@ -2,7 +2,7 @@ import Testing
 
 @testable import ChronicleUI
 
-@Suite("SearchPopoverView content state")
+@Suite("SearchPopoverView content state", .watchdog)
 struct SearchContentStateTests {
     // The core of CHR-68: a daemon/IPC error must read as a failure, never as
     // a clean "No matches".

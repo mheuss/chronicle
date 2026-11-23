@@ -3,7 +3,7 @@ import Foundation
 import Darwin
 @testable import ChronicleUI
 
-@Suite("SocketPairHelper", .timeLimit(.minutes(1)))
+@Suite("SocketPairHelper", .timeLimit(.minutes(1)), .watchdog)
 struct SocketPairHelperTests {
 
     @Test("returns two fds that can communicate")

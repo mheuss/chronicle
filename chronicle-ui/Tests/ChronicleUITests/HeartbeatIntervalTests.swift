@@ -3,7 +3,7 @@ import Darwin
 @testable import ChronicleUI
 
 @MainActor
-@Suite("Heartbeat interval", .timeLimit(.minutes(1)))
+@Suite("Heartbeat interval", .timeLimit(.minutes(1)), .watchdog)
 struct HeartbeatIntervalTests {
     @Test func productionConnectionPollsEveryFiveSeconds() {
         #expect(DaemonConnection().heartbeatInterval == .seconds(5))

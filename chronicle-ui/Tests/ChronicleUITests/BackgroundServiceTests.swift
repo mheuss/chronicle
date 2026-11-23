@@ -55,7 +55,7 @@ struct Boom: Error {}
 // Two `swift test` runs at once share the domain too, and can clear each
 // other's values.
 @MainActor
-@Suite("BackgroundService", .serialized, .timeLimit(.minutes(1)))
+@Suite("BackgroundService", .serialized, .timeLimit(.minutes(1)), .watchdog)
 final class BackgroundServiceTests {
     let log = CallLog()
     let defaults: UserDefaults

@@ -2,7 +2,7 @@ import Testing
 
 @testable import ChronicleUI
 
-@Suite("Search result source badge")
+@Suite("Search result source badge", .watchdog)
 struct SourceBadgeTests {
     private func hit(_ source: SearchHitSource, audioSource: String? = nil) -> SearchHit {
         SearchHit(

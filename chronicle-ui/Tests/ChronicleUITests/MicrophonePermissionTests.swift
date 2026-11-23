@@ -9,6 +9,7 @@ actor HelperReads {
     func next() -> String? { reads.count > 1 ? reads.removeFirst() : reads.first ?? nil }
 }
 
+@Suite(.watchdog)
 @MainActor
 struct MicrophonePermissionTests {
     @Test(arguments: [

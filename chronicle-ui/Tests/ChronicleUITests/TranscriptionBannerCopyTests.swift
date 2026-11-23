@@ -2,7 +2,7 @@ import Testing
 import Foundation
 @testable import ChronicleUI
 
-@Suite("Transcription banner copy")
+@Suite("Transcription banner copy", .watchdog)
 struct TranscriptionBannerCopyTests {
 
     private func stats(

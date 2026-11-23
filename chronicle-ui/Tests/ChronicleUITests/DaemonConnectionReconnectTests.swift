@@ -55,7 +55,7 @@ final class GateBox {
     func releaseAll() { for g in gates { g.signal() } }
 }
 
-@Suite("DaemonConnection reconnect", .timeLimit(.minutes(1)))
+@Suite("DaemonConnection reconnect", .timeLimit(.minutes(1)), .watchdog)
 @MainActor
 struct DaemonConnectionReconnectTests {
 

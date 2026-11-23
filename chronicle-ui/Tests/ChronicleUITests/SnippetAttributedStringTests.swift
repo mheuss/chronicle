@@ -2,7 +2,7 @@ import Testing
 import Foundation
 @testable import ChronicleUI
 
-@Suite("Snippet → AttributedString")
+@Suite("Snippet → AttributedString", .watchdog)
 struct SnippetAttributedStringTests {
 
     @Test("Plain text returns unchanged")
