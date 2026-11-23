@@ -3,10 +3,13 @@ import Foundation
 /// A text scan of the test sources for `@Test` functions that `.watchdog`
 /// does not reach. It relies on the repo's formatting: free functions and
 /// type declarations start at column 0, and members are indented. It is a
-/// scan, not a proof. Known limits: a one-line type whose `{}` wraps onto an
-/// indented line can lend its trait to a following `nonisolated`, `open` or
-/// `package` type; `@Test` in a block comment or raw string reads as a test;
-/// `@Testing.Suite` is not read as a suite.
+/// scan, not a proof. Known limits:
+/// - A one-line type whose `{}` wraps onto an indented line can lend its trait
+///   to a following type the scan does not recognize, such as a `nonisolated` one.
+/// - `@Test` inside a block comment, a multi-line string, or a raw string with an
+///   inner quote reads as a test, and fails loudly.
+/// - `@Testing.Suite` is not read as a suite.
+/// - A one-line type holding a test reports as a free function.
 enum WatchdogScan {
     struct Failure: Equatable, CustomStringConvertible {
         let file: String
