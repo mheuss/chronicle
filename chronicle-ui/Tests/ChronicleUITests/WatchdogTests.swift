@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@Suite("Watchdog")
+@Suite("Watchdog", .watchdog)
 struct WatchdogTests {
     // MARK: Setting
 
@@ -34,14 +34,14 @@ struct WatchdogTests {
         #expect(WatchdogSetting.invalid("abc").notice == "CHRONICLE TEST WATCHDOG: ignoring CHRONICLE_TEST_WATCHDOG_SECONDS=\"abc\"; N is 120 s\n")
     }
 
+    @Test func anInvalidValueWithANewlineStaysOnOneLine() {
+        #expect(WatchdogSetting.invalid("a\nb").notice == "CHRONICLE TEST WATCHDOG: ignoring CHRONICLE_TEST_WATCHDOG_SECONDS=\"a\\nb\"; N is 120 s\n")
+    }
+
     // MARK: Message
 
     @Test func aLabelNamesTheTestAndItsSourceLocation() {
         #expect(WatchdogMessage.label(name: "t()", fileID: "M/F.swift", line: 3) == "t() (M/F.swift:3)")
-    }
-
-    @Test func anInvalidValueWithANewlineStaysOnOneLine() {
-        #expect(WatchdogSetting.invalid("a\nb").notice == "CHRONICLE TEST WATCHDOG: ignoring CHRONICLE_TEST_WATCHDOG_SECONDS=\"a\\nb\"; N is 120 s\n")
     }
 
     @Test func theFiredMessageNamesEachTestInFlight() {
@@ -60,5 +60,19 @@ struct WatchdogTests {
               no test in flight; the hang is outside a test body
 
             """)
+    }
+
+    // MARK: Registry
+
+    @Test("a running test is in flight exactly once")
+    func aRunningTestIsInFlight() {
+        let mine = TestWatchdog.shared.inFlight().filter { $0.hasPrefix("a running test is in flight exactly once (") }
+        #expect(mine.count == 1, "\(TestWatchdog.shared.inFlight())")
+    }
+
+    @Test("a parameterized test is in flight once, not once per case", arguments: [1, 2, 3])
+    func aParameterizedTestIsInFlightOnce(_ value: Int) {
+        let mine = TestWatchdog.shared.inFlight().filter { $0.hasPrefix("a parameterized test is in flight once, not once per case (") }
+        #expect(mine.count == 1, "\(TestWatchdog.shared.inFlight())")
     }
 }
