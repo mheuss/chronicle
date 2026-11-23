@@ -4,7 +4,7 @@ import Foundation
 ///
 /// `CHRONICLE_TEST_WATCHDOG_SECONDS` sets it. A whole number of seconds from
 /// 1 to 86 400 replaces the default of 120, and `0` turns the watchdog off.
-/// Any other value prints a warning and keeps the default.
+/// Any other value is invalid: it keeps the default and carries a warning.
 enum WatchdogSetting: Equatable {
     case `default`
     case seconds(Int)
@@ -33,14 +33,14 @@ enum WatchdogSetting: Equatable {
         }
     }
 
-    /// The line printed when the watchdog arms, or nil for the default.
+    /// The line to print when the watchdog arms, or nil for the default.
     var notice: String? {
         switch self {
         case .default: nil
         case .seconds(let value): "CHRONICLE TEST WATCHDOG: N is \(value) s (\(Self.variable))\n"
         case .off: "CHRONICLE TEST WATCHDOG: off (\(Self.variable)=0)\n"
         case .invalid(let raw):
-            "CHRONICLE TEST WATCHDOG: ignoring \(Self.variable)=\"\(raw)\"; N is \(Self.defaultSeconds) s\n"
+            "CHRONICLE TEST WATCHDOG: ignoring \(Self.variable)=\(raw.debugDescription); N is \(Self.defaultSeconds) s\n"
         }
     }
 }

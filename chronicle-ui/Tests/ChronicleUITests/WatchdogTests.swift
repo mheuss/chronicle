@@ -36,6 +36,14 @@ struct WatchdogTests {
 
     // MARK: Message
 
+    @Test func aLabelNamesTheTestAndItsSourceLocation() {
+        #expect(WatchdogMessage.label(name: "t()", fileID: "M/F.swift", line: 3) == "t() (M/F.swift:3)")
+    }
+
+    @Test func anInvalidValueWithANewlineStaysOnOneLine() {
+        #expect(WatchdogSetting.invalid("a\nb").notice == "CHRONICLE TEST WATCHDOG: ignoring CHRONICLE_TEST_WATCHDOG_SECONDS=\"a\\nb\"; N is 120 s\n")
+    }
+
     @Test func theFiredMessageNamesEachTestInFlight() {
         let message = WatchdogMessage.fired(seconds: 120, inFlight: ["b() (M/B.swift:2)", "a() (M/A.swift:1)"])
         #expect(message == """
