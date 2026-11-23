@@ -28,7 +28,6 @@ enum WatchdogSetting: Equatable {
         return value <= maximumSeconds ? .seconds(value) : .invalid(raw)
     }
 
-    /// The deadline in seconds, or nil when the watchdog is off.
     var armedSeconds: Int? {
         switch self {
         case .default, .invalid: Self.defaultSeconds
@@ -65,7 +64,6 @@ enum WatchdogMessage {
 
 enum StandardError {
     /// Writes `text` to fd 2 with write(2): no stdio buffer, no stdio lock.
-    /// Retries on EINTR, continues after a partial write, stops on any other error.
     static func write(_ text: String) {
         let bytes = Array(text.utf8)
         bytes.withUnsafeBytes { buffer in
