@@ -186,6 +186,11 @@ struct WatchdogTests {
             == ["F.swift:5: @Test outside any type"])
     }
 
+    @Test func aMemberNamedWatchdogIsNotTheTrait() {
+        #expect(scan("@Suite(.enabled(if: Flags.watchdog))\nstruct S {\n    @Test func t() {}\n}\n")
+            == ["F.swift:3: @Test in S, which has no @Suite(... .watchdog ...)"])
+    }
+
     @Test func aWatchdogOutsideTheSuiteAttributeFails() {
         #expect(scan("@Suite(\"S\")\n@Foo(.watchdog)\nstruct S {\n    @Test func t() {}\n}\n")
             == ["F.swift:4: @Test in S, which has no @Suite(... .watchdog ...)"])

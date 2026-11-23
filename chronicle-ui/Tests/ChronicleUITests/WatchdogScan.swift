@@ -24,7 +24,7 @@ enum WatchdogScan {
         let isWatchdogSuite: Bool
     }
 
-    private nonisolated(unsafe) static let watchdogPattern = /\.watchdog(?![A-Za-z0-9_])/
+    private nonisolated(unsafe) static let watchdogPattern = /(?:^|[\s,(])\.watchdog(?![A-Za-z0-9_])/
 
     private nonisolated(unsafe) static let testPattern = /@(?:Testing\.)?Test(?![A-Za-z0-9_])/
 
