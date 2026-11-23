@@ -6,6 +6,37 @@ import Darwin
 @Suite("IPC Protocol Codable Tests")
 struct CodableTests {
 
+    private func decodeStatus(_ json: String) throws -> StatusResponse {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(StatusResponse.self, from: Data(json.utf8))
+    }
+
+    @Test func statusDecodesThePermissionsBlock() throws {
+        let json = #"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"v","permissions":{"screen_recording":"denied","screen_recording_checked_at_ms":42,"microphone":"not_determined","microphone_checked_at_ms":43}}}"#
+        let status = try decodeStatus(json)
+        #expect(status.data.permissions?.screenRecording == .denied)
+        #expect(status.data.permissions?.microphone == .notDetermined)
+        #expect(status.data.permissions?.screenRecordingCheckedAtMs == 42)
+        #expect(status.data.permissions?.microphoneCheckedAtMs == 43)
+    }
+
+    @Test func statusFromAnOlderDaemonHasNoPermissions() throws {
+        let json = #"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"v"}}"#
+        let status = try decodeStatus(json)
+        #expect(status.data.permissions == nil)
+    }
+
+    @Test func unknownPermissionStateDegrades() throws {
+        let json = #"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"v","permissions":{"screen_recording":"limited","screen_recording_checked_at_ms":null,"microphone":"authorized","microphone_checked_at_ms":null}}}"#
+        let status = try decodeStatus(json)
+        #expect(status.data.permissions?.screenRecording == .unknown)
+        #expect(status.data.permissions?.microphone == .authorized)
+        let permissions = try #require(status.data.permissions)
+        #expect(permissions.screenRecordingCheckedAtMs == nil)
+        #expect(permissions.microphoneCheckedAtMs == nil)
+    }
+
     @Test("StatusResponse decodes from Rust wire format")
     func statusResponseDecodesFromRustJSON() throws {
         let json = """

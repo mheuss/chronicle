@@ -6,6 +6,8 @@ struct SearchPopoverView: View {
     @Environment(StartupAlertState.self) private var startupAlert
     @Environment(TranscriptionAlertState.self) private var transcriptionAlert
     @Environment(SearchFilterState.self) private var searchFilter
+    @Environment(BackgroundService.self) private var background
+    @Environment(ScreenRecordingPromptController.self) private var prompt
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
 
@@ -60,6 +62,12 @@ struct SearchPopoverView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if ScreenRecordingPrompt.showsPopoverRow(connection.availability(background: background)) {
+                Button(CaptureAvailabilityCopy.popoverRow) { prompt.present() }
+                    .buttonStyle(.link)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 6)
+            }
             if showPausedBanner {
                 PausedBanner(
                     onResume: resumeCapture,
@@ -68,9 +76,10 @@ struct SearchPopoverView: View {
                 Divider()
             }
 
-            if transcriptionAlert.shouldShow {
+            if transcriptionAlert.shouldShow,
+               let transcription = connection.currentStatus?.data.transcription {
                 TranscriptionBanner(
-                    transcription: connection.lastStatus?.data.transcription,
+                    transcription: transcription,
                     rejection: provisionRejection,
                     onDismiss: { transcriptionAlert.dismissed = true },
                     onProvision: provisionModel
@@ -120,8 +129,8 @@ struct SearchPopoverView: View {
         .task(id: searchKey) { [searchKey] in
             await runSearch(searchKey)
         }
-        .task(id: connection.lastStatus?.data.capture?.paused) {
-            if let status = connection.lastStatus {
+        .task(id: connection.currentStatus?.data.capture?.paused) {
+            if let status = connection.currentStatus {
                 startupAlert.evaluate(status: status)
             }
         }
@@ -129,8 +138,8 @@ struct SearchPopoverView: View {
         // takes a single Equatable, and Swift tuples aren't Equatable. Keying
         // each alert on its own signal is also the correct behaviour — a
         // transcription change must be observed even when `paused` never moves.
-        .task(id: connection.lastStatus?.data.transcription?.state) {
-            if let status = connection.lastStatus {
+        .task(id: connection.currentStatus?.data.transcription?.state) {
+            if let status = connection.currentStatus {
                 transcriptionAlert.evaluate(status: status)
             }
             // A rejection describes one attempt, not a state, so it goes stale
@@ -149,7 +158,7 @@ struct SearchPopoverView: View {
         // must run once per transition — to the lifetime of a loop that sits
         // sleeping for a second at a time, so a cancellation mid-sleep would
         // take the alert evaluation with it.
-        .task(id: connection.lastStatus?.data.transcription?.state) {
+        .task(id: connection.currentStatus?.data.transcription?.state) {
             while !Task.isCancelled, isProvisioningActive {
                 try? await Task.sleep(for: .seconds(1))
                 if Task.isCancelled { return }
@@ -194,7 +203,7 @@ struct SearchPopoverView: View {
     /// silently classify a future state as "not in flight" — the exact hazard
     /// the exhaustive switches in `TranscriptionBannerCopy` guard against.
     private var isProvisioningActive: Bool {
-        TranscriptionBannerCopy(connection.lastStatus?.data.transcription).showsProgress
+        TranscriptionBannerCopy(connection.currentStatus?.data.transcription).showsProgress
     }
 
     @ViewBuilder
@@ -222,15 +231,21 @@ struct SearchPopoverView: View {
                 .labelsHidden()
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
-        case .connecting:
-            Label("Connecting to Chronicle daemon…", systemImage: "ellipsis")
-                .foregroundStyle(.secondary)
-                .padding()
-        case .disconnected:
-            Label("Chronicle daemon is not running.", systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.red)
+        case .connecting, .disconnected:
+            // From the same availability as the menu bar icon above it, so
+            // the two can't disagree (design AD11).
+            let a = connection.availability(background: background)
+            Label(Self.notConnectedText(a), systemImage: a.badgeSymbol)
+                .foregroundStyle(a.tint.color)
                 .padding()
         }
+    }
+
+    /// What the popover says while the daemon isn't connected.
+    nonisolated static func notConnectedText(_ a: CaptureAvailability) -> String {
+        a == .backgroundOff
+            ? CaptureAvailabilityCopy.popoverBackgroundOff
+            : CaptureAvailabilityCopy.settingsText(a)
     }
 
     @ViewBuilder
@@ -279,7 +294,7 @@ struct SearchPopoverView: View {
     }
 
     private var showPausedBanner: Bool {
-        startupAlert.pausedOnBoot && !startupAlert.dismissed
+        startupAlert.pausedOnBoot && !startupAlert.dismissed && connection.currentStatus != nil
     }
 
     private func runSearch(_ key: SearchKey) async {
@@ -355,9 +370,7 @@ private struct PausedBanner: View {
 /// reason when something failed. What it SAYS lives in
 /// `TranscriptionBannerCopy`, which is testable; this type only renders.
 private struct TranscriptionBanner: View {
-    /// nil only when the daemon is too old to send the block; the banner is
-    /// not shown in that case, so the fallback copy is belt-and-braces.
-    let transcription: TranscriptionStats?
+    let transcription: TranscriptionStats
     /// Set when the daemon REJECTED the last request. `ok: false` changes no
     /// state, so without this the click is a silent no-op.
     let rejection: String?
@@ -420,9 +433,9 @@ private struct TranscriptionBanner: View {
         // divide by zero. That guarantee is about the total only:
         // `downloadBytes` is published from zero and the branch below has to
         // handle it, which is not a contradiction of this line.
-        let state = transcription?.state ?? .missing
-        if state == .downloading, let total = transcription?.downloadTotalBytes, total > 0 {
-            let done = transcription?.downloadBytes ?? 0
+        let state = transcription.state
+        if state == .downloading, let total = transcription.downloadTotalBytes, total > 0 {
+            let done = transcription.downloadBytes ?? 0
             ProgressView(value: Double(done), total: Double(total))
                 .progressViewStyle(.linear)
             // [A11y] Numeric text beside the bar — progress is never conveyed
@@ -430,7 +443,7 @@ private struct TranscriptionBanner: View {
             Text("\(byteLabel(done)) of \(byteLabel(total))")
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
-        } else if state == .downloading, let done = transcription?.downloadBytes, done > 0 {
+        } else if state == .downloading, let done = transcription.downloadBytes, done > 0 {
             // Indeterminate bar, but the byte count is still live — the daemon
             // publishes `download_bytes` throughout and only withholds the
             // TOTAL until Content-Length arrives. Hiding a moving number

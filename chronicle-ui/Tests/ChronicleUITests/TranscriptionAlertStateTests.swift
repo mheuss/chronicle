@@ -253,7 +253,7 @@ struct TranscriptionAlertStateTests {
     // A daemon upgraded mid-session starts sending the block. The nil snapshot
     // must NOT have consumed the first-snapshot latch, or the banner could
     // never appear afterwards. Reachable by reopening the popover, where
-    // `.task` re-runs with `lastStatus` already populated.
+    // `.task` re-runs with `currentStatus` already populated.
     @Test func latchSurvivesASnapshotWithNoBlock() {
         let alert = TranscriptionAlertState()
         alert.evaluate(status: statusWithoutBlock())

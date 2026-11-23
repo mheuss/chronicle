@@ -90,10 +90,13 @@ macOS Control Center won't register a menu bar icon for a loose executable.
    login. A copy opened from anywhere else does not register itself. Its
    Settings toggle still reads on. Switch it off and back on to register
    that copy.
-2. Grant Screen Recording: System Settings → Privacy & Security → Screen &
-   System Audio Recording. Click +, choose Chronicle.app in Applications,
-   and choose Later when macOS offers to quit it. Until you do, the daemon
-   exits at startup. launchd retries it every 30 s.
+2. Grant Screen Recording. Chronicle shows a dialog when it's missing. Click
+   Open System Settings, then turn on Chronicle under Privacy & Security →
+   Screen & System Audio Recording. If Chronicle isn't in the list, click +,
+   then choose Chronicle.app in Applications. If macOS offers to quit and reopen Chronicle, click
+   Later. Capture starts a few seconds later without a restart. Chronicle keeps
+   running without the permission. Search still works for anything already
+   saved.
 3. When capture starts, macOS asks whether "dev.heuss.chronicle.daemon" may
    bypass the private window picker. That is Chronicle's capture process.
    Click Allow.
@@ -132,8 +135,8 @@ would then capture. Switch the agent off first. To run the daemon by hand:
    exported. Stop it when done.
 3. Switch the toggle back on. That registers and starts the agent again.
 
-This restarts the agent without toggling it. You need it after you grant
-Screen Recording, for example:
+This restarts the agent without toggling it. A Screen Recording grant no
+longer needs it. Capture starts on its own a few seconds after the grant.
 
 ```sh
 launchctl kickstart -k gui/$(id -u)/dev.heuss.chronicle.daemon
@@ -158,11 +161,17 @@ export CHRONICLE_DATA_DIR="$HOME/chronicle-dev"
 open dist/Chronicle.app
 ```
 
-An icon should appear in the menu bar. A red `xmark.circle` means the UI cannot
-reach the daemon. A yellow `ellipsis.circle` means it is connecting or waiting
-for the first status. A green `record.circle.fill` means the daemon reports
-capture running. Orange `pause.circle.fill` means capture is paused. Red
-`exclamationmark.circle` means the daemon is up but capture is not running.
+An icon should appear in the menu bar. Each state has its own shape:
+
+- Green `record.circle.fill`: capture is running.
+- Orange `pause.circle.fill`: capture is paused.
+- Orange `power.circle`: background capture is off.
+- Yellow `ellipsis.circle`: Chronicle is starting.
+- Yellow `questionmark.circle`: Chronicle can't check Screen Recording right now.
+- Red `lock.circle`: Chronicle needs Screen Recording.
+- Red `xmark.circle`: Chronicle isn't running.
+- Red `exclamationmark.circle`: the daemon is up but capture is not running.
+
 Left-click the icon to open the search popover, or use `Cmd+,` for Settings.
 
 ### First run

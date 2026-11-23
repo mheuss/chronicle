@@ -6,6 +6,8 @@ mod ipc_handler;
 mod logging;
 mod media_presence;
 mod mic_gate;
+mod permission_gate;
+mod permission_monitor;
 mod permissions;
 mod pipeline;
 mod power;
@@ -81,19 +83,32 @@ const POISON_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(15
 /// Exit with code 3 after `grace` if the poisoned shutdown has not finished.
 /// A survivor stream can hold an audio sender and block `audio_pipeline.stop()`.
 fn spawn_poison_exit_watchdog(grace: std::time::Duration) {
+    spawn_exit_watchdog(grace, 3);
+}
+
+/// Exit with `code` after `grace` if the shutdown has not finished.
+fn spawn_exit_watchdog(grace: std::time::Duration, code: u8) {
     let spawned = std::thread::Builder::new()
-        .name("poison-exit-watchdog".into())
+        .name("exit-watchdog".into())
         .spawn(move || {
             std::thread::sleep(grace);
             logging::fatal(&format!(
-                "poisoned shutdown did not finish within {}s; exiting with code 3",
+                "shutdown did not finish within {}s; exiting with code {code}",
                 grace.as_secs()
             ));
-            std::process::exit(3);
+            std::process::exit(i32::from(code));
         });
     if let Err(e) = spawned {
-        log::error!("poison-exit watchdog failed to start: {e}");
+        log::error!("exit watchdog failed to start: {e}");
     }
+}
+
+/// The code the post-loop exit watchdog exits with, if one is needed. A
+/// poisoned engine and a failed start after a grant can both leave a stream
+/// running, and either can block the shutdown below. A monitor stop leaves
+/// the engine healthy, so the normal teardown stops capture and none is armed.
+fn exit_watchdog_code(loop_poisoned: bool, loop_exit: Option<u8>) -> Option<u8> {
+    if loop_poisoned { Some(3) } else { loop_exit }
 }
 
 /// A [`StopSignal`](chronicle_storage::StopSignal) that is true once `cancel`
@@ -373,6 +388,7 @@ fn main() -> std::process::ExitCode {
             .map(|a| a.to_string_lossy().into_owned()),
         &mut std::io::stdout(),
         permissions::check_microphone,
+        permissions::check_screen_recording,
     ) {
         return std::process::ExitCode::from(code);
     }
@@ -381,10 +397,33 @@ fn main() -> std::process::ExitCode {
     std::process::ExitCode::from(exit_code_for(run_main()))
 }
 
+/// The first `Status` permissions block, from the boot reads.
+fn boot_permissions_snapshot(
+    boot: &permissions::BootPermissions,
+    at_ms: i64,
+) -> chronicle_ipc::PermissionsStats {
+    chronicle_ipc::PermissionsStats {
+        screen_recording: ipc_handler::wire_permission(boot.screen.into()),
+        screen_recording_checked_at_ms: Some(at_ms),
+        microphone: ipc_handler::wire_permission(boot.mic),
+        microphone_checked_at_ms: Some(at_ms),
+    }
+}
+
 /// The process exit status for `run_main`'s result.
-fn exit_code_for(result: Result<()>) -> u8 {
+///
+/// | Code | Meaning |
+/// |---|---|
+/// | 0 | Clean shutdown, or another daemon holds the lock |
+/// | 1 | Startup or runtime error |
+/// | 3 | Capture start or stop left streams possibly running, or the permission monitor stopped (`process::exit`) |
+/// | 4 | Restart for fresh permissions, after the full shutdown (design §4) |
+///
+/// The `--permission-status` helper has its own codes, 0 to 2, documented on
+/// `permissions::run_status_command`.
+fn exit_code_for(result: Result<u8>) -> u8 {
     match result {
-        Ok(()) => 0,
+        Ok(code) => code,
         Err(e) => {
             logging::fatal(&format!("chronicle-daemon failed: {e:#}"));
             1
@@ -402,7 +441,7 @@ fn create_group_container() {
         NSFileManager::defaultManager().containerURLForSecurityApplicationGroupIdentifier(&group);
 }
 
-fn run_main() -> Result<()> {
+fn run_main() -> Result<u8> {
     let storage_config = StorageConfig::from_env()?;
     create_group_container();
     let lock = match startup(instance_lock::acquire(&storage_config.base_dir))? {
@@ -412,7 +451,7 @@ fn run_main() -> Result<()> {
                 "another chronicle-daemon is already running on {}; exiting",
                 path.display()
             );
-            return Ok(());
+            return Ok(0);
         }
     };
     let socket_path = checked_socket_path(&storage_config.base_dir)?;
@@ -422,9 +461,18 @@ fn run_main() -> Result<()> {
     instance_lock::run_holding(lock, runtime, run(storage_config, socket_path))
 }
 
-async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> Result<()> {
+async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> Result<u8> {
     // --- Permission preflight ---
-    let _mic_status = permissions::preflight()?;
+    let boot = permissions::preflight();
+    // Seeded from the boot read, so a `Status` served before the supervisor
+    // exists agrees with the snapshot.
+    let sr_denied_mirror = Arc::new(AtomicBool::new(
+        boot.screen == permissions::ScreenRecordingStatus::Denied,
+    ));
+    let permissions_snapshot = Arc::new(ArcSwap::from_pointee(boot_permissions_snapshot(
+        &boot,
+        permission_monitor::unix_ms(),
+    )));
 
     // --- Storage ---
     let storage = Arc::new(Storage::open(storage_config).await?);
@@ -568,6 +616,10 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
         Arc::clone(&capture_ready),
         Arc::clone(&transcription_status),
         model_tx,
+    )
+    .with_permissions(
+        Arc::clone(&permissions_snapshot),
+        Arc::clone(&sr_denied_mirror),
     );
     let ipc_server = IpcServer::start(&socket_path, handler, cancel.clone()).await?;
     log::info!("IPC server started");
@@ -616,7 +668,11 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
         storage.base_dir().to_path_buf(),
         Arc::clone(&capture_drops),
     )
-    .with_on_stop_poisoned(|| spawn_poison_exit_watchdog(POISON_EXIT_GRACE));
+    .with_on_stop_poisoned(|| spawn_poison_exit_watchdog(POISON_EXIT_GRACE))
+    .with_screen_recording_gate(
+        boot.screen == permissions::ScreenRecordingStatus::Denied,
+        Arc::clone(&sr_denied_mirror),
+    );
 
     if initial_capture_paused {
         log::info!("Capture is paused (persisted setting); skipping runtime start");
@@ -818,7 +874,7 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     //
     // **The single-writer note.** All four settings writers run from this
     // loop — `write_mic_setting` here, `write_capture_paused` via
-    // `set_user_paused` in the capture arm, `write_whisper_model` via
+    // `mark_user_paused` in the capture arm, `write_whisper_model` via
     // `handle_provision_event`, and `write_mic_setting(false)` inside the mic
     // gate (`mic_gate::apply_mic_intent`), which this arm, the supervisor's
     // `start()`, and `mic_gate::reapply_mic_gate` all reach. They share one
@@ -833,6 +889,10 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     // runs after the loop has exited. `handle_provision_event`'s doc points
     // here for this reasoning, so it must keep naming all four writers. This
     // note must keep naming both exceptions.
+    //
+    // The two permission arms (`screen_rx`, `mic_rx_perm`) follow the same
+    // rule. They are the only callers of `set_sr_denied` and the only
+    // permission-driven callers of `reapply_mic_gate` (design N5).
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     // Open the readiness gates: from here the loop drains `mic_rx`,
     // `capture_rx` and `model_rx`, so the IPC handler can forward toggles
@@ -841,6 +901,26 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     // always-equal flag.
     mic_ready.store(true, Ordering::Release);
     capture_ready.store(true, Ordering::Release);
+    // Adds 1 after each mic command and each capture start (design §3, AD20).
+    let mut mic_generation: u64 = 0;
+    // Permission monitor (design §2). Started after the readiness flags are set.
+    // The first read then lands on a loop that drains it. The two arms below are the
+    // only code that acts on its reads (N5).
+    let (mode_tx, mode_rx) = tokio::sync::watch::channel(permission_gate::state_for(
+        supervisor.gates(),
+        mic_generation,
+    ));
+    let (screen_tx, mut screen_rx) = tokio::sync::mpsc::channel(8);
+    let (mic_perm_tx, mut mic_rx_perm) = tokio::sync::mpsc::channel(8);
+    let mut monitor_handle = tokio::spawn(permission_monitor::run(
+        permission_monitor::helper_reader(),
+        mode_rx,
+        screen_tx,
+        mic_perm_tx,
+        cancel.clone(),
+        permission_monitor::unix_ms,
+    ));
+    let mut sr_gate = permission_gate::SrGate::default();
     // The provision currently in flight, if any. At most one is ever doing
     // real work — the provisioner's in-flight CAS guarantees it — so the
     // latest handle is the only one worth holding, and shutdown waits on it
@@ -849,9 +929,14 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     // technically still unfinished. Harmless: by then the superseded task has
     // already sent its event and has nothing left but to return.)
     let mut loop_poisoned = false;
+    let mut monitor_stopped = false;
+    // Set when the first start after a grant fails (design §4). The daemon
+    // then shuts down in full and exits with this code.
+    let mut loop_exit: Option<u8> = None;
     let mut provision_task: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         tokio::select! {
+            biased;
             res = tokio::signal::ctrl_c() => {
                 res?;
                 log::info!("SIGINT received, shutting down");
@@ -860,6 +945,72 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
             _ = sigterm.recv() => {
                 log::info!("SIGTERM received, shutting down");
                 break;
+            }
+            // The monitor returns on cancel or once the loop drops its channels, both
+            // after this loop. Ending here means it panicked, and gates would stop moving.
+            res = &mut monitor_handle => {
+                log::error!("permission monitor stopped ({res:?}); shutting down for a fresh process");
+                monitor_stopped = true;
+                break;
+            }
+            Some(t) = screen_rx.recv() => {
+                let g = supervisor.gates();
+                if !permission_gate::accept_screen_read(t.epoch, g) {
+                    continue;
+                }
+                // Before the gate moves, so Status never pairs a new gate with the old read.
+                let mut next = (**permissions_snapshot.load()).clone();
+                next.screen_recording = ipc_handler::wire_permission(t.read);
+                next.screen_recording_checked_at_ms = Some(t.at_ms);
+                permissions_snapshot.store(Arc::new(next));
+                if let Some(denied) = sr_gate.decide(g.sr_denied, g.sr_stale, t.read) {
+                    let granted = permission_gate::grant_cleared(g.sr_denied, denied);
+                    let outcome = supervisor.set_sr_denied(denied, &audio_pipeline).await;
+                    if permission_gate::start_decides_mic(&outcome) {
+                        mic_generation += 1;
+                    }
+                    if let Some(code) = permission_gate::exit_after_grant(granted, &outcome) {
+                        log::error!("capture start after a Screen Recording grant failed; shutting down for a fresh process");
+                        loop_exit = Some(code);
+                        break;
+                    }
+                    let disposition = route_reconcile_outcome(
+                        &outcome,
+                        &mut boot_incident,
+                        &mut start_retry,
+                        &retry_tx,
+                    );
+                    if disposition == BootDisposition::Exit {
+                        log::error!("capture engine poisoned; shutting down for a fresh process");
+                        loop_poisoned = true;
+                        break;
+                    }
+                }
+                permission_gate::publish_state(&mode_tx, supervisor.gates(), mic_generation);
+            }
+            Some(t) = mic_rx_perm.recv() => {
+                if !permission_gate::accept_mic_read(t.mic_generation, mic_generation) {
+                    continue;
+                }
+                let atom = chronicle_ipc::MicState::from_u8(mic_state_atom.load(Ordering::Acquire));
+                let intent_on = settings::read_mic_setting(storage.base_dir());
+                let capture_running = supervisor.is_running() && !supervisor.gates().sr_denied;
+                if permission_gate::mic_tick_calls_gate(t.read, atom, intent_on, capture_running) {
+                    let state = mic_gate::reapply_mic_gate(
+                        &audio_pipeline,
+                        storage.base_dir(),
+                        || t.read,
+                        capture_running,
+                        &mic_state_atom,
+                    );
+                    if state != atom {
+                        log::info!("permission tick: mic read={:?}, result={state:?}", t.read);
+                    }
+                }
+                let mut next = (**permissions_snapshot.load()).clone();
+                next.microphone = ipc_handler::wire_permission(t.read);
+                next.microphone_checked_at_ms = Some(t.at_ms);
+                permissions_snapshot.store(Arc::new(next));
             }
             Some(cmd) = mic_rx.recv() => {
                 // Persist the user's intent first. The gate may then clear it
@@ -892,17 +1043,26 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                     }
                 };
                 mic_state_atom.store(outcome.status as u8, std::sync::atomic::Ordering::Release);
+                // Every command has saved its intent, so older reads are stale
+                // whatever the reply.
+                mic_generation += 1;
+                permission_gate::publish_state(&mode_tx, supervisor.gates(), mic_generation);
                 let _ = cmd.reply.send(outcome.reply);
             }
             Some(cmd) = capture_rx.recv() => {
-                let (paused, outcome) = match cmd.action {
-                    ipc_handler::CaptureAction::Pause => {
-                        (true, supervisor.set_user_paused(true, &audio_pipeline).await)
-                    }
-                    ipc_handler::CaptureAction::Resume => {
-                        (false, supervisor.set_user_paused(false, &audio_pipeline).await)
-                    }
-                };
+                let paused = matches!(cmd.action, ipc_handler::CaptureAction::Pause);
+                supervisor.mark_user_paused(paused);
+                let outcome = permission_gate::publish_then_reconcile(
+                    &mode_tx,
+                    supervisor.gates(),
+                    mic_generation,
+                    supervisor.reconcile(&audio_pipeline),
+                )
+                .await;
+                if permission_gate::start_decides_mic(&outcome) {
+                    mic_generation += 1;
+                    permission_gate::publish_state(&mode_tx, supervisor.gates(), mic_generation);
+                }
                 let disposition = route_reconcile_outcome(
                     &outcome,
                     &mut boot_incident,
@@ -952,12 +1112,21 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
             }
             Some(evt) = power_rx.recv() => {
                 log::info!("power event: {evt:?}");
-                let outcome = match evt {
-                    power::PowerEvent::SystemSleep =>
-                        supervisor.set_system_asleep(true, &audio_pipeline).await,
-                    power::PowerEvent::SystemWake =>
-                        supervisor.set_system_awake(&audio_pipeline).await,
-                };
+                match evt {
+                    power::PowerEvent::SystemSleep => supervisor.mark_system_asleep(true),
+                    power::PowerEvent::SystemWake => supervisor.mark_system_awake(),
+                }
+                let outcome = permission_gate::publish_then_reconcile(
+                    &mode_tx,
+                    supervisor.gates(),
+                    mic_generation,
+                    supervisor.reconcile(&audio_pipeline),
+                )
+                .await;
+                if permission_gate::start_decides_mic(&outcome) {
+                    mic_generation += 1;
+                    permission_gate::publish_state(&mode_tx, supervisor.gates(), mic_generation);
+                }
                 let disposition = route_reconcile_outcome(
                     &outcome,
                     &mut boot_incident,
@@ -980,6 +1149,10 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                 if outcome == ReconcileOutcome::Started {
                     log::info!("capture recovered on retry");
                 }
+                if permission_gate::start_decides_mic(&outcome) {
+                    mic_generation += 1;
+                    permission_gate::publish_state(&mode_tx, supervisor.gates(), mic_generation);
+                }
                 let disposition = route_reconcile_outcome(
                     &outcome,
                     &mut boot_incident,
@@ -994,8 +1167,9 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
             }
         }
     }
-    if loop_poisoned {
-        spawn_poison_exit_watchdog(POISON_EXIT_GRACE);
+    monitor_handle.abort();
+    if let Some(code) = exit_watchdog_code(loop_poisoned, loop_exit) {
+        spawn_exit_watchdog(POISON_EXIT_GRACE, code);
     }
     // Set when an owned task/thread panic is OBSERVED during shutdown — for
     // the provision join below, the panic itself may have happened much
@@ -1206,7 +1380,7 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
         // wait above can add up to 5s. The unbounded steps between them
         // (`ipc_server.shutdown`, `supervisor.shutdown`, the bridge join, the
         // audio-store await, the backfill join) are the ones with no ceiling
-        // on a clean shutdown; a poisoned one is cut off by the poison-exit
+        // on a clean shutdown; a poisoned or exit-4 one is cut off by the exit
         // watchdog. Neither is this one.
         // The three graces differ in what expiry does. The provision wait
         // aborts its task, though not a `spawn_blocking` load already running.
@@ -1267,10 +1441,26 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
         logging::fatal("daemon exiting with code 3 (engine poisoned)");
         std::process::exit(3);
     }
+    if monitor_stopped {
+        logging::fatal("daemon exiting with code 3 (permission monitor stopped)");
+        std::process::exit(3);
+    }
+    after_drain(loop_exit, shutdown_failed)
+}
+
+/// What `run` returns once the shutdown drain is done. A restart for fresh
+/// permissions wins over a task failure, which is already in the log.
+fn after_drain(loop_exit: Option<u8>, shutdown_failed: bool) -> Result<u8> {
+    if let Some(code) = loop_exit {
+        logging::fatal(&format!(
+            "capture start after a Screen Recording grant failed; exiting with code {code} for a fresh process"
+        ));
+        return Ok(code);
+    }
     if shutdown_failed {
         anyhow::bail!("shutdown completed with task failures (see log)");
     }
-    Ok(())
+    Ok(0)
 }
 
 #[cfg(test)]
@@ -1280,6 +1470,56 @@ mod tests {
         let base = std::path::PathBuf::from(format!("/{}", "a".repeat(total - 1 - name_len)));
         assert_eq!(base.join(SOCKET_NAME).as_os_str().len(), total);
         base
+    }
+
+    #[test]
+    fn first_status_takes_both_boot_reads() {
+        let boot = crate::permissions::BootPermissions {
+            screen: crate::permissions::ScreenRecordingStatus::Denied,
+            mic: crate::permissions::PermissionRead::NotDetermined,
+        };
+        let snap = boot_permissions_snapshot(&boot, 42);
+        assert_eq!(
+            snap.screen_recording,
+            chronicle_ipc::PermissionState::Denied
+        );
+        assert_eq!(
+            snap.microphone,
+            chronicle_ipc::PermissionState::NotDetermined
+        );
+        assert_eq!(snap.screen_recording_checked_at_ms, Some(42));
+        assert_eq!(snap.microphone_checked_at_ms, Some(42));
+    }
+
+    #[test]
+    fn forced_post_grant_start_failure_reaches_exit_with_4() {
+        let failed = ReconcileOutcome::StartFailed {
+            partial_teardown: false,
+        };
+        let loop_exit = crate::permission_gate::exit_after_grant(true, &failed);
+        assert_eq!(loop_exit, Some(4));
+        // The code `run` returns after the drain is the process exit status.
+        assert_eq!(exit_code_for(after_drain(loop_exit, false)), 4);
+    }
+
+    #[test]
+    fn a_loop_exit_arms_the_watchdog_with_its_code() {
+        assert_eq!(exit_watchdog_code(false, None), None);
+        assert_eq!(exit_watchdog_code(true, None), Some(3));
+        // A post-grant start can fail with a partial teardown. The graceful
+        // shutdown can then hang on a survivor stream, so it needs the bound.
+        assert_eq!(exit_watchdog_code(false, Some(4)), Some(4));
+    }
+
+    #[test]
+    fn after_drain_codes() {
+        assert_eq!(exit_code_for(after_drain(None, false)), 0);
+        assert_eq!(exit_code_for(after_drain(None, true)), 1);
+        assert_eq!(
+            exit_code_for(after_drain(Some(4), true)),
+            4,
+            "a restart for permissions wins over a shutdown task failure"
+        );
     }
 
     #[test]
@@ -1314,7 +1554,7 @@ mod tests {
 
     #[test]
     fn exit_code_for_maps_ok_and_err() {
-        assert_eq!(exit_code_for(Ok(())), 0);
+        assert_eq!(exit_code_for(Ok(0)), 0);
         assert_eq!(exit_code_for(Err(anyhow::anyhow!("boom"))), 1);
     }
 

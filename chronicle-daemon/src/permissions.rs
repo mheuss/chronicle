@@ -1,9 +1,9 @@
 //! macOS TCC permission checks for the daemon.
 //!
-//! Checks Screen Recording and Microphone authorization status before
-//! starting capture engines. Screen Recording is a hard gate — the
-//! daemon exits if denied. Microphone never blocks startup: the mic gate
-//! (`mic_gate.rs`) decides each mic start from a fresh helper read.
+//! The boot read sets the initial Screen Recording gate. After boot, every
+//! decision uses a fresh helper read (`--permission-status`, ADR-022).
+//! A running process keeps its first answer. Neither read ever stops the
+//! daemon.
 
 use objc2_foundation::NSString;
 
@@ -34,17 +34,6 @@ pub enum MicrophoneStatus {
     Restricted,
 }
 
-/// Errors from the permission preflight check.
-#[derive(Debug, thiserror::Error)]
-pub enum PermissionError {
-    #[error(
-        "screen recording permission not granted — grant access in \
-         System Settings > Privacy & Security > Screen Recording, \
-         then restart chronicle-daemon"
-    )]
-    ScreenRecordingDenied,
-}
-
 // ---------------------------------------------------------------------------
 // FFI
 // ---------------------------------------------------------------------------
@@ -63,7 +52,7 @@ unsafe extern "C" {
 // Checks
 // ---------------------------------------------------------------------------
 
-fn check_screen_recording() -> ScreenRecordingStatus {
+pub(crate) fn check_screen_recording() -> ScreenRecordingStatus {
     let authorized = unsafe { CGPreflightScreenCaptureAccess() };
     if authorized {
         ScreenRecordingStatus::Authorized
@@ -137,6 +126,21 @@ impl From<MicrophoneStatus> for PermissionRead {
     }
 }
 
+impl From<ScreenRecordingStatus> for PermissionRead {
+    fn from(status: ScreenRecordingStatus) -> Self {
+        match status {
+            ScreenRecordingStatus::Authorized => Self::Authorized,
+            ScreenRecordingStatus::Denied => Self::Denied,
+        }
+    }
+}
+
+/// The helper's name for the Screen Recording permission.
+pub(crate) const SCREEN_RECORDING: &str = "screen-recording";
+
+/// The helper's name for the microphone permission.
+pub(crate) const MICROPHONE: &str = "microphone";
+
 /// The helper flag. A process spawned with it reads its permission fresh,
 /// and TCC attributes the read to the process that spawned it.
 pub(crate) const STATUS_FLAG: &str = "--permission-status";
@@ -149,6 +153,7 @@ pub(crate) fn run_status_command<I, W>(
     args: I,
     out: &mut W,
     read_microphone: impl FnOnce() -> MicrophoneStatus,
+    read_screen_recording: impl FnOnce() -> ScreenRecordingStatus,
 ) -> Option<u8>
 where
     I: IntoIterator<Item = String>,
@@ -162,7 +167,8 @@ where
         return Some(2);
     };
     let read = match name.as_str() {
-        "microphone" => PermissionRead::from(read_microphone()),
+        MICROPHONE => PermissionRead::from(read_microphone()),
+        SCREEN_RECORDING => PermissionRead::from(read_screen_recording()),
         _ => return Some(2),
     };
     match writeln!(out, "{}", read.as_word()).and_then(|()| out.flush()) {
@@ -179,7 +185,20 @@ pub(crate) const HELPER_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// from here.
 pub(crate) fn fresh_microphone_status() -> PermissionRead {
     match std::env::current_exe() {
-        Ok(exe) => fresh_status_with(&exe, "microphone", &run_helper),
+        Ok(exe) => fresh_status_with(&exe, MICROPHONE, &run_helper),
+        Err(e) => {
+            log::warn!("permission helper: current_exe failed: {e}");
+            PermissionRead::Unavailable
+        }
+    }
+}
+
+/// The Screen Recording permission as a fresh helper process reads it (design §2).
+/// `CGPreflightScreenCaptureAccess` keeps its first answer in a running process.
+/// The daemon never decides on its own read after boot.
+pub(crate) fn fresh_screen_recording_status() -> PermissionRead {
+    match std::env::current_exe() {
+        Ok(exe) => fresh_status_with(&exe, SCREEN_RECORDING, &run_helper),
         Err(e) => {
             log::warn!("permission helper: current_exe failed: {e}");
             PermissionRead::Unavailable
@@ -254,25 +273,41 @@ pub(crate) fn run_helper(
 // Preflight
 // ---------------------------------------------------------------------------
 
-/// Check all required permissions before starting engines.
-///
-/// Returns microphone status for informational use. Returns
-/// `Err(PermissionError::ScreenRecordingDenied)` if screen recording
-/// is not authorized.
-pub fn preflight() -> Result<MicrophoneStatus, PermissionError> {
-    let screen = check_screen_recording();
-    let mic = check_microphone();
+/// What the daemon read at boot (ADR-022). Only `screen` sets a gate.
+/// `mic` is logged and seeds the first `Status`.
+pub struct BootPermissions {
+    /// In-process read. Fresh, because the process has just started.
+    pub screen: ScreenRecordingStatus,
+    /// Helper read, the same source as the mic gate, so the first `Status`
+    /// agrees with it.
+    pub mic: PermissionRead,
+}
 
+/// Read both permissions at boot and log them. Never fails: a missing
+/// Screen Recording grant gates capture instead of stopping the daemon
+/// (design AD1).
+pub fn preflight() -> BootPermissions {
+    preflight_with(check_screen_recording, fresh_microphone_status)
+}
+
+fn preflight_with(
+    read_screen: impl FnOnce() -> ScreenRecordingStatus,
+    read_mic: impl FnOnce() -> PermissionRead,
+) -> BootPermissions {
+    let screen = read_screen();
+    let mic = read_mic();
     log::info!("Microphone permission: {mic:?}");
-
-    if screen == ScreenRecordingStatus::Denied {
-        log::error!("Screen recording permission: {screen:?}");
-        return Err(PermissionError::ScreenRecordingDenied);
+    match screen {
+        ScreenRecordingStatus::Authorized => {
+            log::info!("Screen recording permission: Authorized");
+        }
+        ScreenRecordingStatus::Denied => {
+            log::warn!(
+                "Screen recording permission: Denied — capture stays off until it is granted"
+            );
+        }
     }
-
-    log::info!("Screen recording permission: {screen:?}");
-
-    Ok(mic)
+    BootPermissions { screen, mic }
 }
 
 #[cfg(test)]
@@ -280,6 +315,16 @@ mod tests {
     use super::*;
     use std::path::Path;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn preflight_takes_the_mic_from_the_fresh_reader() {
+        let boot = preflight_with(
+            || ScreenRecordingStatus::Denied,
+            || PermissionRead::NotDetermined,
+        );
+        assert_eq!(boot.screen, ScreenRecordingStatus::Denied);
+        assert_eq!(boot.mic, PermissionRead::NotDetermined);
+    }
 
     fn answer(out: Option<&'static str>) -> impl Fn(&Path, &[&str], Duration) -> Option<String> {
         move |_, _, _| out.map(str::to_string)
@@ -369,8 +414,48 @@ mod tests {
 
     fn run_with(args: &[&str], status: MicrophoneStatus) -> (Option<u8>, String) {
         let mut out = Vec::new();
-        let code = run_status_command(args.iter().map(|s| s.to_string()), &mut out, || status);
+        let code = run_status_command(
+            args.iter().map(|s| s.to_string()),
+            &mut out,
+            || status,
+            || ScreenRecordingStatus::Denied,
+        );
         (code, String::from_utf8(out).unwrap())
+    }
+
+    #[test]
+    fn status_command_screen_recording_prints_the_reader_word() {
+        assert_eq!(
+            run(&["--permission-status", "screen-recording"]),
+            (Some(0), "denied\n".to_string())
+        );
+    }
+
+    #[test]
+    fn screen_recording_status_maps_to_its_read() {
+        assert_eq!(
+            PermissionRead::from(ScreenRecordingStatus::Authorized),
+            PermissionRead::Authorized
+        );
+        assert_eq!(
+            PermissionRead::from(ScreenRecordingStatus::Denied),
+            PermissionRead::Denied
+        );
+    }
+
+    #[test]
+    fn fresh_screen_status_uses_its_own_name() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let run = |_: &Path, args: &[&str], _: Duration| {
+            seen.borrow_mut().extend(args.iter().map(|s| s.to_string()));
+            Some("denied\n".to_string())
+        };
+        let read = fresh_status_with(Path::new("/unused"), SCREEN_RECORDING, &run);
+        assert_eq!(read, PermissionRead::Denied);
+        assert_eq!(
+            *seen.borrow(),
+            vec!["--permission-status", "screen-recording"]
+        );
     }
 
     #[test]
@@ -405,7 +490,12 @@ mod tests {
     fn status_command_reads_only_for_a_known_name() {
         let mut out = Vec::new();
         let args = ["--permission-status", "camera"].map(String::from);
-        let code = run_status_command(args, &mut out, || panic!("read for an unknown name"));
+        let code = run_status_command(
+            args,
+            &mut out,
+            || panic!("read for an unknown name"),
+            || panic!("read for an unknown name"),
+        );
         assert_eq!(code, Some(2));
     }
 
@@ -440,7 +530,12 @@ mod tests {
             }
         }
         let args = ["--permission-status", "microphone"].map(String::from);
-        let code = run_status_command(args, &mut Closed, || MicrophoneStatus::Authorized);
+        let code = run_status_command(
+            args,
+            &mut Closed,
+            || MicrophoneStatus::Authorized,
+            || ScreenRecordingStatus::Denied,
+        );
         assert_eq!(code, Some(1));
     }
 

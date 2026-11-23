@@ -44,6 +44,8 @@ chronicle-daemon/src/logging.rs
 chronicle-daemon/src/main.rs
 chronicle-daemon/src/media_presence.rs
 chronicle-daemon/src/mic_gate.rs
+chronicle-daemon/src/permission_gate.rs
+chronicle-daemon/src/permission_monitor.rs
 chronicle-daemon/src/permissions.rs
 chronicle-daemon/src/pipeline.rs
 chronicle-daemon/src/pipeline/backfill.rs
@@ -55,7 +57,8 @@ chronicle-daemon/src/provisioning.rs
 chronicle-daemon/src/retention_task.rs
 chronicle-daemon/src/settings.rs
 chronicle-ui/Sources/ChronicleUI/BackgroundService.swift
-chronicle-ui/Sources/ChronicleUI/CaptureHealth.swift
+chronicle-ui/Sources/ChronicleUI/CaptureAvailability.swift
+chronicle-ui/Sources/ChronicleUI/CaptureAvailabilityCopy.swift
 chronicle-ui/Sources/ChronicleUI/ChronicleApp.swift
 chronicle-ui/Sources/ChronicleUI/ConnectionSession.swift
 chronicle-ui/Sources/ChronicleUI/DaemonConnection.swift
@@ -67,6 +70,8 @@ chronicle-ui/Sources/ChronicleUI/MicRowState.swift
 chronicle-ui/Sources/ChronicleUI/MicrophonePermission.swift
 chronicle-ui/Sources/ChronicleUI/ResultRow.swift
 chronicle-ui/Sources/ChronicleUI/RetentionCopy.swift
+chronicle-ui/Sources/ChronicleUI/ScreenRecordingPrompt.swift
+chronicle-ui/Sources/ChronicleUI/ScreenRecordingPromptController.swift
 chronicle-ui/Sources/ChronicleUI/ScreenshotDetailView.swift
 chronicle-ui/Sources/ChronicleUI/SearchFilterState.swift
 chronicle-ui/Sources/ChronicleUI/SearchPopoverView.swift

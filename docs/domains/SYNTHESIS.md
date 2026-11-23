@@ -4,7 +4,7 @@
 
 **Written 2026-09-21**, from the fourteen-sitting walk recorded in `REGISTER.md`.
 
-Given a source file, this says which domain owns it. Eleven domains own all 67
+Given a source file, this says which domain owns it. Eleven domains own all 82
 production source files. That is every Rust, Swift, SQL and plist file whose
 content ships inside a binary Chronicle installs, enumerated in `INVENTORY.txt`.
 Each is owned exactly once, so the Exclusions table below is empty.
@@ -14,7 +14,7 @@ them merged into others. The Candidate Outcomes table records that.
 
 **To place a file.** For a file that already exists, read the `## Owned Files`
 section of the domain files. It is an exact list. Between them the eleven
-cover all 67. For a *new* file, use the placement test at the top of each domain
+cover all 82. For a *new* file, use the placement test at the top of each domain
 file. It is a question you ask of the file to decide where it belongs.
 
 **Why a boundary sits where it does** is in `DECISIONS.md`. That file also holds
@@ -61,7 +61,7 @@ agreed. For the full picture, read each domain file's `## Depends On` and
 | SEAM-daemon-connection-api | IPC | UI | The view layer holds one `DaemonConnection`, calls its request methods and reads its published state, and never touches the socket. IPC decides the method surface and the error vocabulary. | IPC | `DaemonConnection` |
 | SEAM-ocr-extraction | OCR | pipeline | A blocking synchronous call taking a path and returning text, invoked from pipeline's async loop through `spawn_blocking`. OCR decides the signature and the error vocabulary; pipeline decides the scheduling. | OCR | `extract_text`, `ocr_loop` |
 | SEAM-opus-segment-file | audio | transcription | An Ogg/Opus file at 48 kHz whose OpusHead audio writes by hand and transcription parses by hand, reading pre-skip as a u16 LE in the 48 kHz domain at byte offset 10. Neither crate imports the other in production, so the file format is the whole contract, and audio decides what lands on disk. | audio | `OggOpusEncoder`, `decode_opus_16k_mono` |
-| SEAM-permission-wire | permissions | IPC | permissions owns the grant vocabulary and IPC owns what the UI is told. No grant state crosses the wire as itself. The only trace of one is `permission_denied`, the reply to a microphone start the gate refused, after which Status reports `off`. | permissions | `PermissionRead`, `MicState` |
+| SEAM-permission-wire | permissions | IPC | permissions owns the grant vocabulary and IPC owns what the UI is told. Grant states cross the wire in Status's `permissions` block as `PermissionState`. Only `wire_permission` maps a `PermissionRead` to one. Status's capture state reports `permission_denied` while `sr_denied` is set, unless capture is paused. A refused microphone start still replies `permission_denied`. | permissions | `PermissionRead`, `MicState` |
 | SEAM-power-event | power | pipeline | A two-variant `PowerEvent` over a bounded channel, delivered fire-and-forget — an event is dropped rather than queued when the channel is full. power names the transition; pipeline decides what it means. | power | `PowerEvent`, `power_rx` |
 | SEAM-stage-enqueue | capture | pipeline | capture holds an `Arc<dyn OcrSink>` and enqueues through a bounded channel whose full case is a typed result rather than a block or a panic. pipeline decides the trait and the outcome vocabulary; capture decides what it sends. | pipeline | `OcrSink`, `OcrEnqueueResult` |
 | SEAM-storage-status-wire | storage | IPC | `StorageStatus` and `StorageStats` are declared independently, neither importing the other, and the daemon converts between them at `ipc_handler.rs`. storage decides what a status can report. | storage | `StorageStatus`, `StorageStats` |

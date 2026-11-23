@@ -38,6 +38,12 @@ final class FactoryLog {
     func closeServers(from index: Int = 0) {
         for pair in pairs.dropFirst(index) { Darwin.close(pair.serverFD) }
     }
+
+    /// For servers that close their own descriptor. Each one sees EOF once
+    /// its client side closes.
+    private var servers: [Task<Void, Never>] = []
+    func track(_ server: Task<Void, Never>) { servers.append(server) }
+    func awaitServers() async { for server in servers { await server.value } }
 }
 
 /// Holds the semaphores gating each spawned test server, so a test can release
@@ -52,6 +58,188 @@ final class GateBox {
 @Suite("DaemonConnection reconnect", .timeLimit(.minutes(1)))
 @MainActor
 struct DaemonConnectionReconnectTests {
+
+    @MainActor final class Attempts { var count = 0 }
+
+    @Test("reconnectNow skips the backoff wait")
+    func reconnectNowSkipsTheBackoff() async throws {
+        let attempts = Attempts()
+        let conn = DaemonConnection(connectionFactory: {
+            attempts.count += 1
+            throw IPCError.connectionFailed(errno: ECONNREFUSED)
+        })
+        conn.connect()
+        // Let the backoff grow: attempts at 0 s, 1 s, 3 s. The next wait is 4 s.
+        await waitUntil(ticks: 500) { attempts.count >= 3 }
+        let before = attempts.count
+        conn.reconnectNow()
+        await waitUntil(ticks: 50) { attempts.count > before }
+        #expect(attempts.count > before, "a new attempt starts within 0.5 s, not after the 4 s wait")
+        conn.disconnect()
+    }
+
+    @Test("reconnectNow is a no-op while connected")
+    func reconnectNowIsANoOpWhileConnected() async throws {
+        let log = FactoryLog()
+        let conn = DaemonConnection(connectionFactory: {
+            let fd = try log.make()
+            #expect(setNoSigPipe(fd))
+            let serverFD = log.pairs.last!.serverFD
+            log.track(blockingServer {
+                defer { Darwin.close(serverFD) }
+                guard readLineSync(from: serverFD) != nil else { return }
+                writeAll(#"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"0.0.1"}}"# + "\n", to: serverFD)
+                _ = readLineSync(from: serverFD)
+            })
+            return fd
+        }, heartbeatInterval: .seconds(30))
+        conn.connect()
+        await waitUntil { conn.currentStatus != nil }
+        #expect(conn.currentStatus != nil)
+        let before = conn.sessionForTesting
+        conn.reconnectNow()
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(log.count == 1, "reconnectNow while connected opened a second connection")
+        #expect(conn.sessionForTesting === before, "reconnectNow while connected replaced the session")
+        conn.disconnect()
+        await log.awaitServers()
+    }
+
+    @Test("reconnectNow during an attempt leaves the new attempt's session alone")
+    func reconnectNowDuringAnAttemptKeepsTheNewSession() async throws {
+        let log = FactoryLog()
+        let gate = AsyncGate()
+        defer { Task { await gate.open() } }
+        let calls = Attempts()
+        let conn = DaemonConnection(connectionFactory: {
+            calls.count += 1
+            if calls.count == 1 { await gate.wait() }
+            let fd = try log.make()
+            #expect(setNoSigPipe(fd))
+            let serverFD = log.pairs.last!.serverFD
+            log.track(blockingServer {
+                defer { Darwin.close(serverFD) }
+                guard readLineSync(from: serverFD) != nil else { return }
+                writeAll(#"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"0.0.1"}}"# + "\n", to: serverFD)
+                _ = readLineSync(from: serverFD)
+            })
+            return fd
+        }, heartbeatInterval: .seconds(30))
+        conn.connect()
+        await waitUntil { calls.count == 1 }
+        #expect(conn.state == .connecting)
+        conn.reconnectNow()
+        await waitUntil { conn.currentStatus != nil }
+        let winner = conn.sessionForTesting
+        #expect(winner != nil)
+        await gate.open()  // Release the cancelled first attempt.
+        await waitUntil { log.count == 2 }
+        #expect(log.count == 2, "the cancelled attempt ran")
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(conn.state == .connected)
+        #expect(conn.sessionForTesting === winner, "the cancelled attempt touched the new session")
+        #expect(conn.currentStatus != nil)
+        conn.disconnect()
+        await log.awaitServers()
+    }
+
+    @Test("a slow command reply under the bound keeps the replies from going overdue")
+    func aSlowCommandReplyUnderTheBoundIsNotOverdue() async throws {
+        let pair = try SocketPairHelper.make()
+        let conn = DaemonConnection(testingSocketFD: pair.clientFD, staleAfter: .seconds(2))
+        let serverFD = pair.serverFD
+        // The reply takes 1.4 s, like a command the daemon holds until its
+        // recv_timeout. It lands inside the 2 s bound.
+        let daemon = blockingServer {
+            guard readLineSync(from: serverFD) != nil else { return }
+            Thread.sleep(forTimeInterval: 1.4)
+            writeAll(#"{"type":"set_mic_enabled","ok":false,"state":"off","pending":true}"# + "\n", to: serverFD)
+        }
+        _ = try await conn.setMicEnabled(true)
+        _ = await daemon.value
+        // 2.6 s after connect: past the first bound, inside the one the reply restarted.
+        try await Task.sleep(for: .milliseconds(1_200))
+        #expect(!conn.replyOverdue, "a reply of any kind restarts the bound")
+        conn.disconnect()
+        Darwin.close(serverFD)
+    }
+
+    @Test("no reply for the bound marks the replies overdue and the status stale")
+    func noReplyForTheBoundIsOverdue() async throws {
+        let pair = try SocketPairHelper.make()
+        let conn = DaemonConnection(testingSocketFD: pair.clientFD, staleAfter: .milliseconds(300))
+        let serverFD = pair.serverFD
+        let daemon = blockingServer {
+            respondToOneRequest(on: serverFD, with: #"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"v"}}"#)
+        }
+        _ = try await conn.requestStatus()
+        _ = await daemon.value
+        #expect(conn.currentStatus != nil)
+        #expect(!conn.replyOverdue)
+        await waitUntil(ticks: 100) { conn.replyOverdue }
+        #expect(conn.replyOverdue)
+        #expect(conn.currentStatus == nil, "an overdue connection's status is not current")
+        #expect(conn.state == .connected, "overdue is not a disconnect")
+        conn.disconnect()
+        #expect(!conn.replyOverdue, "a closed connection is not overdue")
+        Darwin.close(serverFD)
+    }
+
+    @Test("a reply after the bound clears overdue, and a Status makes it current again")
+    func aReplyAfterTheBoundRecovers() async throws {
+        let pair = try SocketPairHelper.make()
+        let conn = DaemonConnection(testingSocketFD: pair.clientFD, staleAfter: .milliseconds(300))
+        let serverFD = pair.serverFD
+        // A Status first, so a stale snapshot exists for a command reply to
+        // wrongly bring back.
+        let first = blockingServer {
+            respondToOneRequest(on: serverFD, with: #"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"v"}}"#)
+        }
+        _ = try await conn.requestStatus()
+        _ = await first.value
+        #expect(conn.currentStatus != nil)
+        await waitUntil(ticks: 100) { conn.replyOverdue }
+        #expect(conn.replyOverdue)
+        #expect(conn.currentStatus == nil)
+        // A command reply next: any reply clears overdue.
+        let mic = blockingServer {
+            respondToOneRequest(on: serverFD, with: #"{"type":"set_mic_enabled","ok":true,"state":"on"}"#)
+        }
+        _ = try await conn.setMicEnabled(true)
+        _ = await mic.value
+        #expect(!conn.replyOverdue, "a command reply clears overdue")
+        #expect(conn.currentStatus == nil, "only a Status makes the status current")
+        let status = blockingServer {
+            respondToOneRequest(on: serverFD, with: #"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"v"}}"#)
+        }
+        _ = try await conn.requestStatus()
+        _ = await status.value
+        #expect(!conn.replyOverdue)
+        #expect(conn.currentStatus != nil)
+        conn.disconnect()
+        Darwin.close(serverFD)
+    }
+
+    @Test("status is not current until this connection's first reply")
+    func statusIsCurrentOnlyAfterThisConnectionsReply() async throws {
+        let pair = try SocketPairHelper.make()
+        let conn = DaemonConnection(testingSocketFD: pair.clientFD)
+        #expect(conn.currentStatus == nil)
+        let seen = Attempts()
+        conn.onStatus = { _ in seen.count += 1 }
+        let serverFD = pair.serverFD
+        let daemon = blockingServer {
+            respondToOneRequest(on: serverFD, with: #"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"v"}}"#)
+        }
+        _ = try await conn.requestStatus()
+        _ = await daemon.value
+        #expect(conn.currentStatus != nil)
+        #expect(seen.count == 1, "onStatus runs once per Status")
+        conn.disconnect()
+        #expect(conn.currentStatus == nil)
+        #expect(conn.lastStatus != nil, "lastStatus keeps the old snapshot")
+        Darwin.close(serverFD)
+    }
 
     @Test("connect uses the injected factory")
     func connectUsesInjectedFactory() async throws {
@@ -168,24 +356,19 @@ struct DaemonConnectionReconnectTests {
             // sleep. Closing the peer before this would test a blocked
             // request instead, which is a different path.
             let serverFD = log.pairs.last!.serverFD
-            // Decided here on the MainActor: the closure below is Sendable and
-            // cannot read `log`.
-            let serverOwnsFD = log.count > 1
-            _ = blockingServer {
-                // Pair 0's descriptor stays with the test, which closes it
-                // below to force the EOF. Every later pair is the server's, so
-                // the test never frees a number a parked read still holds.
-                defer { if serverOwnsFD { Darwin.close(serverFD) } }
+            // Each server closes its own descriptor, so the test never frees a
+            // number another thread may still read.
+            log.track(blockingServer {
+                defer { Darwin.close(serverFD) }
                 guard readLineSync(from: serverFD) != nil else { return }
                 writeAll(#"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"0.0.1"}}"# + "\n", to: serverFD)
                 _ = readLineSync(from: serverFD)
-            }
+            })
             return fd
         }, heartbeatInterval: .seconds(30))
         conn.connect()
         // `lastStatus`, not `log.count`: it proves the round trip completed, so
-        // monitorConnection is in its 30s sleep and pair 0's server is past its
-        // read — the close below cannot free a number out from under one.
+        // monitorConnection is in its 30s sleep.
         await waitUntil { conn.lastStatus != nil }
         #expect(conn.lastStatus != nil, "the heartbeat never completed; the wait below proves nothing")
 
@@ -196,13 +379,15 @@ struct DaemonConnectionReconnectTests {
         try await Task.sleep(for: .milliseconds(2500))
         #expect(log.count == 1, "a healthy connection must not reconnect")
 
-        // The monitor is now asleep. Close the peer and require a prompt
-        // reconnect rather than a 30 second one.
-        Darwin.close(log.pairs[0].serverFD)
+        // The monitor is now asleep. Shut the peer down and require a prompt
+        // reconnect rather than a 30 second one. Pair 0's server still owns
+        // the descriptor, so it closes it after its read sees the shutdown.
+        shutdown(log.pairs[0].serverFD, SHUT_RDWR)
         await waitUntil(ticks: 300) { log.count >= 2 }
         #expect(log.count >= 2, "idle EOF did not reconnect: \(log.count) attempts")
 
         conn.disconnect()
+        await log.awaitServers()
     }
 
     @Test("a heartbeat failure on a live socket reconnects")

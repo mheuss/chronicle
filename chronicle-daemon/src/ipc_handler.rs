@@ -108,6 +108,10 @@ pub struct DaemonHandler {
     capture_tx: mpsc::Sender<CaptureCommand>,
     /// Latest capture-paused state, read by `Status`.
     capture_paused: Arc<AtomicBool>,
+    /// The permission reads `Status` reports (design §3 Step 3).
+    permissions: Arc<ArcSwap<chronicle_ipc::PermissionsStats>>,
+    /// The Screen Recording gate `Status` reports as `permission_denied`.
+    sr_denied: Arc<AtomicBool>,
     /// Gate that opens once the main loop starts draining `capture_tx` — and
     /// `model_tx`, which deliberately shares this flag rather than carrying a
     /// third always-equal one. The event loop opens every gate at the same
@@ -308,6 +312,10 @@ impl DaemonHandler {
             mic_reply_timeout: Duration::from_secs(20),
             capture_tx,
             capture_paused,
+            permissions: Arc::new(ArcSwap::from_pointee(
+                chronicle_ipc::PermissionsStats::default(),
+            )),
+            sr_denied: Arc::new(AtomicBool::new(false)),
             capture_ready,
             capture_reply_timeout: Duration::from_secs(20),
             transcription_status,
@@ -315,11 +323,27 @@ impl DaemonHandler {
             model_reply_timeout: Duration::from_secs(20),
         }
     }
+
+    /// Read `Status` permissions from a shared snapshot and Screen Recording
+    /// mirror instead of the handler's own defaults.
+    pub fn with_permissions(
+        mut self,
+        permissions: Arc<ArcSwap<chronicle_ipc::PermissionsStats>>,
+        sr_denied: Arc<AtomicBool>,
+    ) -> Self {
+        self.permissions = permissions;
+        self.sr_denied = sr_denied;
+        self
+    }
 }
 
-fn engine_state_str(state: Option<EngineState>, paused: bool) -> &'static str {
+/// "paused" wins, then "permission_denied", then the engine (design AD10).
+fn engine_state_str(state: Option<EngineState>, paused: bool, sr_denied: bool) -> &'static str {
     if paused {
         return "paused";
+    }
+    if sr_denied {
+        return "permission_denied";
     }
     match state {
         Some(EngineState::Running) => "running",
@@ -327,6 +351,21 @@ fn engine_state_str(state: Option<EngineState>, paused: bool) -> &'static str {
         Some(EngineState::Idle) => "idle",
         Some(EngineState::Poisoned) => "poisoned",
         None => "unknown",
+    }
+}
+
+/// The one mapping from CHR-95's read to the wire type (design AD9).
+pub(crate) fn wire_permission(
+    read: crate::permissions::PermissionRead,
+) -> chronicle_ipc::PermissionState {
+    use crate::permissions::PermissionRead as R;
+    use chronicle_ipc::PermissionState as S;
+    match read {
+        R::Authorized => S::Authorized,
+        R::Denied => S::Denied,
+        R::NotDetermined => S::NotDetermined,
+        R::Restricted => S::Restricted,
+        R::Unavailable => S::Unavailable,
     }
 }
 
@@ -349,7 +388,12 @@ impl RequestHandler for DaemonHandler {
                         uptime_secs: self.started_at.elapsed().as_secs(),
                         version: env!("CARGO_PKG_VERSION").to_string(),
                         capture: CaptureStats {
-                            state: engine_state_str(engine.map(|e| e.state), paused).to_string(),
+                            state: engine_state_str(
+                                engine.map(|e| e.state),
+                                paused,
+                                self.sr_denied.load(Ordering::Acquire),
+                            )
+                            .to_string(),
                             active_displays: engine.map_or(0, |e| e.active_displays),
                             frames_captured: engine.map_or(0, |e| e.frames_captured),
                             frames_dropped: engine.map_or(0, |e| e.frames_dropped),
@@ -378,6 +422,7 @@ impl RequestHandler for DaemonHandler {
                             media_absent: c.media_absent,
                         },
                         transcription: self.transcription_status.stats(self.storage.base_dir()),
+                        permissions: (**self.permissions.load()).clone(),
                     },
                 }
             }
@@ -652,6 +697,96 @@ mod tests {
     use chronicle_audio::MicToggleOutcome;
     use chronicle_ipc::{MicState, Request, RequestHandler, Response};
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn engine_state_str_precedence() {
+        use chronicle_capture::EngineState;
+        assert_eq!(
+            engine_state_str(Some(EngineState::Running), true, true),
+            "paused"
+        );
+        assert_eq!(engine_state_str(None, false, true), "permission_denied");
+        assert_eq!(
+            engine_state_str(Some(EngineState::Running), false, true),
+            "permission_denied"
+        );
+        assert_eq!(
+            engine_state_str(Some(EngineState::Stopping), false, true),
+            "permission_denied"
+        );
+        assert_eq!(
+            engine_state_str(Some(EngineState::Running), false, false),
+            "running"
+        );
+        assert_eq!(engine_state_str(None, false, false), "unknown");
+    }
+
+    #[test]
+    fn wire_permission_covers_every_read() {
+        use crate::permissions::PermissionRead as R;
+        use chronicle_ipc::PermissionState as S;
+        assert_eq!(wire_permission(R::Authorized), S::Authorized);
+        assert_eq!(wire_permission(R::Denied), S::Denied);
+        assert_eq!(wire_permission(R::NotDetermined), S::NotDetermined);
+        assert_eq!(wire_permission(R::Restricted), S::Restricted);
+        assert_eq!(wire_permission(R::Unavailable), S::Unavailable);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_carries_permissions_and_the_denied_state() {
+        let (handler, _mic_rx, _atom, _capture_rx, _capture_paused, _ss, _tcell, _dir) =
+            handler_with_full_channels(8, true).await;
+        let snapshot = Arc::new(ArcSwap::from_pointee(chronicle_ipc::PermissionsStats {
+            screen_recording: chronicle_ipc::PermissionState::Denied,
+            screen_recording_checked_at_ms: Some(9),
+            microphone: chronicle_ipc::PermissionState::Authorized,
+            microphone_checked_at_ms: Some(10),
+        }));
+        let denied = Arc::new(AtomicBool::new(true));
+        let handler = handler.with_permissions(Arc::clone(&snapshot), Arc::clone(&denied));
+
+        let Response::Status { data, .. } = handler.handle(Request::Status) else {
+            panic!("expected Status");
+        };
+        assert_eq!(data.capture.state, "permission_denied");
+        assert_eq!(data.permissions, **snapshot.load());
+
+        snapshot.store(Arc::new(chronicle_ipc::PermissionsStats {
+            screen_recording: chronicle_ipc::PermissionState::Authorized,
+            ..**snapshot.load()
+        }));
+        denied.store(false, Ordering::Release);
+        let Response::Status { data, .. } = handler.handle(Request::Status) else {
+            panic!("expected Status");
+        };
+        assert_ne!(
+            data.capture.state, "permission_denied",
+            "reads the shared gate"
+        );
+        assert_eq!(
+            data.permissions.screen_recording,
+            chronicle_ipc::PermissionState::Authorized,
+            "reads the shared snapshot"
+        );
+    }
+
+    #[test]
+    fn helper_words_and_wire_words_match() {
+        use crate::permissions::PermissionRead as R;
+        for read in [
+            R::Authorized,
+            R::Denied,
+            R::NotDetermined,
+            R::Restricted,
+            R::Unavailable,
+        ] {
+            assert_eq!(
+                serde_json::to_value(wire_permission(read)).unwrap(),
+                read.as_word(),
+                "{read:?}"
+            );
+        }
+    }
 
     #[test]
     fn search_sampling_fires_every_nth_from_first() {

@@ -1,6 +1,6 @@
 # Domain: UI
 
-**Status:** Decided 2026-09-18, revised 2026-09-21, revised 2026-10-05, revised 2026-11-06
+**Status:** Decided 2026-09-18, revised 2026-09-21, revised 2026-10-05, revised 2026-11-06, revised 2026-11-21
 **Owns:** Everything the person sees and interacts with — the menu bar app's scenes, its views, the state that decides when an alert fires, the copy that describes a wire value, and the bundle keys that make the process a menu bar agent.
 **Code:** `chronicle-ui/Sources/ChronicleUI/`, less `DaemonConnection.swift` and `ConnectionSession.swift`
 
@@ -8,6 +8,8 @@
 
 - inside: declaring the app's scenes and constructing the objects they share — `chronicle-ui/Sources/ChronicleUI/ChronicleApp.swift` — `ChronicleApp`
 - inside: what the menu bar item shows about capture health — `chronicle-ui/Sources/ChronicleUI/MenuBarIcon.swift` — `MenuBarIcon`
+- inside: the classifier the menu bar, the Settings badge and the popover read — `chronicle-ui/Sources/ChronicleUI/CaptureAvailability.swift` — `CaptureAvailability`
+- inside: when the Screen Recording dialog shows, and showing one at a time — `chronicle-ui/Sources/ChronicleUI/ScreenRecordingPromptController.swift` — `ScreenRecordingPromptController`
 - inside: the search surface, its result list, and the banners above it — `chronicle-ui/Sources/ChronicleUI/SearchPopoverView.swift` — `SearchPopoverView`
 - inside: rendering one search hit, including bold runs parsed out of an FTS5 snippet — `chronicle-ui/Sources/ChronicleUI/SnippetAttributedString.swift` — `snippetAttributedString`
 - inside: deciding whether a one-shot alert has already fired, and on which snapshot — `chronicle-ui/Sources/ChronicleUI/TranscriptionAlertState.swift` — `TranscriptionAlertState`
@@ -27,7 +29,8 @@
 ## Owned Files
 
 - chronicle-ui/Sources/ChronicleUI/BackgroundService.swift
-- chronicle-ui/Sources/ChronicleUI/CaptureHealth.swift
+- chronicle-ui/Sources/ChronicleUI/CaptureAvailability.swift
+- chronicle-ui/Sources/ChronicleUI/CaptureAvailabilityCopy.swift
 - chronicle-ui/Sources/ChronicleUI/ChronicleApp.swift
 - chronicle-ui/Sources/ChronicleUI/Info.plist
 - chronicle-ui/Sources/ChronicleUI/MenuBarIcon.swift
@@ -36,6 +39,8 @@
 - chronicle-ui/Sources/ChronicleUI/MicrophonePermission.swift
 - chronicle-ui/Sources/ChronicleUI/ResultRow.swift
 - chronicle-ui/Sources/ChronicleUI/RetentionCopy.swift
+- chronicle-ui/Sources/ChronicleUI/ScreenRecordingPrompt.swift
+- chronicle-ui/Sources/ChronicleUI/ScreenRecordingPromptController.swift
 - chronicle-ui/Sources/ChronicleUI/ScreenshotDetailView.swift
 - chronicle-ui/Sources/ChronicleUI/SearchFilterState.swift
 - chronicle-ui/Sources/ChronicleUI/SearchPopoverView.swift

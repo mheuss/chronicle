@@ -21,6 +21,29 @@ final class DaemonConnection {
     private(set) var state: ConnectionState = .disconnected
     private(set) var lastStatus: StatusResponse?
 
+    /// True once the current connection has received a Status. A new or
+    /// closed connection resets it, so `currentStatus` never returns an old
+    /// connection's snapshot (design §6.1).
+    private(set) var statusIsCurrent = false
+
+    /// `lastStatus`, but only when it came from the current connection.
+    var currentStatus: StatusResponse? { statusIsCurrent ? lastStatus : nil }
+
+    /// Called with every Status this connection receives (design §7.1).
+    @ObservationIgnored var onStatus: (@MainActor (StatusResponse) -> Void)?
+
+    /// No reply on the current connection for this long means the daemon has
+    /// stopped answering. The longest a healthy daemon holds a reply is a
+    /// command's 20 s `recv_timeout`, so this leaves 10 s of margin. Requests
+    /// are serial, so a heartbeat queued behind that command waits too.
+    static let defaultStaleAfter: Duration = .seconds(30)
+    let staleAfter: Duration
+
+    /// True once the current connection has gone `staleAfter` without a reply
+    /// of any kind. It also makes `currentStatus` nil. Any reply clears it.
+    private(set) var replyOverdue = false
+    private var overdueTask: Task<Void, Never>?
+
     // MARK: - Socket Path
 
     nonisolated private static let logger = Logger(subsystem: "dev.heuss.chronicle", category: "ui")
@@ -74,16 +97,19 @@ final class DaemonConnection {
     init() {
         self.connectionFactory = { try await Self.connectToDaemonSocket() }
         self.heartbeatInterval = Self.defaultHeartbeatInterval
+        self.staleAfter = Self.defaultStaleAfter
     }
 
     /// Builds a connection whose descriptors come from `connectionFactory`
     /// instead of the real socket path.
     internal init(
         connectionFactory: @escaping @MainActor @Sendable () async throws -> Int32,
-        heartbeatInterval: Duration = DaemonConnection.defaultHeartbeatInterval
+        heartbeatInterval: Duration = DaemonConnection.defaultHeartbeatInterval,
+        staleAfter: Duration = DaemonConnection.defaultStaleAfter
     ) {
         self.connectionFactory = connectionFactory
         self.heartbeatInterval = heartbeatInterval
+        self.staleAfter = staleAfter
     }
 
     /// **Test-only.** Not for production use. Wires `DaemonConnection` to a
@@ -98,7 +124,7 @@ final class DaemonConnection {
     /// throws `IPCError.socketCreationFailed` on failure.
     ///
     /// This connection never reconnects, so its factory is never called.
-    internal init(testingSocketFD fd: Int32) {
+    internal init(testingSocketFD fd: Int32, staleAfter: Duration = DaemonConnection.defaultStaleAfter) {
         var noSigPipe: Int32 = 1
         let result = setsockopt(
             fd,
@@ -110,10 +136,12 @@ final class DaemonConnection {
         precondition(result == 0, "SO_NOSIGPIPE failed in testing init: errno=\(errno)")
         self.connectionFactory = { preconditionFailure("testing connections do not reconnect") }
         self.heartbeatInterval = Self.defaultHeartbeatInterval
+        self.staleAfter = staleAfter
         let session = ConnectionSession(fd: fd, maxResponseSize: Self.maxResponseSize)
         session.start()
         self.session = session
         self.state = .connected
+        watchForReplies()
     }
 
     // MARK: - Lifecycle
@@ -136,8 +164,10 @@ final class DaemonConnection {
                         break
                     }
                     newSession.start()
+                    statusIsCurrent = false
                     session = newSession
                     state = .connected
+                    watchForReplies()
                     delay = .seconds(1)
                     await raceHeartbeatAgainstSession(newSession)
                 } catch is CancellationError {
@@ -167,15 +197,30 @@ final class DaemonConnection {
         state = .disconnected
     }
 
+    /// Skip the backoff wait and try now (CHR-177). Does nothing while
+    /// connected. After `disconnect()` it starts connecting again.
+    func reconnectNow() {
+        guard state != .connected else { return }
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        connect()
+    }
+
     // MARK: - Requests
 
     /// Send a status request and return the response.
     func requestStatus() async throws -> StatusResponse {
+        let requestSession = session
         let response = try await sendRequest(
             IPCRequest(type: "status"),
             expecting: StatusResponse.self
         )
+        guard let requestSession, requestSession === session else {
+            throw IPCError.notConnected
+        }
         lastStatus = response
+        statusIsCurrent = true
+        onStatus?(response)
         return response
     }
 
@@ -206,6 +251,7 @@ final class DaemonConnection {
             let type: String
             let variant: String
         }
+        let requestSession = session
         let response = try await sendRequest(
             Req(type: "set_whisper_model", variant: variant),
             expecting: SetWhisperModelResponse.self
@@ -213,7 +259,7 @@ final class DaemonConnection {
         if response.ok {
             // The refresh is still best-effort, but its failure is NOT
             // harmless. Both views decide whether to run their 1 Hz
-            // provisioning poll by reading `lastStatus`, so leaving it on the
+            // provisioning poll by reading `currentStatus`, so leaving it on the
             // pre-request state means neither loop starts: no progress bar,
             // and a fast failure invisible until the connection monitor's
             // next 5-second tick. "One second of staleness" was only ever true
@@ -233,7 +279,11 @@ final class DaemonConnection {
             // be a step backwards. Bounded to one tick and self-correcting
             // either way, since at the moment this matters the poll is not
             // yet running.
-            if (try? await requestStatus()) == nil, let last = lastStatus {
+            //
+            // A reply from a replaced session must not splice into the new
+            // session's snapshot.
+            if (try? await requestStatus()) == nil, let requestSession,
+               requestSession === session, let last = lastStatus {
                 lastStatus = last.replacingTranscription(response.status)
             }
         }
@@ -358,6 +408,7 @@ final class DaemonConnection {
             }
             line.append("\n")
             let responseLine = try await mySession.send(line)
+            if self.session === mySession { self.watchForReplies() }
             let responseData = Data(responseLine.utf8)
             do {
                 return try self.decoder.decode(Res.self, from: responseData)
@@ -477,7 +528,27 @@ final class DaemonConnection {
     private func closeSocket() {
         session?.close()
         session = nil
+        statusIsCurrent = false
+        overdueTask?.cancel()
+        overdueTask = nil
+        replyOverdue = false
         requestQueue = nil
+    }
+
+    /// Restart the `staleAfter` wait. Runs on a new connection and after
+    /// every reply on it.
+    private func watchForReplies() {
+        overdueTask?.cancel()
+        replyOverdue = false
+        let wait = staleAfter
+        overdueTask = Task { [weak self] in
+            // Suspending: time the Mac spends asleep doesn't count, so the
+            // heartbeat answers first on wake.
+            try? await Task.sleep(for: wait, tolerance: nil, clock: .suspending)
+            guard !Task.isCancelled, let self else { return }
+            self.replyOverdue = true
+            self.statusIsCurrent = false
+        }
     }
 }
 
@@ -542,7 +613,8 @@ struct StatusResponse: Decodable, Sendable {
                 ocr: data.ocr,
                 audio: data.audio,
                 storage: data.storage,
-                transcription: stats))
+                transcription: stats,
+                permissions: data.permissions))
     }
 }
 
@@ -556,6 +628,9 @@ struct StatusData: Decodable, Sendable {
     /// Optional so an old daemon (no transcription block) decodes to nil
     /// instead of failing the whole status response (NFR-7).
     let transcription: TranscriptionStats?
+    /// Optional, so a daemon built before CHR-97 decodes to nil. A `var` with
+    /// a default keeps existing memberwise call sites compiling.
+    var permissions: Permissions? = nil
 }
 
 struct CaptureStats: Codable, Sendable {
@@ -576,6 +651,28 @@ struct OcrStats: Codable, Sendable {
 struct AudioStats: Codable, Sendable {
     let segmentsPersisted: UInt64
     let micState: MicState
+}
+
+/// One TCC permission as the daemon last read it (CHR-97, ADR-022).
+enum PermissionState: String, Codable, Sendable {
+    case authorized, denied
+    case notDetermined = "not_determined"
+    case restricted, unavailable
+    /// A state this UI doesn't know yet (newer daemon). Same reasoning as
+    /// `MicState.unknown`.
+    case unknown
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = PermissionState(rawValue: raw) ?? .unknown
+    }
+}
+
+struct Permissions: Codable, Sendable {
+    let screenRecording: PermissionState
+    let screenRecordingCheckedAtMs: Int64?
+    let microphone: PermissionState
+    let microphoneCheckedAtMs: Int64?
 }
 
 struct StorageStats: Decodable, Sendable {

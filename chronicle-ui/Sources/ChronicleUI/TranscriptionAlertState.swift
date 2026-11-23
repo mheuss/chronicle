@@ -99,7 +99,7 @@ final class TranscriptionAlertState {
         // a nil block CONSUMES the latch (hasEvaluated flips, missing stays
         // false), and a `.missing` arriving after a mid-session daemon upgrade
         // could never raise the banner again. Reachable via popover reopen,
-        // where `.task` re-runs with `lastStatus` already populated.
+        // where `.task` re-runs with `currentStatus` already populated.
         let state = status.data.transcription?.state
         if !hasEvaluated, let state {
             hasEvaluated = true

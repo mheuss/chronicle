@@ -1,8 +1,7 @@
 import SwiftUI
 
-/// What the menu bar item shows. Each state has its own symbol shape, so it
-/// reads without relying on tint. The one exception is connecting and waiting
-/// for status, which share `ellipsis.circle` because both mean no status yet.
+/// What the menu bar item shows. Each availability has its own symbol shape,
+/// so it reads without relying on tint.
 struct MenuBarDisplay: Equatable {
     enum Tint: Equatable {
         case red, yellow, orange, green
@@ -21,44 +20,20 @@ struct MenuBarDisplay: Equatable {
     let tint: Tint
     let label: String
 
-    /// The icon for a connection state and the latest status.
-    static func from(
-        connectionState: DaemonConnection.ConnectionState,
-        status: StatusResponse?
-    ) -> MenuBarDisplay {
-        switch connectionState {
-        case .disconnected:
-            return MenuBarDisplay(symbol: "xmark.circle", tint: .red,
-                                  label: "Chronicle daemon disconnected")
-        case .connecting:
-            return MenuBarDisplay(symbol: "ellipsis.circle", tint: .yellow,
-                                  label: "Chronicle daemon connecting")
-        case .connected:
-            switch CaptureHealth.classify(status) {
-            case .noStatus:
-                return MenuBarDisplay(symbol: "ellipsis.circle", tint: .yellow,
-                                      label: "Chronicle waiting for status")
-            case .paused:
-                return MenuBarDisplay(symbol: "pause.circle.fill", tint: .orange,
-                                      label: "Chronicle capture paused")
-            case .running:
-                return MenuBarDisplay(symbol: "record.circle.fill", tint: .green,
-                                      label: "Chronicle capture active")
-            case .notRunning:
-                return MenuBarDisplay(symbol: "exclamationmark.circle", tint: .red,
-                                      label: "Chronicle capture not running")
-            }
-        }
+    /// The icon for one availability (design AD11).
+    static func from(_ a: CaptureAvailability) -> MenuBarDisplay {
+        MenuBarDisplay(symbol: a.menuBarSymbol, tint: a.tint,
+                       label: CaptureAvailabilityCopy.menuBarLabel(a))
     }
 }
 
-/// Menu bar status icon, drawn from `MenuBarDisplay`.
+/// Menu bar status icon, drawn from `CaptureAvailability`.
 struct MenuBarIcon: View {
     var connection: DaemonConnection
+    var background: BackgroundService
 
     var body: some View {
-        let display = MenuBarDisplay.from(
-            connectionState: connection.state, status: connection.lastStatus)
+        let display = MenuBarDisplay.from(connection.availability(background: background))
         Image(systemName: display.symbol)
             .foregroundStyle(display.tint.color)
             .accessibilityLabel(display.label)

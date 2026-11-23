@@ -189,12 +189,16 @@ pub struct StatusData {
     pub audio: AudioStats,
     pub storage: StorageStats,
     pub transcription: TranscriptionStats,
+    /// Additive (CHR-97). A daemon built before it omits the key. Rust
+    /// decodes that to all-`Unavailable`. The Swift UI decodes it to nil.
+    #[serde(default)]
+    pub permissions: PermissionsStats,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptureStats {
-    /// Engine state: "running" | "stopping" | "idle" | "poisoned" | "paused" | "unknown".
-    /// "paused" is reported when capture is intentionally stopped via PauseCapture.
+    /// Engine state: "running" | "stopping" | "idle" | "poisoned" | "paused" |
+    /// "permission_denied" | "unknown". "paused" wins over "permission_denied".
     pub state: String,
     pub active_displays: usize,
     /// Total frames delivered by SCK (from CaptureEngine::status()).
@@ -327,6 +331,30 @@ pub struct StorageStats {
     pub media_absent: u64,
 }
 
+/// One TCC permission as the daemon last read it through the helper
+/// (ADR-022). `Unavailable` means the read failed or has not run yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionState {
+    Authorized,
+    Denied,
+    NotDetermined,
+    Restricted,
+    #[default]
+    Unavailable,
+}
+
+/// The `permissions` block of `StatusData` (CHR-97).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionsStats {
+    pub screen_recording: PermissionState,
+    /// Unix millis of the last Screen Recording read, or None before the first one.
+    pub screen_recording_checked_at_ms: Option<i64>,
+    pub microphone: PermissionState,
+    /// Unix millis of the last microphone read, or None before the first one.
+    pub microphone_checked_at_ms: Option<i64>,
+}
+
 /// One search result row. Mirrors the storage-layer `SearchResult` shape,
 /// flattened for wire transport. `id` is a row id in `screenshots` or in
 /// `audio_segments`, depending on `source`, so two hits can share one.
@@ -400,6 +428,82 @@ mod tests {
     use super::*;
 
     #[test]
+    fn status_data_round_trips_permissions() {
+        let p = PermissionsStats {
+            screen_recording: PermissionState::Denied,
+            screen_recording_checked_at_ms: Some(1_700_000_000_000),
+            microphone: PermissionState::NotDetermined,
+            microphone_checked_at_ms: Some(1_700_000_000_500),
+        };
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(json["screen_recording"], "denied");
+        assert_eq!(
+            json["screen_recording_checked_at_ms"],
+            1_700_000_000_000_i64
+        );
+        assert_eq!(json["microphone"], "not_determined");
+        assert_eq!(json["microphone_checked_at_ms"], 1_700_000_000_500_i64);
+        let back: PermissionsStats = serde_json::from_value(json).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn permission_state_wire_names() {
+        for (state, word) in [
+            (PermissionState::Authorized, "authorized"),
+            (PermissionState::Denied, "denied"),
+            (PermissionState::NotDetermined, "not_determined"),
+            (PermissionState::Restricted, "restricted"),
+            (PermissionState::Unavailable, "unavailable"),
+        ] {
+            assert_eq!(serde_json::to_value(state).unwrap(), word);
+            let back: PermissionState = serde_json::from_value(word.into()).unwrap();
+            assert_eq!(back, state, "{word} decodes");
+        }
+    }
+
+    #[test]
+    fn response_status_round_trips_with_permissions() {
+        let resp = Response::Status {
+            ok: true,
+            data: StatusData {
+                uptime_secs: 1,
+                version: "v".to_string(),
+                capture: CaptureStats::default(),
+                ocr: OcrStats::default(),
+                audio: AudioStats::default(),
+                storage: StorageStats::default(),
+                transcription: TranscriptionStats::default(),
+                permissions: PermissionsStats {
+                    screen_recording: PermissionState::Authorized,
+                    screen_recording_checked_at_ms: Some(5),
+                    microphone: PermissionState::Denied,
+                    microphone_checked_at_ms: Some(6),
+                },
+            },
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value["data"]["permissions"]["screen_recording"], "authorized",
+            "the UI reads the block under this key"
+        );
+        let back: Response = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, resp);
+    }
+
+    #[test]
+    fn status_without_permissions_block_decodes_to_unavailable() {
+        let json = r#"{"uptime_secs":1,"version":"v","capture":{"state":"running","active_displays":1,"frames_captured":0,"frames_dropped":0,"frames_processed":0,"frames_failed":0,"paused":false},"ocr":{"enqueued":0,"dropped":0},"audio":{"segments_persisted":0,"transcription_enqueued":0,"transcription_dropped":0,"mic_state":"off"},"storage":{"db_size_bytes":0,"total_disk_usage_bytes":0,"screenshot_count":0,"audio_segment_count":0,"oldest_entry_ms":null,"retention":null,"media_served":0,"media_absent":0},"transcription":{"state":"missing","variant":"base","loaded_variant":null,"error":null,"download_bytes":null,"download_total_bytes":null,"models":[]}}"#;
+        let data: StatusData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.permissions, PermissionsStats::default());
+        assert_eq!(
+            data.permissions.screen_recording,
+            PermissionState::Unavailable
+        );
+    }
+
+    #[test]
     fn request_status_serializes_to_tagged_json() {
         let json = serde_json::to_string(&Request::Status).unwrap();
         assert_eq!(json, r#"{"type":"status"}"#);
@@ -423,6 +527,7 @@ mod tests {
                 audio: AudioStats::default(),
                 storage: StorageStats::default(),
                 transcription: TranscriptionStats::default(),
+                permissions: PermissionsStats::default(),
             },
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -990,6 +1095,7 @@ mod tests {
                 },
                 storage: StorageStats::default(),
                 transcription: TranscriptionStats::default(),
+                permissions: PermissionsStats::default(),
             },
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -1108,6 +1214,7 @@ mod tests {
                 audio: AudioStats::default(),
                 storage: StorageStats::default(),
                 transcription: TranscriptionStats::default(),
+                permissions: PermissionsStats::default(),
             },
         };
         let value: serde_json::Value =

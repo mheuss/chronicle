@@ -1,6 +1,6 @@
 # Domain: power
 
-**Status:** Decided 2026-09-16, revised 2026-09-21, revised 2026-10-05
+**Status:** Decided 2026-09-16, revised 2026-09-21, revised 2026-10-05, revised 2026-11-21
 **Owns:** Hearing the operating system say the machine is going to sleep or has woken, and saying so in one word.
 **Code:** `chronicle-daemon/src/power.rs`
 
@@ -8,7 +8,7 @@
 
 - inside: registering with IOKit and holding the kernel port that acks a sleep message — `chronicle-daemon/src/power.rs` — `spawn_power_observer`
 - inside: the two-word vocabulary the rest of the daemon reacts to — `chronicle-daemon/src/power.rs` — `PowerEvent`
-- outside: deciding what a sleep event means for recording — `chronicle-daemon/src/capture_supervisor.rs` — `set_system_asleep`
+- outside: deciding what a sleep event means for recording — `chronicle-daemon/src/capture_supervisor.rs` — `mark_system_asleep`
 - outside: routing an event to whoever acts on it — `chronicle-daemon/src/main.rs` — `power_rx`
 - outside: keeping the timeline correct across a gap the event describes — `chronicle-daemon/crates/audio/src/accumulator.rs` — `SegmentAccumulator`
 

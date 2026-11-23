@@ -94,3 +94,26 @@ fn trailing_argument_exits_2_with_no_output() {
     assert_eq!(stdout, "");
     assert_no_daemon_start(home.path(), &stderr);
 }
+
+#[test]
+fn screen_recording_prints_one_word_and_exits_0() {
+    let home = tempfile::tempdir().unwrap();
+    let (code, stdout, stderr) = helper(home.path(), &["--permission-status", "screen-recording"]);
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    // The word depends on this host's TCC state, so only its shape is checked.
+    assert!(
+        ["authorized\n", "denied\n"].contains(&stdout.as_str()),
+        "stdout: {stdout:?}"
+    );
+    assert_no_daemon_start(home.path(), &stderr);
+}
+
+#[test]
+fn screen_recording_trailing_argument_exits_2_with_no_output() {
+    let home = tempfile::tempdir().unwrap();
+    let args = ["--permission-status", "screen-recording", "extra"];
+    let (code, stdout, stderr) = helper(home.path(), &args);
+    assert_eq!(code, Some(2));
+    assert_eq!(stdout, "");
+    assert_no_daemon_start(home.path(), &stderr);
+}

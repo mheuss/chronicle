@@ -7,8 +7,9 @@
 ## Boundary
 
 - inside: querying the TCC state for microphone access — `chronicle-daemon/src/permissions.rs` — `check_microphone`
-- inside: the startup gate that refuses to run without the grants — `chronicle-daemon/src/permissions.rs` — `preflight`
-- inside: the vocabulary the rest of the daemon uses for a grant state — `chronicle-daemon/src/permissions.rs` — `MicrophoneStatus`
+- inside: the boot read that sets the initial Screen Recording gate — `chronicle-daemon/src/permissions.rs` — `preflight`
+- inside: the fresh helper read every later decision uses — `chronicle-daemon/src/permissions.rs` — `fresh_screen_recording_status`
+- inside: the helper child's own AVFoundation answer for the mic, before it becomes a word — `chronicle-daemon/src/permissions.rs` — `MicrophoneStatus`
 - inside: a fresh microphone read in a child process, because a running process's own read goes stale — `chronicle-daemon/src/permissions.rs` — `fresh_microphone_status`
 - inside: the result of that read, where a failed read is `Unavailable` and never authorized — `chronicle-daemon/src/permissions.rs` — `PermissionRead`
 - inside: the `--permission-status` helper mode that prints one grant word — `chronicle-daemon/src/permissions.rs` — `run_status_command`
@@ -32,13 +33,16 @@
 
 - capture — `chronicle-daemon/src/capture_supervisor.rs` — `fresh_microphone_status`
 - capture — `chronicle-daemon/src/mic_gate.rs` — `PermissionRead`
+- capture — `chronicle-daemon/src/permission_gate.rs` — `PermissionRead`
+- capture — `chronicle-daemon/src/permission_monitor.rs` — `fresh_screen_recording_status`
+- IPC — `chronicle-daemon/src/ipc_handler.rs` — `PermissionRead`
 - pipeline — `chronicle-daemon/src/main.rs` — `preflight`
 - pipeline — `chronicle-daemon/src/main.rs` — `run_status_command`
 - UI — `chronicle-ui/Sources/ChronicleUI/MicrophonePermission.swift` — `MicrophonePermission`
 
 ## Seams
 
-- SEAM-permission-wire — IPC — permissions owns the grant vocabulary and IPC owns what the UI is told. No grant state crosses the wire as itself. The only trace of one is `permission_denied`. It is the reply to a microphone start the gate refused on a `PermissionRead` other than `Authorized`. Status then reports `off`. — owner: permissions — `chronicle-daemon/src/permissions.rs` — `PermissionRead`
+- SEAM-permission-wire — IPC — permissions owns the grant vocabulary and IPC owns what the UI is told. Grant states cross the wire in Status's `permissions` block as `PermissionState`. Only `wire_permission` maps a `PermissionRead` to one. Status's capture state reports `permission_denied` while `sr_denied` is set, unless capture is paused. A microphone start the gate refused still replies `permission_denied`, and Status then reports `off`. — owner: permissions — `chronicle-daemon/src/permissions.rs` — `PermissionRead`
 
 ## How The Existing Documents Saw This
 

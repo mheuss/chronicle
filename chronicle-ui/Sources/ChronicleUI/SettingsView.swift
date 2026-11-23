@@ -1,63 +1,11 @@
 import SwiftUI
 import ServiceManagement
 
-/// What the Settings capture badge shows. It has one case per menu bar icon
-/// state, and both classify capture with `CaptureHealth`.
-enum CaptureBadge: String, CaseIterable {
-    case disconnected, connecting, waiting, paused, active, notRunning
-
-    static func from(
-        connectionState: DaemonConnection.ConnectionState,
-        status: StatusResponse?
-    ) -> CaptureBadge {
-        switch connectionState {
-        case .disconnected: return .disconnected
-        case .connecting: return .connecting
-        case .connected:
-            switch CaptureHealth.classify(status) {
-            case .noStatus: return .waiting
-            case .paused: return .paused
-            case .running: return .active
-            case .notRunning: return .notRunning
-            }
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .disconnected: return "xmark.circle.fill"
-        case .connecting, .waiting: return "ellipsis.circle.fill"
-        case .paused: return "pause.circle.fill"
-        case .active: return "record.circle.fill"
-        case .notRunning: return "exclamationmark.circle.fill"
-        }
-    }
-
-    var tint: MenuBarDisplay.Tint {
-        switch self {
-        case .disconnected, .notRunning: return .red
-        case .connecting, .waiting: return .yellow
-        case .paused: return .orange
-        case .active: return .green
-        }
-    }
-
-    var label: String {
-        switch self {
-        case .disconnected: return "Disconnected"
-        case .connecting: return "Connecting"
-        case .waiting: return "Waiting for status"
-        case .paused: return "Paused"
-        case .active: return "Active"
-        case .notRunning: return "Not running"
-        }
-    }
-}
-
 struct SettingsView: View {
     @Environment(DaemonConnection.self) private var connection
     @Environment(TranscriptionAlertState.self) private var transcriptionAlert
     @Environment(BackgroundService.self) private var background
+    @Environment(ScreenRecordingPromptController.self) private var prompt
     @Environment(MicController.self) private var mic
     @State private var isPauseInFlight: Bool = false
     /// The variant the picker is showing. Tracks the daemon's `variant` unless
@@ -82,12 +30,12 @@ struct SettingsView: View {
             provisionRejection = nil
             background.refreshStatus()
             connection.connect()
-            if connection.lastStatus == nil {
+            if connection.currentStatus == nil {
                 _ = try? await connection.requestStatus()
             }
             // `.onChange` does not fire for the value that is already there,
             // and by the time Settings opens the popover has usually populated
-            // `lastStatus` — so the seed has to happen here too.
+            // `currentStatus` — so the seed has to happen here too.
             syncSelection()
             await mic.recheck()
         }
@@ -119,10 +67,11 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             row("Status") { statusBadge }
             row("Transcription") { transcriptionBadge }
-            // Only with a block to drive them. A daemon too old to send one
-            // gets the "Requires daemon update" wording in the row above, and
-            // an empty picker beneath it would just be noise (design §4.3).
-            if let transcription = connection.lastStatus?.data.transcription {
+            // Only with a current Status's block to drive them, the same gate as
+            // the row above. A current Status with no block, from a daemon too
+            // old to send one, gets the "Requires daemon update" wording there,
+            // and an empty picker beneath it would just be noise (design §4.3).
+            if let transcription = connection.currentStatus?.data.transcription {
                 row("Model") { modelPicker(transcription) }
                 row("Downloaded") { Text(Self.downloadedSummary(transcription.models)) }
             }
@@ -160,7 +109,10 @@ struct SettingsView: View {
                 }
                 .controlSize(.large)
                 .keyboardShortcut(.defaultAction)
-                .disabled(isPauseInFlight || connection.state != .connected)
+                .disabled(Self.pauseButtonDisabled(
+                    inFlight: isPauseInFlight,
+                    connected: connection.state == .connected,
+                    hasCurrentStatus: connection.currentStatus != nil))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -169,8 +121,8 @@ struct SettingsView: View {
     private var micRow: MicRowState {
         MicRowState.from(
             permission: mic.permission.status,
-            status: connection.lastStatus,
-            connected: connection.state == .connected,
+            status: connection.currentStatus,
+            connected: connection.state == .connected && !connection.replyOverdue,
             mark: mic.mark)
     }
 
@@ -200,14 +152,18 @@ struct SettingsView: View {
         }
     }
 
-    private var captureStatus: CaptureBadge {
-        CaptureBadge.from(connectionState: connection.state, status: connection.lastStatus)
+    private var availability: CaptureAvailability {
+        connection.availability(background: background)
     }
 
     private var statusBadge: some View {
         HStack(spacing: 6) {
-            Image(systemName: captureStatus.symbol).foregroundStyle(captureStatus.tint.color)
-            Text(captureStatus.label)
+            Image(systemName: availability.badgeSymbol).foregroundStyle(availability.tint.color)
+            Text(CaptureAvailabilityCopy.settingsText(availability))
+            if availability == .needsScreenRecording {
+                Button(CaptureAvailabilityCopy.fixButton) { prompt.present() }
+                    .accessibilityLabel(CaptureAvailabilityCopy.fixButtonAccessibilityLabel)
+            }
         }
     }
 
@@ -218,12 +174,15 @@ struct SettingsView: View {
         // the icon floats to the middle of the paragraph while the row's
         // "Transcription" label stays on line 1.
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            if let transcription = connection.lastStatus?.data.transcription {
+            if let transcription = connection.currentStatus?.data.transcription {
                 transcriptionBadgeBody(transcription)
             } else {
-                // No block at all = a daemon older than this UI. Say so plainly
-                // rather than implying transcription is broken.
-                Text("Requires daemon update").foregroundStyle(.secondary)
+                // A current Status with no block is a daemon older than this UI.
+                // With no current Status, say what the connection is doing.
+                Text(TranscriptionRowFallback.text(
+                    hasCurrentStatus: connection.currentStatus != nil,
+                    availability: availability))
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -251,7 +210,7 @@ struct SettingsView: View {
             // Same words as the no-block branch above, deliberately. Both are
             // version skew — that one is a daemon too old to send the block,
             // this one a daemon too new to be understood — so they read alike.
-            Text("Requires daemon update").foregroundStyle(.secondary)
+            Text(TranscriptionRowFallback.requiresDaemonUpdate).foregroundStyle(.secondary)
         case .missing:
             Image(systemName: "waveform.slash").foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 6) {
@@ -454,18 +413,18 @@ struct SettingsView: View {
     // MARK: - Transcription actions
 
     private var daemonVariant: String? {
-        connection.lastStatus?.data.transcription?.variant
+        connection.currentStatus?.data.transcription?.variant
     }
 
     /// The signal both the poll and the rejection clear key off: the state is
     /// what changes when the daemon moves, and an unchanged state means neither
     /// has anything to do.
     private var pollKey: TranscriptionState? {
-        connection.lastStatus?.data.transcription?.state
+        connection.currentStatus?.data.transcription?.state
     }
 
     private var isProvisioningActive: Bool {
-        TranscriptionBannerCopy(connection.lastStatus?.data.transcription).showsProgress
+        TranscriptionBannerCopy(connection.currentStatus?.data.transcription).showsProgress
     }
 
     private func syncSelection() {
@@ -497,8 +456,16 @@ struct SettingsView: View {
 
     // MARK: - Capture
 
+    /// With no current Status the button can't know whether capture is paused,
+    /// so it can't say which action it takes.
+    nonisolated static func pauseButtonDisabled(
+        inFlight: Bool, connected: Bool, hasCurrentStatus: Bool
+    ) -> Bool {
+        inFlight || !connected || !hasCurrentStatus
+    }
+
     private var isPaused: Bool {
-        captureStatus == .paused
+        availability == .paused
     }
 
     private var diskUsageText: String {

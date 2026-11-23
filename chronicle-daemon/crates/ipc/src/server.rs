@@ -294,6 +294,7 @@ mod tests {
                         audio: AudioStats::default(),
                         storage: StorageStats::default(),
                         transcription: TranscriptionStats::default(),
+                        permissions: crate::PermissionsStats::default(),
                     },
                 },
                 Request::SetMicEnabled { .. } => Response::SetMicEnabled {

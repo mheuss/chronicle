@@ -76,6 +76,63 @@ final class BackgroundServiceTests {
                           fingerprint: fingerprint, isInApplicationsFolder: inApplications)
     }
 
+    @Test func enablingCallsTheHookAndOpensTheWindow() async {
+        let agent = FakeLoginService("agent", log: log)
+        let app = FakeLoginService("app", log: log)
+        let service = make(agent: agent, mainApp: app)
+        var hooks = 0
+        let log = self.log
+        service.onAgentRegistered = {
+            hooks += 1
+            #expect(log.entries.contains("agent.register"), "the hook runs after the agent registers")
+        }
+        await service.setEnabled(false)
+        #expect(!service.startingWindowOpen)
+        #expect(hooks == 0, "turning it off calls no hook")
+        log.entries.removeAll()
+        let enabling = Task { await service.setEnabled(true) }
+        await waitUntil { service.startingWindowOpen }
+        #expect(service.startingWindowOpen, "the starting window opens when the toggle turns on")
+        await enabling.value
+        #expect(hooks == 1)
+        #expect(service.startingWindowOpen)
+    }
+
+    @Test func aLaunchRegistrationCallsTheHookOnce() async {
+        let agent = FakeLoginService("agent", log: log)
+        let app = FakeLoginService("app", log: log)
+        let service = make(agent: agent, mainApp: app)
+        var hooks = 0
+        service.onAgentRegistered = { hooks += 1 }
+        // The agent is not registered, as after it was removed from Login Items.
+        await service.reconcileOnLaunch()
+        #expect(hooks == 1, "registering the agent starts a reconnect")
+        // Already registered with the same fingerprint: nothing to register.
+        await service.reconcileOnLaunch()
+        #expect(hooks == 1, "a reconcile that registers nothing calls no hook")
+    }
+
+    @Test func anUpgradeReRegistrationCallsTheHook() async {
+        let agent = FakeLoginService("agent", log: log)
+        let app = FakeLoginService("app", log: log)
+        // The first build registers and records its fingerprint.
+        await make(agent: agent, mainApp: app, fingerprint: "fp-1").reconcileOnLaunch()
+        #expect(agent.status == .enabled)
+        // A new build sees a different fingerprint and re-registers the agent.
+        let upgraded = make(agent: agent, mainApp: app, fingerprint: "fp-2")
+        var hooks = 0
+        upgraded.onAgentRegistered = { hooks += 1 }
+        await upgraded.reconcileOnLaunch()
+        #expect(hooks == 1, "re-registering after an upgrade starts a reconnect")
+    }
+
+    @Test func launchWithBackgroundOnStartsTheWindow() {
+        let service = make(agent: FakeLoginService("agent", log: log),
+                           mainApp: FakeLoginService("app", log: log))
+        #expect(service.isEnabled)
+        #expect(service.startingWindowOpen, "a launch with capture on doesn't read as not running")
+    }
+
     @Test func launchRegistersEachUnregisteredService() async {
         let agent = FakeLoginService("agent", log: log)
         let app = FakeLoginService("app", log: log)
@@ -254,6 +311,24 @@ final class BackgroundServiceTests {
         #expect(log.entries == ["agent.unregister.start", "agent.unregister.end",
                                 "agent.register", "app.register"])
         #expect(!service.isBusy)
+    }
+
+    @Test func theStartingWindowOpensBeforeAQueuedReconcileRuns() async throws {
+        let agent = FakeLoginService("agent", status: .enabled, log: log)
+        agent.holdUnregister = true
+        let app = FakeLoginService("app", status: .notRegistered, log: log)
+        let service = make(agent: agent, mainApp: app)
+        defer { agent.release() }
+        let first = Task { await service.setEnabled(false) }
+        await waitUntil { log.entries.contains("agent.unregister.start") }
+        try #require(log.entries.contains("agent.unregister.start"))
+        let second = Task { await service.setEnabled(true) }
+        await waitUntil { service.startingWindowOpen }
+        #expect(service.startingWindowOpen, "the window opens while the reconcile still waits")
+        #expect(!log.entries.contains("agent.register"))
+        agent.release()
+        await first.value
+        await second.value
     }
 
     @Test func statusLabelCoversEveryStatus() throws {
