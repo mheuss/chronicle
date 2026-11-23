@@ -44,7 +44,7 @@ struct DaemonConnectionGateTests {
         let pair = try SocketPairHelper.make()
         defer { Darwin.close(pair.serverFD) }
         // Every write gets EPIPE, and the reader sees no end of file.
-        shutdown(pair.clientFD, SHUT_WR)
+        try #require(shutdown(pair.clientFD, SHUT_WR) == 0, "shutdown failed: errno \(errno)")
         let conn = DaemonConnection(testingSocketFD: pair.clientFD)
 
         do {
