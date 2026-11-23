@@ -24,8 +24,6 @@ enum WatchdogScan {
         let isWatchdogSuite: Bool
     }
 
-    private nonisolated(unsafe) static let watchdogPattern = /(?:^|[\s,(])\.watchdog(?![A-Za-z0-9_])/
-
     private nonisolated(unsafe) static let testPattern = /@(?:Testing\.)?Test(?![A-Za-z0-9_])/
 
     private nonisolated(unsafe) static let declarationPattern =
@@ -86,7 +84,7 @@ enum WatchdogScan {
                 }
                 if let match = declaration.firstMatch(of: declarationPattern) {
                     let isExtension = match.output.1 == "extension"
-                    let isWatchdogSuite = suiteArguments(in: attributes)?.firstMatch(of: watchdogPattern) != nil
+                    let isWatchdogSuite = suiteArguments(in: attributes).map(hasWatchdogArgument) ?? false
                     current = Declaration(name: String(match.output.2), isExtension: isExtension, isWatchdogSuite: isWatchdogSuite)
                     if isWatchdogSuite { watchdogSuites.insert(String(match.output.2)) }
                     if code.contains("{"), braceDelta(code) == 0 { current = nil }
@@ -144,6 +142,26 @@ enum WatchdogScan {
             index = attributes.index(after: index)
         }
         return attributes[open.upperBound...]
+    }
+
+    /// True when one top-level argument is exactly `.watchdog`, so a
+    /// `.watchdog` nested in another trait, such as `.tags(.watchdog)`, does not count.
+    private static func hasWatchdogArgument(_ arguments: Substring) -> Bool {
+        var depth = 0
+        var argument = ""
+        for character in arguments {
+            switch character {
+            case "(", "[": depth += 1
+            case ")", "]": depth -= 1
+            case "," where depth == 0:
+                if argument.trimmingCharacters(in: .whitespaces) == ".watchdog" { return true }
+                argument = ""
+                continue
+            default: break
+            }
+            argument.append(character)
+        }
+        return argument.trimmingCharacters(in: .whitespaces) == ".watchdog"
     }
 
     /// Splits off the attributes at the start of a column-0 line, or returns
