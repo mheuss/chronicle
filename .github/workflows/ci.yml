@@ -51,5 +51,8 @@ jobs:
           persist-credentials: false
       - name: Build
         run: swift build --only-use-versions-from-resolved-file
+      # Must not set CHRONICLE_TEST_WATCHDOG_*; check-watchdog.sh owns those.
       - name: Test
         run: swift test --only-use-versions-from-resolved-file
+      - name: Watchdog self-test
+        run: ../scripts/check-watchdog.sh --only-use-versions-from-resolved-file
