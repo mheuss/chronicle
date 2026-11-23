@@ -7,7 +7,7 @@ import Foundation
 /// - A one-line type whose `{}` wraps onto an indented line can lend its trait
 ///   to a following type the scan does not recognize, such as a `nonisolated` one.
 /// - `@Test` inside a block comment, a multi-line string, or a raw string with an
-///   inner quote reads as a test, and fails loudly.
+///   inner quote reads as a test. It fails at column 0 or outside a watchdog suite.
 /// - `@Testing.Suite` is not read as a suite.
 /// - A one-line type holding a test reports as a free function.
 enum WatchdogScan {
