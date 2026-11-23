@@ -18,6 +18,8 @@ enum WatchdogScan {
         let isWatchdogSuite: Bool
     }
 
+    private nonisolated(unsafe) static let watchdogPattern = /\.watchdog(?![A-Za-z0-9_])/
+
     private nonisolated(unsafe) static let declarationPattern =
         /^(?:(?:public|internal|fileprivate|private|final)\s+)*(struct|class|enum|actor|extension)\s+([A-Za-z_][A-Za-z0-9_]*)/
 
@@ -30,7 +32,8 @@ enum WatchdogScan {
             var attributes = ""
             var openParens = 0
             var current: Declaration?
-            for (index, line) in file.text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+            let lines = file.text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+            for (index, line) in lines.enumerated() {
                 let lineNumber = index + 1
                 let text = String(line)
                 if openParens > 0 {
@@ -51,7 +54,7 @@ enum WatchdogScan {
                 }
                 if let match = text.firstMatch(of: declarationPattern) {
                     let isExtension = match.output.1 == "extension"
-                    let isWatchdogSuite = attributes.contains("@Suite(") && attributes.contains(".watchdog")
+                    let isWatchdogSuite = suiteArguments(in: attributes)?.firstMatch(of: watchdogPattern) != nil
                     current = Declaration(name: String(match.output.2), isExtension: isExtension, isWatchdogSuite: isWatchdogSuite)
                     if isWatchdogSuite { watchdogSuites.insert(String(match.output.2)) }
                     attributes = ""
@@ -107,6 +110,24 @@ enum WatchdogScan {
             previous = character
         }
         return code
+    }
+
+    /// The text inside the first `@Suite(...)`, or nil when there is none.
+    private static func suiteArguments(in attributes: String) -> Substring? {
+        guard let open = attributes.range(of: "@Suite(") else { return nil }
+        var depth = 1
+        var index = open.upperBound
+        while index < attributes.endIndex {
+            switch attributes[index] {
+            case "(": depth += 1
+            case ")":
+                depth -= 1
+                if depth == 0 { return attributes[open.upperBound..<index] }
+            default: break
+            }
+            index = attributes.index(after: index)
+        }
+        return attributes[open.upperBound...]
     }
 
     private static func parenDelta(_ code: String) -> Int {

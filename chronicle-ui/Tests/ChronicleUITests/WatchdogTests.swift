@@ -176,6 +176,31 @@ struct WatchdogTests {
             == ["F.swift:3: @Test in S, which has no @Suite(... .watchdog ...)"])
     }
 
+    @Test func aTestAfterAClosedSuiteUnderAnUnknownDeclarationFails() {
+        #expect(scan("@Suite(.watchdog)\nstruct S {\n}\nnonisolated struct T {\n    @Test func t() {}\n}\n")
+            == ["F.swift:5: @Test outside any type"])
+    }
+
+    @Test func aWatchdogOutsideTheSuiteAttributeFails() {
+        #expect(scan("@Suite(\"S\")\n@Foo(.watchdog)\nstruct S {\n    @Test func t() {}\n}\n")
+            == ["F.swift:4: @Test in S, which has no @Suite(... .watchdog ...)"])
+    }
+
+    @Test func aLongerTraitNameIsNotTheWatchdog() {
+        #expect(scan("@Suite(.watchdogDisabled)\nstruct S {\n    @Test func t() {}\n}\n")
+            == ["F.swift:3: @Test in S, which has no @Suite(... .watchdog ...)"])
+    }
+
+    @Test func anAttributeSeparatedFromItsTypeDoesNotCarryOver() {
+        #expect(scan("@Suite(.watchdog)\nfunc helper() {}\nstruct S {\n    @Test func t() {}\n}\n")
+            == ["F.swift:4: @Test in S, which has no @Suite(... .watchdog ...)"])
+    }
+
+    @Test func crlfLineEndingsAreRead() {
+        #expect(scan("struct S {\r\n    @Test func t() {}\r\n}\r\n")
+            == ["F.swift:2: @Test in S, which has no @Suite(... .watchdog ...)"])
+    }
+
     @Test func anExtensionOfAWatchdogSuitePasses() {
         #expect(scan("@Suite(.watchdog)\nstruct S {}\n\nextension S {\n    @Test func t() {}\n}\n") == [])
     }
