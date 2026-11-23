@@ -65,8 +65,6 @@ struct WatchdogTests {
 
     // MARK: Registry
 
-    static let seenTokens = Mutex<Set<UInt64>>([])
-
     @Test("a running test is in flight exactly once")
     func aRunningTestIsInFlight() {
         let mine = TestWatchdog.shared.inFlight().filter { $0.hasPrefix("a running test is in flight exactly once (") }
@@ -78,19 +76,60 @@ struct WatchdogTests {
         #expect(!TestWatchdog.shared.inFlight().contains { $0.hasPrefix("Watchdog (") }, "\(TestWatchdog.shared.inFlight())")
     }
 
-    @Test("a parameterized test is in flight once, not once per case", arguments: [1, 2, 3])
-    func aParameterizedTestIsInFlightOnce(_ value: Int) {
-        let mine = TestWatchdog.shared.inFlightTokens(labelPrefix: "a parameterized test is in flight once, not once per case (")
-        #expect(mine.count == 1, "\(TestWatchdog.shared.inFlight())")
-        let seen = Self.seenTokens.withLock { $0.formUnion(mine); return $0.count }
-        #expect(seen == 1, "each case saw a different token")
-    }
-
     @Test func endRemovesTheEntry() {
         let token = TestWatchdog.shared.begin("round trip (X/Y.swift:1)")
         #expect(TestWatchdog.shared.inFlight().contains("round trip (X/Y.swift:1)"))
         TestWatchdog.shared.end(token)
         #expect(!TestWatchdog.shared.inFlight().contains("round trip (X/Y.swift:1)"))
+    }
+
+    // These call the trait directly from a detached task, which drops the
+    // task-local that marks the running test as already registered.
+
+    private static func count(_ prefix: String) -> Int {
+        TestWatchdog.shared.inFlight().filter { $0.hasPrefix(prefix) }.count
+    }
+
+    @Test("execute registers a test function until its body returns")
+    func executeRegistersUntilTheBodyReturns() async throws {
+        let test = try #require(Test.current)
+        let prefix = "execute registers a test function until its body returns ("
+        let before = Self.count(prefix)
+        let during = try await Task.detached {
+            let seen = Mutex(0)
+            try await WatchdogTrait().execute({ seen.withLock { $0 = Self.count(prefix) } }, for: test, testCase: nil)
+            return seen.withLock { $0 }
+        }.value
+        #expect(during == before + 1)
+        #expect(Self.count(prefix) == before)
+    }
+
+    @Test("execute unregisters a test function whose body throws")
+    func executeUnregistersWhenTheBodyThrows() async throws {
+        struct Thrown: Error {}
+        let test = try #require(Test.current)
+        let prefix = "execute unregisters a test function whose body throws ("
+        let before = Self.count(prefix)
+        await #expect(throws: Thrown.self) {
+            try await Task.detached {
+                try await WatchdogTrait().execute({ throw Thrown() }, for: test, testCase: nil)
+            }.value
+        }
+        #expect(Self.count(prefix) == before)
+    }
+
+    @Test("execute does not register a per-case step")
+    func executeSkipsAPerCaseStep() async throws {
+        let test = try #require(Test.current)
+        let testCase = try #require(Test.Case.current)
+        let prefix = "execute does not register a per-case step ("
+        let before = Self.count(prefix)
+        let during = try await Task.detached {
+            let seen = Mutex(0)
+            try await WatchdogTrait().execute({ seen.withLock { $0 = Self.count(prefix) } }, for: test, testCase: testCase)
+            return seen.withLock { $0 }
+        }.value
+        #expect(during == before)
     }
 
     @Suite(.watchdog)

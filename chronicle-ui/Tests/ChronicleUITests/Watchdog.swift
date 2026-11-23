@@ -106,14 +106,13 @@ final class TestWatchdog: Sendable {
     }
 
     func armOnce() {
-        let raw = ProcessInfo.processInfo.environment[WatchdogSetting.variable]
         let first = state.withLock { state in
             guard !state.armed else { return false }
             state.armed = true
             return true
         }
         guard first else { return }
-        let setting = WatchdogSetting.parse(raw)
+        let setting = WatchdogSetting.parse(ProcessInfo.processInfo.environment[WatchdogSetting.variable])
         if let seconds = setting.armedSeconds {
             timer.schedule(deadline: .now() + .seconds(seconds))
             timer.setEventHandler { [self] in fire(seconds: seconds) }
@@ -143,10 +142,6 @@ final class TestWatchdog: Sendable {
 
     func inFlight() -> [String] {
         state.withLock { Array($0.inFlight.values) }
-    }
-
-    func inFlightTokens(labelPrefix: String) -> Set<UInt64> {
-        state.withLock { Set($0.inFlight.filter { $0.value.hasPrefix(labelPrefix) }.keys) }
     }
 
     private func fire(seconds: Int) {
