@@ -9,6 +9,9 @@
 # CI's main swift test step must set neither.
 #
 # Extra arguments go to swift, for example --only-use-versions-from-resolved-file.
+#
+# The build gets 600 s. On a cold checkout, run swift build first, or rerun
+# after a "FAIL build: still running" line.
 set -euo pipefail
 cd "$(dirname "$0")/../chronicle-ui"
 
