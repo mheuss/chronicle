@@ -12,7 +12,7 @@ final class FakeOnboardingDaemon: OnboardingDaemon {
 
     func requestStatus() async throws -> StatusResponse {
         requests += 1
-        if hold { await withCheckedContinuation { gate = $0 } }
+        if hold && gate == nil { await withCheckedContinuation { gate = $0 } }
         guard let reply else { throw IPCError.notConnected }
         return reply
     }
@@ -96,6 +96,22 @@ struct OnboardingModelTests {
         #expect(model.screenRecordingStep == .done(captureStarted: true))
         daemon.isConnected = false
         #expect(model.screenRecordingStep == .done(captureStarted: false))
+        #expect(daemon.requests == 1)
+    }
+
+    @Test func aReopenDuringAReadDoesNotKeepThePreStopResult() async {
+        let held = HeldRead()
+        let spawns = ReadCount()
+        let model = onboardingModel(srReads: ["authorized", "denied"], spawns: spawns, held: held)
+        model.start()
+        #expect(await waitUntil { spawns.count == 1 })
+        model.stop()
+        model.start()
+        await held.release()
+        #expect(await waitUntil { model.screenRecordingRead != nil })
+        #expect(model.screenRecordingRead == .denied)
+        #expect(spawns.count == 2)
+        model.stop()
     }
 
     @Test func aBusyMicBlocksDoneEvenWhenSettled() async {

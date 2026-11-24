@@ -29,10 +29,15 @@ final class ScreenRecordingPermission {
     func read() async -> HelperPermission {
         if let inFlight { return await inFlight.value }
         let readHelper = readHelper
-        let task = Task { HelperPermission(helperOutput: await readHelper()) }
+        // The task clears inFlight itself, so no caller can join a read that
+        // has already finished.
+        let task = Task {
+            let value = HelperPermission(helperOutput: await readHelper())
+            self.inFlight = nil
+            return value
+        }
         inFlight = task
         let value = await task.value
-        inFlight = nil
         if value == .unavailable && last != .unavailable {
             unavailableWarnings += 1
             Self.logger.warning("screen recording permission helper gave no answer")

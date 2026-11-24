@@ -185,6 +185,24 @@ struct DaemonConnectionReconnectTests {
         Darwin.close(serverFD)
     }
 
+    @Test("onboarding treats an overdue connection as down")
+    func onboardingIsConnectedIsFalseWhileOverdue() async throws {
+        let pair = try SocketPairHelper.make()
+        let conn = DaemonConnection(testingSocketFD: pair.clientFD, staleAfter: .milliseconds(300))
+        let serverFD = pair.serverFD
+        let daemon = blockingServer {
+            respondToOneRequest(on: serverFD, with: #"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"v"}}"#)
+        }
+        _ = try await conn.requestStatus()
+        _ = await daemon.value
+        #expect(conn.isConnected)
+        await waitUntil(ticks: 100) { conn.replyOverdue }
+        #expect(conn.state == .connected)
+        #expect(!conn.isConnected)
+        conn.disconnect()
+        Darwin.close(serverFD)
+    }
+
     @Test("a reply after the bound clears overdue, and a Status makes it current again")
     func aReplyAfterTheBoundRecovers() async throws {
         let pair = try SocketPairHelper.make()

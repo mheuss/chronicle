@@ -14,8 +14,8 @@ extension DaemonConnection: OnboardingDaemon {
     var isConnected: Bool { state == .connected && !replyOverdue }
 }
 
-/// The onboarding window's state (CHR-94 design §3). stop() keeps Skip and
-/// a Turn on outcome, so they survive a close and reopen.
+/// The onboarding window's state (CHR-94 design §3). stop() keeps Skip, a
+/// Turn on outcome and the focused step, so they survive a close and reopen.
 @MainActor @Observable
 final class OnboardingModel {
     private(set) var screenRecordingRead: HelperPermission?
@@ -35,6 +35,8 @@ final class OnboardingModel {
     @ObservationIgnored private let interval: Duration
     @ObservationIgnored private var helperLoop: Task<Void, Never>?
     @ObservationIgnored private var statusLoop: Task<Void, Never>?
+    /// The last helper loop stop() cancelled. Its read may still be running.
+    @ObservationIgnored private var retiredHelperLoop: Task<Void, Never>?
     /// Kept across opens, so a reopen never queues behind a stalled request.
     @ObservationIgnored private var statusInFlight = false
     /// Bumped by stop(). A result from an older generation is dropped.
@@ -73,7 +75,11 @@ final class OnboardingModel {
 
     func start() {
         stop()
+        let previous = retiredHelperLoop
         helperLoop = Task { [weak self] in
+            // A read the old loop started before stop() is dropped there, and
+            // this loop's first read spawns a fresh helper.
+            await previous?.value
             while !Task.isCancelled {
                 guard let self else { return }
                 await self.refreshScreenRecording()
@@ -98,6 +104,7 @@ final class OnboardingModel {
         lastStatus = nil
         helperLoop?.cancel()
         statusLoop?.cancel()
+        retiredHelperLoop = helperLoop ?? retiredHelperLoop
         helperLoop = nil
         statusLoop = nil
     }
