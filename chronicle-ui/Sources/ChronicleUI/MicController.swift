@@ -19,6 +19,8 @@ final class MicController {
     let permission: MicrophonePermission
     private(set) var mark: MicOperationMark = .none
     private(set) var isBusy = false
+    /// The last on or off this controller sent, from any caller.
+    private(set) var lastSentEnabled: Bool?
 
     @ObservationIgnored private let daemon: MicDaemonClient
     @ObservationIgnored private let pollInterval: Duration
@@ -137,6 +139,7 @@ final class MicController {
     /// Returns the mark the outcome earns, or `nil` when it earns none, and
     /// the mic state this send last read.
     private func send(_ on: Bool) async -> (MicOperationMark?, MicState?) {
+        lastSentEnabled = on
         var outcome: MicOperationMark?
         switch await bounded(pollInterval * pollLimit, { try await self.daemon.setMicEnabled(on) }) {
         case .value(let reply):

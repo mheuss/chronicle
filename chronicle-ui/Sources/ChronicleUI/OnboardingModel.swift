@@ -61,8 +61,9 @@ final class OnboardingModel {
             permission: mic.permission.status,
             micState: status?.data.audio?.micState,
             skipped: micSkipped,
-            turnOnSucceeded: micTurnOnSucceeded,
-            busy: mic.isBusy || turningOn,
+            turnOnSucceeded: micTurnOnSucceeded && mic.lastSentEnabled == true,
+            busy: mic.isBusy,
+            turningOn: turningOn,
             connected: daemon.isConnected,
             backgroundEnabled: backgroundEnabled()))
     }
@@ -73,8 +74,10 @@ final class OnboardingModel {
             && OnboardingProgress.canFinish(screenRecording: screenRecordingRead, mic: micStep)
     }
 
-    func start() {
+    /// `seed` is a read the caller just took, so the window opens on it.
+    func start(seed: HelperPermission? = nil) {
         stop()
+        screenRecordingRead = seed
         let previous = retiredHelperLoop
         helperLoop = Task { [weak self] in
             // The old loop drops the read it started before stop(). Waiting

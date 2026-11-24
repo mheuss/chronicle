@@ -19,10 +19,10 @@ struct OnboardingStepsTests {
     private static func inputs(
         srDone: Bool = true, permission: HelperPermission? = .authorized, micState: MicState? = .off,
         skipped: Bool = false, turnOnSucceeded: Bool = false, busy: Bool = false,
-        connected: Bool = true, backgroundEnabled: Bool = true
+        turningOn: Bool = false, connected: Bool = true, backgroundEnabled: Bool = true
     ) -> MicStepState.Inputs {
         .init(screenRecordingDone: srDone, permission: permission, micState: micState, skipped: skipped,
-              turnOnSucceeded: turnOnSucceeded, busy: busy, connected: connected,
+              turnOnSucceeded: turnOnSucceeded, busy: busy, turningOn: turningOn, connected: connected,
               backgroundEnabled: backgroundEnabled)
     }
 
@@ -34,11 +34,12 @@ struct OnboardingStepsTests {
         #expect(MicStepState.from(Self.inputs(permission: .denied)) == .noAccess(restricted: false))
         #expect(MicStepState.from(Self.inputs(permission: .restricted)) == .noAccess(restricted: true))
         #expect(MicStepState.from(Self.inputs(turnOnSucceeded: true)) == .savedOn)
-        #expect(MicStepState.from(Self.inputs(busy: true)) == .working)
-        #expect(MicStepState.from(Self.inputs(connected: false))
-                == .noDaemon(caption: CaptureAvailabilityCopy.notRunning))
+        #expect(MicStepState.from(Self.inputs(busy: true)) == .working(turningOn: false))
+        #expect(MicStepState.from(Self.inputs(busy: true, turningOn: true)) == .working(turningOn: true))
+        #expect(MicStepState.from(Self.inputs(turningOn: true)) == .working(turningOn: true))
+        #expect(MicStepState.from(Self.inputs(connected: false)) == .noDaemon(backgroundOff: false))
         #expect(MicStepState.from(Self.inputs(connected: false, backgroundEnabled: false))
-                == .noDaemon(caption: OnboardingCopy.micBackgroundOff))
+                == .noDaemon(backgroundOff: true))
         #expect(MicStepState.from(Self.inputs()) == .ready)
     }
 
@@ -51,7 +52,7 @@ struct OnboardingStepsTests {
         #expect(MicStepState.from(Self.inputs(permission: .denied, busy: true)) == .noAccess(restricted: false))
         #expect(MicStepState.from(Self.inputs(permission: .restricted, busy: true)) == .noAccess(restricted: true))
         #expect(MicStepState.from(Self.inputs(turnOnSucceeded: true, busy: true)) == .savedOn)
-        #expect(MicStepState.from(Self.inputs(busy: true, connected: false)) == .working)
+        #expect(MicStepState.from(Self.inputs(busy: true, connected: false)) == .working(turningOn: false))
     }
 
     @Test func alreadyOnSettlesWithNoButtonPressed() {
@@ -63,7 +64,8 @@ struct OnboardingStepsTests {
         #expect(MicStepState.from(Self.inputs(permission: .notDetermined, turnOnSucceeded: true)) == .ready)
     }
 
-    @Test(arguments: [MicStepState.locked, .working, .noDaemon(caption: "x"), .ready])
+    @Test(arguments: [MicStepState.locked, .working(turningOn: true), .working(turningOn: false),
+                      .noDaemon(backgroundOff: false), .noDaemon(backgroundOff: true), .ready])
     func unsettled(step: MicStepState) { #expect(!step.isSettled) }
 
     @Test(arguments: [MicStepState.alreadyOn, .skipped, .noAccess(restricted: false), .noAccess(restricted: true), .savedOn])

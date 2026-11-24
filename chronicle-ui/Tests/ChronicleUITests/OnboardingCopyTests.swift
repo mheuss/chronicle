@@ -44,7 +44,10 @@ struct OnboardingCopyTests {
     @Test func micStatusReusesTheMicRowCaptions() {
         #expect(OnboardingCopy.micStatus(.noAccess(restricted: false)) == MicRowState.deniedCaption)
         #expect(OnboardingCopy.micStatus(.noAccess(restricted: true)) == MicRowState.restrictedCaption)
-        #expect(OnboardingCopy.micStatus(.noDaemon(caption: "why")) == "why")
+        #expect(OnboardingCopy.micStatus(.noDaemon(backgroundOff: false)) == CaptureAvailabilityCopy.notRunning)
+        #expect(OnboardingCopy.micStatus(.noDaemon(backgroundOff: true)) == OnboardingCopy.micBackgroundOff)
+        #expect(OnboardingCopy.micStatus(.working(turningOn: true)) == "Turning on the microphone…")
+        #expect(OnboardingCopy.micStatus(.working(turningOn: false)) == "Checking the microphone…")
         #expect(OnboardingCopy.micStatus(.ready) == nil)
         #expect(OnboardingCopy.micStatus(.savedOn) == "Microphone on. It records once capture is running.")
         #expect(OnboardingCopy.micStatus(.alreadyOn) == "The microphone is on.")

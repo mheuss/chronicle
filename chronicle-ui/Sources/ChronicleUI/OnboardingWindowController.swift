@@ -50,7 +50,7 @@ final class OnboardingWindowController {
         switch OnboardingLaunch.decide(state: saved, read: read) {
         case .stay: break
         case .markDone: save(.done)
-        case .open: show(.firstUnsettled(screenRecordingDone: read == .authorized))
+        case .open: show(.firstUnsettled(screenRecordingDone: read == .authorized), read: read)
         }
     }
 
@@ -58,15 +58,15 @@ final class OnboardingWindowController {
     /// window is closed, so this takes a fresh one.
     func resume() async {
         let read = await reader.read()
-        show(.firstUnsettled(screenRecordingDone: read == .authorized))
+        show(.firstUnsettled(screenRecordingDone: read == .authorized), read: read)
     }
 
-    func show(_ step: OnboardingStep) {
+    func show(_ step: OnboardingStep, read: HelperPermission? = nil) {
         if Self.savedState(in: defaults) == nil { save(.started) }
         model.focus = step
         if !isOpen {
             isOpen = true
-            model.start()
+            model.start(seed: read)
         }
         presenter.present(self)
     }

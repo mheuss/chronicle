@@ -30,8 +30,8 @@ enum MicStepState: Equatable, Sendable {
     case locked
     case alreadyOn, skipped, savedOn
     case noAccess(restricted: Bool)
-    case working
-    case noDaemon(caption: String)
+    case working(turningOn: Bool)
+    case noDaemon(backgroundOff: Bool)
     case ready
 
     struct Inputs: Equatable, Sendable {
@@ -41,6 +41,7 @@ enum MicStepState: Equatable, Sendable {
         var skipped: Bool
         var turnOnSucceeded: Bool
         var busy: Bool
+        var turningOn: Bool
         var connected: Bool
         var backgroundEnabled: Bool
     }
@@ -52,13 +53,16 @@ enum MicStepState: Equatable, Sendable {
         if i.permission == .denied { return .noAccess(restricted: false) }
         if i.permission == .restricted { return .noAccess(restricted: true) }
         if i.turnOnSucceeded && i.permission == .authorized { return .savedOn }
-        if i.busy { return .working }
-        if !i.connected {
-            return .noDaemon(caption: i.backgroundEnabled
-                ? CaptureAvailabilityCopy.notRunning
-                : OnboardingCopy.micBackgroundOff)
-        }
+        if i.busy || i.turningOn { return .working(turningOn: i.turningOn) }
+        if !i.connected { return .noDaemon(backgroundOff: !i.backgroundEnabled) }
         return .ready
+    }
+
+    var allowsSkip: Bool {
+        switch self {
+        case .locked, .working: false
+        default: true
+        }
     }
 
     var isSettled: Bool {

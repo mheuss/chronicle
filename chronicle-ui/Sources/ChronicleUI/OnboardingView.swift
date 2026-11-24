@@ -85,7 +85,7 @@ struct OnboardingView: View {
                         .disabled(step != .ready)
                         .focused($focused, equals: .microphone)
                     Button(OnboardingCopy.skipButton) { model.skipMic() }
-                        .disabled(step == .locked || step == .working)
+                        .disabled(!step.allowsSkip)
                 }
             default:
                 EmptyView()

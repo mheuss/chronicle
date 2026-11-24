@@ -222,6 +222,39 @@ final class OnboardingWindowControllerTests {
         #expect(!controller.isOpen)
     }
 
+    // Codex P2: a later off from Settings outdates the saved success.
+    @Test func turningTheMicOffInSettingsUndoesSavedOnForTheResume() async {
+        let (controller, _, _) = make(state: .started, read: "authorized")
+        controller.show(.microphone)
+        #expect(await waitUntil { controller.model.micStep == .ready })
+        await controller.turnOnMic()
+        #expect(controller.model.micStep == .savedOn)
+        controller.close()
+        await controller.model.mic.setEnabled(false)
+        await controller.resume()
+        #expect(controller.model.micStep == .ready)
+        controller.close()
+    }
+
+    // The window opens on the read the controller already has, so it never
+    // shows "can't check" first.
+    @Test(arguments: [(OnboardingState?.none, "denied"), (.started, "authorized")])
+    func theWindowOpensWithTheControllersRead(state: OnboardingState?, read: String) async {
+        let (controller, presenter, _) = make(state: state, read: read)
+        await controller.launchCheck()
+        let expected = HelperPermission(helperOutput: read)
+        #expect(presenter.presents == 1)
+        #expect(controller.model.screenRecordingRead == expected)
+        controller.close()
+    }
+
+    @Test func resumeOpensWithItsOwnRead() async {
+        let (controller, _, _) = make(state: .started, read: "authorized")
+        await controller.resume()
+        #expect(controller.model.screenRecordingRead == .authorized)
+        controller.close()
+    }
+
     @Test(arguments: [("denied", OnboardingStep.screenRecording), ("authorized", .microphone)])
     func resumeOpensAtTheStepAFreshReadPicks(read: String, expected: OnboardingStep) async {
         let spawns = ReadCount()

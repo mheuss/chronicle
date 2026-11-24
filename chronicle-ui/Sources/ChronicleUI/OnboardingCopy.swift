@@ -54,8 +54,8 @@ enum OnboardingCopy {
         case .skipped: "Skipped. You can turn the microphone on later in Settings."
         case .savedOn: "Microphone on. It records once capture is running."
         case .noAccess(let restricted): restricted ? MicRowState.restrictedCaption : MicRowState.deniedCaption
-        case .working: "Turning on the microphone…"
-        case .noDaemon(let caption): caption
+        case .working(let turningOn): turningOn ? "Turning on the microphone…" : "Checking the microphone…"
+        case .noDaemon(let backgroundOff): backgroundOff ? micBackgroundOff : CaptureAvailabilityCopy.notRunning
         case .ready: nil
         }
     }

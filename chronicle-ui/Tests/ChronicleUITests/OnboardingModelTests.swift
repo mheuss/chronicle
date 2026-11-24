@@ -194,7 +194,7 @@ struct OnboardingModelTests {
         async let first: Void = model.turnOnMic()
         async let second: Void = model.turnOnMic()
         #expect(await waitUntil { micDaemon.log.contains("set(true)") })
-        #expect(model.micStep == .working)
+        #expect(model.micStep == .working(turningOn: true))
         micDaemon.release()
         _ = await (first, second)
         #expect(micDaemon.log.filter { $0 == "set(true)" }.count == 1)
