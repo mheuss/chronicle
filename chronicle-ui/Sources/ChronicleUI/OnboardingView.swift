@@ -5,6 +5,7 @@ import SwiftUI
 struct OnboardingView: View {
     let controller: OnboardingWindowController
     @FocusState private var focused: OnboardingStep?
+    @State private var focusPending = false
 
     private var model: OnboardingModel { controller.model }
     private var isComplete: Bool { controller.state == .done }
@@ -26,13 +27,20 @@ struct OnboardingView: View {
         }
         .padding(24)
         .frame(width: 480)
-        .onAppear { focused = model.focus }
-        .onChange(of: model.focus) { _, step in focused = step }
+        .onAppear { requestFocus(model.focus) }
+        .onChange(of: model.focus) { _, step in requestFocus(step) }
+        .onChange(of: focused) { _, now in if now == model.focus { focusPending = false } }
         // Turn on is disabled until the mic step is ready, so focus set
-        // before then lands nowhere. Set it again when the step turns ready.
+        // before then lands nowhere. A request that hasn't landed is retried
+        // once the step turns ready, and never moves focus the user chose.
         .onChange(of: model.micStep) { _, step in
-            if step == .ready && model.focus == .microphone { focused = .microphone }
+            if focusPending && step == .ready && model.focus == .microphone { focused = .microphone }
         }
+    }
+
+    private func requestFocus(_ step: OnboardingStep) {
+        focusPending = true
+        focused = step
     }
 
     private func header(_ title: String, done: Bool) -> some View {
