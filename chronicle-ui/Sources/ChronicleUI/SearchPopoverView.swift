@@ -7,7 +7,7 @@ struct SearchPopoverView: View {
     @Environment(TranscriptionAlertState.self) private var transcriptionAlert
     @Environment(SearchFilterState.self) private var searchFilter
     @Environment(BackgroundService.self) private var background
-    @Environment(ScreenRecordingPromptController.self) private var prompt
+    @Environment(OnboardingWindowController.self) private var onboarding
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
 
@@ -63,7 +63,13 @@ struct SearchPopoverView: View {
     var body: some View {
         VStack(spacing: 0) {
             if ScreenRecordingPrompt.showsPopoverRow(connection.availability(background: background)) {
-                Button(CaptureAvailabilityCopy.popoverRow) { prompt.present() }
+                Button(CaptureAvailabilityCopy.popoverRow) { onboarding.show(.screenRecording) }
+                    .buttonStyle(.link)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 6)
+            }
+            if onboarding.state == .started {
+                Button(OnboardingCopy.finishSetupRow) { Task { await onboarding.resume() } }
                     .buttonStyle(.link)
                     .padding(.horizontal, 12)
                     .padding(.top, 6)

@@ -1,7 +1,7 @@
 import Foundation
 
 /// Is capture working, and if not, why (design §6.1). The menu bar, Settings,
-/// the popover and the dialog are meant to share this one classifier (AD11).
+/// and the popover share this one classifier (AD11).
 enum CaptureAvailability: Equatable, Hashable, CaseIterable {
     case backgroundOff, starting, notRunning, needsScreenRecording, permissionUnverified
     case paused, capturing, notCapturing

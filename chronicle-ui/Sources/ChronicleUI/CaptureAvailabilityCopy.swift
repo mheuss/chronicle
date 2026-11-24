@@ -39,17 +39,6 @@ enum CaptureAvailabilityCopy {
     /// What VoiceOver says for the Fix… button, which reads alone out of context.
     static let fixButtonAccessibilityLabel = "Fix Screen Recording"
     static let popoverRow = "Screen Recording is off. Fix…"
-    static let dialogTitle = "Chronicle needs Screen Recording"
-    static let dialogBody = """
-        Chronicle saves what's on your screen so you can search it later. macOS needs \
-        your OK first. Turn on Chronicle in System Settings › Privacy & Security › \
-        Screen & System Audio Recording. Capture starts a few seconds after you turn it \
-        on, with no restart. Search keeps working for everything already saved.
-
-        If Chronicle isn't in the list, click +, then choose Chronicle.
-        """
-    static let dialogOpenButton = "Open System Settings"
-    static let dialogNotNowButton = "Not Now"
 }
 
 /// The transcription row's text when it has no transcription block to render

@@ -131,10 +131,4 @@ struct CaptureAvailabilityTests {
         #expect(menu.count == CaptureAvailability.allCases.count)
         #expect(badge.count == CaptureAvailability.allCases.count)
     }
-
-    @Test func dialogCopyNamesThePaneAndThePlusHint() {
-        #expect(CaptureAvailabilityCopy.dialogBody.contains("Screen & System Audio Recording"))
-        #expect(CaptureAvailabilityCopy.dialogBody.contains(
-            "If Chronicle isn't in the list, click +, then choose Chronicle."))
-    }
 }

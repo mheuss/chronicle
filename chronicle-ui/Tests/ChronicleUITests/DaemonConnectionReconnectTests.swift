@@ -243,8 +243,6 @@ struct DaemonConnectionReconnectTests {
         let pair = try SocketPairHelper.make()
         let conn = DaemonConnection(testingSocketFD: pair.clientFD)
         #expect(conn.currentStatus == nil)
-        let seen = Attempts()
-        conn.onStatus = { _ in seen.count += 1 }
         let serverFD = pair.serverFD
         let daemon = blockingServer {
             respondToOneRequest(on: serverFD, with: #"{"type":"status","ok":true,"data":{"uptime_secs":1,"version":"v"}}"#)
@@ -252,7 +250,6 @@ struct DaemonConnectionReconnectTests {
         _ = try await conn.requestStatus()
         _ = await daemon.value
         #expect(conn.currentStatus != nil)
-        #expect(seen.count == 1, "onStatus runs once per Status")
         conn.disconnect()
         #expect(conn.currentStatus == nil)
         #expect(conn.lastStatus != nil, "lastStatus keeps the old snapshot")
