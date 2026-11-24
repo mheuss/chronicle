@@ -64,7 +64,7 @@ struct OnboardingModelTests {
         #expect(daemon.requests == 1, "a reopen queues no second request behind the stalled one")
         model.stop()
         daemon.release()
-        try? await Task.sleep(for: .milliseconds(50))
+        #expect(await waitUntil { model.droppedRepliesForTesting == 1 })
         #expect(model.status == nil, "a reply after stop() is dropped")
     }
 
@@ -168,7 +168,7 @@ struct OnboardingModelTests {
         #expect(await waitUntil { spawns.count == 1 })
         model.stop()
         await held.release()
-        try? await Task.sleep(for: .milliseconds(50))
+        #expect(await waitUntil { model.droppedReadsForTesting == 1 })
         #expect(model.screenRecordingRead == nil)
     }
 

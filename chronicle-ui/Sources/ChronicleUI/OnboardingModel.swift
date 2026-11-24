@@ -43,6 +43,8 @@ final class OnboardingModel {
     @ObservationIgnored private var statusInFlight = false
     /// Bumped by stop(). A result from an older generation is dropped.
     @ObservationIgnored private var generation = 0
+    @ObservationIgnored private(set) var droppedReadsForTesting = 0
+    @ObservationIgnored private(set) var droppedRepliesForTesting = 0
 
     init(mic: MicController, reader: ScreenRecordingPermission, daemon: OnboardingDaemon,
          backgroundEnabled: @escaping @MainActor () -> Bool, interval: Duration = .seconds(1)) {
@@ -117,7 +119,7 @@ final class OnboardingModel {
     func refreshScreenRecording() async {
         let started = generation
         let read = await reader.read()
-        if started == generation { screenRecordingRead = read }
+        if started == generation { screenRecordingRead = read } else { droppedReadsForTesting += 1 }
     }
 
     /// A disconnect or a failed request clears the last Status, so "Capture
@@ -132,7 +134,7 @@ final class OnboardingModel {
         let started = generation
         let reply = try? await daemon.requestStatus()
         statusInFlight = false
-        if started == generation { lastStatus = reply }
+        if started == generation { lastStatus = reply } else { droppedRepliesForTesting += 1 }
     }
 
     func turnOnMic() async {
