@@ -19,7 +19,8 @@ final class MicController {
     let permission: MicrophonePermission
     private(set) var mark: MicOperationMark = .none
     private(set) var isBusy = false
-    /// Counts every on or off this controller tries, from any caller.
+    /// Counts every on or off that goes through `send`, from any caller. A
+    /// held off that `flushPendingOff` replays was counted when it was refused.
     private(set) var sendCount = 0
 
     @ObservationIgnored private let daemon: MicDaemonClient
