@@ -42,11 +42,14 @@ struct OnboardingStepsTests {
         #expect(MicStepState.from(Self.inputs()) == .ready)
     }
 
-    // Each pair sets this row's input and the next row's, so a reorder fails.
+    // Each check gives inputs that match two rows, and expects the earlier one.
     @Test func firstMatchWins() {
         #expect(MicStepState.from(Self.inputs(micState: .on, skipped: true)) == .alreadyOn)
         #expect(MicStepState.from(Self.inputs(permission: .denied, skipped: true)) == .skipped)
-        #expect(MicStepState.from(Self.inputs(permission: .denied, turnOnSucceeded: true)) == .noAccess(restricted: false))
+        #expect(MicStepState.from(Self.inputs(permission: .restricted, skipped: true)) == .skipped)
+        #expect(MicStepState.from(Self.inputs(skipped: true, turnOnSucceeded: true)) == .skipped)
+        #expect(MicStepState.from(Self.inputs(permission: .denied, busy: true)) == .noAccess(restricted: false))
+        #expect(MicStepState.from(Self.inputs(permission: .restricted, busy: true)) == .noAccess(restricted: true))
         #expect(MicStepState.from(Self.inputs(turnOnSucceeded: true, busy: true)) == .savedOn)
         #expect(MicStepState.from(Self.inputs(busy: true, connected: false)) == .working)
     }
