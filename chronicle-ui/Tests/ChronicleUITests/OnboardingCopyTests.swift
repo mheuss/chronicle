@@ -12,7 +12,8 @@ struct OnboardingCopyTests {
     @Test func sheetsLineNamesTheDaemonAllowAndLater() {
         #expect(OnboardingCopy.screenRecordingSheets == """
             macOS may ask whether dev.heuss.chronicle.daemon may record your screen: click Allow. \
-            If it offers Quit & Reopen, click Later.
+            If it offers Quit & Reopen, click Later. If it says Chronicle would like to record this \
+            computer's screen and audio, click Open System Settings.
             """)
     }
 
