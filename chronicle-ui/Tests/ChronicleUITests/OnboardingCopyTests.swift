@@ -10,9 +10,14 @@ struct OnboardingCopyTests {
     }
 
     @Test func sheetsLineNamesTheDaemonAllowAndLater() {
-        #expect(OnboardingCopy.screenRecordingSheets.contains("\"dev.heuss.chronicle.daemon\""))
-        #expect(OnboardingCopy.screenRecordingSheets.contains("Click Allow."))
-        #expect(OnboardingCopy.screenRecordingSheets.contains("click Later."))
+        #expect(OnboardingCopy.screenRecordingSheets == """
+            macOS may ask whether dev.heuss.chronicle.daemon may record your screen: click Allow. \
+            If it offers Quit & Reopen, click Later.
+            """)
+    }
+
+    @Test func sheetsLineStandsWithoutTheHowLine() {
+        #expect(!OnboardingCopy.screenRecordingSheets.contains("then"))
     }
 
     @Test func screenRecordingStatus() {

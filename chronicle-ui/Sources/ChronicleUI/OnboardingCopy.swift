@@ -8,10 +8,10 @@ enum OnboardingCopy {
         Turn on Chronicle in System Settings › Privacy & Security › Screen & System Audio Recording. \
         If Chronicle isn't in the list, click +, then choose Chronicle.
         """
+    /// Shown with or without the How line, so it names no earlier step.
     static let screenRecordingSheets = """
-        macOS may then ask whether "dev.heuss.chronicle.daemon" may record your screen. Click Allow. \
-        If it offers Quit & Reopen, click Later. Chronicle captures in the background and starts \
-        without a restart.
+        macOS may ask whether dev.heuss.chronicle.daemon may record your screen: click Allow. \
+        If it offers Quit & Reopen, click Later.
         """
     static let openSettingsButton = "Open System Settings"
 

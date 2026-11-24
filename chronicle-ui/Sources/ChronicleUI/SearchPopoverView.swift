@@ -68,7 +68,8 @@ struct SearchPopoverView: View {
                     .padding(.horizontal, 12)
                     .padding(.top, 6)
             }
-            if onboarding.state == .started {
+            if ScreenRecordingPrompt.showsFinishSetupRow(
+                state: onboarding.state, availability: connection.availability(background: background)) {
                 Button(OnboardingCopy.finishSetupRow) { Task { await onboarding.resume() } }
                     .buttonStyle(.link)
                     .padding(.horizontal, 12)
