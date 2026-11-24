@@ -27,7 +27,8 @@ enum OnboardingCopy {
     static let finishSetupRow = "Finish setting up Chronicle…"
 
     /// What VoiceOver reads for each step's heading: its title and state
-    /// (NFR1). VoiceOver skips a heading's value, so the state is in the label.
+    /// (NFR1). VoiceOver on macOS 27 didn't read this heading's value (V12),
+    /// so the state is in the label.
     static func stepLabel(_ title: String, done: Bool) -> String {
         "\(title), \(done ? "Done" : "Not yet")"
     }
