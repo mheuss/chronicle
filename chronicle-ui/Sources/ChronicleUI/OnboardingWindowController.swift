@@ -6,7 +6,8 @@ import os
 @MainActor
 protocol OnboardingPresenter: AnyObject {
     func present(_ controller: OnboardingWindowController)
-    /// Closes the window. The presenter then calls `didClose()`.
+    /// Closes the window if it is open. That close calls `didClose()`
+    /// before returning.
     func close()
 }
 

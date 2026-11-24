@@ -38,6 +38,7 @@ struct OnboardingView: View {
             Text(title).font(.headline)
         }
         .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
         .accessibilityValue(OnboardingCopy.stepValue(done: done))
     }
 
@@ -49,11 +50,13 @@ struct OnboardingView: View {
             if let status = OnboardingCopy.screenRecordingStatus(step) {
                 Text(status).foregroundStyle(.secondary)
             }
+            if !step.isDone {
+                Text(OnboardingCopy.screenRecordingHow)
+            }
             if !step.isDone || !isComplete {
                 Text(OnboardingCopy.screenRecordingSheets).foregroundStyle(.secondary)
             }
             if !step.isDone {
-                Text(OnboardingCopy.screenRecordingHow)
                 Button(OnboardingCopy.openSettingsButton) {
                     ScreenRecordingPrompt.openSettings(
                         request: { _ = CGRequestScreenCaptureAccess() },
