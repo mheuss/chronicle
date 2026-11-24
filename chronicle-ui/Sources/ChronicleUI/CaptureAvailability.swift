@@ -1,7 +1,7 @@
 import Foundation
 
-/// Is capture working, and if not, why (design §6.1). The menu bar, Settings,
-/// and the popover share this one classifier (AD11).
+/// Is capture working, and if not, why (CHR-96/97 design §6.1). The menu bar,
+/// Settings and the popover share this one classifier (CHR-96/97 AD11).
 enum CaptureAvailability: Equatable, Hashable, CaseIterable {
     case backgroundOff, starting, notRunning, needsScreenRecording, permissionUnverified
     case paused, capturing, notCapturing
