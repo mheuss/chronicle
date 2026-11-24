@@ -23,7 +23,7 @@ struct MicRowState: Equatable {
         CaptureAvailabilityCopy.notRunning
     }
 
-    static func from(permission: MicPermission?, status: StatusResponse?,
+    static func from(permission: HelperPermission?, status: StatusResponse?,
                      connected: Bool, mark: MicOperationMark) -> MicRowState {
         func disabled(_ caption: String, button: Bool = false, isOn: Bool = false) -> MicRowState {
             MicRowState(isOn: isOn, isEnabled: false, caption: caption, showsSettingsButton: button)

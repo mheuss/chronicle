@@ -13,19 +13,19 @@ actor HelperReads {
 @MainActor
 struct MicrophonePermissionTests {
     @Test(arguments: [
-        ("authorized", MicPermission.authorized),
+        ("authorized", HelperPermission.authorized),
         ("denied\n", .denied),
         ("not_determined", .notDetermined),
         (" restricted ", .restricted),
         ("granted", .unavailable),
         ("", .unavailable),
     ])
-    func parsesHelperOutput(output: String, expected: MicPermission) {
-        #expect(MicPermission(helperOutput: output) == expected)
+    func parsesHelperOutput(output: String, expected: HelperPermission) {
+        #expect(HelperPermission(helperOutput: output) == expected)
     }
 
     @Test func nilOutputIsUnavailable() {
-        #expect(MicPermission(helperOutput: nil) == .unavailable)
+        #expect(HelperPermission(helperOutput: nil) == .unavailable)
     }
 
     @Test func statusIsNilBeforeTheFirstRead() {

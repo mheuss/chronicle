@@ -27,7 +27,7 @@ final class MicController {
     @ObservationIgnored private var tail: Task<Void, Never>?
     @ObservationIgnored private var recheckQueued = false
     @ObservationIgnored private var markedMicState: MicState?
-    @ObservationIgnored private var markedPermission: MicPermission?
+    @ObservationIgnored private var markedPermission: HelperPermission?
     @ObservationIgnored private var callOutstanding = false
     @ObservationIgnored private var pendingOff = false
 
@@ -103,7 +103,7 @@ final class MicController {
         // the mic on (Architectural Decision 10).
         // The saved intent can be on while the mic is off, during a pause,
         // so a revoke clears it whatever the mic state is.
-        let revoked: Set<MicPermission> = [.denied, .restricted, .notDetermined]
+        let revoked: Set<HelperPermission> = [.denied, .restricted, .notDetermined]
         // Its send sets no mark: the user did not ask for this change.
         if let status = permission.status, revoked.contains(status) {
             _ = await send(false)

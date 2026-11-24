@@ -3,7 +3,7 @@ import Testing
 
 @Suite(.watchdog)
 struct MicRowStateTests {
-    private func row(_ permission: MicPermission?, _ status: StatusResponse?,
+    private func row(_ permission: HelperPermission?, _ status: StatusResponse?,
                      connected: Bool = true, mark: MicOperationMark = .none) -> MicRowState {
         MicRowState.from(permission: permission, status: status, connected: connected, mark: mark)
     }
@@ -102,7 +102,7 @@ struct MicRowStateTests {
     }
 
     @Test func aMissingGrantNeverRendersOn() {
-        for permission in [MicPermission.denied, .restricted, .notDetermined] {
+        for permission in [HelperPermission.denied, .restricted, .notDetermined] {
             #expect(!row(permission, statusWithMic(.on)).isOn)
         }
     }
