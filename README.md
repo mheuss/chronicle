@@ -103,10 +103,11 @@ macOS Control Center won't register a menu bar icon for a loose executable.
    Click Allow. If macOS then offers to quit and reopen Chronicle, click
    Later.
 4. The window then offers the microphone. Turn it on or skip it, then click
-   Done. Done needs Screen Recording. If you close the window first, the menu
-   bar popover shows "Finish setting up Chronicle…" to reopen it. Chronicle
-   keeps running without Screen Recording. Search still works for anything
-   already saved.
+   Done. Done needs Screen Recording. If you close the window before Done,
+   the menu bar popover reopens it. Its row reads "Screen Recording is off.
+   Fix…" until Screen Recording is on, then "Finish setting up Chronicle…".
+   Chronicle keeps running without Screen Recording. Search still works for
+   anything already saved.
 5. If Settings → Run at login shows "Needs approval in System Settings",
    click Open Login Items and enable Chronicle.
 
