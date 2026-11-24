@@ -34,6 +34,7 @@ struct OnboardingCopyTests {
 
     @Test func screenRecordingStatus() {
         #expect(OnboardingCopy.screenRecordingStatus(.needed) == nil)
+        #expect(OnboardingCopy.screenRecordingStatus(.checking) == nil)
         #expect(OnboardingCopy.screenRecordingStatus(.unverified)
                 == CaptureAvailabilityCopy.settingsText(.permissionUnverified))
         #expect(OnboardingCopy.screenRecordingStatus(.done(captureStarted: false)) == "Screen Recording is on.")

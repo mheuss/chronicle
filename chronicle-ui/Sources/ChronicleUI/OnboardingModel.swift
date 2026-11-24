@@ -24,7 +24,9 @@ final class OnboardingModel {
     /// is still stalled.
     var status: StatusResponse? { daemon.isConnected ? lastStatus : nil }
     private(set) var micSkipped = false
-    private(set) var micTurnOnSucceeded = false
+    /// The mic controller's send count when Turn on microphone succeeded.
+    /// A later send from anywhere makes the success out of date.
+    private var micTurnOnSendCount: Int?
     private(set) var turningOn = false
     var focus: OnboardingStep = .screenRecording
 
@@ -61,7 +63,7 @@ final class OnboardingModel {
             permission: mic.permission.status,
             micState: status?.data.audio?.micState,
             skipped: micSkipped,
-            turnOnSucceeded: micTurnOnSucceeded && mic.lastSentEnabled == true,
+            turnOnSucceeded: micTurnOnSendCount == mic.sendCount,
             busy: mic.isBusy,
             turningOn: turningOn,
             connected: daemon.isConnected,
@@ -137,7 +139,8 @@ final class OnboardingModel {
         guard micStep == .ready else { return }
         turningOn = true
         await mic.setEnabled(true)
-        micTurnOnSucceeded = mic.mark == .none && mic.permission.status == .authorized
+        let succeeded = mic.mark == .none && mic.permission.status == .authorized
+        micTurnOnSendCount = succeeded ? mic.sendCount : nil
         turningOn = false
     }
 

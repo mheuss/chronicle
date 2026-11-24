@@ -236,6 +236,21 @@ final class OnboardingWindowControllerTests {
         controller.close()
     }
 
+    // Any send after the success outdates it, even an on that was rejected.
+    @Test func aRejectedOnAfterASettingsOffDoesNotRestoreSavedOn() async {
+        let micDaemon = FakeMicDaemon()
+        let (controller, _, _) = make(state: .started, read: "authorized", micDaemon: micDaemon)
+        controller.show(.microphone)
+        #expect(await waitUntil { controller.model.micStep == .ready })
+        await controller.turnOnMic()
+        #expect(controller.model.micStep == .savedOn)
+        await controller.model.mic.setEnabled(false)
+        micDaemon.setError = IPCError.notConnected
+        await controller.model.mic.setEnabled(true)
+        #expect(controller.model.micStep != .savedOn)
+        controller.close()
+    }
+
     // The window opens on the read the controller already has, so it never
     // shows "can't check" first.
     @Test(arguments: [(OnboardingState?.none, "denied"), (.started, "authorized")])

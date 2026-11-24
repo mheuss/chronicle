@@ -28,6 +28,11 @@ struct OnboardingView: View {
         .frame(width: 480)
         .onAppear { focused = model.focus }
         .onChange(of: model.focus) { _, step in focused = step }
+        // Turn on is disabled until the mic step is ready, so focus set
+        // before then lands nowhere. Set it again when the step turns ready.
+        .onChange(of: model.micStep) { _, step in
+            if step == .ready && model.focus == .microphone { focused = .microphone }
+        }
     }
 
     private func header(_ title: String, done: Bool) -> some View {

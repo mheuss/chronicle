@@ -41,7 +41,7 @@ enum OnboardingCopy {
 
     static func screenRecordingStatus(_ step: ScreenRecordingStepState) -> String? {
         switch step {
-        case .needed: nil
+        case .needed, .checking: nil
         case .unverified: CaptureAvailabilityCopy.settingsText(.permissionUnverified)
         case .done(let started): started ? "Screen Recording is on. Capture started." : "Screen Recording is on."
         }

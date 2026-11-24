@@ -8,7 +8,7 @@ struct OnboardingStepsTests {
         #expect(ScreenRecordingStepState.from(read: .authorized, captureRunning: false) == .done(captureStarted: false))
         #expect(ScreenRecordingStepState.from(read: .authorized, captureRunning: true) == .done(captureStarted: true))
         #expect(ScreenRecordingStepState.from(read: .unavailable, captureRunning: false) == .unverified)
-        #expect(ScreenRecordingStepState.from(read: nil, captureRunning: false) == .unverified)
+        #expect(ScreenRecordingStepState.from(read: nil, captureRunning: false) == .checking)
     }
 
     @Test(arguments: [HelperPermission.denied, .notDetermined, .restricted])

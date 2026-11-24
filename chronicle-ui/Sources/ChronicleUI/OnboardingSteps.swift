@@ -10,13 +10,16 @@ enum OnboardingStep: Equatable, Sendable {
 /// prints only authorized or denied, so the other words read as needed.
 enum ScreenRecordingStepState: Equatable, Sendable {
     case needed, unverified
+    /// No read yet. Shows no status line, unlike a read that failed.
+    case checking
     case done(captureStarted: Bool)
 
     static func from(read: HelperPermission?, captureRunning: Bool) -> ScreenRecordingStepState {
         switch read {
         case .authorized: .done(captureStarted: captureRunning)
         case .denied, .notDetermined, .restricted: .needed
-        case .unavailable, nil: .unverified
+        case .unavailable: .unverified
+        case nil: .checking
         }
     }
 
