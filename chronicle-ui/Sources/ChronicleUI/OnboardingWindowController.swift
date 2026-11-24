@@ -44,7 +44,9 @@ final class OnboardingWindowController {
         let read = await reader.read()
         let elapsed = began.duration(to: clock.now)
         Self.logger.debug("onboarding launch read: \(String(describing: read), privacy: .public) in \(String(describing: elapsed), privacy: .public)")
-        switch OnboardingLaunch.decide(state: Self.savedState(in: defaults), read: read) {
+        let saved = Self.savedState(in: defaults)
+        state = saved
+        switch OnboardingLaunch.decide(state: saved, read: read) {
         case .stay: break
         case .markDone: save(.done)
         case .open: show(.firstUnsettled(screenRecordingDone: read == .authorized))

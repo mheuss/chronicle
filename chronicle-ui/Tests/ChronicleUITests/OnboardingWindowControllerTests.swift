@@ -164,10 +164,34 @@ final class OnboardingWindowControllerTests {
     @Test func aSecondShowPresentsAgainAndKeepsOneOpenWindow() async {
         let (controller, presenter, _) = make()
         controller.show(.screenRecording)
+        #expect(await waitUntil { controller.model.screenRecordingRead != nil })
         controller.show(.microphone)
         #expect(presenter.presents == 2)
         #expect(controller.isOpen)
         #expect(controller.model.focus == .microphone)
+        #expect(controller.model.screenRecordingRead != nil, "a show while open does not restart the model")
+        controller.close()
+    }
+
+    @Test func aShowAfterCloseRestartsThePolls() async {
+        let spawns = ReadCount()
+        let (controller, _, _) = make(spawns: spawns)
+        controller.show(.screenRecording)
+        #expect(await waitUntil { spawns.count >= 1 })
+        controller.close()
+        let before = spawns.count
+        controller.show(.screenRecording)
+        #expect(await waitUntil { spawns.count > before })
+        #expect(controller.isOpen)
+        controller.close()
+    }
+
+    @Test func anUnknownSavedValueIsTreatedAsAbsent() async {
+        let (controller, presenter, defaults) = make(read: "denied")
+        defaults.set("bogus", forKey: OnboardingState.key)
+        await controller.launchCheck()
+        #expect(presenter.presents == 1)
+        #expect(defaults.string(forKey: OnboardingState.key) == "started")
         controller.close()
     }
 
@@ -176,7 +200,9 @@ final class OnboardingWindowControllerTests {
         let spawns = ReadCount()
         let (controller, presenter, _) = make(state: .started, read: read, spawns: spawns)
         await controller.resume()
-        #expect(spawns.count >= 1, "resume takes a read of its own")
+        // The authorized row proves resume reads for itself: with no read the
+        // model has nothing stored, and focus would stay on Screen Recording.
+        #expect(spawns.count >= 1)
         #expect(presenter.presents == 1)
         #expect(controller.model.focus == expected)
         controller.close()
