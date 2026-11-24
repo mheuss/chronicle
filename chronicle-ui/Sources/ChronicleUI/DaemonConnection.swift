@@ -29,9 +29,6 @@ final class DaemonConnection {
     /// `lastStatus`, but only when it came from the current connection.
     var currentStatus: StatusResponse? { statusIsCurrent ? lastStatus : nil }
 
-    /// Called with every Status this connection receives (design §7.1).
-    @ObservationIgnored var onStatus: (@MainActor (StatusResponse) -> Void)?
-
     /// No reply on the current connection for this long means the daemon has
     /// stopped answering. The longest a healthy daemon holds a reply is a
     /// command's 20 s `recv_timeout`, so this leaves 10 s of margin. Requests
@@ -220,7 +217,6 @@ final class DaemonConnection {
         }
         lastStatus = response
         statusIsCurrent = true
-        onStatus?(response)
         return response
     }
 

@@ -93,16 +93,18 @@ func blockingServer<T: Sendable>(_ body: @escaping @Sendable () -> T) -> Task<T,
 }
 
 /// Polls until `condition` holds, or gives up after `ticks` 10 ms waits.
+/// Returns whether it held, so a caller can write `#expect(await waitUntil { … })`.
 ///
 /// A fixed sleep is a guess about how fast the reader drains under a loaded
 /// parallel suite, and it guesses wrong often enough to flake. This converts
 /// that into a bounded wait, so a genuine regression still fails the caller's
 /// assertion rather than passing on a lucky schedule.
-@MainActor
-func waitUntil(ticks: Int = 200, _ condition: @MainActor () -> Bool) async {
+@MainActor @discardableResult
+func waitUntil(ticks: Int = 200, _ condition: @MainActor () -> Bool) async -> Bool {
     var n = 0
     while !condition() && n < ticks {
         try? await Task.sleep(for: .milliseconds(10))
         n += 1
     }
+    return condition()
 }

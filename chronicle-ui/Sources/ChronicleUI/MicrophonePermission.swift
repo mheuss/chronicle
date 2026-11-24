@@ -2,8 +2,8 @@ import AVFoundation
 import Foundation
 import os
 
-/// Microphone permission as the fresh-read helper reports it (design §1.3).
-enum MicPermission: Hashable, Sendable {
+/// A permission as `chronicle-daemon --permission-status <name>` reports it.
+enum HelperPermission: Hashable, Sendable {
     case authorized, denied, notDetermined, restricted, unavailable
 
     /// Parse one helper output line. Anything else, or no output, is
@@ -27,7 +27,7 @@ final class MicrophonePermission {
     private static let logger = Logger(subsystem: "dev.heuss.chronicle", category: "ui")
 
     /// `nil` until the first read finishes.
-    private(set) var status: MicPermission?
+    private(set) var status: HelperPermission?
 
     @ObservationIgnored private let readHelper: @Sendable () async -> String?
     @ObservationIgnored private let requestAccess: @Sendable () async -> Bool
@@ -43,7 +43,7 @@ final class MicrophonePermission {
     }
 
     func refresh() async {
-        let read = MicPermission(helperOutput: await readHelper())
+        let read = HelperPermission(helperOutput: await readHelper())
         if read == .unavailable {
             Self.logger.warning("microphone permission helper gave no answer")
         }

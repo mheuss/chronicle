@@ -46,7 +46,7 @@ struct CodableTests {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let response = try decoder.decode(StatusResponse.self, from: Data(json.utf8))
         #expect(response.type == "status")
-        #expect(response.ok == true)
+        #expect(response.ok)
         #expect(response.data.uptimeSecs == 3412)
         #expect(response.data.version == "0.1.0")
     }
@@ -106,7 +106,8 @@ struct CodableTests {
     @Test("readFailed description includes errno text")
     func readFailedDescription() {
         let err = IPCError.readFailed(errno: EBADF)
-        #expect(err.errorDescription?.hasPrefix("Read failed: ") == true)
+        let hasPrefix = err.errorDescription?.hasPrefix("Read failed: ") ?? false
+        #expect(hasPrefix)
     }
 
     @Test("StatusData decodes nested capture/ocr/audio/storage stats")
@@ -269,7 +270,8 @@ struct CodableTests {
         let data = try JSONEncoder().encode(request)
         let dict = try JSONSerialization.jsonObject(with: data) as! [String: Any]
         #expect(dict["type"] as? String == "set_mic_enabled")
-        #expect(dict["enabled"] as? Bool == true)
+        let enabled = dict["enabled"] as? Bool ?? false
+        #expect(enabled)
     }
 
     @Test("SetMicEnabledResponse decodes from wire format")
@@ -281,9 +283,10 @@ struct CodableTests {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let response = try decoder.decode(SetMicEnabledResponse.self, from: Data(json.utf8))
         #expect(response.type == "set_mic_enabled")
-        #expect(response.ok == true)
+        #expect(response.ok)
         #expect(response.state == .on)
-        #expect(response.pending == nil)
+        let responsePendingAbsent = response.pending == nil
+        #expect(responsePendingAbsent)
     }
 
     @Test("SearchResponse decodes from Rust wire format")
@@ -300,7 +303,7 @@ struct CodableTests {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let resp = try decoder.decode(SearchResponse.self, from: Data(json.utf8))
         #expect(resp.type == "search")
-        #expect(resp.ok == true)
+        #expect(resp.ok)
         #expect(resp.hits.count == 1)
         let hit = resp.hits[0]
         #expect(hit.id == 1)
@@ -372,16 +375,18 @@ struct CodableTests {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let p = try decoder.decode(PauseResumeResponse.self, from: Data(pauseJson.utf8))
         #expect(p.type == "pause_capture")
-        #expect(p.paused == true)
-        #expect(p.pending == nil)
+        #expect(p.paused)
+        let pPendingAbsent = p.pending == nil
+        #expect(pPendingAbsent)
 
         let resumeJson = """
         {"type":"resume_capture","ok":true,"paused":false}
         """
         let r = try decoder.decode(PauseResumeResponse.self, from: Data(resumeJson.utf8))
         #expect(r.type == "resume_capture")
-        #expect(r.paused == false)
-        #expect(r.pending == nil)
+        #expect(!r.paused)
+        let rPendingAbsent = r.pending == nil
+        #expect(rPendingAbsent)
     }
 
     @Test("An old UI decoder ignores the pending field")
@@ -397,7 +402,7 @@ struct CodableTests {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let old = try decoder.decode(OldSetMicEnabledResponse.self, from: Data(json.utf8))
-        #expect(old.ok == false)
+        #expect(!old.ok)
         #expect(old.state == .off)
     }
 
@@ -409,9 +414,10 @@ struct CodableTests {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let response = try decoder.decode(SetMicEnabledResponse.self, from: Data(json.utf8))
-        #expect(response.ok == false)
+        #expect(!response.ok)
         #expect(response.state == .off)
-        #expect(response.pending == true)
+        let pending = response.pending ?? false
+        #expect(pending)
     }
 
     @Test("PauseResumeResponse decodes a pending timeout reply")
@@ -422,9 +428,10 @@ struct CodableTests {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let response = try decoder.decode(PauseResumeResponse.self, from: Data(json.utf8))
-        #expect(response.ok == false)
-        #expect(response.paused == false)
-        #expect(response.pending == true)
+        #expect(!response.ok)
+        #expect(!response.paused)
+        let pending = response.pending ?? false
+        #expect(pending)
     }
 
     @Test("Expanded StatusData decodes new fields")
@@ -448,7 +455,7 @@ struct CodableTests {
         let resp = try decoder.decode(StatusResponse.self, from: Data(json.utf8))
         let capture = try #require(resp.data.capture)
         let storage = try #require(resp.data.storage)
-        #expect(capture.paused == true)
+        #expect(capture.paused)
         #expect(capture.state == "paused")
         #expect(storage.totalDiskUsageBytes == 2048)
         #expect(storage.screenshotCount == 50)
@@ -484,7 +491,7 @@ struct CodableTests {
         // changing either number.
         #expect(t.downloadTotalBytes == 466_000_000)
         #expect(t.models.count == 3)
-        #expect(t.models[0].downloaded == true)
+        #expect(t.models[0].downloaded)
     }
 
     @Test("StatusData tolerates a daemon without the block")

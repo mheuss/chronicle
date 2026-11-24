@@ -7,9 +7,10 @@ struct SearchPopoverView: View {
     @Environment(TranscriptionAlertState.self) private var transcriptionAlert
     @Environment(SearchFilterState.self) private var searchFilter
     @Environment(BackgroundService.self) private var background
-    @Environment(ScreenRecordingPromptController.self) private var prompt
+    @Environment(OnboardingWindowController.self) private var onboarding
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.dismiss) private var dismiss
 
     @State private var query: String = ""
     @State private var results: [SearchHit] = []
@@ -63,10 +64,23 @@ struct SearchPopoverView: View {
     var body: some View {
         VStack(spacing: 0) {
             if ScreenRecordingPrompt.showsPopoverRow(connection.availability(background: background)) {
-                Button(CaptureAvailabilityCopy.popoverRow) { prompt.present() }
-                    .buttonStyle(.link)
-                    .padding(.horizontal, 12)
-                    .padding(.top, 6)
+                Button(CaptureAvailabilityCopy.popoverRow) {
+                    dismiss()
+                    onboarding.show(.screenRecording)
+                }
+                .buttonStyle(.link)
+                .padding(.horizontal, 12)
+                .padding(.top, 6)
+            }
+            if ScreenRecordingPrompt.showsFinishSetupRow(
+                state: onboarding.state, availability: connection.availability(background: background)) {
+                Button(OnboardingCopy.finishSetupRow) {
+                    dismiss()
+                    Task { await onboarding.resume() }
+                }
+                .buttonStyle(.link)
+                .padding(.horizontal, 12)
+                .padding(.top, 6)
             }
             if showPausedBanner {
                 PausedBanner(

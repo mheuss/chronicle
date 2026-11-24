@@ -1,0 +1,104 @@
+import Foundation
+import Observation
+import os
+
+/// Shows the onboarding window, or brings it forward when it is open.
+@MainActor
+protocol OnboardingPresenter: AnyObject {
+    func present(_ controller: OnboardingWindowController)
+    /// Closes the window if it is open. That close calls `didClose()`
+    /// before returning.
+    func close()
+}
+
+/// Owns the onboarding key and decides when the window opens (CHR-94
+/// design §1, §2.1).
+@MainActor @Observable
+final class OnboardingWindowController {
+    private static let logger = Logger(subsystem: "dev.heuss.chronicle", category: "ui")
+
+    private(set) var state: OnboardingState?
+    private(set) var isOpen = false
+    let model: OnboardingModel
+
+    @ObservationIgnored private let reader: ScreenRecordingPermission
+    @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let presenter: OnboardingPresenter
+    @ObservationIgnored private var launchChecked = false
+
+    init(model: OnboardingModel, reader: ScreenRecordingPermission,
+         defaults: UserDefaults = .standard, presenter: OnboardingPresenter) {
+        self.model = model
+        self.reader = reader
+        self.defaults = defaults
+        self.presenter = presenter
+        state = Self.savedState(in: defaults)
+    }
+
+    /// Runs once per process. The key is read after the helper read returns,
+    /// so a Fix… press during the read counts as `started` (design §1.2).
+    func launchCheck() async {
+        guard !launchChecked else { return }
+        launchChecked = true
+        let clock = ContinuousClock()
+        let began = clock.now
+        let read = await reader.read()
+        let elapsed = began.duration(to: clock.now)
+        Self.logger.debug("onboarding launch read: \(String(describing: read), privacy: .public) in \(String(describing: elapsed), privacy: .public)")
+        let saved = Self.savedState(in: defaults)
+        state = saved
+        switch OnboardingLaunch.decide(state: saved, read: read) {
+        case .stay: break
+        case .markDone: save(.done)
+        case .open: show(.firstUnsettled(screenRecordingDone: read == .authorized), read: read)
+        }
+    }
+
+    /// The popover's Finish row. The model's last read can be stale while the
+    /// window is closed, so this takes a fresh one.
+    func resume() async {
+        let read = await reader.read()
+        show(.firstUnsettled(screenRecordingDone: read == .authorized), read: read)
+    }
+
+    func show(_ step: OnboardingStep, read: HelperPermission? = nil) {
+        if Self.savedState(in: defaults) == nil { save(.started) }
+        model.focus = step
+        if !isOpen {
+            isOpen = true
+            model.start(seed: read)
+        }
+        presenter.present(self)
+    }
+
+    /// The mic consent prompt hands focus back to the app that was in front,
+    /// so the window comes forward again once the step finishes.
+    func turnOnMic() async {
+        await model.turnOnMic()
+        if isOpen { presenter.present(self) }
+    }
+
+    func finish() {
+        save(.done)
+        presenter.close()
+    }
+
+    /// Close: leaves the key as it is.
+    func close() {
+        presenter.close()
+    }
+
+    func didClose() {
+        isOpen = false
+        model.stop()
+    }
+
+    private func save(_ new: OnboardingState) {
+        defaults.set(new.rawValue, forKey: OnboardingState.key)
+        state = new
+    }
+
+    private static func savedState(in defaults: UserDefaults) -> OnboardingState? {
+        defaults.string(forKey: OnboardingState.key).flatMap(OnboardingState.init(rawValue:))
+    }
+}

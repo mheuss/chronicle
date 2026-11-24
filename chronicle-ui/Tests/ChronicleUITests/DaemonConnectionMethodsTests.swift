@@ -145,7 +145,7 @@ struct DaemonConnectionMethodsTests {
         let paused = try await conn.pauseCapture()
         _ = await daemonTask.value
 
-        #expect(paused == true)
+        #expect(paused)
     }
 
     @Test("resumeCapture returns false when daemon confirms capture is running")
@@ -172,7 +172,7 @@ struct DaemonConnectionMethodsTests {
         let paused = try await conn.resumeCapture()
         _ = await daemonTask.value
 
-        #expect(paused == false)
+        #expect(!paused)
     }
 
     @Test("setMicEnabled returns the full response, including pending")
@@ -194,8 +194,9 @@ struct DaemonConnectionMethodsTests {
         let response = try await conn.setMicEnabled(true)
         _ = await daemonTask.value
 
-        #expect(response.ok == false)
+        #expect(!response.ok)
         #expect(response.state == .off)
-        #expect(response.pending == true)
+        let pending = response.pending ?? false
+        #expect(pending)
     }
 }

@@ -193,11 +193,13 @@ struct StatusTranscriptionSpliceTests {
         // Everything else must survive — this is one field arriving by a
         // different route, not a status refresh.
         #expect(after.type == before.type)
-        #expect(after.ok == before.ok)
+        #expect(before.ok, "fixture premise")
+        #expect(after.ok)
         #expect(after.data.uptimeSecs == before.data.uptimeSecs)
         #expect(after.data.version == before.data.version)
         #expect(after.data.capture?.framesCaptured == 7)
-        #expect(after.data.capture?.paused == false)
+        let paused = after.data.capture?.paused ?? true
+        #expect(!paused)
         #expect(after.data.permissions?.screenRecording == .denied)
     }
 

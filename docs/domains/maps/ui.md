@@ -9,7 +9,7 @@
 - inside: declaring the app's scenes and constructing the objects they share — `chronicle-ui/Sources/ChronicleUI/ChronicleApp.swift` — `ChronicleApp`
 - inside: what the menu bar item shows about capture health — `chronicle-ui/Sources/ChronicleUI/MenuBarIcon.swift` — `MenuBarIcon`
 - inside: the classifier the menu bar, the Settings badge and the popover read — `chronicle-ui/Sources/ChronicleUI/CaptureAvailability.swift` — `CaptureAvailability`
-- inside: when the Screen Recording dialog shows, and showing one at a time — `chronicle-ui/Sources/ChronicleUI/ScreenRecordingPromptController.swift` — `ScreenRecordingPromptController`
+- inside: when the onboarding window opens, its saved progress, and its two steps — `chronicle-ui/Sources/ChronicleUI/OnboardingWindowController.swift` — `OnboardingWindowController`
 - inside: the search surface, its result list, and the banners above it — `chronicle-ui/Sources/ChronicleUI/SearchPopoverView.swift` — `SearchPopoverView`
 - inside: rendering one search hit, including bold runs parsed out of an FTS5 snippet — `chronicle-ui/Sources/ChronicleUI/SnippetAttributedString.swift` — `snippetAttributedString`
 - inside: deciding whether a one-shot alert has already fired, and on which snapshot — `chronicle-ui/Sources/ChronicleUI/TranscriptionAlertState.swift` — `TranscriptionAlertState`
@@ -37,10 +37,17 @@
 - chronicle-ui/Sources/ChronicleUI/MicController.swift
 - chronicle-ui/Sources/ChronicleUI/MicRowState.swift
 - chronicle-ui/Sources/ChronicleUI/MicrophonePermission.swift
+- chronicle-ui/Sources/ChronicleUI/OnboardingCopy.swift
+- chronicle-ui/Sources/ChronicleUI/OnboardingLaunch.swift
+- chronicle-ui/Sources/ChronicleUI/OnboardingModel.swift
+- chronicle-ui/Sources/ChronicleUI/OnboardingSteps.swift
+- chronicle-ui/Sources/ChronicleUI/OnboardingView.swift
+- chronicle-ui/Sources/ChronicleUI/OnboardingWindowController.swift
+- chronicle-ui/Sources/ChronicleUI/OnboardingWindowPresenter.swift
 - chronicle-ui/Sources/ChronicleUI/ResultRow.swift
 - chronicle-ui/Sources/ChronicleUI/RetentionCopy.swift
+- chronicle-ui/Sources/ChronicleUI/ScreenRecordingPermission.swift
 - chronicle-ui/Sources/ChronicleUI/ScreenRecordingPrompt.swift
-- chronicle-ui/Sources/ChronicleUI/ScreenRecordingPromptController.swift
 - chronicle-ui/Sources/ChronicleUI/ScreenshotDetailView.swift
 - chronicle-ui/Sources/ChronicleUI/SearchFilterState.swift
 - chronicle-ui/Sources/ChronicleUI/SearchPopoverView.swift
@@ -54,6 +61,7 @@
 
 - IPC — `chronicle-ui/Sources/ChronicleUI/ChronicleApp.swift` — `DaemonConnection`
 - permissions — runs the daemon binary's `--permission-status` helper for a fresh read — `chronicle-ui/Sources/ChronicleUI/MicrophonePermission.swift` — `MicrophonePermission`
+- permissions — runs the same helper for a fresh Screen Recording read — `chronicle-ui/Sources/ChronicleUI/ScreenRecordingPermission.swift` — `ScreenRecordingPermission`
 
 ## Depended On By
 
@@ -68,7 +76,7 @@
 | Document | Said | Verdict |
 |---|---|---|
 | `docs/project-description.md:25-26, 166-178, 207` | A "thin menu bar app" whose icon click opens a search popover, built in SwiftUI | accurate in shape — `MenuBarExtra` with `SearchPopoverView` as content is `ChronicleApp.swift:11-19`. "Thin" understates it: this domain is 13 Swift files and 1,737 lines |
-| `docs/guides/chronicle-daemon.md`, "What depends on the daemon" | The UI "does not depend on the daemon as a library". It talks over the IPC protocol and runs the bundled daemon binary for a fresh permission read | accurate — the UI links no daemon code. `MicrophonePermission.swift` runs `chronicle-daemon --permission-status microphone`. `BackgroundService.swift` registers the daemon's login agent and fingerprints its binary. Requests go through `DaemonConnection`. Revised 2026-11-21 |
+| `docs/guides/chronicle-daemon.md`, "What depends on the daemon" | The UI "does not depend on the daemon as a library". It talks over the IPC protocol and runs the bundled daemon binary for a fresh permission read | accurate — the UI links no daemon code. `MicrophonePermission.swift` runs `chronicle-daemon --permission-status microphone`, and `ScreenRecordingPermission.swift` runs it with `screen-recording`. `BackgroundService.swift` registers the daemon's login agent and fingerprints its binary. Requests go through `DaemonConnection`. Revised 2026-11-21 |
 | `.claude/audit/architecture-design.md:60` | "the Swift app only connects, polls status, and renders a connection indicator" | stale — true when written 2026-04-06, falsified by CHR-121 (Done 2026-05-21). `SearchPopoverView.swift` is 457 lines and `SettingsView.swift` 488 |
 | `.claude/audit/documentation-drift.md:57-59` | "the UI only connects to the daemon, polls `status`, and offers a Quit action" | stale — same date and same cause as the row above |
 | `.claude/audit/frontend-ui.md:13` | "The menu bar scene only renders a title, a health badge, and Quit", against `docs/project-description.md:167-178` | stale as a measurement, and the disagreement it names has since inverted — the code grew a search popover and the description is the older artifact. Recorded on CHR-79, which already proposes refreshing that file |

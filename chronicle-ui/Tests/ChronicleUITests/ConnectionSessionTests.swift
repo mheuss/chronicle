@@ -173,7 +173,8 @@ struct ConnectionSessionRoutingTests {
             _ = writeAll(#"{"type":"event","event":"transcription_changed"}"# + "\n", to: serverFD)
             var iterator = session.eventLines.makeAsyncIterator()
             let line = await iterator.next()
-            #expect(line?.contains("transcription_changed") == true)
+            let sawChange = line?.contains("transcription_changed") ?? false
+            #expect(sawChange)
         }
     }
 

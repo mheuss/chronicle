@@ -90,17 +90,25 @@ macOS Control Center won't register a menu bar icon for a loose executable.
    login. A copy opened from anywhere else does not register itself. Its
    Settings toggle still reads on. Switch it off and back on to register
    that copy.
-2. Grant Screen Recording. Chronicle shows a dialog when it's missing. Click
-   Open System Settings, then turn on Chronicle under Privacy & Security →
-   Screen & System Audio Recording. If Chronicle isn't in the list, click +,
-   then choose Chronicle.app in Applications. If macOS offers to quit and reopen Chronicle, click
-   Later. Capture starts a few seconds later without a restart. Chronicle keeps
-   running without the permission. Search still works for anything already
-   saved.
-3. When capture starts, macOS asks whether "dev.heuss.chronicle.daemon" may
+2. Grant Screen Recording. On first launch Chronicle opens a Set Up Chronicle
+   window. Click Open System Settings, then turn on Chronicle under Privacy &
+   Security → Screen & System Audio Recording. If Chronicle isn't in the list,
+   click +, then choose Chronicle.app in Applications. If you press Open
+   System Settings again, macOS may say Chronicle would like to record this
+   computer's screen and audio. Click Open System Settings there, not Deny.
+   Capture starts a few seconds after you turn Chronicle on, without a
+   restart.
+3. When capture starts, macOS may ask whether dev.heuss.chronicle.daemon may
    bypass the private window picker. That is Chronicle's capture process.
-   Click Allow.
-4. If Settings → Run at login shows "Needs approval in System Settings",
+   Click Allow. If macOS then offers to quit and reopen Chronicle, click
+   Later.
+4. The window then offers the microphone. Turn it on or skip it. Then click
+   Done. Done needs Screen Recording. If you close the window before Done,
+   the menu bar popover reopens it. While capture reports Screen Recording is
+   off, its row reads "Screen Recording is off. Fix…". Otherwise it reads
+   "Finish setting up Chronicle…". Chronicle keeps running without Screen
+   Recording. Search still works for anything already saved.
+5. If Settings → Run at login shows "Needs approval in System Settings",
    click Open Login Items and enable Chronicle.
 
 To turn it off, switch off "Capture in the background" under Settings → Run at

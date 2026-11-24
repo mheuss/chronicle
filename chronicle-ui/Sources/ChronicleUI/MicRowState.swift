@@ -18,12 +18,17 @@ struct MicRowState: Equatable {
     static let settingsURL = URL(
         string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!
 
+    static let deniedCaption =
+        "Chronicle doesn't have microphone access. Turn it on in System Settings → Privacy & Security → Microphone."
+    static let restrictedCaption =
+        "Microphone access is restricted on this Mac, for example by a device management profile."
+
     /// Shared with the capture rows (design §6.2, BR14).
     static func notConnectedCaption() -> String {
         CaptureAvailabilityCopy.notRunning
     }
 
-    static func from(permission: MicPermission?, status: StatusResponse?,
+    static func from(permission: HelperPermission?, status: StatusResponse?,
                      connected: Bool, mark: MicOperationMark) -> MicRowState {
         func disabled(_ caption: String, button: Bool = false, isOn: Bool = false) -> MicRowState {
             MicRowState(isOn: isOn, isEnabled: false, caption: caption, showsSettingsButton: button)
@@ -44,12 +49,9 @@ struct MicRowState: Equatable {
                 "Chronicle couldn't check microphone access. Close and reopen Settings to check again.",
                 isOn: micState == .on)
         case .denied:
-            return disabled(
-                "Chronicle doesn't have microphone access. Turn it on in System Settings → Privacy & Security → Microphone.",
-                button: true)
+            return disabled(deniedCaption, button: true)
         case .restricted:
-            return disabled(
-                "Microphone access is restricted on this Mac, for example by a device management profile.")
+            return disabled(restrictedCaption)
         case .authorized, .notDetermined:
             break
         }

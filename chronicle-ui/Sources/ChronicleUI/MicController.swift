@@ -19,6 +19,9 @@ final class MicController {
     let permission: MicrophonePermission
     private(set) var mark: MicOperationMark = .none
     private(set) var isBusy = false
+    /// Counts every on or off that goes through `send`, from any caller. A
+    /// held off that `flushPendingOff` replays was counted when it was refused.
+    private(set) var sendCount = 0
 
     @ObservationIgnored private let daemon: MicDaemonClient
     @ObservationIgnored private let pollInterval: Duration
@@ -27,7 +30,7 @@ final class MicController {
     @ObservationIgnored private var tail: Task<Void, Never>?
     @ObservationIgnored private var recheckQueued = false
     @ObservationIgnored private var markedMicState: MicState?
-    @ObservationIgnored private var markedPermission: MicPermission?
+    @ObservationIgnored private var markedPermission: HelperPermission?
     @ObservationIgnored private var callOutstanding = false
     @ObservationIgnored private var pendingOff = false
 
@@ -103,7 +106,7 @@ final class MicController {
         // the mic on (Architectural Decision 10).
         // The saved intent can be on while the mic is off, during a pause,
         // so a revoke clears it whatever the mic state is.
-        let revoked: Set<MicPermission> = [.denied, .restricted, .notDetermined]
+        let revoked: Set<HelperPermission> = [.denied, .restricted, .notDetermined]
         // Its send sets no mark: the user did not ask for this change.
         if let status = permission.status, revoked.contains(status) {
             _ = await send(false)
@@ -137,6 +140,7 @@ final class MicController {
     /// Returns the mark the outcome earns, or `nil` when it earns none, and
     /// the mic state this send last read.
     private func send(_ on: Bool) async -> (MicOperationMark?, MicState?) {
+        sendCount += 1
         var outcome: MicOperationMark?
         switch await bounded(pollInterval * pollLimit, { try await self.daemon.setMicEnabled(on) }) {
         case .value(let reply):

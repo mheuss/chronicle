@@ -39,6 +39,7 @@
 - pipeline — `chronicle-daemon/src/main.rs` — `preflight`
 - pipeline — `chronicle-daemon/src/main.rs` — `run_status_command`
 - UI — `chronicle-ui/Sources/ChronicleUI/MicrophonePermission.swift` — `MicrophonePermission`
+- UI — `chronicle-ui/Sources/ChronicleUI/ScreenRecordingPermission.swift` — `ScreenRecordingPermission`
 
 ## Seams
 
