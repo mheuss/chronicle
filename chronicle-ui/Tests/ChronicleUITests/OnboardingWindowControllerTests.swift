@@ -195,6 +195,25 @@ final class OnboardingWindowControllerTests {
         controller.close()
     }
 
+    // The mic consent prompt hands focus back to the app that was in front
+    // (V4), so a finished Turn on microphone brings the window forward again.
+    @Test func turnOnMicBringsTheOpenWindowForward() async {
+        let (controller, presenter, _) = make(read: "authorized")
+        controller.show(.microphone)
+        await controller.turnOnMic()
+        #expect(presenter.presents == 2)
+        controller.close()
+    }
+
+    @Test func turnOnMicAfterCloseLeavesTheWindowClosed() async {
+        let (controller, presenter, _) = make(read: "authorized")
+        controller.show(.microphone)
+        controller.close()
+        await controller.turnOnMic()
+        #expect(presenter.presents == 1)
+        #expect(!controller.isOpen)
+    }
+
     @Test(arguments: [("denied", OnboardingStep.screenRecording), ("authorized", .microphone)])
     func resumeOpensAtTheStepAFreshReadPicks(read: String, expected: OnboardingStep) async {
         let spawns = ReadCount()

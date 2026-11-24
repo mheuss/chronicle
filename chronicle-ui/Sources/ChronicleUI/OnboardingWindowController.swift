@@ -71,6 +71,13 @@ final class OnboardingWindowController {
         presenter.present(self)
     }
 
+    /// The mic consent prompt hands focus back to the app that was in front,
+    /// so the window comes forward again once the step finishes.
+    func turnOnMic() async {
+        await model.turnOnMic()
+        if isOpen { presenter.present(self) }
+    }
+
     func finish() {
         save(.done)
         presenter.close()

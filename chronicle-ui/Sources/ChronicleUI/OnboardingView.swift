@@ -80,7 +80,7 @@ struct OnboardingView: View {
             switch step {
             case .locked, .ready, .noDaemon, .working:
                 HStack {
-                    Button(OnboardingCopy.turnOnButton) { Task { await model.turnOnMic() } }
+                    Button(OnboardingCopy.turnOnButton) { Task { await controller.turnOnMic() } }
                         .disabled(step != .ready)
                         .focused($focused, equals: .microphone)
                     Button(OnboardingCopy.skipButton) { model.skipMic() }
