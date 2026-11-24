@@ -1,4 +1,4 @@
-/// Every capture-state string (design §6.2, §7.2), so views need not write
+/// Every capture-state string (CHR-96/97 design §6.2), so views need not write
 /// their own. Switches are exhaustive with no `default:`.
 enum CaptureAvailabilityCopy {
     /// Shared with the mic row's caption while not connected (BR14).

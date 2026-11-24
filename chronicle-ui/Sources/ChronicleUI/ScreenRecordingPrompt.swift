@@ -8,7 +8,7 @@ enum ScreenRecordingPrompt {
         a == .needsScreenRecording
     }
 
-    /// Every press asks macOS first, then opens the pane (design §7.3, AD16).
+    /// Every press asks macOS first, then opens the pane (CHR-96/97 design §7.3, AD16).
     @MainActor static func openSettings(request: () -> Void, open: (URL) -> Void) {
         request()
         open(paneURL)
