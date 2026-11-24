@@ -20,6 +20,7 @@ enum OnboardingCopy {
         "Chronicle can also record and transcribe your microphone. You can change this later in Settings."
     static let turnOnButton = "Turn on microphone"
     static let skipButton = "Skip"
+    static let micBackgroundOff = "Background capture is off. Turn it on in Settings to use the microphone."
 
     static let doneButton = "Done"
     static let closeButton = "Close"
@@ -39,7 +40,7 @@ enum OnboardingCopy {
     static func micStatus(_ step: MicStepState) -> String? {
         switch step {
         case .locked: "Turn on Screen Recording first."
-        case .alreadyOn: "Microphone recording."
+        case .alreadyOn: "The microphone is on."
         case .skipped: "Skipped. You can turn the microphone on later in Settings."
         case .savedOn: "Microphone on. It records once capture is running."
         case .noAccess(let restricted): restricted ? MicRowState.restrictedCaption : MicRowState.deniedCaption

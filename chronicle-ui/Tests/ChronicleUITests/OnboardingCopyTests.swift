@@ -30,7 +30,7 @@ struct OnboardingCopyTests {
         #expect(OnboardingCopy.micStatus(.noDaemon(caption: "why")) == "why")
         #expect(OnboardingCopy.micStatus(.ready) == nil)
         #expect(OnboardingCopy.micStatus(.savedOn) == "Microphone on. It records once capture is running.")
-        #expect(OnboardingCopy.micStatus(.alreadyOn) == "Microphone recording.")
+        #expect(OnboardingCopy.micStatus(.alreadyOn) == "The microphone is on.")
     }
 
     @Test func micRowCaptionsKeepTheirOpening() {

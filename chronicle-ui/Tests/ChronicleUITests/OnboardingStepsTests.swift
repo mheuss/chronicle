@@ -38,7 +38,7 @@ struct OnboardingStepsTests {
         #expect(MicStepState.from(Self.inputs(connected: false))
                 == .noDaemon(caption: CaptureAvailabilityCopy.notRunning))
         #expect(MicStepState.from(Self.inputs(connected: false, backgroundEnabled: false))
-                == .noDaemon(caption: CaptureAvailabilityCopy.popoverBackgroundOff))
+                == .noDaemon(caption: OnboardingCopy.micBackgroundOff))
         #expect(MicStepState.from(Self.inputs()) == .ready)
     }
 

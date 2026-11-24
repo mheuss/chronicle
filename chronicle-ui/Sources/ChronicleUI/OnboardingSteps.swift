@@ -56,7 +56,7 @@ enum MicStepState: Equatable, Sendable {
         if !i.connected {
             return .noDaemon(caption: i.backgroundEnabled
                 ? CaptureAvailabilityCopy.notRunning
-                : CaptureAvailabilityCopy.popoverBackgroundOff)
+                : OnboardingCopy.micBackgroundOff)
         }
         return .ready
     }
