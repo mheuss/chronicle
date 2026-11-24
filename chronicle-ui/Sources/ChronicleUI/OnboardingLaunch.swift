@@ -6,14 +6,14 @@ enum OnboardingState: String, Sendable {
 }
 
 enum OnboardingLaunchAction: Equatable, Sendable {
-    case none, markDone, open
+    case stay, markDone, open
 }
 
 enum OnboardingLaunch {
     /// Only an absent key with an authorized read is an existing install.
     static func decide(state: OnboardingState?, read: HelperPermission) -> OnboardingLaunchAction {
         switch state {
-        case .done: .none
+        case .done: .stay
         case .started: .open
         case nil: read == .authorized ? .markDone : .open
         }

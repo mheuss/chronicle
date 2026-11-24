@@ -14,11 +14,11 @@ struct OnboardingLaunchTests {
         (.started, .notDetermined, .open),
         (.started, .restricted, .open),
         (.started, .unavailable, .open),
-        (.done, .authorized, .none),
-        (.done, .denied, .none),
-        (.done, .notDetermined, .none),
-        (.done, .restricted, .none),
-        (.done, .unavailable, .none),
+        (.done, .authorized, .stay),
+        (.done, .denied, .stay),
+        (.done, .notDetermined, .stay),
+        (.done, .restricted, .stay),
+        (.done, .unavailable, .stay),
     ]
 
     @Test(arguments: rows)
