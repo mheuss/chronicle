@@ -9,7 +9,7 @@
 - inside: declaring the app's scenes and constructing the objects they share — `chronicle-ui/Sources/ChronicleUI/ChronicleApp.swift` — `ChronicleApp`
 - inside: what the menu bar item shows about capture health — `chronicle-ui/Sources/ChronicleUI/MenuBarIcon.swift` — `MenuBarIcon`
 - inside: the classifier the menu bar, the Settings badge and the popover read — `chronicle-ui/Sources/ChronicleUI/CaptureAvailability.swift` — `CaptureAvailability`
-- inside: when the Screen Recording dialog shows, and showing one at a time — `chronicle-ui/Sources/ChronicleUI/ScreenRecordingPromptController.swift` — `ScreenRecordingPromptController`
+- inside: when the onboarding window opens, its saved progress, and its two steps — `chronicle-ui/Sources/ChronicleUI/OnboardingWindowController.swift` — `OnboardingWindowController`
 - inside: the search surface, its result list, and the banners above it — `chronicle-ui/Sources/ChronicleUI/SearchPopoverView.swift` — `SearchPopoverView`
 - inside: rendering one search hit, including bold runs parsed out of an FTS5 snippet — `chronicle-ui/Sources/ChronicleUI/SnippetAttributedString.swift` — `snippetAttributedString`
 - inside: deciding whether a one-shot alert has already fired, and on which snapshot — `chronicle-ui/Sources/ChronicleUI/TranscriptionAlertState.swift` — `TranscriptionAlertState`
@@ -37,10 +37,17 @@
 - chronicle-ui/Sources/ChronicleUI/MicController.swift
 - chronicle-ui/Sources/ChronicleUI/MicRowState.swift
 - chronicle-ui/Sources/ChronicleUI/MicrophonePermission.swift
+- chronicle-ui/Sources/ChronicleUI/OnboardingCopy.swift
+- chronicle-ui/Sources/ChronicleUI/OnboardingLaunch.swift
+- chronicle-ui/Sources/ChronicleUI/OnboardingModel.swift
+- chronicle-ui/Sources/ChronicleUI/OnboardingSteps.swift
+- chronicle-ui/Sources/ChronicleUI/OnboardingView.swift
+- chronicle-ui/Sources/ChronicleUI/OnboardingWindowController.swift
+- chronicle-ui/Sources/ChronicleUI/OnboardingWindowPresenter.swift
 - chronicle-ui/Sources/ChronicleUI/ResultRow.swift
 - chronicle-ui/Sources/ChronicleUI/RetentionCopy.swift
+- chronicle-ui/Sources/ChronicleUI/ScreenRecordingPermission.swift
 - chronicle-ui/Sources/ChronicleUI/ScreenRecordingPrompt.swift
-- chronicle-ui/Sources/ChronicleUI/ScreenRecordingPromptController.swift
 - chronicle-ui/Sources/ChronicleUI/ScreenshotDetailView.swift
 - chronicle-ui/Sources/ChronicleUI/SearchFilterState.swift
 - chronicle-ui/Sources/ChronicleUI/SearchPopoverView.swift
