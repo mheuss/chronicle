@@ -52,6 +52,7 @@ struct OnboardingView: View {
             }
             if !step.isDone {
                 Text(OnboardingCopy.screenRecordingHow)
+                Text(OnboardingCopy.screenRecordingRequestPrompt).foregroundStyle(.secondary)
             }
             if !step.isDone || !isComplete {
                 Text(OnboardingCopy.screenRecordingSheets).foregroundStyle(.secondary)

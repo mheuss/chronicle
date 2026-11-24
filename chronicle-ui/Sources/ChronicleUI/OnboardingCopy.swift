@@ -10,9 +10,14 @@ enum OnboardingCopy {
         """
     /// Shown with or without the How line, so it names no earlier step.
     static let screenRecordingSheets = """
-        macOS may ask whether dev.heuss.chronicle.daemon may record your screen: click Allow. \
-        If it offers Quit & Reopen, click Later. If it says Chronicle would like to record this \
-        computer's screen and audio, click Open System Settings.
+        macOS may ask whether dev.heuss.chronicle.daemon may bypass the private window picker \
+        to access your screen and audio: click Allow. If it offers Quit & Reopen, click Later.
+        """
+    /// The prompt a repeat Open System Settings press can bring up before the
+    /// grant (V11), so it shows only while the step isn't done.
+    static let screenRecordingRequestPrompt = """
+        If macOS says Chronicle would like to record this computer's screen and audio, \
+        click Open System Settings.
         """
     static let openSettingsButton = "Open System Settings"
 
