@@ -20,6 +20,13 @@ struct OnboardingCopyTests {
         #expect(!OnboardingCopy.screenRecordingSheets.contains("then"))
     }
 
+    // VoiceOver on macOS reads a heading's label but not its value, so the
+    // state goes in the label (V12).
+    @Test func stepLabelCarriesTheState() {
+        #expect(OnboardingCopy.stepLabel("Screen Recording", done: false) == "Screen Recording, Not yet")
+        #expect(OnboardingCopy.stepLabel("Microphone (optional)", done: true) == "Microphone (optional), Done")
+    }
+
     @Test func screenRecordingStatus() {
         #expect(OnboardingCopy.screenRecordingStatus(.needed) == nil)
         #expect(OnboardingCopy.screenRecordingStatus(.unverified)

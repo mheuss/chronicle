@@ -26,8 +26,11 @@ enum OnboardingCopy {
     static let closeButton = "Close"
     static let finishSetupRow = "Finish setting up Chronicle…"
 
-    /// What VoiceOver reads as each step's state (NFR1).
-    static func stepValue(done: Bool) -> String { done ? "Done" : "Not yet" }
+    /// What VoiceOver reads for each step's heading: its title and state
+    /// (NFR1). VoiceOver skips a heading's value, so the state is in the label.
+    static func stepLabel(_ title: String, done: Bool) -> String {
+        "\(title), \(done ? "Done" : "Not yet")"
+    }
 
     static func screenRecordingStatus(_ step: ScreenRecordingStepState) -> String? {
         switch step {

@@ -39,7 +39,7 @@ struct OnboardingView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isHeader)
-        .accessibilityValue(OnboardingCopy.stepValue(done: done))
+        .accessibilityLabel(OnboardingCopy.stepLabel(title, done: done))
     }
 
     private var screenRecordingSection: some View {
