@@ -200,8 +200,8 @@ final class OnboardingWindowControllerTests {
         let spawns = ReadCount()
         let (controller, presenter, _) = make(state: .started, read: read, spawns: spawns)
         await controller.resume()
-        // The authorized row proves resume reads for itself: with no read the
-        // model has nothing stored, and focus would stay on Screen Recording.
+        // The authorized row proves resume reads for itself: focus comes from
+        // that read, and without it focus stays at Screen Recording.
         #expect(spawns.count >= 1)
         #expect(presenter.presents == 1)
         #expect(controller.model.focus == expected)
