@@ -350,8 +350,9 @@ dev-dependency for `OggOpusEncoder`. It takes `chronicle-storage` as one for
 
 The Swift UI (`chronicle-ui`) communicates with the daemon over a Unix socket.
 It does not depend on the daemon as a library. It talks to it over the IPC
-protocol. It also runs the bundled daemon binary as
-`chronicle-daemon --permission-status microphone` for a fresh permission read.
+protocol. It also runs the bundled daemon binary for a fresh permission read:
+`chronicle-daemon --permission-status microphone` for the microphone and
+`chronicle-daemon --permission-status screen-recording` for Screen Recording.
 
 ## Building
 
