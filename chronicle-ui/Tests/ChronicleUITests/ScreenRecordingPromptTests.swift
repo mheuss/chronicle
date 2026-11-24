@@ -6,14 +6,15 @@ import Foundation
 struct ScreenRecordingPromptTests {
     @Test(arguments: CaptureAvailability.allCases)
     func popoverRowVisibility(a: CaptureAvailability) {
-        #expect(ScreenRecordingPrompt.showsPopoverRow(a) == (a == .needsScreenRecording))
+        if a == .needsScreenRecording { #expect(ScreenRecordingPrompt.showsPopoverRow(a)) } else { #expect(!ScreenRecordingPrompt.showsPopoverRow(a)) }
     }
 
     // One row per cause: the Fix… row wins while Screen Recording is off.
     @Test(arguments: [OnboardingState?.none, .started, .done], CaptureAvailability.allCases)
     func finishSetupRowVisibility(state: OnboardingState?, a: CaptureAvailability) {
         let expected = state == .started && a != .needsScreenRecording
-        #expect(ScreenRecordingPrompt.showsFinishSetupRow(state: state, availability: a) == expected)
+        let shows = ScreenRecordingPrompt.showsFinishSetupRow(state: state, availability: a)
+        if expected { #expect(shows) } else { #expect(!shows) }
     }
 
     @Test @MainActor func openSettingsRequestsThenOpens() {

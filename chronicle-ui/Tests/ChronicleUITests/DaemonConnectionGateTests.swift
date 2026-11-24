@@ -98,7 +98,7 @@ struct DaemonConnectionGateTests {
 
         let response = try await conn.requestStatus()
         #expect(response.type == "status")
-        #expect(response.ok == true)
+        #expect(response.ok)
         #expect(response.data.uptimeSecs == 42)
         #expect(response.data.version == "0.1.0")
 
@@ -239,7 +239,7 @@ struct DaemonConnectionGateTests {
         let (got1, got2) = try await (resp1, resp2)
         let sawEarly = await serverTask.value
 
-        #expect(sawEarly == false,
+        #expect(!sawEarly,
                 "FIFO broken: request 2 bytes arrived at server before response 1 was sent")
 
         // Deliberately order-agnostic. `async let` starts child tasks but does

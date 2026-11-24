@@ -74,7 +74,8 @@ struct OnboardingStepsTests {
           [MicStepState.skipped, .ready])
     func canFinish(read: HelperPermission, mic: MicStepState) {
         let expected = read == .authorized && mic == .skipped
-        #expect(OnboardingProgress.canFinish(screenRecording: read, mic: mic) == expected)
+        let canFinish = OnboardingProgress.canFinish(screenRecording: read, mic: mic)
+        if expected { #expect(canFinish) } else { #expect(!canFinish) }
     }
 
     @Test func firstUnsettledStep() {
