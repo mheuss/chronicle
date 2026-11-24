@@ -14,8 +14,8 @@ extension DaemonConnection: OnboardingDaemon {
     var isConnected: Bool { state == .connected && !replyOverdue }
 }
 
-/// The onboarding window's state (CHR-94 design §3). It lives for the whole
-/// UI process, so Skip and a Turn on outcome survive a close and reopen.
+/// The onboarding window's state (CHR-94 design §3). stop() keeps Skip and
+/// a Turn on outcome, so they survive a close and reopen.
 @MainActor @Observable
 final class OnboardingModel {
     private(set) var screenRecordingRead: HelperPermission?
