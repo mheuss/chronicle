@@ -36,7 +36,8 @@ final class OnboardingWindowControllerTests {
 
     private func make(state: OnboardingState? = nil, read: String? = "denied",
                       spawns: ReadCount = ReadCount(), held: HeldRead? = nil,
-                      daemon: FakeOnboardingDaemon = FakeOnboardingDaemon())
+                      daemon: FakeOnboardingDaemon = FakeOnboardingDaemon(),
+                      micDaemon: FakeMicDaemon = FakeMicDaemon())
         -> (OnboardingWindowController, FakePresenter, UserDefaults) {
         let defaults = UserDefaults(suiteName: suite)!
         if let state { defaults.set(state.rawValue, forKey: OnboardingState.key) }
@@ -46,7 +47,7 @@ final class OnboardingWindowControllerTests {
             return read
         })
         let model = OnboardingModel(
-            mic: MicController(daemon: FakeMicDaemon(),
+            mic: MicController(daemon: micDaemon,
                                permission: MicrophonePermission(readHelper: { "authorized" }, requestAccess: { true })),
             reader: reader, daemon: daemon, backgroundEnabled: { true },
             interval: .milliseconds(10))
@@ -197,10 +198,17 @@ final class OnboardingWindowControllerTests {
 
     // The mic consent prompt hands focus back to the app that was in front
     // (V4), so a finished Turn on microphone brings the window forward again.
-    @Test func turnOnMicBringsTheOpenWindowForward() async {
-        let (controller, presenter, _) = make(read: "authorized")
+    @Test func turnOnMicBringsTheOpenWindowForwardWhenItFinishes() async {
+        let micDaemon = FakeMicDaemon()
+        micDaemon.holdSet = true
+        let (controller, presenter, _) = make(read: "authorized", micDaemon: micDaemon)
         controller.show(.microphone)
-        await controller.turnOnMic()
+        #expect(await waitUntil { controller.model.micStep == .ready })
+        let turnOn = Task { await controller.turnOnMic() }
+        #expect(await waitUntil { micDaemon.log.contains("set(true)") })
+        #expect(presenter.presents == 1, "not while the mic operation is still running")
+        micDaemon.release()
+        await turnOn.value
         #expect(presenter.presents == 2)
         controller.close()
     }
