@@ -77,8 +77,8 @@ final class OnboardingModel {
         stop()
         let previous = retiredHelperLoop
         helperLoop = Task { [weak self] in
-            // A read the old loop started before stop() is dropped there, and
-            // this loop's first read spawns a fresh helper.
+            // The old loop drops the read it started before stop(), so this
+            // loop never stores that read.
             await previous?.value
             while !Task.isCancelled {
                 guard let self else { return }
