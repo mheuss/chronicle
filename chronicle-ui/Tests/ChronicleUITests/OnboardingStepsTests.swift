@@ -7,9 +7,13 @@ struct OnboardingStepsTests {
     @Test func screenRecordingStep() {
         #expect(ScreenRecordingStepState.from(read: .authorized, captureRunning: false) == .done(captureStarted: false))
         #expect(ScreenRecordingStepState.from(read: .authorized, captureRunning: true) == .done(captureStarted: true))
-        #expect(ScreenRecordingStepState.from(read: .denied, captureRunning: false) == .needed)
         #expect(ScreenRecordingStepState.from(read: .unavailable, captureRunning: false) == .unverified)
         #expect(ScreenRecordingStepState.from(read: nil, captureRunning: false) == .unverified)
+    }
+
+    @Test(arguments: [HelperPermission.denied, .notDetermined, .restricted])
+    func everyNonGrantReadIsNeeded(read: HelperPermission) {
+        #expect(ScreenRecordingStepState.from(read: read, captureRunning: false) == .needed)
     }
 
     private static func inputs(
@@ -38,6 +42,15 @@ struct OnboardingStepsTests {
         #expect(MicStepState.from(Self.inputs()) == .ready)
     }
 
+    // Each pair sets this row's input and the next row's, so a reorder fails.
+    @Test func firstMatchWins() {
+        #expect(MicStepState.from(Self.inputs(micState: .on, skipped: true)) == .alreadyOn)
+        #expect(MicStepState.from(Self.inputs(permission: .denied, skipped: true)) == .skipped)
+        #expect(MicStepState.from(Self.inputs(permission: .denied, turnOnSucceeded: true)) == .noAccess(restricted: false))
+        #expect(MicStepState.from(Self.inputs(turnOnSucceeded: true, busy: true)) == .savedOn)
+        #expect(MicStepState.from(Self.inputs(busy: true, connected: false)) == .working)
+    }
+
     @Test func alreadyOnSettlesWithNoButtonPressed() {
         let step = MicStepState.from(Self.inputs(micState: .on))
         #expect(step.isSettled)
@@ -50,7 +63,7 @@ struct OnboardingStepsTests {
     @Test(arguments: [MicStepState.locked, .working, .noDaemon(caption: "x"), .ready])
     func unsettled(step: MicStepState) { #expect(!step.isSettled) }
 
-    @Test(arguments: [MicStepState.alreadyOn, .skipped, .noAccess(restricted: false), .savedOn])
+    @Test(arguments: [MicStepState.alreadyOn, .skipped, .noAccess(restricted: false), .noAccess(restricted: true), .savedOn])
     func settled(step: MicStepState) { #expect(step.isSettled) }
 
     // BR11: 5 reads × settled/unsettled. Only one row enables Done.
