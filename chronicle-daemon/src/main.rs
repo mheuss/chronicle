@@ -978,22 +978,48 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
             Some(n) = stop_rx.recv() => {
                 let code = n.code();
                 let triage = triage_stop_notice(n.won_cas, n.is_stream_domain(), code);
-                match triage {
-                    StopTriage::Act(cause) => log::warn!(
-                        "capture stream stopped: display_id={} run={} domain={} \
-                         code={code} cause={cause:?} ({})",
-                        n.display_id,
-                        n.run,
-                        n.domain(),
-                        n.description(),
-                    ),
-                    StopTriage::Ignore => log::debug!(
+                let StopTriage::Act(cause) = triage else {
+                    log::debug!(
                         "capture stream stop ignored, engine not running: \
                          display_id={} run={} domain={} code={code}",
                         n.display_id,
                         n.run,
                         n.domain(),
-                    ),
+                    );
+                    continue;
+                };
+                if !supervisor.notice_acts(n.run, cause) {
+                    log::debug!(
+                        "capture stream stop dropped, its run is gone: \
+                         display_id={} run={} domain={} code={code}",
+                        n.display_id,
+                        n.run,
+                        n.domain(),
+                    );
+                    continue;
+                }
+                log::warn!(
+                    "capture stream stopped: display_id={} run={} domain={} \
+                     code={code} cause={cause:?} ({})",
+                    n.display_id,
+                    n.run,
+                    n.domain(),
+                    n.description(),
+                );
+                let outcome = supervisor
+                    .on_stream_failed(n.run, cause, &audio_pipeline)
+                    .await;
+                permission_gate::publish_state(&mode_tx, supervisor.gates(), mic_generation);
+                let disposition = route_reconcile_outcome(
+                    &outcome,
+                    &mut boot_incident,
+                    &mut start_retry,
+                    &retry_tx,
+                );
+                if disposition == BootDisposition::Exit {
+                    log::error!("capture engine poisoned; shutting down for a fresh process");
+                    loop_poisoned = true;
+                    break;
                 }
             }
             Some(t) = screen_rx.recv() => {

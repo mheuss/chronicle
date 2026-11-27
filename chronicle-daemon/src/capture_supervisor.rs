@@ -1,6 +1,6 @@
-//! Owns the capture runtime and reconciles it against four stop reasons:
-//! user pause, system sleep, a missing Screen Recording grant, and a stale
-//! Screen Recording read.
+//! Owns the capture runtime and reconciles it against five stop reasons:
+//! user pause, system sleep, a missing Screen Recording grant, a stale
+//! Screen Recording read, and a spent stream death budget.
 //!
 //! Display sleep is intentionally not a separate flag — see CHR-57 for the
 //! Apple-Silicon-specific investigation. Re-adding it later is one more flag
@@ -9,10 +9,10 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chronicle_audio::{AudioPipeline, CHANNEL_COUNT, SAMPLE_RATE};
-use chronicle_capture::{CaptureConfig, CaptureError, EngineStatusProbe, StreamStopped};
+use chronicle_capture::{CaptureConfig, CaptureError, EngineStatusProbe, StopCause, StreamStopped};
 use chronicle_storage::Storage;
 use tokio::sync::mpsc;
 
@@ -65,13 +65,17 @@ pub enum ReconcileOutcome {
     StopPoisoned,
 }
 
-/// A copy of the supervisor's four stop flags.
+/// A copy of the supervisor's stop flags, plus the failure flag Status reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Gates {
     pub user_paused: bool,
     pub system_asleep: bool,
     pub sr_denied: bool,
     pub sr_stale: bool,
+    /// The death budget is spent. Only an entry to Idle clears it.
+    pub hold: bool,
+    /// A stream stop took capture down, and capture hasn't started since.
+    pub failed: bool,
     /// The supervisor's idle epoch (design §1.2).
     pub idle_epoch: u64,
 }
@@ -119,8 +123,51 @@ impl StartRetry {
     }
 }
 
-/// Drives the capture runtime against four stop reasons: user pause, system
-/// sleep, a missing Screen Recording grant, and a stale Screen Recording read.
+/// What one stream death does to capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeathVerdict {
+    Restart,
+    Hold,
+}
+
+/// Counts stream deaths. Five with no healthy run between them hold capture.
+/// Separate from `StartRetry`, which resets on every start.
+#[derive(Debug, Default)]
+pub struct DeathBudget {
+    deaths: u32,
+}
+
+impl DeathBudget {
+    pub const MAX_DEATHS: u32 = 5;
+    pub const HEALTHY_RUN: Duration = Duration::from_secs(60);
+
+    pub fn record(&mut self, ran_for: Duration) -> DeathVerdict {
+        if ran_for >= Self::HEALTHY_RUN {
+            self.deaths = 0;
+        }
+        self.deaths += 1;
+        if self.deaths >= Self::MAX_DEATHS {
+            DeathVerdict::Hold
+        } else {
+            DeathVerdict::Restart
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.deaths = 0;
+    }
+}
+
+/// A stop notice acts only for the current run. A notice from an earlier run
+/// must not stop a later runtime. With no runtime left, only a user stop
+/// still acts, so a pause that lost the race to a sleep teardown is kept.
+fn notice_acts(notice_run: u64, current_run: u64, running: bool, cause: StopCause) -> bool {
+    notice_run == current_run && (running || cause == StopCause::UserStopped)
+}
+
+/// Drives the capture runtime against five stop reasons: user pause, system
+/// sleep, a missing Screen Recording grant, a stale Screen Recording read,
+/// and a spent stream death budget.
 ///
 /// `AudioPipeline` is deliberately NOT a field. `reconcile()` borrows it as
 /// `&'a AudioPipeline` so the borrow checker enforces ADR-009: the audio
@@ -164,6 +211,16 @@ pub struct CaptureSupervisor<'a, M: AppMetadataProvider + 'static + ?Sized> {
     run: u64,
     /// Handed to every engine so its stream delegates can report a stop.
     stop_notices: mpsc::Sender<StreamStopped>,
+    /// When the current runtime started. A failure measures its run from here.
+    started_at: Option<Instant>,
+    deaths: DeathBudget,
+    /// Set when a stream stop takes capture down. Cleared on the next start
+    /// or entry to Idle.
+    failed: bool,
+    /// IPC-visible mirror of `failed`.
+    failed_mirror: Arc<AtomicBool>,
+    /// Set when the death budget is spent. Only an entry to Idle clears it.
+    hold: bool,
 }
 
 impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
@@ -205,6 +262,11 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
             run: 0,
             // Closed until `with_stop_notices`, so a notice sent here is dropped.
             stop_notices: mpsc::channel(1).0,
+            started_at: None,
+            deaths: DeathBudget::default(),
+            failed: false,
+            failed_mirror: Arc::new(AtomicBool::new(false)),
+            hold: false,
         }
     }
 
@@ -266,7 +328,7 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     }
 
     pub fn should_run(&self) -> bool {
-        !self.user_paused && !self.system_asleep && !self.sr_denied && !self.sr_stale
+        !self.user_paused && !self.system_asleep && !self.sr_denied && !self.sr_stale && !self.hold
     }
 
     pub fn gates(&self) -> Gates {
@@ -275,6 +337,8 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
             system_asleep: self.system_asleep,
             sr_denied: self.sr_denied,
             sr_stale: self.sr_stale,
+            hold: self.hold,
+            failed: self.failed,
             idle_epoch: self.idle_epoch,
         }
     }
@@ -292,11 +356,12 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     pub async fn reconcile(&mut self, audio: &'a AudioPipeline) -> ReconcileOutcome {
         let action = decide(self.should_run(), self.runtime.is_some());
         log::info!(
-            "reconcile: user_paused={} system_asleep={} sr_denied={} sr_stale={} -> {:?}",
+            "reconcile: user_paused={} system_asleep={} sr_denied={} sr_stale={} hold={} -> {:?}",
             self.user_paused,
             self.system_asleep,
             self.sr_denied,
             self.sr_stale,
+            self.hold,
             action,
         );
         match action {
@@ -332,6 +397,7 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
             Ok(rt) => {
                 *self.probe_holder.lock().unwrap() = Some(rt.status_probe());
                 self.runtime = Some(rt);
+                self.note_started(Instant::now());
                 log::info!("capture runtime started (audio on primary display)");
 
                 // Apply the gate to the persisted preference. The pause
@@ -366,6 +432,7 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         if paused {
             self.sr_stale = true;
             self.idle_epoch += 1;
+            self.clear_failure();
         }
         self.capture_paused.store(paused, Ordering::Release);
         settings::write_capture_paused(&self.base_dir, paused);
@@ -378,6 +445,7 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         if asleep {
             self.sr_stale = true;
             self.idle_epoch += 1;
+            self.clear_failure();
         }
         log::info!("mark_system_asleep: asleep={asleep}");
     }
@@ -396,13 +464,88 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         denied: bool,
         audio: &'a AudioPipeline,
     ) -> ReconcileOutcome {
+        self.apply_sr_read(denied);
+        self.reconcile(audio).await
+    }
+
+    /// The gate half of `set_sr_denied`, without the reconcile. A denial is an
+    /// entry to Idle. A grant leaves the hold in place.
+    fn apply_sr_read(&mut self, denied: bool) {
         self.sr_denied = denied;
-        if !denied {
+        if denied {
+            self.clear_failure();
+        } else {
             self.sr_stale = false;
         }
         self.sr_denied_mirror.store(denied, Ordering::Release);
         log::info!("set_sr_denied: denied={denied}");
-        self.reconcile(audio).await
+    }
+
+    /// True when `on_stream_failed` would act on a notice from `run`.
+    pub fn notice_acts(&self, run: u64, cause: StopCause) -> bool {
+        notice_acts(run, self.run, self.runtime.is_some(), cause)
+    }
+
+    /// Book a stream stop, then stop the runtime. Booking first persists a
+    /// user pause, sets the failed mirror and stops the run clock before
+    /// teardown starts. A notice that doesn't act changes nothing.
+    pub async fn on_stream_failed(
+        &mut self,
+        run: u64,
+        cause: StopCause,
+        audio: &'a AudioPipeline,
+    ) -> ReconcileOutcome {
+        if !self.notice_acts(run, cause) {
+            return ReconcileOutcome::NoChange;
+        }
+        self.record_failure(cause, Instant::now());
+        if self.runtime.is_none() {
+            return ReconcileOutcome::NoChange;
+        }
+        self.stop_capture(audio).await
+    }
+
+    /// Book one stream failure. A user stop is a pause. Any other stop
+    /// restarts after a fresh read, or holds once the budget is spent.
+    fn record_failure(&mut self, cause: StopCause, now: Instant) {
+        if cause == StopCause::UserStopped {
+            self.mark_user_paused(true);
+            return;
+        }
+        self.failed = true;
+        self.failed_mirror.store(true, Ordering::Release);
+        let ran_for = self
+            .started_at
+            .map_or(Duration::ZERO, |t| now.saturating_duration_since(t));
+        match self.deaths.record(ran_for) {
+            DeathVerdict::Restart => {
+                self.sr_stale = true;
+                self.idle_epoch += 1;
+            }
+            DeathVerdict::Hold => {
+                self.hold = true;
+                log::warn!(
+                    "capture held after {} stream failures with no healthy run; \
+                     pause and resume to try again",
+                    DeathBudget::MAX_DEATHS
+                );
+            }
+        }
+    }
+
+    /// Record a successful start: the run clock starts and the failure clears.
+    fn note_started(&mut self, now: Instant) {
+        self.started_at = Some(now);
+        self.failed = false;
+        self.failed_mirror.store(false, Ordering::Release);
+    }
+
+    /// Clear the failure, the hold and the death budget on an entry to Idle.
+    fn clear_failure(&mut self) {
+        self.hold = false;
+        self.failed = false;
+        self.failed_mirror.store(false, Ordering::Release);
+        self.deaths.reset();
     }
 
     /// Stop the runtime deterministically for daemon shutdown. Consumes
@@ -1145,5 +1288,390 @@ mod tests {
 
         assert!(supervisor.should_run(), "no stop flag is set");
         assert!(!supervisor.is_running(), "no runtime has been started");
+    }
+
+    /// A supervisor whose gates all start clear. Nothing here reconciles, so
+    /// nothing reaches ScreenCaptureKit.
+    fn clear_supervisor<'a>(
+        dir: &tempfile::TempDir,
+        capture_paused: Arc<AtomicBool>,
+        storage: Arc<Storage>,
+        metadata: Arc<dyn AppMetadataProvider>,
+        counters: Arc<PipelineCounters>,
+        probe_holder: Arc<Mutex<Option<EngineStatusProbe>>>,
+        mic_atom: Arc<AtomicU8>,
+    ) -> CaptureSupervisor<'a, dyn AppMetadataProvider> {
+        CaptureSupervisor::new(
+            false,
+            storage,
+            metadata,
+            counters,
+            1024,
+            probe_holder,
+            capture_paused,
+            mic_atom,
+            dir.path().to_path_buf(),
+            Arc::new(chronicle_capture::CaptureDropCounters::default()),
+        )
+        .with_screen_recording_gate(false, Arc::new(AtomicBool::new(false)))
+    }
+
+    fn spend_the_budget(s: &mut CaptureSupervisor<'_, dyn AppMetadataProvider>) {
+        for _ in 0..DeathBudget::MAX_DEATHS {
+            s.record_failure(StopCause::Other, Instant::now());
+        }
+    }
+
+    #[test]
+    fn the_fifth_quick_death_holds() {
+        let mut budget = DeathBudget::default();
+        for _ in 0..4 {
+            assert_eq!(budget.record(Duration::ZERO), DeathVerdict::Restart);
+        }
+        assert_eq!(budget.record(Duration::ZERO), DeathVerdict::Hold);
+    }
+
+    #[test]
+    fn a_healthy_run_restores_the_death_budget() {
+        let mut budget = DeathBudget::default();
+        for _ in 0..4 {
+            budget.record(Duration::from_secs(59));
+        }
+        assert_eq!(
+            budget.record(DeathBudget::HEALTHY_RUN),
+            DeathVerdict::Restart,
+            "a 60 s run is healthy, a 59 s run is not"
+        );
+        assert_eq!(budget.deaths, 1);
+    }
+
+    #[test]
+    fn reset_restores_the_death_budget() {
+        let mut budget = DeathBudget::default();
+        for _ in 0..4 {
+            budget.record(Duration::ZERO);
+        }
+        budget.reset();
+        assert_eq!(budget.deaths, 0);
+    }
+
+    #[test]
+    fn a_notice_acts_only_for_the_current_run() {
+        use StopCause::{Other, UserStopped};
+        assert!(notice_acts(3, 3, true, Other));
+        assert!(notice_acts(3, 3, true, UserStopped));
+        assert!(!notice_acts(2, 3, true, Other), "an earlier run");
+        assert!(!notice_acts(2, 3, true, UserStopped), "an earlier run");
+        assert!(!notice_acts(3, 3, false, Other), "no runtime");
+        assert!(
+            notice_acts(3, 3, false, UserStopped),
+            "a user stop outlives the runtime"
+        );
+        assert!(!notice_acts(2, 3, false, UserStopped));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_notice_with_no_runtime_changes_nothing() {
+        let (dir, audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+        let mut supervisor = clear_supervisor(
+            &dir,
+            capture_paused,
+            storage,
+            metadata,
+            counters,
+            probe_holder,
+            mic_atom,
+        );
+        let before = supervisor.gates();
+        for run in [0, 1] {
+            assert_eq!(
+                supervisor
+                    .on_stream_failed(run, StopCause::Other, &audio)
+                    .await,
+                ReconcileOutcome::NoChange
+            );
+        }
+        assert_eq!(supervisor.gates(), before);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_user_stop_after_the_runtime_is_gone_still_pauses() {
+        let (dir, audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+        let mut supervisor = clear_supervisor(
+            &dir,
+            capture_paused,
+            storage,
+            metadata,
+            counters,
+            probe_holder,
+            mic_atom,
+        );
+        // A sleep teardown dropped the runtime before the notice arrived.
+        supervisor.mark_system_asleep(true);
+
+        assert_eq!(
+            supervisor
+                .on_stream_failed(1, StopCause::UserStopped, &audio)
+                .await,
+            ReconcileOutcome::NoChange,
+            "an earlier run's user stop is dropped"
+        );
+        assert!(!supervisor.gates().user_paused);
+
+        assert_eq!(
+            supervisor
+                .on_stream_failed(0, StopCause::UserStopped, &audio)
+                .await,
+            ReconcileOutcome::NoChange
+        );
+        assert!(supervisor.gates().user_paused);
+        assert!(settings::read_capture_paused(dir.path()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failure_waits_for_a_fresh_read() {
+        let (dir, _audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+        let mut supervisor = clear_supervisor(
+            &dir,
+            capture_paused,
+            storage,
+            metadata,
+            counters,
+            probe_holder,
+            mic_atom,
+        );
+
+        supervisor.record_failure(StopCause::Other, Instant::now());
+
+        assert_eq!(
+            supervisor.gates(),
+            Gates {
+                sr_stale: true,
+                failed: true,
+                idle_epoch: 1,
+                ..Gates::default()
+            }
+        );
+        assert!(supervisor.failed_mirror.load(Ordering::Acquire));
+        assert!(!supervisor.should_run(), "no start before a fresh read");
+        // The gate half of set_sr_denied(false). The full call reconciles,
+        // which would start real capture here.
+        supervisor.apply_sr_read(false);
+        let g = supervisor.gates();
+        assert!(
+            !g.hold && !g.sr_stale,
+            "an Authorized read clears stale and leaves no hold"
+        );
+        assert!(
+            supervisor.should_run(),
+            "the next reconcile would start capture"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn five_quick_failures_hold_until_a_pause() {
+        let (dir, audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+        let mut supervisor = clear_supervisor(
+            &dir,
+            capture_paused,
+            storage,
+            metadata,
+            counters,
+            probe_holder,
+            mic_atom,
+        );
+        for _ in 0..4 {
+            supervisor.record_failure(StopCause::Other, Instant::now());
+            supervisor.apply_sr_read(false);
+        }
+        supervisor.record_failure(StopCause::Other, Instant::now());
+
+        let g = supervisor.gates();
+        assert!(g.hold && g.failed && !g.sr_stale);
+        assert!(!supervisor.should_run());
+        assert_eq!(
+            supervisor.set_sr_denied(false, &audio).await,
+            ReconcileOutcome::NoChange,
+            "a grant doesn't release the hold"
+        );
+        assert!(supervisor.gates().hold);
+
+        supervisor.mark_user_paused(true);
+        let g = supervisor.gates();
+        assert!(!g.hold && !g.failed);
+        assert!(!supervisor.failed_mirror.load(Ordering::Acquire));
+        assert_eq!(supervisor.deaths.deaths, 0);
+        supervisor.mark_user_paused(false);
+        supervisor.apply_sr_read(false);
+        assert!(supervisor.should_run());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sleep_and_a_denial_release_the_hold() {
+        let (dir, audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+        let mut supervisor = clear_supervisor(
+            &dir,
+            capture_paused,
+            storage,
+            metadata,
+            counters,
+            probe_holder,
+            mic_atom,
+        );
+
+        spend_the_budget(&mut supervisor);
+        assert!(supervisor.gates().hold);
+        supervisor.mark_system_asleep(true);
+        assert!(!supervisor.gates().hold && !supervisor.gates().failed);
+        supervisor.mark_system_awake();
+
+        spend_the_budget(&mut supervisor);
+        assert!(supervisor.gates().hold);
+        assert_eq!(
+            supervisor.set_sr_denied(true, &audio).await,
+            ReconcileOutcome::NoChange
+        );
+        assert!(!supervisor.gates().hold && !supervisor.gates().failed);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_healthy_run_before_a_failure_restores_the_budget() {
+        let (dir, _audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+        let mut supervisor = clear_supervisor(
+            &dir,
+            capture_paused,
+            storage,
+            metadata,
+            counters,
+            probe_holder,
+            mic_atom,
+        );
+        let t0 = Instant::now();
+        for _ in 0..4 {
+            supervisor.record_failure(StopCause::Other, t0);
+        }
+
+        supervisor.note_started(t0);
+        supervisor.record_failure(StopCause::Other, t0 + DeathBudget::HEALTHY_RUN);
+
+        assert!(!supervisor.gates().hold);
+        assert_eq!(supervisor.deaths.deaths, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_start_clears_the_failure() {
+        let (dir, _audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+        let mut supervisor = clear_supervisor(
+            &dir,
+            capture_paused,
+            storage,
+            metadata,
+            counters,
+            probe_holder,
+            mic_atom,
+        );
+        supervisor.record_failure(StopCause::Other, Instant::now());
+
+        supervisor.note_started(Instant::now());
+
+        assert!(!supervisor.gates().failed);
+        assert!(!supervisor.failed_mirror.load(Ordering::Acquire));
+        assert!(supervisor.started_at.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_user_stop_is_a_persisted_pause() {
+        let (dir, _audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+        let mut supervisor = clear_supervisor(
+            &dir,
+            Arc::clone(&capture_paused),
+            storage,
+            metadata,
+            counters,
+            probe_holder,
+            mic_atom,
+        );
+
+        supervisor.record_failure(StopCause::Other, Instant::now());
+        supervisor.record_failure(StopCause::UserStopped, Instant::now());
+
+        assert_eq!(
+            supervisor.gates(),
+            Gates {
+                user_paused: true,
+                sr_stale: true,
+                idle_epoch: 2,
+                ..Gates::default()
+            },
+            "paused like Pause Capture, with failed and hold clear"
+        );
+        assert!(
+            settings::read_capture_paused(dir.path()),
+            "the pause file lands in the temp dir"
+        );
+        assert!(capture_paused.load(Ordering::Acquire));
+        assert!(!supervisor.failed_mirror.load(Ordering::Acquire));
+        assert_eq!(
+            supervisor.deaths.deaths, 0,
+            "a user stop is not a death, and the pause resets the budget"
+        );
+        assert!(!supervisor.should_run());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore] // Starts real capture, which needs Screen Recording TCC.
+    async fn a_failure_with_a_runtime_books_then_stops() {
+        let (dir, audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+        let mut supervisor = clear_supervisor(
+            &dir,
+            capture_paused,
+            storage,
+            metadata,
+            counters,
+            probe_holder,
+            mic_atom,
+        );
+        assert_eq!(
+            supervisor.reconcile(&audio).await,
+            ReconcileOutcome::Started
+        );
+
+        let run = supervisor.run;
+        assert_eq!(
+            supervisor
+                .on_stream_failed(run, StopCause::Other, &audio)
+                .await,
+            ReconcileOutcome::Stopped
+        );
+        let g = supervisor.gates();
+        assert!(g.failed && g.sr_stale && !g.hold);
+        assert!(!supervisor.is_running());
+
+        supervisor.apply_sr_read(false);
+        assert_eq!(
+            supervisor.reconcile(&audio).await,
+            ReconcileOutcome::Started
+        );
+        assert!(!supervisor.gates().failed, "a start clears the failure");
+        assert_eq!(supervisor.run, run + 1);
+
+        assert_eq!(
+            supervisor
+                .on_stream_failed(run + 1, StopCause::UserStopped, &audio)
+                .await,
+            ReconcileOutcome::Stopped
+        );
+        assert!(supervisor.gates().user_paused);
+        assert!(settings::read_capture_paused(dir.path()));
+        assert!(!supervisor.is_running());
     }
 }
