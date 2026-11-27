@@ -604,9 +604,8 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     /// Tear down the current runtime, disable the mic, and flush the system
     /// segment so a later restart doesn't span the off-period.
     ///
-    /// Persisted `capture_paused` is NOT written here. Pause persistence
-    /// belongs to `mark_user_paused`, which the IPC pause path and a -3817
-    /// stop call. Flag-driven stops such as sleep don't persist anything.
+    /// Persisted `capture_paused` is NOT written here. `mark_user_paused`
+    /// writes it, for the IPC pause path and a -3817 user stop.
     async fn stop_capture(&mut self, audio: &'a AudioPipeline) -> ReconcileOutcome {
         let mut poisoned = false;
         if let Some(rt) = self.runtime.take()
