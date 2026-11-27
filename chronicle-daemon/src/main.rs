@@ -899,7 +899,8 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     //
     // **The single-writer note.** All four settings writers run from this
     // loop — `write_mic_setting` here, `write_capture_paused` via
-    // `mark_user_paused` in the capture arm, `write_whisper_model` via
+    // `mark_user_paused` in the capture arm and, for a -3817 stop, via
+    // `on_stream_failed` in the stop arm, `write_whisper_model` via
     // `handle_provision_event`, and `write_mic_setting(false)` inside the mic
     // gate (`mic_gate::apply_mic_intent`), which this arm, the supervisor's
     // `start()`, and `mic_gate::reapply_mic_gate` all reach. They share one
