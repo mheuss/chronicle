@@ -72,7 +72,8 @@ pub struct Gates {
     pub system_asleep: bool,
     pub sr_denied: bool,
     pub sr_stale: bool,
-    /// The death budget is spent. Only an entry to Idle clears it.
+    /// The death budget is spent. Only a pause, a sleep or a Screen
+    /// Recording denial clears it.
     pub hold: bool,
     /// A stream stop took capture down, and capture hasn't started since.
     pub failed: bool,
@@ -178,12 +179,14 @@ pub struct CaptureSupervisor<'a, M: AppMetadataProvider + 'static + ?Sized> {
     system_asleep: bool,
     /// Screen Recording is not authorized, per the last helper read (design §1.2).
     sr_denied: bool,
-    /// Set on every pause or sleep. Cleared only by an Authorized read.
+    /// Set on every pause, sleep and failure that restarts. Cleared only by an
+    /// Authorized read.
     /// A resume or wake therefore never starts on a read taken before the idle period.
     sr_stale: bool,
     /// IPC-visible mirror of `sr_denied`.
     sr_denied_mirror: Arc<AtomicBool>,
-    /// Adds 1 on every entry to Idle, so a read taken before it can be told apart.
+    /// Adds 1 on a pause, a sleep, a paused boot and a failure that restarts,
+    /// so a read taken before it can be told apart.
     idle_epoch: u64,
     runtime: Option<CaptureRuntime<'a, M>>,
     storage: Arc<Storage>,
@@ -211,15 +214,16 @@ pub struct CaptureSupervisor<'a, M: AppMetadataProvider + 'static + ?Sized> {
     run: u64,
     /// Handed to every engine so its stream delegates can report a stop.
     stop_notices: mpsc::Sender<StreamStopped>,
-    /// When the current runtime started. A failure measures its run from here.
+    /// When the last runtime started. A failure measures its run from here.
     started_at: Option<Instant>,
     deaths: DeathBudget,
-    /// Set when a stream stop takes capture down. Cleared on the next start
-    /// or entry to Idle.
+    /// Set when a stream stop takes capture down. Cleared on the next start,
+    /// a pause, a sleep or a Screen Recording denial.
     failed: bool,
     /// IPC-visible mirror of `failed`.
     failed_mirror: Arc<AtomicBool>,
-    /// Set when the death budget is spent. Only an entry to Idle clears it.
+    /// Set when the death budget is spent. Only a pause, a sleep or a Screen
+    /// Recording denial clears it.
     hold: bool,
 }
 
@@ -468,8 +472,8 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         self.reconcile(audio).await
     }
 
-    /// The gate half of `set_sr_denied`, without the reconcile. A denial is an
-    /// entry to Idle. A grant leaves the hold in place.
+    /// The gate half of `set_sr_denied`, without the reconcile. A denial
+    /// clears the failure and the hold. A grant leaves the hold in place.
     fn apply_sr_read(&mut self, denied: bool) {
         self.sr_denied = denied;
         if denied {
@@ -541,7 +545,8 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         self.failed_mirror.store(false, Ordering::Release);
     }
 
-    /// Clear the failure, the hold and the death budget on an entry to Idle.
+    /// Clear the failure, the hold and the death budget on a pause, a sleep
+    /// or a Screen Recording denial.
     fn clear_failure(&mut self) {
         self.hold = false;
         self.failed = false;
@@ -1494,6 +1499,11 @@ mod tests {
         let g = supervisor.gates();
         assert!(g.hold && g.failed && !g.sr_stale);
         assert!(!supervisor.should_run());
+        assert_eq!(
+            crate::permission_gate::mode_for(supervisor.gates()),
+            crate::permission_gate::MonitorMode::Permitted,
+            "a held supervisor keeps reading, so a denial can release it"
+        );
         assert_eq!(
             supervisor.set_sr_denied(false, &audio).await,
             ReconcileOutcome::NoChange,
