@@ -1102,8 +1102,8 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                     );
                     o
                 } else {
-                    // No runtime (pause, sleep, or a failed start): save the
-                    // preference only. `start()` applies the gate to it.
+                    // No runtime: save the preference only. `start()`
+                    // applies the gate to it.
                     log::info!(
                         "mic toggle: requested enabled={} while capture not running — \
                          preference saved, device left off",

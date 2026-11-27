@@ -386,7 +386,7 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     /// On success this always runs the mic gate on the persisted preference
     /// and writes `mic_state_atom`, whether the preference is true or false.
     /// That is what makes `start()` work for both boot and a flag-driven
-    /// resume: a pause/sleep teardown disables the mic, and any later Start
+    /// resume: a pause, sleep or failure teardown disables the mic, and any later Start
     /// must re-apply the user's intent without relying on the caller. The gate
     /// may clear the preference when the grant is missing (design §1.2), so
     /// `start()` is a settings writer. It must run on the event loop task, or in
@@ -604,8 +604,9 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     /// Tear down the current runtime, disable the mic, and flush the system
     /// segment so a later restart doesn't span the off-period.
     ///
-    /// Persisted `capture_paused` is NOT written here — pause persistence
-    /// belongs to the IPC pause path, not to flag-driven stops (sleep).
+    /// Persisted `capture_paused` is NOT written here. Pause persistence
+    /// belongs to `mark_user_paused`, which the IPC pause path and a -3817
+    /// stop call. Flag-driven stops such as sleep don't persist anything.
     async fn stop_capture(&mut self, audio: &'a AudioPipeline) -> ReconcileOutcome {
         let mut poisoned = false;
         if let Some(rt) = self.runtime.take()
