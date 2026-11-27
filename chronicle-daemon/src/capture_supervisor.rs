@@ -179,13 +179,13 @@ pub struct CaptureSupervisor<'a, M: AppMetadataProvider + 'static + ?Sized> {
     system_asleep: bool,
     /// Screen Recording is not authorized, per the last helper read (design §1.2).
     sr_denied: bool,
-    /// Set on every pause, sleep and failure that restarts. Cleared only by an
-    /// Authorized read.
+    /// Set on a paused boot and on every pause, sleep and failure that
+    /// restarts. Cleared only by an Authorized read.
     /// A resume or wake therefore never starts on a read taken before the idle period.
     sr_stale: bool,
     /// IPC-visible mirror of `sr_denied`.
     sr_denied_mirror: Arc<AtomicBool>,
-    /// Adds 1 on a pause, a sleep, a paused boot and a failure that restarts,
+    /// Adds 1 on a pause, a sleep and a failure that restarts,
     /// so a read taken before it can be told apart.
     idle_epoch: u64,
     runtime: Option<CaptureRuntime<'a, M>>,
