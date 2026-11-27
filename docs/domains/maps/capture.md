@@ -24,6 +24,7 @@
 
 ## Owned Files
 
+- chronicle-daemon/crates/capture/src/delegate.rs
 - chronicle-daemon/crates/capture/src/deps.rs
 - chronicle-daemon/crates/capture/src/drops.rs
 - chronicle-daemon/crates/capture/src/encoder.rs
