@@ -7,6 +7,7 @@ chronicle-daemon/crates/audio/src/engine.rs
 chronicle-daemon/crates/audio/src/handler.rs
 chronicle-daemon/crates/audio/src/lib.rs
 chronicle-daemon/crates/audio/src/microphone.rs
+chronicle-daemon/crates/capture/src/delegate.rs
 chronicle-daemon/crates/capture/src/deps.rs
 chronicle-daemon/crates/capture/src/drops.rs
 chronicle-daemon/crates/capture/src/encoder.rs

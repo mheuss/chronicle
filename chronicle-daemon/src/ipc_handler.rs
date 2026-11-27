@@ -112,6 +112,8 @@ pub struct DaemonHandler {
     permissions: Arc<ArcSwap<chronicle_ipc::PermissionsStats>>,
     /// The Screen Recording gate `Status` reports as `permission_denied`.
     sr_denied: Arc<AtomicBool>,
+    /// The supervisor's failure mirror, which `Status` reports as `failed`.
+    capture_failed: Arc<AtomicBool>,
     /// Gate that opens once the main loop starts draining `capture_tx` — and
     /// `model_tx`, which deliberately shares this flag rather than carrying a
     /// third always-equal one. The event loop opens every gate at the same
@@ -316,6 +318,7 @@ impl DaemonHandler {
                 chronicle_ipc::PermissionsStats::default(),
             )),
             sr_denied: Arc::new(AtomicBool::new(false)),
+            capture_failed: Arc::new(AtomicBool::new(false)),
             capture_ready,
             capture_reply_timeout: Duration::from_secs(20),
             transcription_status,
@@ -335,21 +338,35 @@ impl DaemonHandler {
         self.sr_denied = sr_denied;
         self
     }
+
+    pub fn with_capture_failed(mut self, failed: Arc<AtomicBool>) -> Self {
+        self.capture_failed = failed;
+        self
+    }
 }
 
-/// "paused" wins, then "permission_denied", then the engine (design AD10).
-fn engine_state_str(state: Option<EngineState>, paused: bool, sr_denied: bool) -> &'static str {
+/// "paused" wins, then "permission_denied", then "failed", then the engine.
+fn engine_state_str(
+    state: Option<EngineState>,
+    paused: bool,
+    sr_denied: bool,
+    failed: bool,
+) -> &'static str {
     if paused {
         return "paused";
     }
     if sr_denied {
         return "permission_denied";
     }
+    if failed {
+        return "failed";
+    }
     match state {
         Some(EngineState::Running) => "running",
         Some(EngineState::Stopping) => "stopping",
         Some(EngineState::Idle) => "idle",
         Some(EngineState::Poisoned) => "poisoned",
+        Some(EngineState::Failed) => "failed",
         None => "unknown",
     }
 }
@@ -392,6 +409,7 @@ impl RequestHandler for DaemonHandler {
                                 engine.map(|e| e.state),
                                 paused,
                                 self.sr_denied.load(Ordering::Acquire),
+                                self.capture_failed.load(Ordering::Acquire),
                             )
                             .to_string(),
                             active_displays: engine.map_or(0, |e| e.active_displays),
@@ -702,23 +720,44 @@ mod tests {
     fn engine_state_str_precedence() {
         use chronicle_capture::EngineState;
         assert_eq!(
-            engine_state_str(Some(EngineState::Running), true, true),
+            engine_state_str(Some(EngineState::Running), true, true, true),
             "paused"
         );
-        assert_eq!(engine_state_str(None, false, true), "permission_denied");
         assert_eq!(
-            engine_state_str(Some(EngineState::Running), false, true),
+            engine_state_str(None, false, true, false),
             "permission_denied"
         );
         assert_eq!(
-            engine_state_str(Some(EngineState::Stopping), false, true),
+            engine_state_str(Some(EngineState::Running), false, true, false),
             "permission_denied"
         );
         assert_eq!(
-            engine_state_str(Some(EngineState::Running), false, false),
+            engine_state_str(Some(EngineState::Stopping), false, true, false),
+            "permission_denied"
+        );
+        assert_eq!(
+            engine_state_str(Some(EngineState::Running), false, false, false),
             "running"
         );
-        assert_eq!(engine_state_str(None, false, false), "unknown");
+        assert_eq!(engine_state_str(None, false, false, false), "unknown");
+        assert_eq!(
+            engine_state_str(Some(EngineState::Failed), false, false, false),
+            "failed"
+        );
+        assert_eq!(engine_state_str(None, false, false, true), "failed");
+        assert_eq!(
+            engine_state_str(Some(EngineState::Running), false, false, true),
+            "failed"
+        );
+        assert_eq!(engine_state_str(None, true, false, true), "paused");
+        assert_eq!(
+            engine_state_str(None, false, true, true),
+            "permission_denied"
+        );
+        assert_eq!(
+            engine_state_str(Some(EngineState::Failed), false, true, false),
+            "permission_denied"
+        );
     }
 
     #[test]
@@ -768,6 +807,21 @@ mod tests {
             chronicle_ipc::PermissionState::Authorized,
             "reads the shared snapshot"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_reports_failed_from_the_supervisor_mirror() {
+        let (handler, _mic_rx, _mic_atom, _cap_rx, cap_paused, _ss, _tcell, _dir) =
+            handler_with_full_channels(8, true).await;
+        let failed = Arc::new(AtomicBool::new(true));
+        let handler = handler.with_capture_failed(Arc::clone(&failed));
+
+        assert_eq!(capture_stats(&handler).state, "failed");
+        cap_paused.store(true, Ordering::Release);
+        assert_eq!(capture_stats(&handler).state, "paused");
+        cap_paused.store(false, Ordering::Release);
+        failed.store(false, Ordering::Release);
+        assert_eq!(capture_stats(&handler).state, "unknown");
     }
 
     #[test]

@@ -43,7 +43,7 @@ struct CaptureAvailabilityTests {
         #expect(classify(.connected, statusWithCapture(state: "permission_denied", paused: true)) == .paused)
     }
 
-    @Test(arguments: ["unknown", "idle", "stopping", "poisoned", "frobnicating"])
+    @Test(arguments: ["unknown", "idle", "stopping", "poisoned", "failed", "frobnicating"])
     func anyOtherStateIsNotCapturing(state: String) {
         #expect(classify(.connected, statusWithCapture(state: state, paused: false)) == .notCapturing)
     }

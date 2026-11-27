@@ -23,6 +23,9 @@ pub mod engine;
 /// Frame handler bridging SCK callbacks to an mpsc channel.
 pub(crate) mod handler;
 
+/// Stream delegate that reports SCK stopping a stream.
+pub(crate) mod delegate;
+
 /// HEIF encoding for captured frames.
 pub mod encoder;
 
@@ -32,6 +35,7 @@ pub mod metadata;
 /// CoreVideo pixel buffer FFI.
 pub(crate) mod pixel_buffer;
 
+pub use delegate::{StopCause, StreamStopped, stop_cause};
 pub use drops::{CaptureDropCounters, CaptureDropSnapshot};
 pub use encoder::encode_heif;
 pub use engine::{CaptureEngine, EngineState, EngineStatusProbe, EngineStatusSnapshot};
@@ -79,6 +83,12 @@ pub struct CaptureConfig<'a> {
     /// passes its own so counts survive the engine rebuild that pause/resume
     /// performs.
     pub drop_counters: Arc<CaptureDropCounters>,
+    /// A start counter the caller picks, copied into every stop notice.
+    /// Default: 0
+    pub run: u64,
+    /// Where each stream delegate sends its stop notice. `None` registers no
+    /// delegate. Default: `None`
+    pub stop_notices: Option<tokio::sync::mpsc::Sender<StreamStopped>>,
 }
 
 /// Seconds between captured frames. Named so a caller that wants only the
@@ -97,6 +107,8 @@ impl<'a> Default for CaptureConfig<'a> {
             channel_buffer_size: DEFAULT_CHANNEL_BUFFER_SIZE,
             audio: None,
             drop_counters: Arc::new(CaptureDropCounters::default()),
+            run: 0,
+            stop_notices: None,
         }
     }
 }
@@ -108,6 +120,8 @@ impl fmt::Debug for CaptureConfig<'_> {
             .field("channel_buffer_size", &self.channel_buffer_size)
             .field("audio", &self.audio.as_ref().map(|_| "Some(token)"))
             .field("drop_counters", &self.drop_counters.snapshot())
+            .field("run", &self.run)
+            .field("stop_notices", &self.stop_notices.is_some())
             .finish()
     }
 }
@@ -157,6 +171,13 @@ mod tests {
     fn capture_config_defaults_no_audio() {
         let config = CaptureConfig::default();
         assert!(config.audio.is_none());
+    }
+
+    #[test]
+    fn capture_config_defaults_register_no_delegate() {
+        let config = CaptureConfig::default();
+        assert_eq!(config.run, 0);
+        assert!(config.stop_notices.is_none());
     }
 
     #[test]

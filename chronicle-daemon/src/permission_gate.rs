@@ -187,6 +187,7 @@ mod tests {
             sr_denied,
             sr_stale,
             idle_epoch: 0,
+            ..Gates::default()
         }
     }
 

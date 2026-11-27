@@ -329,6 +329,23 @@ fn route_reconcile_outcome(
     BootDisposition::Continue
 }
 
+/// What the stop arm does with one stream stop notice.
+#[derive(Debug, PartialEq, Eq)]
+enum StopTriage {
+    /// The notice moved its engine from Running to Failed.
+    Act(chronicle_capture::StopCause),
+    /// The engine was already stopping, idle, poisoned or failed.
+    Ignore,
+}
+
+fn triage_stop_notice(won_cas: bool, is_stream_domain: bool, code: isize) -> StopTriage {
+    if won_cas {
+        StopTriage::Act(chronicle_capture::stop_cause(is_stream_domain, code))
+    } else {
+        StopTriage::Ignore
+    }
+}
+
 /// The filter applied when `RUST_LOG` is unset.
 ///
 /// `chronicle` is a prefix match, not a crate name — `env_filter` compares with
@@ -469,6 +486,7 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     let sr_denied_mirror = Arc::new(AtomicBool::new(
         boot.screen == permissions::ScreenRecordingStatus::Denied,
     ));
+    let capture_failed_mirror = Arc::new(AtomicBool::new(false));
     let permissions_snapshot = Arc::new(ArcSwap::from_pointee(boot_permissions_snapshot(
         &boot,
         permission_monitor::unix_ms(),
@@ -577,6 +595,9 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     // idempotent.
     let (retry_tx, mut retry_rx) = tokio::sync::mpsc::channel::<()>(4);
     let mut start_retry = StartRetry::new();
+    // Stream stop notices from the capture engine's delegates (CHR-188).
+    // Each notice carries its engine's run, so one channel serves every run.
+    let (stop_tx, mut stop_rx) = tokio::sync::mpsc::channel::<chronicle_capture::StreamStopped>(64);
     // Whisper model status cell (CHR-71). Created — and, when the model is
     // on disk, put into Loading — BEFORE the IPC server below serves its
     // first Status, so the UI never sees Missing for a model that exists
@@ -620,7 +641,8 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     .with_permissions(
         Arc::clone(&permissions_snapshot),
         Arc::clone(&sr_denied_mirror),
-    );
+    )
+    .with_capture_failed(Arc::clone(&capture_failed_mirror));
     let ipc_server = IpcServer::start(&socket_path, handler, cancel.clone()).await?;
     log::info!("IPC server started");
 
@@ -672,7 +694,9 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     .with_screen_recording_gate(
         boot.screen == permissions::ScreenRecordingStatus::Denied,
         Arc::clone(&sr_denied_mirror),
-    );
+    )
+    .with_stop_notices(stop_tx)
+    .with_failed_mirror(Arc::clone(&capture_failed_mirror));
 
     if initial_capture_paused {
         log::info!("Capture is paused (persisted setting); skipping runtime start");
@@ -874,7 +898,8 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     //
     // **The single-writer note.** All four settings writers run from this
     // loop — `write_mic_setting` here, `write_capture_paused` via
-    // `mark_user_paused` in the capture arm, `write_whisper_model` via
+    // `mark_user_paused` in the capture arm and, for a -3817 stop, via
+    // `on_stream_failed` in the stop arm, `write_whisper_model` via
     // `handle_provision_event`, and `write_mic_setting(false)` inside the mic
     // gate (`mic_gate::apply_mic_intent`), which this arm, the supervisor's
     // `start()`, and `mic_gate::reapply_mic_gate` all reach. They share one
@@ -953,6 +978,53 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                 monitor_stopped = true;
                 break;
             }
+            Some(n) = stop_rx.recv() => {
+                let code = n.code();
+                let triage = triage_stop_notice(n.won_cas, n.is_stream_domain(), code);
+                let StopTriage::Act(cause) = triage else {
+                    log::debug!(
+                        "capture stream stop ignored, engine not running: \
+                         display_id={} run={} domain={} code={code}",
+                        n.display_id,
+                        n.run,
+                        n.domain(),
+                    );
+                    continue;
+                };
+                if !supervisor.notice_acts(n.run, cause) {
+                    log::debug!(
+                        "capture stream stop dropped, its run is gone: \
+                         display_id={} run={} domain={} code={code}",
+                        n.display_id,
+                        n.run,
+                        n.domain(),
+                    );
+                    continue;
+                }
+                log::warn!(
+                    "capture stream stopped: display_id={} run={} domain={} \
+                     code={code} cause={cause:?} ({})",
+                    n.display_id,
+                    n.run,
+                    n.domain(),
+                    n.description(),
+                );
+                let outcome = supervisor
+                    .on_stream_failed(n.run, cause, &audio_pipeline)
+                    .await;
+                permission_gate::publish_state(&mode_tx, supervisor.gates(), mic_generation);
+                let disposition = route_reconcile_outcome(
+                    &outcome,
+                    &mut boot_incident,
+                    &mut start_retry,
+                    &retry_tx,
+                );
+                if disposition == BootDisposition::Exit {
+                    log::error!("capture engine poisoned; shutting down for a fresh process");
+                    loop_poisoned = true;
+                    break;
+                }
+            }
             Some(t) = screen_rx.recv() => {
                 let g = supervisor.gates();
                 if !permission_gate::accept_screen_read(t.epoch, g) {
@@ -1030,8 +1102,8 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                     );
                     o
                 } else {
-                    // No runtime (pause, sleep, or a failed start): save the
-                    // preference only. `start()` applies the gate to it.
+                    // No runtime: save the preference only. `start()`
+                    // applies the gate to it.
                     log::info!(
                         "mic toggle: requested enabled={} while capture not running — \
                          preference saved, device left off",
@@ -1286,6 +1358,8 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     // the runtime.
     retry_rx.close();
     while retry_rx.try_recv().is_ok() {}
+    stop_rx.close();
+    while stop_rx.try_recv().is_ok() {}
     cancel.cancel();
 
     // Stop the IPC server before the capture engine: stop accepting
@@ -1746,6 +1820,25 @@ mod tests {
             settings::read_whisper_model(dir.path()).as_str(),
             "base",
             "settings unchanged after a failed switch"
+        );
+    }
+
+    #[test]
+    fn only_the_notice_that_won_the_cas_acts() {
+        use chronicle_capture::StopCause;
+        assert_eq!(triage_stop_notice(false, true, -3817), StopTriage::Ignore);
+        assert_eq!(triage_stop_notice(false, true, -3821), StopTriage::Ignore);
+        assert_eq!(
+            triage_stop_notice(true, true, -3817),
+            StopTriage::Act(StopCause::UserStopped)
+        );
+        assert_eq!(
+            triage_stop_notice(true, true, -3821),
+            StopTriage::Act(StopCause::Other)
+        );
+        assert_eq!(
+            triage_stop_notice(true, false, -3817),
+            StopTriage::Act(StopCause::Other)
         );
     }
 

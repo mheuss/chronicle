@@ -18,6 +18,7 @@ use objc2_screen_capture_kit::{
 };
 use tokio::sync::mpsc;
 
+use crate::delegate::StreamDelegate;
 use crate::deps::EngineDeps;
 use crate::error::{CaptureError, Result};
 use crate::handler::CaptureOutputHandler;
@@ -36,7 +37,9 @@ unsafe extern "C" {
 ///
 /// Set to `Running` on successful construction. Transitions via `stop()` to
 /// `Stopping` and then either `Idle` (clean teardown) or `Poisoned` (one or
-/// more streams failed to stop).
+/// more streams failed to stop). `Failed` means ScreenCaptureKit stopped a
+/// stream while the engine was `Running`. `stop()` tears a failed engine down
+/// the same way.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(u8)]
 pub enum EngineState {
@@ -44,6 +47,7 @@ pub enum EngineState {
     Stopping = 1,
     Idle = 2,
     Poisoned = 3,
+    Failed = 4,
 }
 
 impl EngineState {
@@ -52,6 +56,7 @@ impl EngineState {
             0 => EngineState::Running,
             1 => EngineState::Stopping,
             2 => EngineState::Idle,
+            4 => EngineState::Failed,
             _ => EngineState::Poisoned,
         }
     }
@@ -66,11 +71,14 @@ impl EngineState {
 pub struct CaptureEngine<'a> {
     streams: Vec<Retained<SCStream>>,
     handlers: Vec<Retained<CaptureOutputHandler>>,
+    /// One per stream when `CaptureConfig::stop_notices` is set, otherwise
+    /// empty. The SDK header doesn't say whether SCStream retains its
+    /// delegate, so the engine does.
+    delegates: Vec<Retained<StreamDelegate>>,
     display_ids: Vec<u32>,
     _sender: mpsc::Sender<CapturedFrame>,
     frames_captured: Arc<AtomicU64>,
     frames_dropped: Arc<AtomicU64>,
-    state: EngineState,
     state_atom: Arc<AtomicU8>,
     active_displays_atom: Arc<AtomicUsize>,
     deps: EngineDeps,
@@ -126,6 +134,8 @@ impl<'a> CaptureEngine<'a> {
 
         let frames_captured = Arc::new(AtomicU64::new(0));
         let frames_dropped = Arc::new(AtomicU64::new(0));
+        // Created before the display loop so every stream delegate shares it.
+        let state_atom = Arc::new(AtomicU8::new(EngineState::Running as u8));
 
         // Build a CMTime for the minimum frame interval.
         // Uses millisecond precision: e.g. 2.0 s -> value=2000, timescale=1000.
@@ -149,6 +159,7 @@ impl<'a> CaptureEngine<'a> {
             first_display_id
         };
 
+        let mut delegates: Vec<Retained<StreamDelegate>> = Vec::with_capacity(displays.len());
         let mut streams: Vec<Retained<SCStream>> = Vec::with_capacity(displays.len());
         let mut handlers: Vec<Retained<CaptureOutputHandler>> = Vec::with_capacity(displays.len());
         let mut started_display_ids: Vec<u32> = Vec::with_capacity(displays.len());
@@ -210,6 +221,7 @@ impl<'a> CaptureEngine<'a> {
                 Arc::clone(&frames_captured),
                 Arc::clone(&frames_dropped),
             );
+            let delegate = StreamDelegate::for_config(&config, display_id, &state_atom);
 
             // Create the SCStream.
             let stream = autoreleasepool(|_| unsafe {
@@ -217,7 +229,7 @@ impl<'a> CaptureEngine<'a> {
                     SCStream::alloc(),
                     &filter,
                     &stream_config,
-                    None,
+                    delegate.as_deref().map(StreamDelegate::as_protocol_object),
                 )
             });
 
@@ -306,18 +318,20 @@ impl<'a> CaptureEngine<'a> {
             streams.push(stream);
             started_display_ids.push(display_id);
             handlers.push(handler);
+            if let Some(delegate) = delegate {
+                delegates.push(delegate);
+            }
         }
 
-        let state_atom = Arc::new(AtomicU8::new(EngineState::Running as u8));
         let active_displays_atom = Arc::new(AtomicUsize::new(streams.len()));
         let engine = Self {
             streams,
             handlers,
+            delegates,
             display_ids: started_display_ids,
             _sender: sender,
             frames_captured,
             frames_dropped,
-            state: EngineState::Running,
             state_atom,
             active_displays_atom,
             deps,
@@ -331,14 +345,14 @@ impl<'a> CaptureEngine<'a> {
     ///
     /// Idempotent on `Idle` and `Stopping` (returns `Ok(())` without doing
     /// anything). On `Poisoned`, returns `CaptureError::Poisoned` because the
-    /// engine cannot be stopped cleanly from a poisoned state. On `Running`,
-    /// iterates every stream; any `stop_stream` failure is collected and the
-    /// engine transitions to `Poisoned`.
+    /// engine cannot be stopped cleanly from a poisoned state. On `Running` or
+    /// `Failed`, iterates every stream; any `stop_stream` failure is collected
+    /// and the engine transitions to `Poisoned`.
     pub fn stop(&mut self) -> Result<()> {
-        match self.state {
+        match self.state() {
             EngineState::Idle | EngineState::Stopping => return Ok(()),
             EngineState::Poisoned => return Err(CaptureError::Poisoned),
-            EngineState::Running => {}
+            EngineState::Running | EngineState::Failed => {}
         }
         self.set_state(EngineState::Stopping);
 
@@ -351,6 +365,7 @@ impl<'a> CaptureEngine<'a> {
         }
         self.streams.clear();
         self.handlers.clear();
+        self.delegates.clear();
         self.display_ids.clear();
 
         if errors.is_empty() {
@@ -371,7 +386,6 @@ impl<'a> CaptureEngine<'a> {
     }
 
     fn set_state(&mut self, next: EngineState) {
-        self.state = next;
         self.state_atom.store(next as u8, Ordering::Release);
     }
 
@@ -386,7 +400,7 @@ impl<'a> CaptureEngine<'a> {
 
     /// Return the current post-construction state.
     pub fn state(&self) -> EngineState {
-        self.state
+        EngineState::from_u8(self.state_atom.load(Ordering::Acquire))
     }
 
     /// Return a cloneable probe into the engine's live atomics.
@@ -445,6 +459,7 @@ impl Drop for CaptureEngine<'_> {
         }
         self.streams.clear();
         self.handlers.clear();
+        self.delegates.clear();
         self.display_ids.clear();
     }
 }
@@ -826,16 +841,57 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore] // Requires real SCDisplay enumeration, which needs Screen Recording TCC.
+    fn every_stream_gets_a_delegate() {
+        use objc2::DefinedClass;
+
+        let (tx, _notices) = mpsc::channel(64);
+        let config = CaptureConfig {
+            run: 9,
+            stop_notices: Some(tx),
+            ..CaptureConfig::default()
+        };
+        let (mut engine, _rx) =
+            CaptureEngine::start(config).expect("engine must start on macOS with TCC granted");
+        assert!(!engine.streams.is_empty());
+        assert_eq!(engine.delegates.len(), engine.streams.len());
+        let ids: Vec<u32> = engine
+            .delegates
+            .iter()
+            .map(|d| d.ivars().display_id)
+            .collect();
+        assert_eq!(ids, engine.display_ids);
+        for d in &engine.delegates {
+            assert!(Arc::ptr_eq(&engine.state_atom, &d.ivars().state));
+            assert_eq!(d.ivars().run, 9);
+        }
+        // Drive the first delegate's callback body: the engine itself fails.
+        let first = engine.delegates[0].ivars();
+        let error = NSError::new(-3821, &objc2_foundation::NSString::from_str("test"));
+        assert!(crate::delegate::on_stop(
+            &first.state,
+            &first.notices,
+            first.run,
+            first.display_id,
+            error
+        ));
+        assert_eq!(engine.state(), EngineState::Failed);
+        engine.stop().expect("stop must succeed");
+        assert!(engine.delegates.is_empty());
+    }
+
     fn test_engine_with_state(state: EngineState) -> CaptureEngine<'static> {
         let (sender, _rx) = mpsc::channel(1);
         CaptureEngine {
             streams: Vec::new(),
             handlers: Vec::new(),
+            delegates: Vec::new(),
             display_ids: Vec::new(),
             _sender: sender,
             frames_captured: Arc::new(AtomicU64::new(0)),
             frames_dropped: Arc::new(AtomicU64::new(0)),
-            state,
             state_atom: Arc::new(AtomicU8::new(state as u8)),
             active_displays_atom: Arc::new(AtomicUsize::new(0)),
             deps: EngineDeps::default(),
@@ -844,10 +900,43 @@ mod tests {
     }
 
     #[test]
+    fn engine_state_from_u8_maps_every_value() {
+        for state in [
+            EngineState::Running,
+            EngineState::Stopping,
+            EngineState::Idle,
+            EngineState::Poisoned,
+            EngineState::Failed,
+        ] {
+            assert_eq!(EngineState::from_u8(state as u8), state);
+        }
+        assert_eq!(EngineState::from_u8(5), EngineState::Poisoned);
+    }
+
+    #[test]
+    fn stop_on_failed_transitions_to_idle() {
+        let mut engine = test_engine_with_state(EngineState::Failed);
+        engine.stop().expect("stop on Failed must succeed");
+        assert_eq!(engine.state(), EngineState::Idle);
+    }
+
+    #[test]
+    fn stop_reads_the_state_atom() {
+        // Another thread can move the shared atom, so stop() must read it.
+        let mut engine = test_engine_with_state(EngineState::Running);
+        engine
+            .state_atom
+            .store(EngineState::Failed as u8, Ordering::Release);
+        assert_eq!(engine.state(), EngineState::Failed);
+        engine.stop().expect("stop after a failure must succeed");
+        assert_eq!(engine.state(), EngineState::Idle);
+    }
+
+    #[test]
     fn stop_on_idle_is_idempotent() {
         let mut engine = test_engine_with_state(EngineState::Idle);
         engine.stop().expect("stop on Idle must be idempotent");
-        assert_eq!(engine.state, EngineState::Idle);
+        assert_eq!(engine.state(), EngineState::Idle);
     }
 
     #[test]
@@ -855,7 +944,7 @@ mod tests {
         let mut engine = test_engine_with_state(EngineState::Poisoned);
         let err = engine.stop().expect_err("stop on Poisoned must error");
         assert!(matches!(err, CaptureError::Poisoned));
-        assert_eq!(engine.state, EngineState::Poisoned);
+        assert_eq!(engine.state(), EngineState::Poisoned);
     }
 
     #[test]
@@ -865,7 +954,7 @@ mod tests {
         engine
             .stop()
             .expect("stop on Running with no streams must succeed");
-        assert_eq!(engine.state, EngineState::Idle);
+        assert_eq!(engine.state(), EngineState::Idle);
     }
 
     #[cfg(target_os = "macos")]
@@ -892,7 +981,7 @@ mod tests {
             .stop()
             .expect_err("stop must fail when deps.stop_stream fails");
         assert!(matches!(err, CaptureError::PartialTeardown { .. }));
-        assert_eq!(engine.state, EngineState::Poisoned);
+        assert_eq!(engine.state(), EngineState::Poisoned);
     }
 
     #[test]
