@@ -73,8 +73,8 @@ pub(crate) async fn run(
     let mut idle = false;
     loop {
         let state = *mode_rx.borrow_and_update();
-        // A new epoch means an Idle period began. It may have ended before
-        // this loop saw it, so treat it as leaving Idle.
+        // A new epoch means a pause, a sleep or a restarting stream failure
+        // happened since the last tick, so the next read doesn't wait for it.
         if state.epoch != last_epoch {
             last_epoch = state.epoch;
             last_tick = None;

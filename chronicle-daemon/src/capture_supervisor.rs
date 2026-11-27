@@ -75,7 +75,8 @@ pub struct Gates {
     /// The death budget is spent. Only a pause, a sleep or a Screen
     /// Recording denial clears it.
     pub hold: bool,
-    /// A stream stop took capture down, and capture hasn't started since.
+    /// A stream stop took capture down. Cleared on the next start, a pause, a
+    /// sleep or a Screen Recording denial.
     pub failed: bool,
     /// The supervisor's idle epoch (design §1.2).
     pub idle_epoch: u64,
@@ -181,7 +182,7 @@ pub struct CaptureSupervisor<'a, M: AppMetadataProvider + 'static + ?Sized> {
     sr_denied: bool,
     /// Set on a paused boot and on every pause, sleep and failure that
     /// restarts. Cleared only by an Authorized read.
-    /// A resume or wake therefore never starts on a read taken before the idle period.
+    /// A resume, wake or restart therefore never starts on a read taken before it.
     sr_stale: bool,
     /// IPC-visible mirror of `sr_denied`.
     sr_denied_mirror: Arc<AtomicBool>,
@@ -473,7 +474,8 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     }
 
     /// The gate half of `set_sr_denied`, without the reconcile. A denial
-    /// clears the failure and the hold. A grant leaves the hold in place.
+    /// clears the failure and the hold and resets the death budget. A grant
+    /// leaves the hold in place.
     fn apply_sr_read(&mut self, denied: bool) {
         self.sr_denied = denied;
         if denied {
