@@ -71,8 +71,9 @@ impl EngineState {
 pub struct CaptureEngine<'a> {
     streams: Vec<Retained<SCStream>>,
     handlers: Vec<Retained<CaptureOutputHandler>>,
-    /// One per stream. The SDK header doesn't say whether SCStream retains
-    /// its delegate, so the engine does.
+    /// One per stream when `CaptureConfig::stop_notices` is set, otherwise
+    /// empty. The SDK header doesn't say whether SCStream retains its
+    /// delegate, so the engine does.
     delegates: Vec<Retained<StreamDelegate>>,
     display_ids: Vec<u32>,
     _sender: mpsc::Sender<CapturedFrame>,
@@ -220,14 +221,7 @@ impl<'a> CaptureEngine<'a> {
                 Arc::clone(&frames_captured),
                 Arc::clone(&frames_dropped),
             );
-            let delegate = config.stop_notices.as_ref().map(|notices| {
-                StreamDelegate::for_display(
-                    display_id,
-                    config.run,
-                    notices.clone(),
-                    Arc::clone(&state_atom),
-                )
-            });
+            let delegate = StreamDelegate::for_config(&config, display_id, &state_atom);
 
             // Create the SCStream.
             let stream = autoreleasepool(|_| unsafe {
@@ -851,8 +845,11 @@ mod tests {
     #[test]
     #[ignore] // Requires real SCDisplay enumeration, which needs Screen Recording TCC.
     fn every_stream_gets_a_delegate() {
+        use objc2::DefinedClass;
+
         let (tx, _notices) = mpsc::channel(64);
         let config = CaptureConfig {
+            run: 9,
             stop_notices: Some(tx),
             ..CaptureConfig::default()
         };
@@ -860,6 +857,27 @@ mod tests {
             CaptureEngine::start(config).expect("engine must start on macOS with TCC granted");
         assert!(!engine.streams.is_empty());
         assert_eq!(engine.delegates.len(), engine.streams.len());
+        let ids: Vec<u32> = engine
+            .delegates
+            .iter()
+            .map(|d| d.ivars().display_id)
+            .collect();
+        assert_eq!(ids, engine.display_ids);
+        for d in &engine.delegates {
+            assert!(Arc::ptr_eq(&engine.state_atom, &d.ivars().state));
+            assert_eq!(d.ivars().run, 9);
+        }
+        // Drive the first delegate's callback body: the engine itself fails.
+        let first = engine.delegates[0].ivars();
+        let error = NSError::new(-3821, &objc2_foundation::NSString::from_str("test"));
+        assert!(crate::delegate::on_stop(
+            &first.state,
+            &first.notices,
+            first.run,
+            first.display_id,
+            error
+        ));
+        assert_eq!(engine.state(), EngineState::Failed);
         engine.stop().expect("stop must succeed");
         assert!(engine.delegates.is_empty());
     }

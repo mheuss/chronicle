@@ -91,10 +91,10 @@ pub(crate) fn on_stop(
 }
 
 pub(crate) struct StreamDelegateIvars {
-    display_id: u32,
-    run: u64,
-    state: Arc<AtomicU8>,
-    notices: mpsc::Sender<StreamStopped>,
+    pub(crate) display_id: u32,
+    pub(crate) run: u64,
+    pub(crate) state: Arc<AtomicU8>,
+    pub(crate) notices: mpsc::Sender<StreamStopped>,
 }
 
 define_class!(
@@ -109,7 +109,7 @@ define_class!(
 
     // SAFETY: The signature matches the optional stream:didStopWithError:.
     // The body retains the error and touches only Sync ivars, so any queue
-    // is fine.
+    // is fine. The ivars are also Send, so the last release can run there.
     unsafe impl SCStreamDelegate for StreamDelegate {
         #[unsafe(method(stream:didStopWithError:))]
         unsafe fn stream_did_stop_with_error(&self, _stream: &SCStream, error: &NSError) {
@@ -141,6 +141,22 @@ impl StreamDelegate {
             notices,
         });
         unsafe { objc2::msg_send![super(this), init] }
+    }
+
+    /// Build the delegate for one display from the engine's config, or `None`
+    /// when the config has no `stop_notices`.
+    ///
+    /// The `Arc::clone` of the engine's state atom lives here rather than at
+    /// the `engine.rs` call site so a plain unit test can reach it. That call
+    /// site sits past `SCShareableContent`, which needs Screen Recording TCC.
+    pub(crate) fn for_config(
+        config: &crate::CaptureConfig<'_>,
+        display_id: u32,
+        state: &Arc<AtomicU8>,
+    ) -> Option<Retained<Self>> {
+        config.stop_notices.as_ref().map(|notices| {
+            Self::for_display(display_id, config.run, notices.clone(), Arc::clone(state))
+        })
     }
 
     /// Get a reference suitable for passing to `initWithFilter:configuration:delegate:`.
@@ -213,9 +229,17 @@ mod tests {
         })
         .unwrap();
         assert!(on_stop(&state, &tx, 1, 7, user_stopped()), "full channel");
+        assert_eq!(
+            EngineState::from_u8(state.load(Ordering::Acquire)),
+            EngineState::Failed
+        );
         drop(rx);
         let state = AtomicU8::new(EngineState::Running as u8);
         assert!(on_stop(&state, &tx, 1, 7, user_stopped()), "closed channel");
+        assert_eq!(
+            EngineState::from_u8(state.load(Ordering::Acquire)),
+            EngineState::Failed
+        );
     }
 
     #[test]
@@ -226,6 +250,28 @@ mod tests {
         let _protocol: &ProtocolObject<dyn SCStreamDelegate> = delegate.as_protocol_object();
         assert!(Arc::ptr_eq(&state, &delegate.ivars().state));
         assert_eq!((delegate.ivars().display_id, delegate.ivars().run), (7, 3));
+    }
+
+    #[test]
+    fn for_config_shares_the_engine_state_and_carries_the_run() {
+        // The mutation this pins: `Arc::new` for `Arc::clone(state)`. The
+        // delegate would then fail a private atom and the engine would stay
+        // Running, the bug CHR-188 fixes.
+        let state = Arc::new(AtomicU8::new(EngineState::Running as u8));
+        let (tx, _rx) = mpsc::channel(4);
+        let config = crate::CaptureConfig {
+            run: 9,
+            stop_notices: Some(tx.clone()),
+            ..crate::CaptureConfig::default()
+        };
+        let delegate = StreamDelegate::for_config(&config, 7, &state).expect("notices set");
+        let ivars = delegate.ivars();
+        assert!(Arc::ptr_eq(&state, &ivars.state));
+        assert_eq!((ivars.display_id, ivars.run), (7, 9));
+        assert!(ivars.notices.same_channel(&tx));
+
+        let none = StreamDelegate::for_config(&crate::CaptureConfig::default(), 7, &state);
+        assert!(none.is_none(), "no stop_notices registers no delegate");
     }
 
     #[test]
