@@ -126,8 +126,6 @@ define_class!(
 );
 
 impl StreamDelegate {
-    /// Build the delegate for one display's stream. `state` is the engine's
-    /// state atom.
     pub(crate) fn for_display(
         display_id: u32,
         run: u64,

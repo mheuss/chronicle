@@ -339,7 +339,6 @@ impl DaemonHandler {
         self
     }
 
-    /// Read `Status`'s failure state from the supervisor's mirror.
     pub fn with_capture_failed(mut self, failed: Arc<AtomicBool>) -> Self {
         self.capture_failed = failed;
         self

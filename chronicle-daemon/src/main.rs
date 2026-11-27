@@ -338,7 +338,6 @@ enum StopTriage {
     Ignore,
 }
 
-/// Only the notice that won its engine's CAS acts.
 fn triage_stop_notice(won_cas: bool, is_stream_domain: bool, code: isize) -> StopTriage {
     if won_cas {
         StopTriage::Act(chronicle_capture::stop_cause(is_stream_domain, code))

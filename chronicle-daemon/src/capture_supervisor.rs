@@ -290,14 +290,12 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         self
     }
 
-    /// Share the failure flag with IPC.
     pub fn with_failed_mirror(mut self, mirror: Arc<AtomicBool>) -> Self {
         mirror.store(self.failed, Ordering::Release);
         self.failed_mirror = mirror;
         self
     }
 
-    /// Send stream stop notices to the event loop.
     pub fn with_stop_notices(mut self, tx: mpsc::Sender<StreamStopped>) -> Self {
         self.stop_notices = tx;
         self
