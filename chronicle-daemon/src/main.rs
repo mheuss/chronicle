@@ -329,6 +329,24 @@ fn route_reconcile_outcome(
     BootDisposition::Continue
 }
 
+/// What the stop arm does with one stream stop notice.
+#[derive(Debug, PartialEq, Eq)]
+enum StopTriage {
+    /// The notice moved its engine from Running to Failed.
+    Act(chronicle_capture::StopCause),
+    /// The engine was already stopping, idle, poisoned or failed.
+    Ignore,
+}
+
+/// Only the notice that won its engine's CAS acts.
+fn triage_stop_notice(won_cas: bool, is_stream_domain: bool, code: isize) -> StopTriage {
+    if won_cas {
+        StopTriage::Act(chronicle_capture::stop_cause(is_stream_domain, code))
+    } else {
+        StopTriage::Ignore
+    }
+}
+
 /// The filter applied when `RUST_LOG` is unset.
 ///
 /// `chronicle` is a prefix match, not a crate name — `env_filter` compares with
@@ -577,6 +595,9 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     // idempotent.
     let (retry_tx, mut retry_rx) = tokio::sync::mpsc::channel::<()>(4);
     let mut start_retry = StartRetry::new();
+    // Stream stop notices from the capture engine's delegates (CHR-188). At
+    // most one per display per engine.
+    let (stop_tx, mut stop_rx) = tokio::sync::mpsc::channel::<chronicle_capture::StreamStopped>(64);
     // Whisper model status cell (CHR-71). Created — and, when the model is
     // on disk, put into Loading — BEFORE the IPC server below serves its
     // first Status, so the UI never sees Missing for a model that exists
@@ -672,7 +693,8 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     .with_screen_recording_gate(
         boot.screen == permissions::ScreenRecordingStatus::Denied,
         Arc::clone(&sr_denied_mirror),
-    );
+    )
+    .with_stop_notices(stop_tx);
 
     if initial_capture_paused {
         log::info!("Capture is paused (persisted setting); skipping runtime start");
@@ -952,6 +974,27 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
                 log::error!("permission monitor stopped ({res:?}); shutting down for a fresh process");
                 monitor_stopped = true;
                 break;
+            }
+            Some(n) = stop_rx.recv() => {
+                let code = n.code();
+                let triage = triage_stop_notice(n.won_cas, n.is_stream_domain(), code);
+                match triage {
+                    StopTriage::Act(cause) => log::warn!(
+                        "capture stream stopped: display_id={} run={} domain={} \
+                         code={code} cause={cause:?} ({})",
+                        n.display_id,
+                        n.run,
+                        n.domain(),
+                        n.description(),
+                    ),
+                    StopTriage::Ignore => log::debug!(
+                        "capture stream stop ignored, engine not running: \
+                         display_id={} run={} domain={} code={code}",
+                        n.display_id,
+                        n.run,
+                        n.domain(),
+                    ),
+                }
             }
             Some(t) = screen_rx.recv() => {
                 let g = supervisor.gates();
@@ -1286,6 +1329,8 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     // the runtime.
     retry_rx.close();
     while retry_rx.try_recv().is_ok() {}
+    stop_rx.close();
+    while stop_rx.try_recv().is_ok() {}
     cancel.cancel();
 
     // Stop the IPC server before the capture engine: stop accepting
@@ -1746,6 +1791,25 @@ mod tests {
             settings::read_whisper_model(dir.path()).as_str(),
             "base",
             "settings unchanged after a failed switch"
+        );
+    }
+
+    #[test]
+    fn only_the_notice_that_won_the_cas_acts() {
+        use chronicle_capture::StopCause;
+        assert_eq!(triage_stop_notice(false, true, -3817), StopTriage::Ignore);
+        assert_eq!(triage_stop_notice(false, true, -3821), StopTriage::Ignore);
+        assert_eq!(
+            triage_stop_notice(true, true, -3817),
+            StopTriage::Act(StopCause::UserStopped)
+        );
+        assert_eq!(
+            triage_stop_notice(true, true, -3821),
+            StopTriage::Act(StopCause::Other)
+        );
+        assert_eq!(
+            triage_stop_notice(true, false, -3817),
+            StopTriage::Act(StopCause::Other)
         );
     }
 

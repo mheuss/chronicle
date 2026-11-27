@@ -12,8 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chronicle_audio::{AudioPipeline, CHANNEL_COUNT, SAMPLE_RATE};
-use chronicle_capture::{CaptureConfig, CaptureError, EngineStatusProbe};
+use chronicle_capture::{CaptureConfig, CaptureError, EngineStatusProbe, StreamStopped};
 use chronicle_storage::Storage;
+use tokio::sync::mpsc;
 
 use crate::capture_runtime::{CaptureRuntime, CaptureRuntimeError, engine_poisoned};
 use crate::ipc_handler;
@@ -158,6 +159,11 @@ pub struct CaptureSupervisor<'a, M: AppMetadataProvider + 'static + ?Sized> {
     /// non-monotonic.
     capture_drops: Arc<chronicle_capture::CaptureDropCounters>,
     on_stop_poisoned: fn(),
+    /// Adds 1 on every start attempt. Every stop notice carries the run it
+    /// came from.
+    run: u64,
+    /// Handed to every engine so its stream delegates can report a stop.
+    stop_notices: mpsc::Sender<StreamStopped>,
 }
 
 impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
@@ -196,6 +202,9 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
             base_dir,
             capture_drops,
             on_stop_poisoned: || {},
+            run: 0,
+            // Closed until `with_stop_notices`, so a notice sent here is dropped.
+            stop_notices: mpsc::channel(1).0,
         }
     }
 
@@ -211,6 +220,12 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         mirror.store(denied, Ordering::Release);
         self.sr_denied = denied;
         self.sr_denied_mirror = mirror;
+        self
+    }
+
+    /// Send stream stop notices to the event loop.
+    pub fn with_stop_notices(mut self, tx: mpsc::Sender<StreamStopped>) -> Self {
+        self.stop_notices = tx;
         self
     }
 
@@ -235,9 +250,19 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
             channel_buffer_size: chronicle_capture::DEFAULT_CHANNEL_BUFFER_SIZE,
             audio,
             drop_counters: Arc::clone(&self.capture_drops),
-            run: 0,
-            stop_notices: None,
+            run: self.run,
+            stop_notices: Some(self.stop_notices.clone()),
         }
+    }
+
+    /// Start a new run and build its config, so the engine's delegates carry
+    /// the new run.
+    fn next_capture_config<'t>(
+        &mut self,
+        audio: Option<chronicle_audio::AudioHandlerToken<'t>>,
+    ) -> CaptureConfig<'t> {
+        self.run += 1;
+        self.capture_config(audio)
     }
 
     pub fn should_run(&self) -> bool {
@@ -296,7 +321,7 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     /// process. `route_reconcile_outcome` decides whether to escalate
     /// `partial_teardown`.
     fn start(&mut self, audio: &'a AudioPipeline) -> ReconcileOutcome {
-        let capture_config = self.capture_config(audio.token(SAMPLE_RATE, CHANNEL_COUNT));
+        let capture_config = self.next_capture_config(audio.token(SAMPLE_RATE, CHANNEL_COUNT));
         match CaptureRuntime::start(
             capture_config,
             Arc::clone(&self.storage),
@@ -545,6 +570,45 @@ mod tests {
         assert_eq!(drops.snapshot().closed, 4);
         assert!(Arc::ptr_eq(&drops, &first.drop_counters));
         assert!(Arc::ptr_eq(&drops, &second.drop_counters));
+    }
+
+    #[tokio::test]
+    async fn every_start_gets_a_new_run_and_the_loop_channel() {
+        let (dir, _audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut supervisor = CaptureSupervisor::new(
+            true,
+            storage,
+            metadata,
+            counters,
+            1024,
+            probe_holder,
+            capture_paused,
+            mic_atom,
+            dir.path().to_path_buf(),
+            Arc::new(chronicle_capture::CaptureDropCounters::default()),
+        )
+        .with_stop_notices(tx.clone());
+
+        let first = supervisor.next_capture_config(None);
+        let second = supervisor.next_capture_config(None);
+
+        // The mutation this pins: `stop_notices: None` in capture_config
+        // registers no delegate, and no stream death is ever seen.
+        assert_eq!((first.run, second.run), (1, 2));
+        assert!(
+            first
+                .stop_notices
+                .as_ref()
+                .is_some_and(|s| s.same_channel(&tx))
+        );
+        assert!(
+            second
+                .stop_notices
+                .as_ref()
+                .is_some_and(|s| s.same_channel(&tx))
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
