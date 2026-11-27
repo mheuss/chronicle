@@ -595,8 +595,8 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     // idempotent.
     let (retry_tx, mut retry_rx) = tokio::sync::mpsc::channel::<()>(4);
     let mut start_retry = StartRetry::new();
-    // Stream stop notices from the capture engine's delegates (CHR-188). At
-    // most one per display per engine.
+    // Stream stop notices from the capture engine's delegates (CHR-188).
+    // Each notice carries its engine's run, so one channel serves every run.
     let (stop_tx, mut stop_rx) = tokio::sync::mpsc::channel::<chronicle_capture::StreamStopped>(64);
     // Whisper model status cell (CHR-71). Created — and, when the model is
     // on disk, put into Loading — BEFORE the IPC server below serves its
