@@ -487,8 +487,9 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
     }
 
     /// Book a stream stop, then stop the runtime. Booking first persists a
-    /// user pause, sets the failed mirror and stops the run clock before
-    /// teardown starts. A notice that doesn't act changes nothing.
+    /// user pause, or sets the failed mirror for any other stop, and measures
+    /// the run's length before teardown starts. A notice that doesn't act
+    /// changes nothing.
     pub async fn on_stream_failed(
         &mut self,
         run: u64,
@@ -1416,7 +1417,7 @@ mod tests {
                 .on_stream_failed(1, StopCause::UserStopped, &audio)
                 .await,
             ReconcileOutcome::NoChange,
-            "an earlier run's user stop is dropped"
+            "a user stop from another run is dropped"
         );
         assert!(!supervisor.gates().user_paused);
 
