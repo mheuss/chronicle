@@ -290,6 +290,13 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
         self
     }
 
+    /// Share the failure flag with IPC.
+    pub fn with_failed_mirror(mut self, mirror: Arc<AtomicBool>) -> Self {
+        mirror.store(self.failed, Ordering::Release);
+        self.failed_mirror = mirror;
+        self
+    }
+
     /// Send stream stop notices to the event loop.
     pub fn with_stop_notices(mut self, tx: mpsc::Sender<StreamStopped>) -> Self {
         self.stop_notices = tx;
@@ -1686,5 +1693,30 @@ mod tests {
         assert!(supervisor.gates().user_paused);
         assert!(settings::read_capture_paused(dir.path()));
         assert!(!supervisor.is_running());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failure_shows_in_the_mirror_handed_in() {
+        let (dir, _audio, capture_paused, storage, metadata, counters, probe_holder, mic_atom) =
+            supervisor_fixtures().await;
+        let mirror = Arc::new(AtomicBool::new(true));
+        let mut supervisor = clear_supervisor(
+            &dir,
+            capture_paused,
+            storage,
+            metadata,
+            counters,
+            probe_holder,
+            mic_atom,
+        )
+        .with_failed_mirror(Arc::clone(&mirror));
+        assert!(
+            !mirror.load(Ordering::Acquire),
+            "the mirror starts at the supervisor's value"
+        );
+
+        supervisor.record_failure(StopCause::Other, Instant::now());
+
+        assert!(mirror.load(Ordering::Acquire));
     }
 }

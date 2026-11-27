@@ -487,6 +487,7 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     let sr_denied_mirror = Arc::new(AtomicBool::new(
         boot.screen == permissions::ScreenRecordingStatus::Denied,
     ));
+    let capture_failed_mirror = Arc::new(AtomicBool::new(false));
     let permissions_snapshot = Arc::new(ArcSwap::from_pointee(boot_permissions_snapshot(
         &boot,
         permission_monitor::unix_ms(),
@@ -641,7 +642,8 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
     .with_permissions(
         Arc::clone(&permissions_snapshot),
         Arc::clone(&sr_denied_mirror),
-    );
+    )
+    .with_capture_failed(Arc::clone(&capture_failed_mirror));
     let ipc_server = IpcServer::start(&socket_path, handler, cancel.clone()).await?;
     log::info!("IPC server started");
 
@@ -694,7 +696,8 @@ async fn run(storage_config: StorageConfig, socket_path: std::path::PathBuf) -> 
         boot.screen == permissions::ScreenRecordingStatus::Denied,
         Arc::clone(&sr_denied_mirror),
     )
-    .with_stop_notices(stop_tx);
+    .with_stop_notices(stop_tx)
+    .with_failed_mirror(Arc::clone(&capture_failed_mirror));
 
     if initial_capture_paused {
         log::info!("Capture is paused (persisted setting); skipping runtime start");
