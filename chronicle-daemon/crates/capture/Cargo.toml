@@ -35,5 +35,6 @@ core-graphics = "0.24"
 foreign-types = "0.5"
 
 [dev-dependencies]
+objc2-foundation = { version = "0.3", features = ["NSDictionary"] }
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 tempfile = "3"

@@ -18,6 +18,7 @@ use objc2_screen_capture_kit::{
 };
 use tokio::sync::mpsc;
 
+use crate::delegate::StreamDelegate;
 use crate::deps::EngineDeps;
 use crate::error::{CaptureError, Result};
 use crate::handler::CaptureOutputHandler;
@@ -70,6 +71,9 @@ impl EngineState {
 pub struct CaptureEngine<'a> {
     streams: Vec<Retained<SCStream>>,
     handlers: Vec<Retained<CaptureOutputHandler>>,
+    /// One per stream. The SDK header doesn't say whether SCStream retains
+    /// its delegate, so the engine does.
+    delegates: Vec<Retained<StreamDelegate>>,
     display_ids: Vec<u32>,
     _sender: mpsc::Sender<CapturedFrame>,
     frames_captured: Arc<AtomicU64>,
@@ -129,6 +133,8 @@ impl<'a> CaptureEngine<'a> {
 
         let frames_captured = Arc::new(AtomicU64::new(0));
         let frames_dropped = Arc::new(AtomicU64::new(0));
+        // Created before the display loop so every stream delegate shares it.
+        let state_atom = Arc::new(AtomicU8::new(EngineState::Running as u8));
 
         // Build a CMTime for the minimum frame interval.
         // Uses millisecond precision: e.g. 2.0 s -> value=2000, timescale=1000.
@@ -152,6 +158,7 @@ impl<'a> CaptureEngine<'a> {
             first_display_id
         };
 
+        let mut delegates: Vec<Retained<StreamDelegate>> = Vec::with_capacity(displays.len());
         let mut streams: Vec<Retained<SCStream>> = Vec::with_capacity(displays.len());
         let mut handlers: Vec<Retained<CaptureOutputHandler>> = Vec::with_capacity(displays.len());
         let mut started_display_ids: Vec<u32> = Vec::with_capacity(displays.len());
@@ -213,6 +220,14 @@ impl<'a> CaptureEngine<'a> {
                 Arc::clone(&frames_captured),
                 Arc::clone(&frames_dropped),
             );
+            let delegate = config.stop_notices.as_ref().map(|notices| {
+                StreamDelegate::for_display(
+                    display_id,
+                    config.run,
+                    notices.clone(),
+                    Arc::clone(&state_atom),
+                )
+            });
 
             // Create the SCStream.
             let stream = autoreleasepool(|_| unsafe {
@@ -220,7 +235,7 @@ impl<'a> CaptureEngine<'a> {
                     SCStream::alloc(),
                     &filter,
                     &stream_config,
-                    None,
+                    delegate.as_deref().map(StreamDelegate::as_protocol_object),
                 )
             });
 
@@ -309,13 +324,16 @@ impl<'a> CaptureEngine<'a> {
             streams.push(stream);
             started_display_ids.push(display_id);
             handlers.push(handler);
+            if let Some(delegate) = delegate {
+                delegates.push(delegate);
+            }
         }
 
-        let state_atom = Arc::new(AtomicU8::new(EngineState::Running as u8));
         let active_displays_atom = Arc::new(AtomicUsize::new(streams.len()));
         let engine = Self {
             streams,
             handlers,
+            delegates,
             display_ids: started_display_ids,
             _sender: sender,
             frames_captured,
@@ -353,6 +371,7 @@ impl<'a> CaptureEngine<'a> {
         }
         self.streams.clear();
         self.handlers.clear();
+        self.delegates.clear();
         self.display_ids.clear();
 
         if errors.is_empty() {
@@ -446,6 +465,7 @@ impl Drop for CaptureEngine<'_> {
         }
         self.streams.clear();
         self.handlers.clear();
+        self.delegates.clear();
         self.display_ids.clear();
     }
 }
@@ -827,11 +847,29 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore] // Requires real SCDisplay enumeration, which needs Screen Recording TCC.
+    fn every_stream_gets_a_delegate() {
+        let (tx, _notices) = mpsc::channel(64);
+        let config = CaptureConfig {
+            stop_notices: Some(tx),
+            ..CaptureConfig::default()
+        };
+        let (mut engine, _rx) =
+            CaptureEngine::start(config).expect("engine must start on macOS with TCC granted");
+        assert!(!engine.streams.is_empty());
+        assert_eq!(engine.delegates.len(), engine.streams.len());
+        engine.stop().expect("stop must succeed");
+        assert!(engine.delegates.is_empty());
+    }
+
     fn test_engine_with_state(state: EngineState) -> CaptureEngine<'static> {
         let (sender, _rx) = mpsc::channel(1);
         CaptureEngine {
             streams: Vec::new(),
             handlers: Vec::new(),
+            delegates: Vec::new(),
             display_ids: Vec::new(),
             _sender: sender,
             frames_captured: Arc::new(AtomicU64::new(0)),

@@ -235,6 +235,8 @@ impl<'a, M: AppMetadataProvider + 'static + ?Sized> CaptureSupervisor<'a, M> {
             channel_buffer_size: chronicle_capture::DEFAULT_CHANNEL_BUFFER_SIZE,
             audio,
             drop_counters: Arc::clone(&self.capture_drops),
+            run: 0,
+            stop_notices: None,
         }
     }
 
