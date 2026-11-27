@@ -36,7 +36,9 @@ unsafe extern "C" {
 ///
 /// Set to `Running` on successful construction. Transitions via `stop()` to
 /// `Stopping` and then either `Idle` (clean teardown) or `Poisoned` (one or
-/// more streams failed to stop).
+/// more streams failed to stop). `Failed` means ScreenCaptureKit stopped a
+/// stream while the engine was `Running`. `stop()` tears a failed engine down
+/// the same way.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(u8)]
 pub enum EngineState {
@@ -44,6 +46,7 @@ pub enum EngineState {
     Stopping = 1,
     Idle = 2,
     Poisoned = 3,
+    Failed = 4,
 }
 
 impl EngineState {
@@ -52,6 +55,7 @@ impl EngineState {
             0 => EngineState::Running,
             1 => EngineState::Stopping,
             2 => EngineState::Idle,
+            4 => EngineState::Failed,
             _ => EngineState::Poisoned,
         }
     }
@@ -70,7 +74,6 @@ pub struct CaptureEngine<'a> {
     _sender: mpsc::Sender<CapturedFrame>,
     frames_captured: Arc<AtomicU64>,
     frames_dropped: Arc<AtomicU64>,
-    state: EngineState,
     state_atom: Arc<AtomicU8>,
     active_displays_atom: Arc<AtomicUsize>,
     deps: EngineDeps,
@@ -317,7 +320,6 @@ impl<'a> CaptureEngine<'a> {
             _sender: sender,
             frames_captured,
             frames_dropped,
-            state: EngineState::Running,
             state_atom,
             active_displays_atom,
             deps,
@@ -331,14 +333,14 @@ impl<'a> CaptureEngine<'a> {
     ///
     /// Idempotent on `Idle` and `Stopping` (returns `Ok(())` without doing
     /// anything). On `Poisoned`, returns `CaptureError::Poisoned` because the
-    /// engine cannot be stopped cleanly from a poisoned state. On `Running`,
-    /// iterates every stream; any `stop_stream` failure is collected and the
-    /// engine transitions to `Poisoned`.
+    /// engine cannot be stopped cleanly from a poisoned state. On `Running` or
+    /// `Failed`, iterates every stream; any `stop_stream` failure is collected
+    /// and the engine transitions to `Poisoned`.
     pub fn stop(&mut self) -> Result<()> {
-        match self.state {
+        match self.state() {
             EngineState::Idle | EngineState::Stopping => return Ok(()),
             EngineState::Poisoned => return Err(CaptureError::Poisoned),
-            EngineState::Running => {}
+            EngineState::Running | EngineState::Failed => {}
         }
         self.set_state(EngineState::Stopping);
 
@@ -371,7 +373,6 @@ impl<'a> CaptureEngine<'a> {
     }
 
     fn set_state(&mut self, next: EngineState) {
-        self.state = next;
         self.state_atom.store(next as u8, Ordering::Release);
     }
 
@@ -386,7 +387,7 @@ impl<'a> CaptureEngine<'a> {
 
     /// Return the current post-construction state.
     pub fn state(&self) -> EngineState {
-        self.state
+        EngineState::from_u8(self.state_atom.load(Ordering::Acquire))
     }
 
     /// Return a cloneable probe into the engine's live atomics.
@@ -835,7 +836,6 @@ mod tests {
             _sender: sender,
             frames_captured: Arc::new(AtomicU64::new(0)),
             frames_dropped: Arc::new(AtomicU64::new(0)),
-            state,
             state_atom: Arc::new(AtomicU8::new(state as u8)),
             active_displays_atom: Arc::new(AtomicUsize::new(0)),
             deps: EngineDeps::default(),
@@ -844,10 +844,43 @@ mod tests {
     }
 
     #[test]
+    fn engine_state_from_u8_maps_every_value() {
+        for state in [
+            EngineState::Running,
+            EngineState::Stopping,
+            EngineState::Idle,
+            EngineState::Poisoned,
+            EngineState::Failed,
+        ] {
+            assert_eq!(EngineState::from_u8(state as u8), state);
+        }
+        assert_eq!(EngineState::from_u8(5), EngineState::Poisoned);
+    }
+
+    #[test]
+    fn stop_on_failed_transitions_to_idle() {
+        let mut engine = test_engine_with_state(EngineState::Failed);
+        engine.stop().expect("stop on Failed must succeed");
+        assert_eq!(engine.state(), EngineState::Idle);
+    }
+
+    #[test]
+    fn stop_reads_the_state_atom() {
+        // Another thread can move the shared atom, so stop() must read it.
+        let mut engine = test_engine_with_state(EngineState::Running);
+        engine
+            .state_atom
+            .store(EngineState::Failed as u8, Ordering::Release);
+        assert_eq!(engine.state(), EngineState::Failed);
+        engine.stop().expect("stop after a failure must succeed");
+        assert_eq!(engine.state(), EngineState::Idle);
+    }
+
+    #[test]
     fn stop_on_idle_is_idempotent() {
         let mut engine = test_engine_with_state(EngineState::Idle);
         engine.stop().expect("stop on Idle must be idempotent");
-        assert_eq!(engine.state, EngineState::Idle);
+        assert_eq!(engine.state(), EngineState::Idle);
     }
 
     #[test]
@@ -855,7 +888,7 @@ mod tests {
         let mut engine = test_engine_with_state(EngineState::Poisoned);
         let err = engine.stop().expect_err("stop on Poisoned must error");
         assert!(matches!(err, CaptureError::Poisoned));
-        assert_eq!(engine.state, EngineState::Poisoned);
+        assert_eq!(engine.state(), EngineState::Poisoned);
     }
 
     #[test]
@@ -865,7 +898,7 @@ mod tests {
         engine
             .stop()
             .expect("stop on Running with no streams must succeed");
-        assert_eq!(engine.state, EngineState::Idle);
+        assert_eq!(engine.state(), EngineState::Idle);
     }
 
     #[cfg(target_os = "macos")]
@@ -892,7 +925,7 @@ mod tests {
             .stop()
             .expect_err("stop must fail when deps.stop_stream fails");
         assert!(matches!(err, CaptureError::PartialTeardown { .. }));
-        assert_eq!(engine.state, EngineState::Poisoned);
+        assert_eq!(engine.state(), EngineState::Poisoned);
     }
 
     #[test]

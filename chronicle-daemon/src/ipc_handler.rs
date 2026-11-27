@@ -350,6 +350,7 @@ fn engine_state_str(state: Option<EngineState>, paused: bool, sr_denied: bool) -
         Some(EngineState::Stopping) => "stopping",
         Some(EngineState::Idle) => "idle",
         Some(EngineState::Poisoned) => "poisoned",
+        Some(EngineState::Failed) => "failed",
         None => "unknown",
     }
 }
@@ -719,6 +720,10 @@ mod tests {
             "running"
         );
         assert_eq!(engine_state_str(None, false, false), "unknown");
+        assert_eq!(
+            engine_state_str(Some(EngineState::Failed), false, false),
+            "failed"
+        );
     }
 
     #[test]
